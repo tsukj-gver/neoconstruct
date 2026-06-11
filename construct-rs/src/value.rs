@@ -113,6 +113,12 @@ impl Value {
         matches!(self, Value::UInt(_))
     }
 
+    /// Returns `true` if this value is [`Value::BigInt`].
+    #[must_use]
+    pub fn is_bigint(&self) -> bool {
+        matches!(self, Value::BigInt(_))
+    }
+
     /// Returns `true` if this value is [`Value::Float`].
     #[must_use]
     pub fn is_float(&self) -> bool {
@@ -739,6 +745,7 @@ mod tests {
         assert!(Value::Bool(true).is_bool());
         assert!(Value::Int(0).is_int());
         assert!(Value::UInt(0).is_uint());
+        assert!(Value::BigInt(0).is_bigint());
         assert!(Value::Float(0.0).is_float());
         assert!(Value::Bytes(vec![]).is_bytes());
         assert!(Value::String(String::new()).is_string());
@@ -754,9 +761,9 @@ mod tests {
     }
 
     #[test]
-    fn big_int_has_no_dedicated_query_but_works() {
-        // BigInt is part of the integer family for numeric conversions.
+    fn bigint_query_method() {
         let v = Value::BigInt(123);
+        assert!(v.is_bigint());
         assert!(!v.is_int());
         assert!(!v.is_uint());
         assert_eq!(v.to_i64().unwrap(), 123);

@@ -147,10 +147,15 @@ impl Context {
     /// Resolves a `this`-style path such as `["header", "length"]`.
     ///
     /// Each segment is looked up in turn:
-    /// 1. The first segment is looked up in the context (recursively, via
-    ///    [`get_recursive`](Context::get_recursive)).
+    /// 1. The first segment is looked up in the context **at the current level
+    ///    only** (via [`get`](Context::get)), matching Python `this.field`
+    ///    behaviour. To access parent-level fields, use the `"_"` special
+    ///    segment.
     /// 2. Subsequent segments are looked up inside the resulting
     ///    [`Value::Container`] using [`Value::get`].
+    /// 3. The `"_"` segment is special: it navigates to the parent context
+    ///    (corresponding to Python `this._`). If there is no parent, a
+    ///    [`ConstructError::FieldMissing`] is returned.
     ///
     /// If any segment fails, a [`ConstructError`] is returned with the path
     /// prefix enriched.
@@ -177,8 +182,9 @@ impl Context {
     /// # Errors
     ///
     /// Returns [`ConstructError::FieldMissing`] if the first segment is not
-    /// found in the context, or [`ConstructError`] from [`Value::get`] if a
-    /// subsequent segment is not found in a nested container.
+    /// found in the current context level, or [`ConstructError`] from
+    /// [`Value::get`] if a subsequent segment is not found in a nested
+    /// container.
     pub fn get_path(&self, path: &[String]) -> Result<&Value, ConstructError> {
         if path.is_empty() {
             return Err(ConstructError::Generic {
@@ -187,17 +193,48 @@ impl Context {
             });
         }
 
-        let first_key = &path[0];
-        let mut current =
-            self.get_recursive(first_key)
-                .ok_or_else(|| ConstructError::FieldMissing {
-                    path: String::new(),
-                    field: first_key.clone(),
-                })?;
+        /// Special path segment that navigates to the parent context.
+        /// Corresponds to Python `this._`.
+        const PARENT_SEGMENT: &str = "_";
 
-        let mut traversed = first_key.clone();
+        // We need to track which Context we are resolving against.
+        // Starting at `self`, `_` segments move us up the parent chain.
+        let mut ctx: &Context = self;
+        let mut segment_idx = 0;
 
-        for key in &path[1..] {
+        // Process leading `_` segments to navigate up the parent chain.
+        while segment_idx < path.len() && path[segment_idx] == PARENT_SEGMENT {
+            ctx = ctx.parent().ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: PARENT_SEGMENT.to_string(),
+            })?;
+            segment_idx += 1;
+        }
+
+        // If the entire path was `_` segments, there is no field to look up.
+        // This is an error — we need at least one real key after `_`.
+        if segment_idx >= path.len() {
+            return Err(ConstructError::Generic {
+                path: String::new(),
+                message: "path consists only of parent navigation segments".to_string(),
+            });
+        }
+
+        // The first real key (after any leading `_` segments) is looked up in
+        // the current context level only — matching Python `this.field`.
+        let first_key = &path[segment_idx];
+        let mut current = ctx
+            .get(first_key)
+            .ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: first_key.clone(),
+            })?;
+
+        let mut traversed = path[..=segment_idx].join(".");
+
+        segment_idx += 1;
+
+        for key in &path[segment_idx..] {
             current = match current.get(key) {
                 Ok(value) => value,
                 Err(err) => {
@@ -486,14 +523,89 @@ mod tests {
     }
 
     #[test]
-    fn get_path_uses_recursive_lookup_for_first_key() {
-        // parent has "shared", child resolves it via get_recursive
+    fn get_path_first_key_does_not_penetrate_parent() {
+        // parent has "shared", child does NOT resolve it via get_path
+        // (first key uses get, not get_recursive)
         let mut parent = Context::new();
         parent.insert("shared", Value::Int(99));
         let child = parent.subcontext();
 
         let path: Vec<String> = vec!["shared".to_string()];
-        assert_eq!(child.get_path(&path).unwrap(), &Value::Int(99));
+        let err = child.get_path(&path).unwrap_err();
+        match err {
+            ConstructError::FieldMissing { field, .. } => {
+                assert_eq!(field, "shared");
+            }
+            other => panic!("expected FieldMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_path_underscore_navigates_to_parent() {
+        // parent has "field", child accesses it via ["_", "field"]
+        let mut parent = Context::new();
+        parent.insert("field", Value::Int(42));
+        let child = parent.subcontext();
+
+        let path: Vec<String> = vec!["_".to_string(), "field".to_string()];
+        assert_eq!(child.get_path(&path).unwrap(), &Value::Int(42));
+    }
+
+    #[test]
+    fn get_path_underscore_double_navigates_to_grandparent() {
+        let mut grandparent = Context::new();
+        grandparent.insert("deep", Value::Int(7));
+        let parent = grandparent.subcontext();
+        let child = parent.subcontext();
+
+        let path: Vec<String> = vec!["_".to_string(), "_".to_string(), "deep".to_string()];
+        assert_eq!(child.get_path(&path).unwrap(), &Value::Int(7));
+    }
+
+    #[test]
+    fn get_path_underscore_no_parent_returns_error() {
+        let ctx = Context::new();
+        let path: Vec<String> = vec!["_".to_string()];
+        let err = ctx.get_path(&path).unwrap_err();
+        match err {
+            ConstructError::FieldMissing { field, .. } => {
+                assert_eq!(field, "_");
+            }
+            other => panic!("expected FieldMissing, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn get_path_only_underscore_segments_returns_error() {
+        let mut parent = Context::new();
+        parent.insert("x", Value::Int(1));
+        let child = parent.subcontext();
+
+        let path: Vec<String> = vec!["_".to_string()];
+        let err = child.get_path(&path).unwrap_err();
+        assert!(matches!(err, ConstructError::Generic { .. }));
+    }
+
+    #[test]
+    fn get_path_underscore_then_container_path() {
+        // parent: { header: Container { length: 10 } }
+        // child:  get_path(["_", "header", "length"])
+        let mut inner = IndexMap::new();
+        inner.insert("length".to_string(), Value::Int(10));
+        let mut outer = IndexMap::new();
+        outer.insert("header".to_string(), Value::Container(inner));
+
+        let mut parent = Context::new();
+        parent.insert("header", Value::Container(outer));
+        let child = parent.subcontext();
+
+        let path: Vec<String> = vec![
+            "_".to_string(),
+            "header".to_string(),
+            "header".to_string(),
+            "length".to_string(),
+        ];
+        assert_eq!(child.get_path(&path).unwrap(), &Value::Int(10));
     }
 
     #[test]

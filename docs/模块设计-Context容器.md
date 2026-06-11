@@ -42,7 +42,10 @@ impl Context {
     pub fn get_or_error(&self, key: &str) -> Result<&Value, ConstructError>;
 
     /// 通过 `this` 风格路径获取值
-    /// 路径格式：`"header.length"` → 先查找 `header`，再在其值中查找 `length`
+    /// 路径格式：`["header", "length"]` → 先在当前层级查找 `header`，再在其值中查找 `length`
+    ///
+    /// **首键仅在当前层级查找**（对应 Python `this.field` 行为）。
+    /// 路径段中 `"_"` 为特殊键，表示导航到父级上下文（对应 Python `this._`）。
     pub fn get_path(&self, path: &[String]) -> Result<&Value, ConstructError>;
 
     /// 获取父级上下文（`_` 引用）
@@ -70,7 +73,7 @@ impl Context {
 
 ### 路径查找逻辑
 
-路径查找与 Python 版本的 `this` 引用一致：
+路径查找与 Python 版本的 `this` 引用行为严格一致：
 
 ```
 Context {
@@ -82,13 +85,17 @@ Context {
 }
 
 this.header.length → fields["header"].as_container()["length"] → 42
+this._.field       → parent.fields["field"]                    → (parent 的 field)
 ```
 
-查找规则：
-1. 在当前上下文的 `fields` 中查找第一个 key
-2. 如果路径有多级，在结果 Value 中继续查找
-3. 如果当前层级找不到，向上查找 parent
+查找规则（严格对应 Python `Path.__call__` 行为）：
+
+1. 首键在当前上下文的 `fields` 中查找（**仅当前层级**，不穿透 parent）—— 对应 Python `this.field` 的 `obj[field]`
+2. 如果路径有多级，在结果 Value 中继续查找 —— 对应 Python 的 `parent(obj)[field]`
+3. **`"_"` 是特殊路径段**：遇到 `"_"` 时导航到 parent 上下文，后续段在 parent 中继续解析 —— 对应 Python `this._`
 4. 全部找不到则返回 `ConstructError`
+
+> **关键区别**：首键查找**不穿透 parent 链**。这与 Python 行为一致：`this.field` 仅在当前 Container 中查找，不会沿 `_` 向上搜索。需要访问父级字段时必须显式使用 `_` 路径段。
 
 ## 设计考量
 
@@ -105,3 +112,5 @@ this.header.length → fields["header"].as_container()["length"] → 42
 | `context.field` | `ctx.get("field")` |
 | `context._` | `ctx.parent()` |
 | `this.field.subfield` | `ctx.get_path(&["field", "subfield"])` |
+| `this._.field` | `ctx.get_path(&["_", "field"])` |
+| `this._._.field` | `ctx.get_path(&["_", "_", "field"])` |
