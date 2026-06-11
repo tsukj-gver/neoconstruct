@@ -1,0 +1,93 @@
+﻿{
+  "$schema": "https://opencode.ai/config.json",
+  "instructions": ["AGENTS.md"],
+  "default_agent": "pm",
+  "agent": {
+    "pm": {
+      "mode": "primary",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "construct/**": "deny",
+          "docs/**": "deny",
+          "construct-rs/**": "deny",
+          "plans/**": "allow"
+        },
+        "bash": {
+          "*": "ask",
+          "git *": "allow",
+          "cargo *": "allow"
+        }
+      }
+    },
+    "architect": {
+      "mode": "subagent",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "construct/**": "deny",
+          "construct-rs/**": "deny",
+          "plans/**": "deny",
+          "docs/**": "allow"
+        },
+        "bash": {
+          "*": "deny"
+        }
+      }
+    },
+    "developer": {
+      "mode": "subagent",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "construct/**": "deny",
+          "docs/**": "deny",
+          "plans/**/过程记录.md": "allow",
+          "construct-rs/**": "allow"
+        },
+        "bash": {
+          "*": "ask",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "cargo *": "allow"
+        }
+      }
+    },
+    "validator": {
+      "mode": "subagent",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "construct/**": "deny",
+          "docs/**": "deny",
+          "construct-rs/**": "deny",
+          "plans/**/过程记录.md": "allow"
+        },
+        "bash": {
+          "*": "ask",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "cargo *": "allow"
+        }
+      }
+    },
+    "reviewer": {
+      "mode": "subagent",
+      "permission": {
+        "edit": {
+          "*": "deny",
+          "construct/**": "deny",
+          "docs/**": "deny",
+          "construct-rs/**": "deny",
+          "plans/**/过程记录.md": "allow"
+        },
+        "bash": {
+          "*": "ask",
+          "git status*": "allow",
+          "git diff*": "allow",
+          "cargo *": "allow"
+        }
+      }
+    }
+  }
+}

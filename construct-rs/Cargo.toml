@@ -1,0 +1,28 @@
+﻿[package]
+name = "construct"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "A declarative binary data parsing and building library (Rust port of Python construct)"
+license = "MIT"
+
+[dependencies]
+thiserror = "2"
+
+[features]
+default = []
+byteorder = ["dep:byteorder"]
+bigint = ["dep:num-bigint"]
+compression = ["dep:flate2"]
+
+[dependencies.byteorder]
+version = "1"
+optional = true
+
+[dependencies.num-bigint]
+version = "0.4"
+optional = true
+
+[dependencies.flate2]
+version = "1"
+optional = true
