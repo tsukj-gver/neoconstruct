@@ -255,6 +255,29 @@ pub enum ConstructError {
         /// Description of the actual type.
         actual: String,
     },
+
+    /// A `Select` construct failure — none of the sub-constructs matched.
+    ///
+    /// Corresponds to the Python `SelectError`. Raised when no member of a
+    /// `Select` construct was successfully parsed.
+    #[error("select error at {path}: {message}")]
+    Select {
+        /// Location of the failure inside the construct tree.
+        path: String,
+        /// Human-readable description of the select failure.
+        message: String,
+    },
+
+    /// A `StopIf` condition was met, signaling early termination.
+    ///
+    /// Corresponds to the Python `StopFieldError`. Used internally by
+    /// [`Struct`](crate::constructs::Struct) to stop processing further fields.
+    /// This is not a user-facing error; it is caught by the enclosing Struct.
+    #[error("stop field at {path}")]
+    StopField {
+        /// Location of the construct tree where the stop occurred.
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -282,7 +305,9 @@ impl ConstructError {
             | ConstructError::Union { path, .. }
             | ConstructError::Switch { path, .. }
             | ConstructError::FieldMissing { path, .. }
-            | ConstructError::TypeMismatch { path, .. } => path,
+            | ConstructError::TypeMismatch { path, .. }
+            | ConstructError::Select { path, .. }
+            | ConstructError::StopField { path, .. } => path,
         }
     }
 
@@ -405,6 +430,13 @@ impl ConstructError {
                 path: join_path(prefix, &path),
                 expected,
                 actual,
+            },
+            ConstructError::Select { path, message } => ConstructError::Select {
+                path: join_path(prefix, &path),
+                message,
+            },
+            ConstructError::StopField { path } => ConstructError::StopField {
+                path: join_path(prefix, &path),
             },
         }
     }
@@ -656,6 +688,28 @@ mod tests {
         );
     }
 
+    #[test]
+    fn select_display_and_path() {
+        let err = ConstructError::Select {
+            path: "sel".to_string(),
+            message: "no matching subconstruct".to_string(),
+        };
+        assert_eq!(err.path(), "sel");
+        assert_eq!(
+            err.to_string(),
+            "select error at sel: no matching subconstruct"
+        );
+    }
+
+    #[test]
+    fn stop_field_display_and_path() {
+        let err = ConstructError::StopField {
+            path: "sf".to_string(),
+        };
+        assert_eq!(err.path(), "sf");
+        assert_eq!(err.to_string(), "stop field at sf");
+    }
+
     // -- path() over every variant -----------------------------------------
 
     #[test]
@@ -785,6 +839,14 @@ mod tests {
                 },
                 "tm",
             ),
+            (
+                ConstructError::Select {
+                    path: "sel".into(),
+                    message: String::new(),
+                },
+                "sel",
+            ),
+            (ConstructError::StopField { path: "sf".into() }, "sf"),
         ];
         for (err, expected_path) in cases {
             assert_eq!(err.path(), expected_path);

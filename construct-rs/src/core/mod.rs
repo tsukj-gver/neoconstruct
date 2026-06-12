@@ -64,6 +64,22 @@ pub trait Construct {
     /// Returns [`ConstructError::Sizeof`] if the size cannot be determined
     /// (e.g. for variable-length constructs without sufficient context).
     fn sizeof(&self, ctx: &Context) -> Result<usize>;
+
+    /// Returns `true` if this construct can be built without a value.
+    ///
+    /// Constructs such as [`Pass`](crate::constructs::Pass),
+    /// [`Tell`](crate::constructs::Tell), [`Const`](crate::constructs::Const),
+    /// etc. do not require a build value because they produce fixed output or
+    /// no output at all. [`Struct`](crate::constructs::Struct) uses this flag
+    /// to decide whether to look up a field value in the container or pass
+    /// `None`.
+    ///
+    /// The default implementation returns `false`.
+    ///
+    /// Corresponds to the Python `Construct.flagbuildnone` attribute.
+    fn flagbuildnone(&self) -> bool {
+        false
+    }
 }
 
 // ===========================================================================

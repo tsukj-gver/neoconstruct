@@ -112,6 +112,10 @@ impl Construct for Const {
     fn sizeof(&self, ctx: &Context) -> Result<usize> {
         self.subcon.sizeof(ctx)
     }
+
+    fn flagbuildnone(&self) -> bool {
+        true
+    }
 }
 
 #[cfg(test)]

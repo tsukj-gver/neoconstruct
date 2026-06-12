@@ -73,6 +73,10 @@ impl Construct for Pass {
     fn sizeof(&self, _ctx: &Context) -> Result<usize> {
         Ok(0)
     }
+
+    fn flagbuildnone(&self) -> bool {
+        true
+    }
 }
 
 // ===========================================================================
@@ -138,6 +142,10 @@ impl Construct for Terminated {
             reason: "Terminated has undefined size".to_string(),
         })
     }
+
+    fn flagbuildnone(&self) -> bool {
+        true
+    }
 }
 
 // ===========================================================================
@@ -194,6 +202,10 @@ impl Construct for Tell {
 
     fn sizeof(&self, _ctx: &Context) -> Result<usize> {
         Ok(0)
+    }
+
+    fn flagbuildnone(&self) -> bool {
+        true
     }
 }
 
@@ -288,6 +300,10 @@ impl Construct for Seek {
             path: String::new(),
             reason: "Seek only moves the stream, size is not meaningful".to_string(),
         })
+    }
+
+    fn flagbuildnone(&self) -> bool {
+        true
     }
 }
 
