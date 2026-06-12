@@ -24,7 +24,7 @@
 //! methods and enrich errors with a `path` parameter, matching the Python
 //! original's `stream_read(stream, count, path)` pattern.
 
-use std::io::{Cursor, Read, Write};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 
 use super::error::{ConstructError, Result};
 
@@ -65,6 +65,34 @@ pub trait Stream {
 
     /// Returns `true` if the cursor is at or past the end of the data.
     fn is_eof(&mut self) -> Result<bool>;
+
+    /// Reads all remaining bytes from the current position to the end of the
+    /// stream.
+    ///
+    /// The default implementation computes the remaining length via
+    /// `size() - tell()` and calls [`read_bytes`](Stream::read_bytes).
+    /// Implementors may override this for better performance (e.g. a single
+    /// slice copy).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConstructError::Stream`] on I/O failure.
+    fn read_remaining(&mut self) -> Result<Vec<u8>> {
+        let pos = self.tell()?;
+        let total = self.size()?;
+        let remaining = total.saturating_sub(pos) as usize;
+        self.read_bytes(remaining)
+    }
+
+    /// Seeks to a position relative to the given `whence` origin.
+    ///
+    /// Corresponds to Python's `stream.seek(offset, whence)` where
+    /// `whence=0` is start, `whence=1` is current, `whence=2` is end.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConstructError::Stream`] on I/O failure.
+    fn seek_from(&mut self, pos: SeekFrom) -> Result<u64>;
 }
 
 // ===========================================================================
@@ -134,6 +162,13 @@ impl ByteStream {
         let data = self.cursor.get_ref();
         Ok(data.get(pos..).unwrap_or(&[]).to_vec())
     }
+
+    /// Seeks to a position relative to the given `whence` origin.
+    ///
+    /// Uses the underlying [`Cursor::seek`] implementation.
+    pub fn seek_from_io(&mut self, pos: SeekFrom) -> Result<u64> {
+        Ok(self.cursor.seek(pos)?)
+    }
 }
 
 impl Default for ByteStream {
@@ -177,6 +212,20 @@ impl Stream for ByteStream {
         let pos = self.cursor.position() as usize;
         let len = self.cursor.get_ref().len();
         Ok(pos >= len)
+    }
+
+    fn read_remaining(&mut self) -> Result<Vec<u8>> {
+        // Optimized: avoid double size/tell calls by using remaining_bytes directly
+        // but advance the cursor after reading.
+        let pos = self.cursor.position() as usize;
+        let data = self.cursor.get_ref();
+        let remaining = data.get(pos..).unwrap_or(&[]).to_vec();
+        self.cursor.set_position(data.len() as u64);
+        Ok(remaining)
+    }
+
+    fn seek_from(&mut self, pos: SeekFrom) -> Result<u64> {
+        Ok(self.cursor.seek(pos)?)
     }
 }
 

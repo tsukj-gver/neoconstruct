@@ -72,7 +72,7 @@ impl Value {
     /// This is used internally to populate the `actual` field of
     /// [`ConstructError::TypeMismatch`] errors.
     #[must_use]
-    fn type_name(&self) -> &'static str {
+    pub fn type_name(&self) -> &'static str {
         match self {
             Value::None => "None",
             Value::Bool(_) => "Bool",
