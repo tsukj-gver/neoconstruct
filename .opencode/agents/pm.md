@@ -9,9 +9,19 @@ permission:
     "construct-rs/**": "deny"
     "plans/**": "allow"
   bash:
-    "*": "ask"
-    "git *": "allow"
-    "cargo *": "allow"
+    "*": "allow"
+    "git push*": "deny"
+    "git add*": "ask"
+    "git commit*": "ask"
+    "git tag*": "ask"
+    "git reset*": "deny"
+    "git checkout*": "deny"
+    "git rebase*": "deny"
+    "git merge*": "deny"
+    "git cherry-pick*": "deny"
+    "rm *": "deny"
+    "del *": "deny"
+    "rmdir*": "deny"
 ---
 
 # 角色：项目经理 (PM)

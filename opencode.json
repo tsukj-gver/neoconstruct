@@ -14,9 +14,19 @@
           "plans/**": "allow"
         },
         "bash": {
-          "*": "ask",
-          "git *": "allow",
-          "cargo *": "allow"
+          "*": "allow",
+          "git push*": "deny",
+          "git add*": "ask",
+          "git commit*": "ask",
+          "git tag*": "ask",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git rebase*": "deny",
+          "git merge*": "deny",
+          "git cherry-pick*": "deny",
+          "rm *": "deny",
+          "del *": "deny",
+          "rmdir*": "deny"
         }
       }
     },
@@ -46,10 +56,19 @@
           "construct-rs/**": "allow"
         },
         "bash": {
-          "*": "ask",
-          "git status*": "allow",
-          "git diff*": "allow",
-          "cargo *": "allow"
+          "*": "allow",
+          "git push*": "deny",
+          "git add*": "deny",
+          "git commit*": "deny",
+          "git tag*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git rebase*": "deny",
+          "git merge*": "deny",
+          "git cherry-pick*": "deny",
+          "rm *": "deny",
+          "del *": "deny",
+          "rmdir*": "deny"
         }
       }
     },
@@ -64,10 +83,19 @@
           "plans/**/过程记录.md": "allow"
         },
         "bash": {
-          "*": "ask",
-          "git status*": "allow",
-          "git diff*": "allow",
-          "cargo *": "allow"
+          "*": "allow",
+          "git push*": "deny",
+          "git add*": "deny",
+          "git commit*": "deny",
+          "git tag*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git rebase*": "deny",
+          "git merge*": "deny",
+          "git cherry-pick*": "deny",
+          "rm *": "deny",
+          "del *": "deny",
+          "rmdir*": "deny"
         }
       }
     },
@@ -82,10 +110,19 @@
           "plans/**/过程记录.md": "allow"
         },
         "bash": {
-          "*": "ask",
-          "git status*": "allow",
-          "git diff*": "allow",
-          "cargo *": "allow"
+          "*": "allow",
+          "git push*": "deny",
+          "git add*": "deny",
+          "git commit*": "deny",
+          "git tag*": "deny",
+          "git reset*": "deny",
+          "git checkout*": "deny",
+          "git rebase*": "deny",
+          "git merge*": "deny",
+          "git cherry-pick*": "deny",
+          "rm *": "deny",
+          "del *": "deny",
+          "rmdir*": "deny"
         }
       }
     }

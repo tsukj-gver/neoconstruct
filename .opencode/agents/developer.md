@@ -9,10 +9,19 @@ permission:
     "plans/**/过程记录.md": "allow"
     "construct-rs/**": "allow"
   bash:
-    "*": "ask"
-    "git status*": "allow"
-    "git diff*": "allow"
-    "cargo *": "allow"
+    "*": "allow"
+    "git push*": "deny"
+    "git add*": "deny"
+    "git commit*": "deny"
+    "git tag*": "deny"
+    "git reset*": "deny"
+    "git checkout*": "deny"
+    "git rebase*": "deny"
+    "git merge*": "deny"
+    "git cherry-pick*": "deny"
+    "rm *": "deny"
+    "del *": "deny"
+    "rmdir*": "deny"
 ---
 
 # 角色：开发者 (DEV)
