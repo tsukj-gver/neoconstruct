@@ -1,0 +1,17 @@
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "construct_rust"
+version = "2.10.70"
+requires-python = ">=3.8"
+description = "Rust-backed port of Python construct"
+
+[tool.maturin]
+# Native extension is placed at construct_rust/_core.<so|pyd>, then re-exported
+# by the pure-Python package via `from ._core import *`.
+module-name = "construct_rust._core"
+# Pure-Python package source root (contains construct_rust/ package dir).
+python-source = "."
+features = ["pyo3/extension-module"]

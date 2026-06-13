@@ -1,0 +1,21 @@
+[package]
+name = "construct-py"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+description = "PyO3 bindings for construct-rs (Rust port of Python construct)"
+
+[lib]
+name = "construct_rust"
+crate-type = ["cdylib"]
+
+[dependencies]
+construct = { path = "../construct-rs", features = ["byteorder", "bigint", "compression"] }
+pyo3 = { version = "0.22", features = ["extension-module"] }
+
+# Release profile: LTO + single codegen unit for best inlining across crate
+# boundaries (mirrors construct-rs profile configuration).
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
