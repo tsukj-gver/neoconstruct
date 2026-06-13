@@ -31,6 +31,7 @@ use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::{ByteStream, Stream};
 use crate::core::Construct;
+use crate::expr::Evaluate;
 use crate::value::Value;
 
 // ===========================================================================
@@ -224,6 +225,101 @@ impl Construct for Pointer {
         }
         let build_result = self.subcon.build(data, stream, ctx);
         // Always seek back
+        let seek_result = stream.seek(fallback);
+        build_result.and(seek_result)
+    }
+
+    fn sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+// ===========================================================================
+// PointerExpr
+// ===========================================================================
+
+/// A [`Pointer`] whose offset is computed at runtime from an expression.
+///
+/// - **parse**: evaluates `offset_expr` to get the target position, seeks there,
+///   parses `subcon`, then seeks back to the original position
+/// - **build**: evaluates `offset_expr`, seeks to the target, builds `subcon`,
+///   then seeks back
+/// - **sizeof**: returns 0 (the pointer itself consumes no bytes in the
+///   sequential stream)
+///
+/// Corresponds to Python `Pointer(this.xxx, subcon)`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::stream_ops::PointerExpr;
+/// use construct::constructs::bytes::Bytes;
+/// use construct::constructs::struct_::Struct;
+/// use construct::constructs::format_field::INT8UB;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+/// use construct::expr::this_;
+///
+/// let d = Struct::new()
+///     .field("offset", Box::new(INT8UB))
+///     .field("data", Box::new(PointerExpr::new(
+///         Box::new(this_().field("offset")),
+///         Box::new(Bytes::new(1)),
+///     )));
+/// let c: &dyn Construct = &d;
+/// // offset=3, then Pointer reads 1 byte at position 3 = 'C'
+/// let parsed = c.parse_bytes(b"\x03ABC").unwrap();
+/// ```
+pub struct PointerExpr {
+    /// Expression that evaluates to the absolute stream offset.
+    pub offset_expr: Box<dyn Evaluate>,
+    /// The inner construct to parse/build at the target position.
+    pub subcon: Box<dyn Construct>,
+}
+
+impl PointerExpr {
+    /// Creates a new `PointerExpr` with the given offset expression and
+    /// sub-construct.
+    pub fn new(offset_expr: Box<dyn Evaluate>, subcon: Box<dyn Construct>) -> Self {
+        PointerExpr {
+            offset_expr,
+            subcon,
+        }
+    }
+
+    /// Resolves the offset from the expression and returns it as `i64`.
+    fn resolve_offset(&self, ctx: &Context) -> Result<i64> {
+        let val = self.offset_expr.evaluate(ctx, None)?;
+        val.to_i64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("PointerExpr offset must be an integer: {e}"),
+        })
+    }
+}
+
+impl Construct for PointerExpr {
+    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+        let offset = self.resolve_offset(ctx)?;
+        let fallback = stream.tell()?;
+        if offset >= 0 {
+            stream.seek(offset as u64)?;
+        } else {
+            stream.seek_from(SeekFrom::End(offset))?;
+        }
+        let parse_result = self.subcon.parse(stream, ctx);
+        let seek_result = stream.seek(fallback);
+        parse_result.and_then(|v| seek_result.map(|_| v))
+    }
+
+    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+        let offset = self.resolve_offset(ctx)?;
+        let fallback = stream.tell()?;
+        if offset >= 0 {
+            stream.seek(offset as u64)?;
+        } else {
+            stream.seek_from(SeekFrom::End(offset))?;
+        }
+        let build_result = self.subcon.build(data, stream, ctx);
         let seek_result = stream.seek(fallback);
         build_result.and(seek_result)
     }

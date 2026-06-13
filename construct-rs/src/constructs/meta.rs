@@ -17,6 +17,7 @@ use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::Evaluate;
 use crate::value::Value;
 
 // ===========================================================================
@@ -373,6 +374,93 @@ impl Construct for Error {
             path: String::new(),
             reason: ERROR_SIZEOF_REASON.to_string(),
         })
+    }
+}
+
+// ===========================================================================
+// SeekExpr
+// ===========================================================================
+
+/// A [`Seek`] whose target position is computed at runtime from an expression.
+///
+/// - **parse**: evaluates `at_expr`, seeks to the resolved position, returns
+///   the new position as [`Value::UInt`]
+/// - **build**: evaluates `at_expr`, seeks to the resolved position
+/// - **sizeof**: returns [`ConstructError::Sizeof`]
+///
+/// Corresponds to Python `Seek(this.xxx)`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::meta::SeekExpr;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+/// use construct::expr::this_;
+///
+/// let d = SeekExpr::new(Box::new(this_().field("pos")));
+/// let c: &dyn Construct = &d;
+///
+/// let mut stream = construct::core::stream::ByteStream::new_read(b"0123456789");
+/// let mut ctx = construct::core::context::Context::new();
+/// ctx.insert("pos", Value::UInt(3));
+/// let parsed = c.parse(&mut stream, &mut ctx).unwrap();
+/// assert_eq!(parsed, Value::UInt(3));
+/// ```
+pub struct SeekExpr {
+    /// Expression that evaluates to the seek offset.
+    pub at_expr: Box<dyn Evaluate>,
+    /// Origin from which the offset is measured.
+    pub whence: SeekWhence,
+}
+
+impl SeekExpr {
+    /// Creates a new `SeekExpr` that seeks to an absolute position from the
+    /// start of the stream.
+    pub fn new(at_expr: Box<dyn Evaluate>) -> Self {
+        SeekExpr {
+            at_expr,
+            whence: SeekWhence::Start,
+        }
+    }
+
+    /// Creates a new `SeekExpr` with a custom `whence` origin.
+    pub fn with_whence(at_expr: Box<dyn Evaluate>, whence: SeekWhence) -> Self {
+        SeekExpr { at_expr, whence }
+    }
+
+    /// Resolves the offset from the expression and returns it as `i64`.
+    fn resolve_offset(&self, ctx: &Context) -> Result<i64> {
+        let val = self.at_expr.evaluate(ctx, None)?;
+        val.to_i64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("SeekExpr offset must be an integer: {e}"),
+        })
+    }
+}
+
+impl Construct for SeekExpr {
+    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+        let offset = self.resolve_offset(ctx)?;
+        let new_pos = stream.seek_from(self.whence.to_seek_from(offset))?;
+        Ok(Value::UInt(new_pos))
+    }
+
+    fn build(&self, _data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+        let offset = self.resolve_offset(ctx)?;
+        stream.seek_from(self.whence.to_seek_from(offset))?;
+        Ok(())
+    }
+
+    fn sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "SeekExpr only moves the stream, size is not meaningful".to_string(),
+        })
+    }
+
+    fn flagbuildnone(&self) -> bool {
+        true
     }
 }
 

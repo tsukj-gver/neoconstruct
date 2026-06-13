@@ -15,6 +15,7 @@ use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::Evaluate;
 use crate::value::Value;
 
 // ===========================================================================
@@ -175,6 +176,112 @@ impl Construct for Array {
     fn sizeof(&self, ctx: &Context) -> Result<usize> {
         let sub_size = self.subcon.sizeof(ctx)?;
         Ok(self.count.saturating_mul(sub_size))
+    }
+}
+
+// ===========================================================================
+// ArrayExpr
+// ===========================================================================
+
+/// An [`Array`] whose element count is computed at runtime from an expression.
+///
+/// - **parse**: evaluates `count_expr` to get the element count, then parses
+///   that many elements into a [`Value::List`]
+/// - **build**: builds each element from a list; if the list length does not
+///   match the evaluated count, returns [`ConstructError::Array`]
+/// - **sizeof**: returns [`ConstructError::Sizeof`] (count is runtime-dependent)
+///
+/// Corresponds to Python `Array(this.xxx, subcon)`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::repetition::ArrayExpr;
+/// use construct::constructs::struct_::Struct;
+/// use construct::constructs::format_field::INT8UB;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+/// use construct::expr::this_;
+///
+/// let d = Struct::new()
+///     .field("count", Box::new(INT8UB))
+///     .field("items", Box::new(ArrayExpr::new(
+///         Box::new(this_().field("count")),
+///         Box::new(INT8UB),
+///     )));
+/// let c: &dyn Construct = &d;
+/// let parsed = c.parse_bytes(b"\x03\x01\x02\x03").unwrap();
+/// ```
+pub struct ArrayExpr {
+    /// Expression that evaluates to the element count.
+    pub count_expr: Box<dyn Evaluate>,
+    /// The sub-construct applied to each element.
+    pub subcon: Box<dyn Construct>,
+}
+
+impl ArrayExpr {
+    /// Creates a new `ArrayExpr` with the given count expression and
+    /// sub-construct.
+    pub fn new(count_expr: Box<dyn Evaluate>, subcon: Box<dyn Construct>) -> Self {
+        ArrayExpr { count_expr, subcon }
+    }
+
+    /// Evaluates the count expression and returns it as a `usize`.
+    fn resolve_count(&self, ctx: &Context) -> Result<usize> {
+        let val = self.count_expr.evaluate(ctx, None)?;
+        let u = val.to_u64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("ArrayExpr count must be a non-negative integer: {e}"),
+        })?;
+        Ok(u as usize)
+    }
+}
+
+impl Construct for ArrayExpr {
+    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+        let count = self.resolve_count(ctx)?;
+        let mut list = Vec::with_capacity(count);
+        for i in 0..count {
+            ctx.insert(CONTEXT_INDEX_KEY, Value::UInt(i as u64));
+            let element = self
+                .subcon
+                .parse(stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            list.push(element);
+        }
+        Ok(Value::List(list))
+    }
+
+    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+        let expected = self.resolve_count(ctx)?;
+        let list = data.as_list().map_err(|_| ConstructError::TypeMismatch {
+            path: String::new(),
+            expected: "List".to_string(),
+            actual: data.type_name().to_string(),
+        })?;
+
+        if list.len() != expected {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected,
+                actual: list.len(),
+            });
+        }
+
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(CONTEXT_INDEX_KEY, Value::UInt(i as u64));
+            self.subcon
+                .build(element, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+        }
+        Ok(())
+    }
+
+    fn sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "ArrayExpr has variable size (count is runtime-dependent)".to_string(),
+        })
     }
 }
 

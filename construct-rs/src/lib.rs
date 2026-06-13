@@ -10,4 +10,5 @@ pub mod constructs;
 pub mod containers;
 pub mod core;
 pub mod expr;
+pub mod gallery;
 pub mod value;

@@ -15,6 +15,7 @@
 //! | [`NamedTuple`] | Adapter that maps a Struct/Sequence to a named list |
 //! | [`TimestampAdapter`] | Epoch-based integer timestamp adapter |
 
+use crate::constructs::Pass;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::{ByteStream, Stream};
@@ -944,6 +945,47 @@ impl Construct for TimestampAdapter {
     fn sizeof(&self, ctx: &Context) -> Result<usize> {
         self.subcon.sizeof(ctx)
     }
+}
+
+// ===========================================================================
+// Padding — convenience wrapper
+// ===========================================================================
+
+/// Creates a pure padding construct that reads/writes exactly `length` bytes of
+/// padding (default `\x00`), discarding the parsed data.
+///
+/// This is a convenience alias equivalent to:
+///
+/// ```ignore
+/// Padded::new(length, Box::new(Pass::new()), DEFAULT_PAD_PATTERN, false)
+/// ```
+///
+/// Corresponds to Python `Padding(length, pattern=b"\\x00")`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::computed::Padding;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+///
+/// let d = Padding(4);
+/// let c: &dyn Construct = &d;
+///
+/// // Build: writes 4 null bytes
+/// let built = c.build_bytes(&Value::None).unwrap();
+/// assert_eq!(built, vec![0, 0, 0, 0]);
+///
+/// // Parse: reads and discards 4 bytes
+/// let parsed = c.parse_bytes(b"\x00\x00\x00\x00").unwrap();
+/// assert_eq!(parsed, Value::None);
+///
+/// // sizeof: returns 4
+/// assert_eq!(c.sizeof(&Default::default()).unwrap(), 4);
+/// ```
+#[allow(non_snake_case)]
+pub fn Padding(length: usize) -> Padded {
+    Padded::new(length, Box::new(Pass::new()), DEFAULT_PAD_PATTERN, false)
 }
 
 // ===========================================================================

@@ -495,6 +495,58 @@ impl Construct for StopIf {
 }
 
 // ===========================================================================
+// If — convenience wrapper
+// ===========================================================================
+
+/// Creates a conditional construct: runs `then_constr` when `cond` returns
+/// `true`, otherwise does nothing (returns [`Value::None`]).
+///
+/// This is a convenience alias equivalent to:
+///
+/// ```ignore
+/// IfThenElse::new(cond, then_constr, Box::new(Pass::new()))
+/// ```
+///
+/// Corresponds to Python `If(condfunc, subcon)`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::control_flow::If;
+/// use construct::constructs::format_field::INT8UB;
+/// use construct::core::context::Context;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+///
+/// let d = If(
+///     Box::new(|ctx: &Context| {
+///         ctx.get("flag")
+///             .map(|v| v.as_bool().unwrap_or(false))
+///             .unwrap_or(false)
+///     }),
+///     Box::new(INT8UB),
+/// );
+///
+/// let c: &dyn Construct = &d;
+///
+/// // flag = true → reads a byte
+/// let mut stream = construct::core::stream::ByteStream::new_read(b"\x07");
+/// let mut ctx = Context::new();
+/// ctx.insert("flag", Value::Bool(true));
+/// assert_eq!(c.parse(&mut stream, &mut ctx).unwrap(), Value::UInt(7));
+///
+/// // flag = false → returns None, reads nothing
+/// let mut stream2 = construct::core::stream::ByteStream::new_read(b"\x07");
+/// let mut ctx2 = Context::new();
+/// ctx2.insert("flag", Value::Bool(false));
+/// assert_eq!(c.parse(&mut stream2, &mut ctx2).unwrap(), Value::None);
+/// ```
+#[allow(non_snake_case)]
+pub fn If(cond: CondFunc, then_constr: Box<dyn Construct>) -> IfThenElse {
+    IfThenElse::new(cond, then_constr, Box::new(Pass::new()))
+}
+
+// ===========================================================================
 // Tests
 // ===========================================================================
 

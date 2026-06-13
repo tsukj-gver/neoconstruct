@@ -53,13 +53,14 @@ pub mod repetition;
 pub mod select;
 pub mod sequence;
 pub mod stream_ops;
+pub mod strings;
 pub mod struct_;
 pub mod union;
 pub mod varint;
 
 // Re-export primary types for convenience.
 pub use adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator};
-pub use bytes::{Bytes, GreedyBytes};
+pub use bytes::{Bytes, BytesExpr, GreedyBytes};
 pub use bytes_integer::{BitsInteger, BytesInteger};
 pub use computed::{
     Aligned, ComputeFunc, Computed, Default, FixedSized, Index, NamedTuple, Padded, Rebuild,
@@ -71,16 +72,17 @@ pub use flag::Flag;
 pub use focused_seq::FocusedSeq;
 pub use format_field::{Endianness, FormatField, FormatKind};
 pub use lazy::{Lazy, LazyArray, LazyStruct, Rebuffered};
-pub use meta::{Error, Pass, Seek, SeekWhence, Tell, Terminated};
-pub use repetition::{Array, GreedyRange, RepeatUntil};
+pub use meta::{Error, Pass, Seek, SeekExpr, SeekWhence, Tell, Terminated};
+pub use repetition::{Array, ArrayExpr, GreedyRange, RepeatUntil};
 pub use select::Select;
 pub use sequence::{SeqEntry, Sequence};
 pub use stream_ops::{
-    BitsSwapped, Bitwise, ByteSwapped, Bytewise, Checksum, LazyBound, Peek, Pointer, Prefixed,
-    RawCopy, Restreamed, Transformed,
+    BitsSwapped, Bitwise, ByteSwapped, Bytewise, Checksum, LazyBound, Peek, Pointer, PointerExpr,
+    Prefixed, RawCopy, Restreamed, Transformed,
 };
 #[cfg(feature = "compression")]
 pub use stream_ops::{Compressed, CompressionAlgorithm};
+pub use strings::{CString, PaddedString, StringEncoding};
 pub use struct_::{Struct, StructField};
 pub use union::{Union, UnionTarget};
 pub use varint::{VarInt, ZigZag};

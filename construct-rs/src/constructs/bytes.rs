@@ -12,6 +12,7 @@ use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::Evaluate;
 use crate::value::Value;
 
 /// A construct that reads/writes a fixed number of bytes.
@@ -142,6 +143,102 @@ impl Construct for GreedyBytes {
         Err(ConstructError::Sizeof {
             path: String::new(),
             reason: "GreedyBytes has undefined size".to_string(),
+        })
+    }
+}
+
+// ===========================================================================
+// BytesExpr — expression-length Bytes
+// ===========================================================================
+
+/// A [`Bytes`] whose length is computed at runtime from an expression.
+///
+/// - **parse**: evaluates `length_expr` to get the byte count, then reads
+///   exactly that many bytes → [`Value::Bytes`]
+/// - **build**: writes [`Value::Bytes`] whose length must match the evaluated
+///   count; if the evaluated count is `0`, writes nothing
+/// - **sizeof**: returns [`ConstructError::Sizeof`] (length is runtime-dependent)
+///
+/// Corresponds to Python `Bytes(this.xxx)` or `Bytes(lambda this: ...)`.
+///
+/// # Examples
+///
+/// ```
+/// use construct::constructs::bytes::BytesExpr;
+/// use construct::constructs::struct_::Struct;
+/// use construct::constructs::format_field::INT8UB;
+/// use construct::core::Construct;
+/// use construct::value::Value;
+/// use construct::expr::this_;
+///
+/// let d = Struct::new()
+///     .field("len", Box::new(INT8UB))
+///     .field("data", Box::new(BytesExpr::new(
+///         Box::new(this_().field("len")),
+///     )));
+/// let c: &dyn Construct = &d;
+/// let parsed = c.parse_bytes(b"\x03ABC").unwrap();
+/// let container = parsed.as_container().unwrap();
+/// assert_eq!(container.get("len").unwrap(), &Value::UInt(3));
+/// assert_eq!(container.get("data").unwrap(), &Value::Bytes(b"ABC".to_vec()));
+/// ```
+pub struct BytesExpr {
+    /// Expression that evaluates to the number of bytes to read/write.
+    pub length_expr: Box<dyn Evaluate>,
+}
+
+impl BytesExpr {
+    /// Creates a new `BytesExpr` with the given length expression.
+    pub fn new(length_expr: Box<dyn Evaluate>) -> Self {
+        BytesExpr { length_expr }
+    }
+
+    /// Evaluates the length expression and returns it as a `usize`.
+    fn resolve_length(&self, ctx: &Context) -> Result<usize> {
+        let val = self.length_expr.evaluate(ctx, None)?;
+        let u = val.to_u64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("BytesExpr length must be a non-negative integer: {e}"),
+        })?;
+        Ok(u as usize)
+    }
+}
+
+impl Construct for BytesExpr {
+    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+        let length = self.resolve_length(ctx)?;
+        let data = stream.read_bytes(length)?;
+        Ok(Value::Bytes(data))
+    }
+
+    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+        let expected = self.resolve_length(ctx)?;
+        let bytes = data.as_bytes().map_err(|_| ConstructError::TypeMismatch {
+            path: String::new(),
+            expected: "Bytes".to_string(),
+            actual: data.type_name().to_string(),
+        })?;
+
+        if bytes.len() != expected {
+            return Err(ConstructError::Stream {
+                path: String::new(),
+                source: io::Error::new(
+                    ErrorKind::InvalidData,
+                    format!("expected {expected} bytes but got {}", bytes.len()),
+                ),
+            });
+        }
+
+        if expected > 0 {
+            stream.write_bytes(bytes)?;
+        }
+        Ok(())
+    }
+
+    fn sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "BytesExpr has variable size (length is runtime-dependent)".to_string(),
         })
     }
 }
