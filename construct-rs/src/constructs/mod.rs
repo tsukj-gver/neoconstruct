@@ -46,6 +46,7 @@ pub mod meta;
 pub mod repetition;
 pub mod select;
 pub mod sequence;
+pub mod stream_ops;
 pub mod struct_;
 pub mod union;
 pub mod varint;
@@ -67,6 +68,12 @@ pub use meta::{Error, Pass, Seek, SeekWhence, Tell, Terminated};
 pub use repetition::{Array, GreedyRange, RepeatUntil};
 pub use select::Select;
 pub use sequence::{SeqEntry, Sequence};
+pub use stream_ops::{
+    BitsSwapped, Bitwise, ByteSwapped, Bytewise, Checksum, LazyBound, Peek, Pointer, Prefixed,
+    RawCopy, Restreamed, Transformed,
+};
+#[cfg(feature = "compression")]
+pub use stream_ops::{Compressed, CompressionAlgorithm};
 pub use struct_::{Struct, StructField};
 pub use union::{Union, UnionTarget};
 pub use varint::{VarInt, ZigZag};
