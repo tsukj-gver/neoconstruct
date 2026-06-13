@@ -14,10 +14,32 @@ once the module exists. Keeping them commented ensures ``import construct_rust.l
 succeeds during 10.1 even though the sub-modules are not yet created.
 """
 
-# from .containers import *    # 10.3
+from .containers import (
+    Container,
+    ListContainer,
+    globalPrintFullStrings,
+    globalPrintFalseFlags,
+    globalPrintPrivateEntries,
+    setGlobalPrintFullStrings,
+    setGlobalPrintFalseFlags,
+    setGlobalPrintPrivateEntries,
+    recursion_lock,
+    value_to_string,
+)
 # from .binary import *        # 10.9
 # from .bitstream import *     # 10.9
 # from .hex import *           # 10.9
 # from .py3compat import *     # 10.9
 
-__all__ = []  # populated as sub-modules are added
+__all__ = [
+    "Container",
+    "ListContainer",
+    "globalPrintFullStrings",
+    "globalPrintFalseFlags",
+    "globalPrintPrivateEntries",
+    "setGlobalPrintFullStrings",
+    "setGlobalPrintFalseFlags",
+    "setGlobalPrintPrivateEntries",
+    "recursion_lock",
+    "value_to_string",
+]  # populated as sub-modules are added
