@@ -1,13 +1,13 @@
 ---
 description: 架构师，负责模块设计文档编写、接口一致性把关、功能覆盖审计。被 PM 分派执行设计任务。
 mode: subagent
-permission:
+  permission:
   edit:
-    "docs/**": "allow"
+    "*": "deny"
     "plans/**": "deny"
     "construct-rs/**": "deny"
     "construct/**": "deny"
-    "*": "deny"
+    "docs/**": "allow"
   bash:
     "*": "deny"
 ---

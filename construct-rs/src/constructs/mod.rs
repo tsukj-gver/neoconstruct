@@ -24,12 +24,17 @@
 //! | [`focused_seq`] | [`FocusedSeq`] |
 //! | [`computed`] | [`Computed`], [`Rebuild`], [`Default`], [`Index`], [`Padded`], [`Aligned`], [`FixedSized`], [`NamedTuple`], [`TimestampAdapter`] |
 //! | [`repetition`] | [`Array`], [`GreedyRange`], [`RepeatUntil`] |
+//! | [`lazy`] | [`Lazy`], [`LazyStruct`], [`LazyArray`], [`Rebuffered`] |
 //!
 //! [`Adapter`]: adapters::Adapter
 //! [`SymmetricAdapter`]: adapters::SymmetricAdapter
 //! [`ExprAdapter`]: adapters::ExprAdapter
 //! [`Validator`]: adapters::Validator
 //! [`ExprValidator`]: adapters::ExprValidator
+//! [`Lazy`]: lazy::Lazy
+//! [`LazyStruct`]: lazy::LazyStruct
+//! [`LazyArray`]: lazy::LazyArray
+//! [`Rebuffered`]: lazy::Rebuffered
 
 pub mod adapters;
 pub mod bytes;
@@ -42,6 +47,7 @@ pub mod flag;
 pub mod focused_seq;
 pub mod format_field;
 pub mod hex;
+pub mod lazy;
 pub mod meta;
 pub mod repetition;
 pub mod select;
@@ -64,6 +70,7 @@ pub use enum_::{Enum, FlagsEnum, Mapping};
 pub use flag::Flag;
 pub use focused_seq::FocusedSeq;
 pub use format_field::{Endianness, FormatField, FormatKind};
+pub use lazy::{Lazy, LazyArray, LazyStruct, Rebuffered};
 pub use meta::{Error, Pass, Seek, SeekWhence, Tell, Terminated};
 pub use repetition::{Array, GreedyRange, RepeatUntil};
 pub use select::Select;
