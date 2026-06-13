@@ -18,3 +18,12 @@ construct/
 # OS
 .DS_Store
 Thumbs.db
+
+# Python FFI
+construct-py/target/
+construct-py/Cargo.lock
+__pycache__/
+*.pyc
+*.pyd
+*.egg-info/
+.venv/
