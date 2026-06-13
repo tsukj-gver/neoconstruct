@@ -1,4 +1,4 @@
-//! Bidirectional conversion between Rust [`Value`] and Python objects.
+﻿//! Bidirectional conversion between Rust [`Value`] and Python objects.
 //!
 //! - [`value_to_py`] converts a [`Value`] reference into a Python `PyObject`.
 //! - [`py_to_value`] converts a Python object reference into a [`Value`].
@@ -174,40 +174,51 @@ fn bigint_to_value(bigint: &BigInt) -> PyResult<Value> {
     }
 }
 
-/// Converts a [`Context`] into a Python dict (Container in 10.3+).
+/// Converts a [`Context`] into a Python dict (or `Container` if the pure-Python
+/// package is importable).
 ///
 /// Each field is recursively converted via [`value_to_py`]. If the context
-/// has a parent, it is recursively converted and stored under the `"_ "` key,
+/// has a parent, it is recursively converted and stored under the `"_"` key,
 /// mirroring the Python `context._` convention.
 ///
-/// # Design limitation
+/// # Container vs dict
 ///
-/// The current [`Context`] API does not expose field iteration. This function
-/// returns an empty dict as a stub until Context gains a public iterator
-/// (needed for 10.4 callback support).
+/// The function tries to import `construct_rust.lib.containers.Container`
+/// first. If the import succeeds (production environment after `maturin
+/// develop`), a `Container` instance is returned — providing attribute access
+/// (`ctx.field`) that pure-Python Adapter/Validator classes expect. If the
+/// import fails (e.g., during `cargo test` where the pure-Python package is
+/// not in `sys.path`), a plain `PyDict` is used instead. Dict indexing
+/// (`ctx["field"]`) works identically in both cases, so the expression system
+/// (`this.field` → `Path.__call__`) functions correctly with either type.
 ///
 /// # Errors
 ///
 /// Returns `PyErr` if any value conversion fails.
-pub fn context_to_py_container(py: Python<'_>, _ctx: &Context) -> PyResult<PyObject> {
-    // TODO(10.4): Context does not currently expose field iteration. Once a
-    // public `iter()` or `fields()` method is added to Context, replace this
-    // stub with full recursive conversion:
-    //
-    //   let py_dict = PyDict::new_bound(py);
-    //   for (key, value) in ctx.iter_fields() {
-    //       py_dict.set_item(key, value_to_py(py, value)?)?;
-    //   }
-    //   if let Some(parent) = ctx.parent() {
-    //       let parent_container = context_to_py_container(py, parent)?;
-    //       py_dict.set_item("_", parent_container)?;
-    //   }
-    //   Ok(py_dict.into_any().unbind())
-    //
-    // For now, return an empty dict so callers compile.
-    // TODO(10.3): Use Container class instead of plain dict.
-    let _ = py;
-    Ok(PyDict::new_bound(py).into_any().unbind())
+pub fn context_to_py_container(py: Python<'_>, ctx: &Context) -> PyResult<PyObject> {
+    // Attempt to use Container for attribute access compatibility.
+    let container = py
+        .import_bound("construct_rust.lib.containers")
+        .and_then(|m| m.getattr("Container"))
+        .and_then(|cls| cls.call0());
+
+    let py_obj: PyObject = match container {
+        Ok(c) => c.unbind(),
+        Err(_) => PyDict::new_bound(py).into_any().unbind(),
+    };
+
+    let bound = py_obj.bind(py);
+    for (key, value) in ctx.iter_fields() {
+        bound.set_item(key, value_to_py(py, value)?)?;
+    }
+
+    // Recursively convert parent context under the "_" key.
+    if let Some(parent) = ctx.parent() {
+        let parent_container = context_to_py_container(py, parent)?;
+        bound.set_item("_", parent_container)?;
+    }
+
+    Ok(py_obj)
 }
 
 #[cfg(test)]

@@ -248,6 +248,18 @@ impl Context {
         Ok(current)
     }
 
+    /// Returns an iterator over the field key-value pairs at the **current
+    /// level only**.
+    ///
+    /// Does not include fields from parent contexts. Use
+    /// [`get_recursive`](Context::get_recursive) to search parent scopes.
+    ///
+    /// This is primarily used by the FFI layer (Phase 10) to convert a
+    /// `Context` into a Python Container for callback evaluation.
+    pub fn iter_fields(&self) -> impl Iterator<Item = (&String, &Value)> {
+        self.fields.iter()
+    }
+
     /// Returns a reference to the parent context, or `None` if this is the
     /// root context.
     ///

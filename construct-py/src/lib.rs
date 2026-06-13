@@ -1,4 +1,4 @@
-//! PyO3 module entry point for the `construct_rust` native extension.
+﻿//! PyO3 module entry point for the `construct_rust` native extension.
 //!
 //! The compiled cdylib is loaded as `construct_rust._core` (see
 //! `pyproject.toml` -> `module-name`). The pure-Python package
@@ -10,6 +10,8 @@
 pub mod api;
 pub mod conversions;
 pub mod exceptions;
+pub mod expr_bridge;
+pub mod py_adapter;
 pub mod pystream;
 
 use pyo3::prelude::*;
