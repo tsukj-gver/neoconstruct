@@ -215,7 +215,8 @@ impl Default for Struct {
 
 impl Construct for Struct {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
-        let mut container: IndexMap<String, Value> = IndexMap::new();
+        // Pre-allocate with the known field count to avoid repeated rehashing.
+        let mut container: IndexMap<String, Value> = IndexMap::with_capacity(self.fields.len());
         let mut child_ctx = ctx.subcontext();
 
         for field in &self.fields {

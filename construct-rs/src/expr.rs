@@ -698,9 +698,10 @@ impl Evaluate for UniExpr {
 
         match self.op {
             UniOp::Neg => match val {
-                Value::Int(i) => Ok(Value::Int(-i)),
-                Value::UInt(u) => Ok(Value::Int(-(u as i64))),
-                Value::BigInt(i) => Ok(Value::BigInt(-i)),
+                // wrapping_neg avoids panic on i64::MIN / i128::MIN (see §5.1).
+                Value::Int(i) => Ok(Value::Int(i.wrapping_neg())),
+                Value::UInt(u) => Ok(Value::Int((u as i64).wrapping_neg())),
+                Value::BigInt(i) => Ok(Value::BigInt(i.wrapping_neg())),
                 Value::Float(f) => Ok(Value::Float(-f)),
                 _ => Err(ConstructError::Expr {
                     path: String::new(),
@@ -868,9 +869,10 @@ impl Evaluate for FuncPath {
                 Ok(Value::Int(max_val))
             }
             "abs" => match &val {
-                Value::Int(i) => Ok(Value::Int(i.abs())),
+                // wrapping_abs avoids panic on i64::MIN / i128::MIN (see §5.2).
+                Value::Int(i) => Ok(Value::Int(i.wrapping_abs())),
                 Value::UInt(u) => Ok(Value::UInt(*u)),
-                Value::BigInt(i) => Ok(Value::BigInt(i.abs())),
+                Value::BigInt(i) => Ok(Value::BigInt(i.wrapping_abs())),
                 Value::Float(f) => Ok(Value::Float(f.abs())),
                 _ => Err(ConstructError::Expr {
                     path: String::new(),
@@ -1871,6 +1873,22 @@ mod tests {
     }
 
     #[test]
+    fn uni_expr_neg_int_min_wraps() {
+        // -i64::MIN overflows; wrapping_neg returns i64::MIN (no panic).
+        let expr = UniExpr::new(UniOp::Neg, ConstExpr::new(Value::Int(i64::MIN)));
+        let result = expr.evaluate(&Context::new(), None).unwrap();
+        assert_eq!(result, Value::Int(i64::MIN));
+    }
+
+    #[test]
+    fn uni_expr_neg_bigint_min_wraps() {
+        // -i128::MIN overflows; wrapping_neg returns i128::MIN (no panic).
+        let expr = UniExpr::new(UniOp::Neg, ConstExpr::new(Value::BigInt(i128::MIN)));
+        let result = expr.evaluate(&Context::new(), None).unwrap();
+        assert_eq!(result, Value::BigInt(i128::MIN));
+    }
+
+    #[test]
     fn uni_expr_not_bool() {
         let expr = UniExpr::new(UniOp::Not, ConstExpr::new(Value::Bool(true)));
         let result = expr.evaluate(&Context::new(), None).unwrap();
@@ -2070,6 +2088,22 @@ mod tests {
         let expr = FuncPath::new("abs", ConstExpr::new(Value::BigInt(-100)));
         let result = expr.evaluate(&Context::new(), None).unwrap();
         assert_eq!(result, Value::BigInt(100));
+    }
+
+    #[test]
+    fn func_path_abs_int_min_wraps() {
+        // i64::MIN.abs() overflows; wrapping_abs returns i64::MIN (no panic).
+        let expr = FuncPath::new("abs", ConstExpr::new(Value::Int(i64::MIN)));
+        let result = expr.evaluate(&Context::new(), None).unwrap();
+        assert_eq!(result, Value::Int(i64::MIN));
+    }
+
+    #[test]
+    fn func_path_abs_bigint_min_wraps() {
+        // i128::MIN.abs() overflows; wrapping_abs returns i128::MIN (no panic).
+        let expr = FuncPath::new("abs", ConstExpr::new(Value::BigInt(i128::MIN)));
+        let result = expr.evaluate(&Context::new(), None).unwrap();
+        assert_eq!(result, Value::BigInt(i128::MIN));
     }
 
     #[test]

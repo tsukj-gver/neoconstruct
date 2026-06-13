@@ -204,7 +204,8 @@ impl Default for Sequence {
 
 impl Construct for Sequence {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
-        let mut list: Vec<Value> = Vec::new();
+        // Pre-allocate with the known entry count to avoid reallocations.
+        let mut list: Vec<Value> = Vec::with_capacity(self.entries.len());
         let mut child_ctx = ctx.subcontext();
 
         for entry in &self.entries {

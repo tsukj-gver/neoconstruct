@@ -27,3 +27,31 @@ optional = true
 [dependencies.flate2]
 version = "1"
 optional = true
+
+[dev-dependencies]
+criterion = { version = "0.5", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
+
+# ---------------------------------------------------------------------------
+# Benchmark targets (criterion requires `harness = false`)
+# ---------------------------------------------------------------------------
+[[bench]]
+name = "core_constructs"
+harness = false
+
+[[bench]]
+name = "gallery_formats"
+harness = false
+
+# ---------------------------------------------------------------------------
+# Release / bench profile optimizations (see docs/模块设计-性能优化.md §4.2).
+# LTO + single codegen-unit let the compiler inline dyn-Construct calls across
+# crate boundaries, giving partial monomorphization benefits without changing
+# any source code.
+# ---------------------------------------------------------------------------
+[profile.release]
+lto = true
+codegen-units = 1
+
+[profile.bench]
+lto = true
+codegen-units = 1

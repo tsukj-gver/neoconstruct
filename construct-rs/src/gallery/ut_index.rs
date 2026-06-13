@@ -141,11 +141,12 @@ impl Construct for UTIndex {
     fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
         let obj = data.to_i64().map_err(|e| e.with_path_prefix("UTIndex"))?;
 
-        let mut to_write: i64 = obj;
+        // unsigned_abs avoids panic on i64::MIN. The result is a u64, and the
+        // subsequent bit extraction uses logical (unsigned) right-shifts so
+        // the loop terminates correctly. Values whose magnitude exceeds the
+        // 2^35 - 1 maximum are rejected by the "value too large" check below.
+        let mut to_write: u64 = obj.unsigned_abs();
         let negative = obj < 0;
-        if negative {
-            to_write = -to_write;
-        }
 
         for (i, &length) in LENGTHS.iter().enumerate() {
             let mask = get_data_mask(length);
@@ -394,6 +395,17 @@ mod tests {
         // 2^35 is too large (max is 2^35 - 1)
         let err = c.build_bytes(&Value::Int(1i64 << 35)).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
+    }
+
+    #[test]
+    fn build_i64_min_returns_error_no_panic() {
+        // i64::MIN was previously negated with `-to_write` which panics in
+        // debug mode. Now unsigned_abs() is used; the magnitude far exceeds
+        // the 2^35 - 1 maximum so a clean Generic error is returned.
+        let c: &dyn Construct = &UTIndex::new();
+        let err = c.build_bytes(&Value::Int(i64::MIN)).unwrap_err();
+        assert!(matches!(err, ConstructError::Generic { .. }));
+        assert!(err.to_string().contains("exceeds maximum"));
     }
 
     #[test]

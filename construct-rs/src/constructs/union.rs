@@ -140,7 +140,8 @@ impl Union {
 
 impl Construct for Union {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
-        let mut container: IndexMap<String, Value> = IndexMap::new();
+        // Pre-allocate with the known subcon count to avoid repeated rehashing.
+        let mut container: IndexMap<String, Value> = IndexMap::with_capacity(self.subcons.len());
         let mut child_ctx = ctx.subcontext();
 
         // Save the original (fallback) position
@@ -148,7 +149,8 @@ impl Construct for Union {
 
         // Track the forward position after each sub-construct
         let mut forward_by_index: Vec<u64> = Vec::with_capacity(self.subcons.len());
-        let mut forward_by_name: IndexMap<String, u64> = IndexMap::new();
+        let mut forward_by_name: IndexMap<String, u64> =
+            IndexMap::with_capacity(self.subcons.len());
 
         for (i, field) in self.subcons.iter().enumerate() {
             let subobj = match field.subcon.parse(stream, &mut child_ctx) {
