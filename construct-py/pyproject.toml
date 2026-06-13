@@ -14,4 +14,4 @@ description = "Rust-backed port of Python construct"
 module-name = "construct_rust._core"
 # Pure-Python package source root (contains construct_rust/ package dir).
 python-source = "."
-features = ["pyo3/extension-module"]
+features = ["extension-module"]

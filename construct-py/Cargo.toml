@@ -11,7 +11,17 @@ crate-type = ["cdylib"]
 
 [dependencies]
 construct = { path = "../construct-rs", features = ["byteorder", "bigint", "compression"] }
-pyo3 = { version = "0.22", features = ["extension-module"] }
+pyo3 = { version = "0.22", features = ["num-bigint"] }
+num-bigint = "0.4"
+num-traits = "0.2"
+indexmap = "2"
+
+# The extension-module feature must NOT be enabled during `cargo test` because
+# it prevents Python interpreter auto-initialization. Maturin enables it via
+# `features = ["extension-module"]` in pyproject.toml.
+[features]
+default = []
+extension-module = ["pyo3/extension-module"]
 
 # Release profile: LTO + single codegen unit for best inlining across crate
 # boundaries (mirrors construct-rs profile configuration).
