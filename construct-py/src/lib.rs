@@ -9,9 +9,11 @@ pub mod constructs_adapter;
 pub mod constructs_atomic;
 pub mod constructs_composite;
 pub mod constructs_stream;
+pub mod constructs_string;
 pub mod conversions;
 pub mod exceptions;
 pub mod expr_bridge;
+pub mod gallery;
 pub mod py_adapter;
 pub mod py_renamed;
 pub mod pystream;
@@ -138,6 +140,8 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use constructs_atomic::*;
     use constructs_composite::*;
     use constructs_stream::*;
+    use constructs_string::*;
+    use gallery::PyGalleryParser;
     use py_renamed::PyRenamed;
 
     // Atomic
@@ -206,6 +210,11 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyLazyArray>()?;
     m.add_class::<PyLazyBound>()?;
     m.add_class::<PyRebuffered>()?;
+    // String constructs (10.9)
+    m.add_class::<PyPaddedString>()?;
+    m.add_class::<PyCString>()?;
+    // Gallery (10.9)
+    m.add_class::<PyGalleryParser>()?;
     // Renamed
     m.add_class::<PyRenamed>()?;
     Ok(())
@@ -216,6 +225,8 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use constructs_atomic::*;
     use constructs_composite::*;
     use constructs_stream::*;
+    use constructs_string::*;
+    use gallery::{py_elf, py_pe32file, py_ut_index};
     // Atomic
     m.add_function(wrap_pyfunction!(py_format_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_bytes, m)?)?;
@@ -284,6 +295,13 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_rebuffered, m)?)?;
     m.add_function(wrap_pyfunction!(py_bit_struct, m)?)?;
     m.add_function(wrap_pyfunction!(py_prefixed_array, m)?)?;
+    // String constructs (10.9)
+    m.add_function(wrap_pyfunction!(py_padded_string, m)?)?;
+    m.add_function(wrap_pyfunction!(py_c_string, m)?)?;
+    // Gallery (10.9)
+    m.add_function(wrap_pyfunction!(py_elf, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pe32file, m)?)?;
+    m.add_function(wrap_pyfunction!(py_ut_index, m)?)?;
     // No-argument types registered as pre-created instances
     m.add("GreedyBytes", Py::new(py, py_greedy_bytes())?)?;
     m.add("VarInt", Py::new(py, py_varint())?)?;

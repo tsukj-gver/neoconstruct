@@ -1327,6 +1327,15 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
     try_type!(obj, PyLazyBound);
     try_type!(obj, PyRebuffered);
 
+    // String constructs (10.9)
+    use crate::constructs_string::*;
+    try_type!(obj, PyPaddedString);
+    try_type!(obj, PyCString);
+
+    // Gallery (10.9)
+    use crate::gallery::PyGalleryParser;
+    try_type!(obj, PyGalleryParser);
+
     Ok(None)
 }
 

@@ -26,10 +26,10 @@ from .containers import (
     recursion_lock,
     value_to_string,
 )
-# from .binary import *        # 10.9
-# from .bitstream import *     # 10.9
-# from .hex import *           # 10.9
-# from .py3compat import *     # 10.9
+from .py3compat import *
+from .binary import *
+from .bitstream import *
+from .hex import *
 
 __all__ = [
     "Container",
@@ -42,4 +42,21 @@ __all__ = [
     "setGlobalPrintPrivateEntries",
     "recursion_lock",
     "value_to_string",
-]  # populated as sub-modules are added
+    # py3compat
+    "PY", "PYPY", "ONWINDOWS", "INT2BYTE_CACHE",
+    "int2byte", "byte2int", "str2bytes", "bytes2str",
+    "PY2", "PY3", "stringtypes", "integertypes",
+    "unicodestringtype", "bytestringtype", "reprstring",
+    "integers2bytes", "bytes2integers", "trimstring",
+    # binary
+    "integer2bits", "integer2bytes", "bits2integer", "bytes2integer",
+    "bytes2bits", "bits2bytes", "swapbytes", "swapbytesinbits",
+    "swapbitsinbytes", "hexlify", "unhexlify",
+    "BYTES2BITS_CACHE", "BITS2BYTES_CACHE", "SWAPBITSINBYTES_CACHE",
+    # bitstream
+    "RestreamedBytesIO", "RebufferedBytesIO",
+    # hex
+    "HexDisplayedInteger", "HexDisplayedBytes", "HexDisplayedDict",
+    "HexDumpDisplayedBytes", "HexDumpDisplayedDict",
+    "PRINTABLE", "HEXPRINT", "hexdump", "hexundump",
+]

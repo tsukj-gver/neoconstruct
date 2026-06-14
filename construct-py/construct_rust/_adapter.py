@@ -53,6 +53,14 @@ class Construct(object):
             " +docs" if self.docs else "",
         )
 
+    def __rtruediv__(self, name):
+        """``"field" / self`` → Renamed wrapper."""
+        if not isinstance(name, str):
+            return NotImplemented
+        from ._core import Renamed
+
+        return Renamed(self, name)
+
     def parse(self, data, **contextkw):
         return self.parse_stream(io.BytesIO(data), **contextkw)
 

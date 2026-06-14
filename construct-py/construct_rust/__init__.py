@@ -36,6 +36,19 @@ from ._stream import (
     OffsettedEnd,
 )
 
+# 10.9 pure-Python string constructs
+from ._string import (
+    StringEncoded,
+    PascalString,
+    GreedyString,
+)
+
+# 10.9 debugging tools (stubs)
+from .debug import (
+    Probe,
+    Debugger,
+)
+
 # 10.7 pure-Python constructs: NamedTuple (depends on collections.namedtuple)
 from ._namedtuple import NamedTuple
 
