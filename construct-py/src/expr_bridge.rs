@@ -331,6 +331,101 @@ pub fn py_to_control_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> R
 }
 
 // ===========================================================================
+// Stream-operation function bridges (10.8)
+// ===========================================================================
+
+use pyo3::types::PyBytes;
+
+/// Adapts a Python callable into a stream_ops `TransformFunc`
+/// (`Fn(&[u8]) -> Result<Vec<u8>>`).
+///
+/// Python calling convention: `callable(data: bytes) -> bytes`.
+///
+/// Used by `Transformed` (decode/encode) and `Restreamed` (decoder/encoder).
+pub fn py_to_transform_func(
+    callable: PyObject,
+) -> construct::constructs::stream_ops::TransformFunc {
+    Box::new(move |data: &[u8]| {
+        Python::with_gil(|py| {
+            let py_input = PyBytes::new_bound(py, data);
+            let result = callable
+                .call1(py, (py_input,))
+                .map_err(|e| err_to_generic("Transform function error", e))?;
+            let py_bytes = result.bind(py).downcast::<PyBytes>().map_err(|_| {
+                err_to_generic("Transform function return type", "must return bytes")
+            })?;
+            Ok(py_bytes.as_bytes().to_vec())
+        })
+    })
+}
+
+/// Adapts a Python callable into a stream_ops `ChecksumFunc`
+/// (`Fn(&[u8]) -> Vec<u8>`).
+///
+/// Python calling convention: `callable(data: bytes) -> bytes`.
+/// On error, returns an empty checksum (fail-safe; the parsed value will not
+/// match and `Checksum` raises a `ChecksumError`).
+///
+/// Used by `Checksum` (hashfunc).
+pub fn py_to_checksum_func(callable: PyObject) -> construct::constructs::stream_ops::ChecksumFunc {
+    Box::new(move |data: &[u8]| {
+        Python::with_gil(|py| {
+            let py_input = PyBytes::new_bound(py, data);
+            match callable.call1(py, (py_input,)) {
+                Ok(result) => {
+                    if let Ok(py_bytes) = result.bind(py).downcast::<PyBytes>() {
+                        py_bytes.as_bytes().to_vec()
+                    } else {
+                        Vec::new()
+                    }
+                }
+                Err(_) => Vec::new(),
+            }
+        })
+    })
+}
+
+/// Adapts a Python callable/expression into a stream_ops `ChecksumBytesFunc`
+/// (`Fn(&Context) -> Result<Vec<u8>>`).
+///
+/// Python calling convention: `callable(context) -> bytes`.
+/// Supports Path/BinExpr/lambda via [`PyClosure`].
+///
+/// Used by `Checksum` (bytesfunc).
+pub fn py_to_checksum_bytes_func(
+    callable: PyObject,
+) -> construct::constructs::stream_ops::ChecksumBytesFunc {
+    let closure = PyClosure::new(callable);
+    Box::new(move |ctx: &Context| {
+        let val = closure.evaluate(ctx, None)?;
+        match val {
+            Value::Bytes(b) => Ok(b),
+            other => Err(ConstructError::Generic {
+                path: String::new(),
+                message: format!(
+                    "Checksum bytesfunc must return bytes, got {}",
+                    other.type_name()
+                ),
+            }),
+        }
+    })
+}
+
+/// Adapts a Python callable into a Restreamed `size_computer`
+/// (`Fn(usize) -> usize`).
+///
+/// Python calling convention: `callable(n: int) -> int`.
+/// On error, returns 0 (fail-safe; sizeof may be inaccurate but no panic).
+pub fn py_to_size_computer(callable: PyObject) -> PyResult<Box<dyn Fn(usize) -> usize>> {
+    Ok(Box::new(move |n: usize| {
+        Python::with_gil(|py| match callable.call1(py, (n,)) {
+            Ok(r) => r.extract::<usize>(py).unwrap_or(0),
+            Err(_) => 0,
+        })
+    }))
+}
+
+// ===========================================================================
 // Parameter helpers (dual-mode: callable vs plain value)
 // ===========================================================================
 

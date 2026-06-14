@@ -1306,6 +1306,27 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
     try_type!(obj, PySlicing);
     try_type!(obj, PyIndexing);
 
+    // Stream operations / tunnel / lazy (10.8)
+    use crate::constructs_stream::*;
+    try_type!(obj, PyBitwise);
+    try_type!(obj, PyBytewise);
+    try_type!(obj, PyPointer);
+    try_type!(obj, PyPeek);
+    try_type!(obj, PyRawCopy);
+    try_type!(obj, PyPrefixed);
+    try_type!(obj, PyTransformed);
+    try_type!(obj, PyRestreamed);
+    try_type!(obj, PyCompressed);
+    try_type!(obj, PyChecksum);
+    try_type!(obj, PyByteSwapped);
+    try_type!(obj, PyBitsSwapped);
+    try_type!(obj, PyFixedSized);
+    try_type!(obj, PyLazy);
+    try_type!(obj, PyLazyStruct);
+    try_type!(obj, PyLazyArray);
+    try_type!(obj, PyLazyBound);
+    try_type!(obj, PyRebuffered);
+
     Ok(None)
 }
 

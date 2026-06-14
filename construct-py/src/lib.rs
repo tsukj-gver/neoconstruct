@@ -8,6 +8,7 @@ pub mod construct_macros;
 pub mod constructs_adapter;
 pub mod constructs_atomic;
 pub mod constructs_composite;
+pub mod constructs_stream;
 pub mod conversions;
 pub mod exceptions;
 pub mod expr_bridge;
@@ -136,6 +137,7 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
+    use constructs_stream::*;
     use py_renamed::PyRenamed;
 
     // Atomic
@@ -185,6 +187,25 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyExprValidator>()?;
     m.add_class::<PySlicing>()?;
     m.add_class::<PyIndexing>()?;
+    // Stream operations / tunnel / lazy (10.8)
+    m.add_class::<PyBitwise>()?;
+    m.add_class::<PyBytewise>()?;
+    m.add_class::<PyPointer>()?;
+    m.add_class::<PyPeek>()?;
+    m.add_class::<PyRawCopy>()?;
+    m.add_class::<PyPrefixed>()?;
+    m.add_class::<PyTransformed>()?;
+    m.add_class::<PyRestreamed>()?;
+    m.add_class::<PyCompressed>()?;
+    m.add_class::<PyChecksum>()?;
+    m.add_class::<PyByteSwapped>()?;
+    m.add_class::<PyBitsSwapped>()?;
+    m.add_class::<PyFixedSized>()?;
+    m.add_class::<PyLazy>()?;
+    m.add_class::<PyLazyStruct>()?;
+    m.add_class::<PyLazyArray>()?;
+    m.add_class::<PyLazyBound>()?;
+    m.add_class::<PyRebuffered>()?;
     // Renamed
     m.add_class::<PyRenamed>()?;
     Ok(())
@@ -194,6 +215,7 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
+    use constructs_stream::*;
     // Atomic
     m.add_function(wrap_pyfunction!(py_format_field, m)?)?;
     m.add_function(wrap_pyfunction!(py_bytes, m)?)?;
@@ -241,6 +263,27 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_filter, m)?)?;
     m.add_function(wrap_pyfunction!(py_slicing, m)?)?;
     m.add_function(wrap_pyfunction!(py_indexing, m)?)?;
+    // Stream operations / tunnel / lazy (10.8)
+    m.add_function(wrap_pyfunction!(py_bitwise, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bytewise, m)?)?;
+    m.add_function(wrap_pyfunction!(py_pointer, m)?)?;
+    m.add_function(wrap_pyfunction!(py_peek, m)?)?;
+    m.add_function(wrap_pyfunction!(py_raw_copy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prefixed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_transformed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_restreamed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_compressed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_checksum, m)?)?;
+    m.add_function(wrap_pyfunction!(py_byte_swapped, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bits_swapped, m)?)?;
+    m.add_function(wrap_pyfunction!(py_fixed_sized, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lazy, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lazy_struct, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lazy_array, m)?)?;
+    m.add_function(wrap_pyfunction!(py_lazy_bound, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rebuffered, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bit_struct, m)?)?;
+    m.add_function(wrap_pyfunction!(py_prefixed_array, m)?)?;
     // No-argument types registered as pre-created instances
     m.add("GreedyBytes", Py::new(py, py_greedy_bytes())?)?;
     m.add("VarInt", Py::new(py, py_varint())?)?;

@@ -26,6 +26,16 @@ from ._adapter import (
     Validator,
 )
 
+# 10.8 pure-Python stream-processing constructs
+from ._stream import (
+    NullTerminated,
+    NullStripped,
+    RestreamData,
+    ProcessXor,
+    ProcessRotateLeft,
+    OffsettedEnd,
+)
+
 # 10.7 pure-Python constructs: NamedTuple (depends on collections.namedtuple)
 from ._namedtuple import NamedTuple
 
