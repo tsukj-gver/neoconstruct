@@ -166,6 +166,11 @@ pub fn py_build(
     let value = py_to_value(py, data)?;
     let mut stream = ByteStream::new_write();
     let mut ctx = Context::new();
+    // Set the embedding value in context, matching construct Python's
+    // behavior where `context._ = obj` is set before _build is called.
+    // This allows condition-based constructs (Optional, IfThenElse) to
+    // inspect the value being built via `ctx.get("_")`.
+    ctx.insert("_".to_string(), value.clone());
     for (key, val) in kw {
         ctx.insert(key, val);
     }

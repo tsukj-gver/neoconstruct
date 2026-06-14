@@ -215,6 +215,122 @@ pub fn py_to_repeat_predicate(
 }
 
 // ===========================================================================
+// Dual-parameter function-type adapters (obj, context)
+// ===========================================================================
+
+/// Converts a [`ConstructError`] into a `Generic` variant for use inside
+/// dual-parameter closure bridges.
+fn err_to_generic(prefix: &str, e: impl std::fmt::Display) -> ConstructError {
+    ConstructError::Generic {
+        path: String::new(),
+        message: format!("{prefix}: {e}"),
+    }
+}
+
+/// Adapts a Python callable into a decode function
+/// (`Fn(&Value, &Context) -> Result<Value>`).
+///
+/// Uses the two-argument calling convention: `callable(obj, context)`.
+/// Used by `ExprAdapter` and `Adapter`.
+#[allow(clippy::type_complexity)]
+pub fn py_to_decode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+    Box::new(move |obj, ctx| {
+        Python::with_gil(|py| {
+            let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Decoder value", e))?;
+            let py_ctx = context_to_py_container(py, ctx)
+                .map_err(|e| err_to_generic("Decoder context", e))?;
+            let result = callable
+                .call1(py, (py_obj.bind(py), py_ctx.bind(py)))
+                .map_err(|e| err_to_generic("Adapter decoder error", e))?;
+            py_to_value(py, result.bind(py))
+                .map_err(|e| err_to_generic("Decoder result conversion", e))
+        })
+    })
+}
+
+/// Adapts a Python callable into an encode function
+/// (`Fn(&Value, &Context) -> Result<Value>`).
+///
+/// Uses the two-argument calling convention: `callable(obj, context)`.
+/// Used by `ExprAdapter` and `Adapter`.
+#[allow(clippy::type_complexity)]
+pub fn py_to_encode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+    Box::new(move |obj, ctx| {
+        Python::with_gil(|py| {
+            let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Encoder value", e))?;
+            let py_ctx = context_to_py_container(py, ctx)
+                .map_err(|e| err_to_generic("Encoder context", e))?;
+            let result = callable
+                .call1(py, (py_obj.bind(py), py_ctx.bind(py)))
+                .map_err(|e| err_to_generic("Adapter encoder error", e))?;
+            py_to_value(py, result.bind(py))
+                .map_err(|e| err_to_generic("Encoder result conversion", e))
+        })
+    })
+}
+
+/// Adapts a Python callable into a symmetric function
+/// (`Fn(&Value, &Context) -> Result<Value>`).
+///
+/// Uses the two-argument calling convention: `callable(obj, context)`.
+/// Used by `SymmetricAdapter` and `ExprSymmetricAdapter`.
+#[allow(clippy::type_complexity)]
+pub fn py_to_symmetric_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+    Box::new(move |obj, ctx| {
+        Python::with_gil(|py| {
+            let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Symmetric value", e))?;
+            let py_ctx = context_to_py_container(py, ctx)
+                .map_err(|e| err_to_generic("Symmetric context", e))?;
+            let result = callable
+                .call1(py, (py_obj.bind(py), py_ctx.bind(py)))
+                .map_err(|e| err_to_generic("Symmetric func error", e))?;
+            py_to_value(py, result.bind(py))
+                .map_err(|e| err_to_generic("Symmetric result conversion", e))
+        })
+    })
+}
+
+/// Adapts a Python callable into an adapter check function
+/// (`Fn(&Value, &Context) -> Result<()>`).
+///
+/// Uses the two-argument calling convention: `callable(obj, context)`.
+/// A truthy return means validation passed (`Ok(())`); falsy means failure
+/// (`Err(ConstructError::Validation)`).
+///
+/// Used by `Validator` and `ExprValidator`.
+#[allow(clippy::type_complexity)]
+pub fn py_to_adapter_check_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<()>> {
+    Box::new(move |obj, ctx| {
+        Python::with_gil(|py| {
+            let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Validator value", e))?;
+            let py_ctx = context_to_py_container(py, ctx)
+                .map_err(|e| err_to_generic("Validator context", e))?;
+            let result = callable
+                .call1(py, (py_obj.bind(py), py_ctx.bind(py)))
+                .map_err(|e| err_to_generic("Validator error", e))?;
+            if result.is_truthy(py).unwrap_or(false) {
+                Ok(())
+            } else {
+                Err(ConstructError::Validation {
+                    path: String::new(),
+                    message: format!("object failed validation: {obj:?}"),
+                })
+            }
+        })
+    })
+}
+
+/// Adapts a Python callable into a control-flow check function
+/// (`Fn(&Context) -> Result<()>`).
+///
+/// Functionally identical to [`py_to_check_func`]; provided as a separate
+/// function for semantic clarity (used by the `Check` control-flow construct).
+#[allow(clippy::type_complexity)]
+pub fn py_to_control_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()>> {
+    py_to_check_func(callable)
+}
+
+// ===========================================================================
 // Parameter helpers (dual-mode: callable vs plain value)
 // ===========================================================================
 
@@ -519,6 +635,80 @@ mod tests {
                 result,
                 Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
             );
+        });
+    }
+
+    #[test]
+    fn py_to_decode_func_transforms_value() {
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval_bound("lambda obj, ctx: obj + 1", None, None)
+                .unwrap()
+                .unbind();
+            let decode = py_to_decode_func(callable);
+            let ctx = Context::new();
+            let result = decode(&Value::Int(4), &ctx).unwrap();
+            assert_eq!(result, Value::Int(5));
+        });
+    }
+
+    #[test]
+    fn py_to_encode_func_transforms_value() {
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval_bound("lambda obj, ctx: obj - 1", None, None)
+                .unwrap()
+                .unbind();
+            let encode = py_to_encode_func(callable);
+            let ctx = Context::new();
+            let result = encode(&Value::Int(5), &ctx).unwrap();
+            assert_eq!(result, Value::Int(4));
+        });
+    }
+
+    #[test]
+    fn py_to_symmetric_func_applies_same_both_directions() {
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval_bound("lambda obj, ctx: obj & 0xf", None, None)
+                .unwrap()
+                .unbind();
+            let func = py_to_symmetric_func(callable);
+            let ctx = Context::new();
+            assert_eq!(func(&Value::UInt(0xFF), &ctx).unwrap(), Value::Int(15));
+            assert_eq!(func(&Value::UInt(0x1F), &ctx).unwrap(), Value::Int(15));
+        });
+    }
+
+    #[test]
+    fn py_to_adapter_check_func_passes() {
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval_bound("lambda obj, ctx: obj <= 10", None, None)
+                .unwrap()
+                .unbind();
+            let check = py_to_adapter_check_func(callable);
+            let ctx = Context::new();
+            assert!(check(&Value::Int(5), &ctx).is_ok());
+        });
+    }
+
+    #[test]
+    fn py_to_adapter_check_func_fails() {
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            let callable = py
+                .eval_bound("lambda obj, ctx: obj <= 10", None, None)
+                .unwrap()
+                .unbind();
+            let check = py_to_adapter_check_func(callable);
+            let ctx = Context::new();
+            let err = check(&Value::Int(20), &ctx).unwrap_err();
+            assert!(matches!(err, ConstructError::Validation { .. }));
         });
     }
 }

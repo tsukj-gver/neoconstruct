@@ -245,6 +245,13 @@ impl Construct for PyConstructAdapter {
 /// This function enables the **mixed architecture** where Rust Structs,
 /// Sequences, and other composites can embed user-defined Python constructs.
 pub fn extract_subcon(obj: &Bound<'_, PyAny>) -> PyResult<Box<dyn Construct>> {
+    // Check registered PyO3 wrapper types first (10.5+ atomic, 10.6 composite,
+    // 10.7 adapter/control-flow). This enables direct Rust-to-Rust delegation
+    // without Python round-trips.
+    if let Some(con) = crate::constructs_adapter::try_extract_registered(obj)? {
+        return Ok(con);
+    }
+
     // Check for duck typing: must have parse_stream and build_stream methods.
     let has_parse = obj.hasattr("parse_stream")?;
     let has_build = obj.hasattr("build_stream")?;

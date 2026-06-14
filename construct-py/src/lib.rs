@@ -5,6 +5,7 @@
 
 pub mod api;
 pub mod construct_macros;
+pub mod constructs_adapter;
 pub mod constructs_atomic;
 pub mod constructs_composite;
 pub mod conversions;
@@ -132,6 +133,7 @@ fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
 
 /// Registers all pyclass types.
 fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
     use py_renamed::PyRenamed;
@@ -166,12 +168,30 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyFocusedSeq>()?;
     m.add_class::<PyPadded>()?;
     m.add_class::<PyAligned>()?;
+    // Adapter / Control flow (10.7)
+    m.add_class::<PyIfThenElse>()?;
+    m.add_class::<PySwitch>()?;
+    m.add_class::<PyCheck>()?;
+    m.add_class::<PyStopIf>()?;
+    m.add_class::<PyEnum>()?;
+    m.add_class::<PyFlagsEnum>()?;
+    m.add_class::<PyMapping>()?;
+    m.add_class::<PyHex>()?;
+    m.add_class::<PyHexDump>()?;
+    m.add_class::<PyExprAdapter>()?;
+    m.add_class::<PySymmetricAdapter>()?;
+    m.add_class::<PyExprSymmetricAdapter>()?;
+    m.add_class::<PyValidator>()?;
+    m.add_class::<PyExprValidator>()?;
+    m.add_class::<PySlicing>()?;
+    m.add_class::<PyIndexing>()?;
     // Renamed
     m.add_class::<PyRenamed>()?;
     Ok(())
 }
 /// Registers all pyfunction factories.
 fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
     // Atomic
@@ -199,6 +219,28 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_aligned, m)?)?;
     m.add_function(wrap_pyfunction!(py_padding, m)?)?;
     m.add_function(wrap_pyfunction!(py_aligned_struct, m)?)?;
+    // Adapter / Control flow / Enum / Hex (10.7)
+    m.add_function(wrap_pyfunction!(py_if_then_else, m)?)?;
+    m.add_function(wrap_pyfunction!(py_if, m)?)?;
+    m.add_function(wrap_pyfunction!(py_optional, m)?)?;
+    m.add_function(wrap_pyfunction!(py_switch, m)?)?;
+    m.add_function(wrap_pyfunction!(py_check, m)?)?;
+    m.add_function(wrap_pyfunction!(py_stop_if, m)?)?;
+    m.add_function(wrap_pyfunction!(py_enum, m)?)?;
+    m.add_function(wrap_pyfunction!(py_flags_enum, m)?)?;
+    m.add_function(wrap_pyfunction!(py_mapping, m)?)?;
+    m.add_function(wrap_pyfunction!(py_hex, m)?)?;
+    m.add_function(wrap_pyfunction!(py_hex_dump, m)?)?;
+    m.add_function(wrap_pyfunction!(py_expr_adapter, m)?)?;
+    m.add_function(wrap_pyfunction!(py_symmetric_adapter, m)?)?;
+    m.add_function(wrap_pyfunction!(py_expr_symmetric_adapter, m)?)?;
+    m.add_function(wrap_pyfunction!(py_validator, m)?)?;
+    m.add_function(wrap_pyfunction!(py_expr_validator, m)?)?;
+    m.add_function(wrap_pyfunction!(py_one_of, m)?)?;
+    m.add_function(wrap_pyfunction!(py_none_of, m)?)?;
+    m.add_function(wrap_pyfunction!(py_filter, m)?)?;
+    m.add_function(wrap_pyfunction!(py_slicing, m)?)?;
+    m.add_function(wrap_pyfunction!(py_indexing, m)?)?;
     // No-argument types registered as pre-created instances
     m.add("GreedyBytes", Py::new(py, py_greedy_bytes())?)?;
     m.add("VarInt", Py::new(py, py_varint())?)?;

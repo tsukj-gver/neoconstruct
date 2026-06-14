@@ -26,6 +26,29 @@ from ._adapter import (
     Validator,
 )
 
+# 10.7 pure-Python constructs: NamedTuple (depends on collections.namedtuple)
+from ._namedtuple import NamedTuple
+
+# 10.7 Timestamp stub: requires 'arrow' library (not installed in Phase 10).
+# Import does not fail; calling Timestamp/TimestampAdapter raises ImportError.
+try:
+    import arrow  # noqa: F401
+    from ._timestamp import Timestamp, TimestampAdapter, TimestampError
+except ImportError:
+    class TimestampError(Exception):
+        """Raised when Timestamp encounters an error (stub when arrow is missing)."""
+
+        pass
+
+    def Timestamp(*args, **kwargs):
+        """Stub: Timestamp requires the 'arrow' library."""
+        raise ImportError(
+            "Timestamp requires the 'arrow' library. "
+            "Install it with: pip install arrow"
+        )
+
+    TimestampAdapter = Timestamp  # alias
+
 # ---------------------------------------------------------------------------
 # metadata (mirrors construct/__init__.py)
 # ---------------------------------------------------------------------------
