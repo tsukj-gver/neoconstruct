@@ -218,6 +218,13 @@ impl Construct for Subconstruct {
 // Renamed
 // ===========================================================================
 
+/// Type alias for a parsed hook callback.
+///
+/// Corresponds to the Python `Renamed.parsed` attribute — a callable invoked
+/// immediately after a successful parse, receiving the parsed value and the
+/// current context.
+pub type ParsedHook = Box<dyn Fn(&Value, &Context) + Send + Sync>;
+
 /// A wrapper that assigns a name to an inner construct.
 ///
 /// Used primarily by `Struct` and similar composite constructs to associate
@@ -239,10 +246,19 @@ pub struct Renamed {
     pub inner: Box<dyn Construct>,
     /// The name assigned to the construct.
     pub name: String,
+    /// Optional docstring. Corresponds to the Python `Renamed.docs` attribute,
+    /// set via the `subcon * "documentation"` operator.
+    pub docs: Option<String>,
+    /// Optional parse callback hook. Corresponds to the Python
+    /// `Renamed.parsed` attribute, invoked immediately after a successful
+    /// parse. Set via the `subcon * callback` operator.
+    pub parsed: Option<ParsedHook>,
 }
 
 impl Renamed {
     /// Creates a new `Renamed` wrapper around `inner` with the given `name`.
+    ///
+    /// The `docs` and `parsed` fields default to `None`.
     ///
     /// # Example
     ///
@@ -253,15 +269,41 @@ impl Renamed {
         Renamed {
             inner,
             name: name.into(),
+            docs: None,
+            parsed: None,
         }
+    }
+
+    /// Builder: sets the docstring.
+    ///
+    /// Corresponds to the Python `subcon * "docs"` operator.
+    #[must_use]
+    pub fn with_docs(mut self, docs: impl Into<String>) -> Self {
+        self.docs = Some(docs.into());
+        self
+    }
+
+    /// Builder: sets the parsed hook.
+    ///
+    /// Corresponds to the Python `subcon * callback` operator. The hook is
+    /// invoked immediately after a successful [`Construct::parse`] call.
+    #[must_use]
+    pub fn with_parsed(mut self, hook: ParsedHook) -> Self {
+        self.parsed = Some(hook);
+        self
     }
 }
 
 impl Construct for Renamed {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
-        self.inner
+        let obj = self
+            .inner
             .parse(stream, ctx)
-            .map_err(|e| e.with_path_prefix(&self.name))
+            .map_err(|e| e.with_path_prefix(&self.name))?;
+        if let Some(hook) = &self.parsed {
+            hook(&obj, ctx);
+        }
+        Ok(obj)
     }
 
     fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {

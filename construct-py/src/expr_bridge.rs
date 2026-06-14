@@ -104,7 +104,7 @@ fn err_to_expr(prefix: &str, e: impl std::fmt::Display) -> ConstructError {
 ///
 /// Used by `IfThenElse` and `StopIf`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool + Send + Sync> {
+pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = match context_to_py_container(py, ctx) {
@@ -126,7 +126,7 @@ pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool + Sen
 ///
 /// Used by `Switch`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value> + Send + Sync> {
+pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value>> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = context_to_py_container(py, ctx)
@@ -147,7 +147,7 @@ pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Valu
 ///
 /// Used by `Check`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()> + Send + Sync> {
+pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()>> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = context_to_py_container(py, ctx)
@@ -175,9 +175,7 @@ pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()
 ///
 /// Used by `Computed` and `Rebuild`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_compute_func(
-    callable: PyObject,
-) -> Box<dyn Fn(&Context) -> Result<Value> + Send + Sync> {
+pub fn py_to_compute_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value>> {
     py_to_key_func(callable)
 }
 
@@ -192,7 +190,7 @@ pub fn py_to_compute_func(
 #[allow(clippy::type_complexity)]
 pub fn py_to_repeat_predicate(
     callable: PyObject,
-) -> Box<dyn Fn(&Value, &[Value], &Context) -> bool + Send + Sync> {
+) -> Box<dyn Fn(&Value, &[Value], &Context) -> bool> {
     Box::new(move |element, list, ctx| {
         Python::with_gil(|py| {
             let py_element = match value_to_py(py, element) {
@@ -249,7 +247,7 @@ pub fn py_param_to_evaluate(
 pub fn py_param_to_cond_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Fn(&Context) -> bool + Send + Sync>> {
+) -> PyResult<Box<dyn Fn(&Context) -> bool>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
         Ok(py_to_cond_func(callable))
@@ -267,7 +265,7 @@ pub fn py_param_to_cond_func(
 pub fn py_param_to_compute_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Fn(&Context) -> Result<Value> + Send + Sync>> {
+) -> PyResult<Box<dyn Fn(&Context) -> Result<Value>>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
         Ok(py_to_compute_func(callable))

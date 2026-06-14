@@ -1,26 +1,23 @@
-﻿//! PyO3 module entry point for the `construct_rust` native extension.
-//!
-//! The compiled cdylib is loaded as `construct_rust._core` (see
-//! `pyproject.toml` -> `module-name`). The pure-Python package
-//! `construct_rust/__init__.py` re-exports everything via `from ._core import *`.
-//!
-//! Subsequent Phase 10 sub-tasks (10.3-10.9) register their `#[pyclass]` /
-//! `#[pyfunction]` items inside the [`_core`] function body.
+//! PyO3 module entry point for the construct_rust native extension.
+
+#![allow(clippy::useless_conversion)]
+#![allow(clippy::type_complexity)]
 
 pub mod api;
+pub mod construct_macros;
+pub mod constructs_atomic;
+pub mod constructs_composite;
 pub mod conversions;
 pub mod exceptions;
 pub mod expr_bridge;
 pub mod py_adapter;
+pub mod py_renamed;
 pub mod pystream;
 
 use pyo3::prelude::*;
+use pyo3::types::PyModule;
 
 /// Initializes the Python interpreter for unit tests.
-///
-/// When the `extension-module` feature is not enabled (as during `cargo test`),
-/// the Python interpreter must be explicitly initialized before any
-/// `Python::with_gil` call. This function is safe to call multiple times.
 #[cfg(test)]
 pub fn ensure_python() {
     use std::sync::Once;
@@ -29,9 +26,6 @@ pub fn ensure_python() {
 }
 
 /// Registers all exception classes as top-level module attributes.
-///
-/// Each exception is exported under its Python name so that
-/// `from construct_rust import SizeofError` (etc.) works.
 fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add(
         "ConstructError",
@@ -136,15 +130,294 @@ fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
     Ok(())
 }
 
-/// PyO3 module entry — registers the native extension symbols.
-///
-/// 10.2 registers the 28-class exception hierarchy. Downstream sub-tasks
-/// (10.3+) will append `m.add_class::<X>()` calls here.
+/// Registers all pyclass types.
+fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use constructs_atomic::*;
+    use constructs_composite::*;
+    use py_renamed::PyRenamed;
+
+    // Atomic
+    m.add_class::<PyFormatField>()?;
+    m.add_class::<PyBytes>()?;
+    m.add_class::<PyGreedyBytes>()?;
+    m.add_class::<PyBytesInteger>()?;
+    m.add_class::<PyBitsInteger>()?;
+    m.add_class::<PyVarInt>()?;
+    m.add_class::<PyZigZag>()?;
+    m.add_class::<PyFlag>()?;
+    m.add_class::<PyConst>()?;
+    m.add_class::<PyPass>()?;
+    m.add_class::<PyTerminated>()?;
+    m.add_class::<PyTell>()?;
+    m.add_class::<PySeek>()?;
+    m.add_class::<PyError>()?;
+    m.add_class::<PyComputed>()?;
+    m.add_class::<PyRebuild>()?;
+    m.add_class::<PyDefault>()?;
+    m.add_class::<PyIndex>()?;
+    // Composite
+    m.add_class::<PyStruct>()?;
+    m.add_class::<PySequence>()?;
+    m.add_class::<PyArray>()?;
+    m.add_class::<PyGreedyRange>()?;
+    m.add_class::<PyRepeatUntil>()?;
+    m.add_class::<PyUnion>()?;
+    m.add_class::<PySelect>()?;
+    m.add_class::<PyFocusedSeq>()?;
+    m.add_class::<PyPadded>()?;
+    m.add_class::<PyAligned>()?;
+    // Renamed
+    m.add_class::<PyRenamed>()?;
+    Ok(())
+}
+/// Registers all pyfunction factories.
+fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use constructs_atomic::*;
+    use constructs_composite::*;
+    // Atomic
+    m.add_function(wrap_pyfunction!(py_format_field, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bytes_integer, m)?)?;
+    m.add_function(wrap_pyfunction!(py_bits_integer, m)?)?;
+    m.add_function(wrap_pyfunction!(py_const, m)?)?;
+    m.add_function(wrap_pyfunction!(py_seek, m)?)?;
+    m.add_function(wrap_pyfunction!(py_error, m)?)?;
+    m.add_function(wrap_pyfunction!(py_computed, m)?)?;
+    m.add_function(wrap_pyfunction!(py_rebuild, m)?)?;
+    m.add_function(wrap_pyfunction!(py_default, m)?)?;
+    m.add_function(wrap_pyfunction!(py_index, m)?)?;
+    // Composite
+    m.add_function(wrap_pyfunction!(py_struct, m)?)?;
+    m.add_function(wrap_pyfunction!(py_sequence, m)?)?;
+    m.add_function(wrap_pyfunction!(py_array, m)?)?;
+    m.add_function(wrap_pyfunction!(py_greedy_range, m)?)?;
+    m.add_function(wrap_pyfunction!(py_repeat_until, m)?)?;
+    m.add_function(wrap_pyfunction!(py_union, m)?)?;
+    m.add_function(wrap_pyfunction!(py_select, m)?)?;
+    m.add_function(wrap_pyfunction!(py_focused_seq, m)?)?;
+    m.add_function(wrap_pyfunction!(py_padded, m)?)?;
+    m.add_function(wrap_pyfunction!(py_aligned, m)?)?;
+    m.add_function(wrap_pyfunction!(py_padding, m)?)?;
+    m.add_function(wrap_pyfunction!(py_aligned_struct, m)?)?;
+    // No-argument types registered as pre-created instances
+    m.add("GreedyBytes", Py::new(py, py_greedy_bytes())?)?;
+    m.add("VarInt", Py::new(py, py_varint())?)?;
+    m.add("ZigZag", Py::new(py, py_zigzag())?)?;
+    m.add("Flag", Py::new(py, py_flag())?)?;
+    m.add("Pass", Py::new(py, py_pass())?)?;
+    m.add("Terminated", Py::new(py, py_terminated())?)?;
+    m.add("Tell", Py::new(py, py_tell())?)?;
+    Ok(())
+}
+
+/// Registers 35 FormatField constants + 4 BytesInteger + 3 BitsInteger + 7 aliases.
+fn register_constants(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use construct::constructs::bytes_integer as bi;
+    use construct::constructs::format_field as ff;
+    use constructs_atomic::{PyBitsInteger, PyBytesInteger, PyFormatField};
+
+    // FormatField constants — Python naming (Int8ub, not INT8UB)
+    m.add("Int8ub", Py::new(py, PyFormatField { inner: ff::INT8UB })?)?;
+    m.add(
+        "Int16ub",
+        Py::new(py, PyFormatField { inner: ff::INT16UB })?,
+    )?;
+    m.add(
+        "Int32ub",
+        Py::new(py, PyFormatField { inner: ff::INT32UB })?,
+    )?;
+    m.add(
+        "Int64ub",
+        Py::new(py, PyFormatField { inner: ff::INT64UB })?,
+    )?;
+    m.add("Int8sb", Py::new(py, PyFormatField { inner: ff::INT8SB })?)?;
+    m.add(
+        "Int16sb",
+        Py::new(py, PyFormatField { inner: ff::INT16SB })?,
+    )?;
+    m.add(
+        "Int32sb",
+        Py::new(py, PyFormatField { inner: ff::INT32SB })?,
+    )?;
+    m.add(
+        "Int64sb",
+        Py::new(py, PyFormatField { inner: ff::INT64SB })?,
+    )?;
+    m.add("Int8ul", Py::new(py, PyFormatField { inner: ff::INT8UL })?)?;
+    m.add(
+        "Int16ul",
+        Py::new(py, PyFormatField { inner: ff::INT16UL })?,
+    )?;
+    m.add(
+        "Int32ul",
+        Py::new(py, PyFormatField { inner: ff::INT32UL })?,
+    )?;
+    m.add(
+        "Int64ul",
+        Py::new(py, PyFormatField { inner: ff::INT64UL })?,
+    )?;
+    m.add("Int8sl", Py::new(py, PyFormatField { inner: ff::INT8SL })?)?;
+    m.add(
+        "Int16sl",
+        Py::new(py, PyFormatField { inner: ff::INT16SL })?,
+    )?;
+    m.add(
+        "Int32sl",
+        Py::new(py, PyFormatField { inner: ff::INT32SL })?,
+    )?;
+    m.add(
+        "Int64sl",
+        Py::new(py, PyFormatField { inner: ff::INT64SL })?,
+    )?;
+    m.add("Int8un", Py::new(py, PyFormatField { inner: ff::INT8UN })?)?;
+    m.add(
+        "Int16un",
+        Py::new(py, PyFormatField { inner: ff::INT16UN })?,
+    )?;
+    m.add(
+        "Int32un",
+        Py::new(py, PyFormatField { inner: ff::INT32UN })?,
+    )?;
+    m.add(
+        "Int64un",
+        Py::new(py, PyFormatField { inner: ff::INT64UN })?,
+    )?;
+    m.add("Int8sn", Py::new(py, PyFormatField { inner: ff::INT8SN })?)?;
+    m.add(
+        "Int16sn",
+        Py::new(py, PyFormatField { inner: ff::INT16SN })?,
+    )?;
+    m.add(
+        "Int32sn",
+        Py::new(py, PyFormatField { inner: ff::INT32SN })?,
+    )?;
+    m.add(
+        "Int64sn",
+        Py::new(py, PyFormatField { inner: ff::INT64SN })?,
+    )?;
+    m.add(
+        "Float16b",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT16B,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float32b",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT32B,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float64b",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT64B,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float16l",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT16L,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float32l",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT32L,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float64l",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT64L,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float16n",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT16N,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float32n",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT32N,
+            },
+        )?,
+    )?;
+    m.add(
+        "Float64n",
+        Py::new(
+            py,
+            PyFormatField {
+                inner: ff::FLOAT64N,
+            },
+        )?,
+    )?;
+
+    // Aliases — reference the same objects
+    m.add("Byte", m.getattr("Int8ub")?)?;
+    m.add("Short", m.getattr("Int16ub")?)?;
+    m.add("Int", m.getattr("Int32ub")?)?;
+    m.add("Long", m.getattr("Int64ub")?)?;
+    m.add("Half", m.getattr("Float16b")?)?;
+    m.add("Single", m.getattr("Float32b")?)?;
+    m.add("Double", m.getattr("Float64b")?)?;
+
+    // BytesInteger constants
+    m.add(
+        "Int24ub",
+        Py::new(py, PyBytesInteger { inner: bi::INT24UB })?,
+    )?;
+    m.add(
+        "Int24ul",
+        Py::new(py, PyBytesInteger { inner: bi::INT24UL })?,
+    )?;
+    m.add(
+        "Int24sb",
+        Py::new(py, PyBytesInteger { inner: bi::INT24SB })?,
+    )?;
+    m.add(
+        "Int24sl",
+        Py::new(py, PyBytesInteger { inner: bi::INT24SL })?,
+    )?;
+
+    // BitsInteger constants
+    m.add("Bit", Py::new(py, PyBitsInteger { inner: bi::BIT })?)?;
+    m.add("Nibble", Py::new(py, PyBitsInteger { inner: bi::NIBBLE })?)?;
+    m.add("Octet", Py::new(py, PyBitsInteger { inner: bi::OCTET })?)?;
+    Ok(())
+}
+
+/// PyO3 module entry.
 #[pymodule]
 fn _core(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("__version__", env!("CARGO_PKG_VERSION"))?;
-
     register_exceptions(py, m)?;
-
+    register_classes(m)?;
+    register_functions(py, m)?;
+    register_constants(py, m)?;
     Ok(())
 }

@@ -98,7 +98,14 @@ impl std::fmt::Debug for PyConstructAdapter {
 impl Construct for PyConstructAdapter {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
         Python::with_gil(|py| {
-            // 1. Read remaining bytes from Rust stream.
+            // 1. Record the current stream position (before read_remaining
+            //    consumes all remaining bytes).
+            let start_pos = stream.tell().map_err(|e| ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+            })?;
+
+            // 2. Read remaining bytes from Rust stream.
             let remaining = stream
                 .read_remaining()
                 .map_err(|e| ConstructError::Stream {
@@ -106,16 +113,16 @@ impl Construct for PyConstructAdapter {
                     source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
                 })?;
 
-            // 2. Create Python BytesIO with the data.
+            // 3. Create Python BytesIO with the data.
             let bytesio_class = Self::get_bytesio(py)?;
             let py_stream = bytesio_class
                 .call1(py, (PyBytes::new_bound(py, &remaining),))
                 .map_err(|e| Self::generic_err(format!("Failed to create BytesIO: {e}")))?;
 
-            // 3. Prepare kwargs from context.
+            // 4. Prepare kwargs from context.
             let kwargs = Self::context_to_kwargs(py, ctx).map_err(Self::generic_err)?;
 
-            // 4. Call parse_stream(stream, **kwargs).
+            // 5. Call parse_stream(stream, **kwargs).
             let result = self
                 .py_obj
                 .bind(py)
@@ -126,17 +133,21 @@ impl Construct for PyConstructAdapter {
                 )
                 .map_err(|e| Self::generic_err(format!("Python construct parse error: {e}")))?;
 
-            // 5. Sync stream position: BytesIO tell() → Rust stream seek.
+            // 6. Sync stream position: BytesIO tell() gives the number of
+            //    bytes consumed within the Python BytesIO (relative to 0).
+            //    The Rust stream must be set to start_pos + consumed.
             let consumed: u64 = py_stream
                 .call_method0(py, "tell")
                 .and_then(|v| v.extract(py))
                 .map_err(|e| Self::generic_err(format!("Invalid stream position: {e}")))?;
-            stream.seek(consumed).map_err(|e| ConstructError::Stream {
-                path: String::new(),
-                source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-            })?;
+            stream
+                .seek(start_pos + consumed)
+                .map_err(|e| ConstructError::Stream {
+                    path: String::new(),
+                    source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                })?;
 
-            // 6. Convert result → Value.
+            // 7. Convert result → Value.
             py_to_value(py, &result).map_err(Self::generic_err)
         })
     }

@@ -79,7 +79,7 @@ PENDING → DESIGNING → CODING → VERIFYING → REVIEWING → ACCEPTED
 |------|------|------|
 | PM | `plans/00-项目进度.md`（总进度）、`plans/phaseN/过程记录.md`（状态更新）、`plans/phaseN/总纲.md`（清单勾选） | 全部 |
 | ARCH | `docs/模块设计-*.md`、`docs/总设计文档.md` | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
+| DEV | `construct-rs/src/**`、`construct-py/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
 | REF | `plans/phaseN/过程记录.md`（验证结果） | 全部 |
 | REV | `plans/phaseN/过程记录.md`（审查结果） | 全部 |
 
@@ -263,17 +263,32 @@ Task 工具参数：
 
 | 角色 agent | 可写范围 | 禁止写入 |
 |-----------|---------|---------|
-| pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `docs/`, `construct/` |
-| architect | `docs/` | `construct-rs/`, `plans/`, `construct/` |
-| developer | `construct-rs/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
-| validator | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
-| reviewer | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
+| pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
+| architect | `docs/` | `construct-rs/`, `construct-py/`, `plans/`, `construct/` |
+| developer | `construct-rs/`, `construct-py/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
+| validator | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
+| reviewer | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
 
 ### 切换 agent
 
 - PM 是默认主 agent，用户直接与 PM 对话
 - 如需直接使用其他角色，可在 opencode 中切换 agent
 - 所有角色 agent 的完整指令见 `.opencode/agents/*.md`
+
+### Agent 文件写入规范（全员必须遵守）
+
+子 agent 在写入大文件时**必须分批操作**，严禁一次性写入超长内容：
+
+1. **禁止一次性创建/覆盖超过 ~300 行的文件**。对于大型设计文档或源文件，必须：
+   - 先用 `Write` 工具创建文件并写入第一部分（文档头部 + 前几节）
+   - 再用 `Edit` 工具追加后续章节，每次追加不超过 ~300 行
+   - 每次写入后确认成功再继续下一批
+
+2. **禁止在单个 Task prompt 中要求 agent 一次性产出超大输出**。PM 分派任务时应：
+   - 明确告知 agent 分批写入策略
+   - 对于大型文档，可在 prompt 中指定分批计划（如"先写第 1-4 节，再追加第 5-8 节"）
+
+3. **原因**：单次写入超长内容会导致 agent 响应超时或被截断，浪费大量时间。
 
 ## 13. Git 工作流
 

@@ -11,7 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 construct = { path = "../construct-rs", features = ["byteorder", "bigint", "compression"] }
-pyo3 = { version = "0.22", features = ["num-bigint"] }
+pyo3 = { version = "0.22", features = ["num-bigint", "multiple-pymethods"] }
 num-bigint = "0.4"
 num-traits = "0.2"
 indexmap = "2"

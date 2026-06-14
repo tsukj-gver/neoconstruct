@@ -54,6 +54,19 @@ pub fn pykw_to_indexmap(
     Ok(map)
 }
 
+/// Converts an optional Python `**kwargs` dict into an [`IndexMap`].
+///
+/// Returns an empty map when `kw` is `None`.
+pub fn opt_kw_to_indexmap(
+    py: Python<'_>,
+    kw: Option<&Bound<'_, PyDict>>,
+) -> PyResult<IndexMap<String, Value>> {
+    match kw {
+        Some(d) => pykw_to_indexmap(py, d),
+        None => Ok(IndexMap::new()),
+    }
+}
+
 // ===========================================================================
 // Parse helpers
 // ===========================================================================
