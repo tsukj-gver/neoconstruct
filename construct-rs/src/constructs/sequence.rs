@@ -28,8 +28,8 @@
 //! use construct::value::Value;
 //!
 //! let s = Sequence::new()
-//!     .push(Box::new(INT8UB))
-//!     .push(Box::new(Bytes::new(3)));
+//!     .push(Box::new(INT8UB.into()))
+//!     .push(Box::new(Bytes::new(3).into()));
 //!
 //! let c: &dyn Construct = &s;
 //! let parsed = c.parse_bytes(b"\x04ABC").unwrap();
@@ -39,9 +39,10 @@
 //! assert_eq!(list[1], Value::Bytes(b"ABC".to_vec()));
 //! ```
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -62,7 +63,7 @@ pub struct SeqEntry {
     /// The entry name, or `None` for anonymous entries.
     pub name: Option<String>,
     /// The sub-construct that parses / builds this entry.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl SeqEntry {
@@ -71,9 +72,9 @@ impl SeqEntry {
     /// # Examples
     ///
     /// ```ignore
-    /// let entry = SeqEntry::new("count", Box::new(INT8UB));
+    /// let entry = SeqEntry::new("count", Box::new(INT8UB.into()));
     /// ```
-    pub fn new(name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         SeqEntry {
             name: Some(name.into()),
             subcon,
@@ -85,9 +86,9 @@ impl SeqEntry {
     /// # Examples
     ///
     /// ```ignore
-    /// let entry = SeqEntry::anonymous(Box::new(INT8UB));
+    /// let entry = SeqEntry::anonymous(Box::new(INT8UB.into()));
     /// ```
-    pub fn anonymous(subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(subcon: Box<CombinedConstruct>) -> Self {
         SeqEntry { name: None, subcon }
     }
 }
@@ -148,9 +149,9 @@ impl Sequence {
     /// use construct::constructs::sequence::Sequence;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let s = Sequence::new().push(Box::new(INT8UB));
+    /// let s = Sequence::new().push(Box::new(INT8UB.into()));
     /// ```
-    pub fn push(mut self, subcon: Box<dyn Construct>) -> Self {
+    pub fn push(mut self, subcon: Box<CombinedConstruct>) -> Self {
         self.entries.push(SeqEntry::anonymous(subcon));
         self
     }
@@ -166,9 +167,9 @@ impl Sequence {
     /// use construct::constructs::sequence::Sequence;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let s = Sequence::new().named("count", Box::new(INT8UB));
+    /// let s = Sequence::new().named("count", Box::new(INT8UB.into()));
     /// ```
-    pub fn named(mut self, name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn named(mut self, name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         self.entries.push(SeqEntry::new(name, subcon));
         self
     }
@@ -184,8 +185,8 @@ impl Sequence {
     /// use construct::constructs::sequence::Sequence;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let header = Sequence::new().push(Box::new(INT8UB));
-    /// let full = Sequence::new().push(Box::new(INT8UB)).extend(header);
+    /// let header = Sequence::new().push(Box::new(INT8UB.into()));
+    /// let full = Sequence::new().push(Box::new(INT8UB.into())).extend(header);
     /// ```
     pub fn extend(mut self, other: Sequence) -> Self {
         let other_entries = other.entries;
@@ -203,7 +204,7 @@ impl Default for Sequence {
 }
 
 impl Construct for Sequence {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Pre-allocate with the known entry count to avoid reallocations.
         let mut list: Vec<Value> = Vec::with_capacity(self.entries.len());
         let mut child_ctx = ctx.subcontext();
@@ -234,7 +235,7 @@ impl Construct for Sequence {
         Ok(Value::List(list))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // If data is None, treat as list of Nones matching entry count
         let list = match data {
             Value::None => vec![Value::None; self.entries.len()],
@@ -342,7 +343,7 @@ mod tests {
 
     #[test]
     fn parse_single_anonymous_entry() {
-        let s = Sequence::new().push(Box::new(INT8UB));
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x2A").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list.len(), 1);
@@ -352,8 +353,8 @@ mod tests {
     #[test]
     fn parse_two_anonymous_entries() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT8UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x01\x02").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list[0], Value::UInt(1));
@@ -362,7 +363,7 @@ mod tests {
 
     #[test]
     fn parse_named_entry_appends_to_list() {
-        let s = Sequence::new().named("num", Box::new(INT8UB));
+        let s = Sequence::new().named("num", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x2A").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list.len(), 1);
@@ -372,9 +373,9 @@ mod tests {
     #[test]
     fn parse_mixed_named_and_anonymous() {
         let s = Sequence::new()
-            .named("a", Box::new(INT8UB))
-            .push(Box::new(INT8UB))
-            .named("b", Box::new(INT8UB));
+            .named("a", Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()))
+            .named("b", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x01\x02\x03").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list.len(), 3);
@@ -387,8 +388,8 @@ mod tests {
     fn parse_context_visible_to_later_entries() {
         // Named entry "length" is in context, later entry can use it
         let s = Sequence::new()
-            .named("length", Box::new(INT8UB))
-            .push(Box::new(Bytes::new(3)));
+            .named("length", Box::new(INT8UB.into()))
+            .push(Box::new(Bytes::new(3).into()));
         let result = as_dyn!(s).parse_bytes(b"\x03ABC").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list[0], Value::UInt(3));
@@ -408,7 +409,7 @@ mod tests {
 
     #[test]
     fn build_single_entry() {
-        let s = Sequence::new().push(Box::new(INT8UB));
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
         let built = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(42)]))
             .unwrap();
@@ -418,8 +419,8 @@ mod tests {
     #[test]
     fn build_two_entries() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT8UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()));
         let built = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(1), Value::UInt(2)]))
             .unwrap();
@@ -429,8 +430,8 @@ mod tests {
     #[test]
     fn build_mixed_types() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT16UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()));
         let built = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(0x12), Value::UInt(0x3456)]))
             .unwrap();
@@ -441,15 +442,15 @@ mod tests {
     fn build_from_none_creates_list_of_nones() {
         // When all subcons have flagbuildnone=true, Sequence can build from None
         let s = Sequence::new()
-            .push(Box::new(Const::new_bytes(b"HI".to_vec())))
-            .push(Box::new(Pass::new()));
+            .push(Box::new(Const::new_bytes(b"HI".to_vec()).into()))
+            .push(Box::new(Pass::new().into()));
         let built = as_dyn!(s).build_bytes(&Value::None).unwrap();
         assert_eq!(built, b"HI");
     }
 
     #[test]
     fn build_wrong_type_returns_error() {
-        let s = Sequence::new().push(Box::new(INT8UB));
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
         let err = as_dyn!(s).build_bytes(&Value::Int(42)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
     }
@@ -457,8 +458,8 @@ mod tests {
     #[test]
     fn build_too_few_elements_returns_error() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT8UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()));
         let err = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(1)]))
             .unwrap_err();
@@ -469,8 +470,8 @@ mod tests {
     fn build_named_entry_uses_context() {
         // Named entries should be available in context for later entries
         let s = Sequence::new()
-            .named("a", Box::new(INT8UB))
-            .push(Box::new(INT8UB));
+            .named("a", Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()));
         let built = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(0x10), Value::UInt(0x20)]))
             .unwrap();
@@ -489,24 +490,24 @@ mod tests {
 
     #[test]
     fn sizeof_single_entry() {
-        let s = Sequence::new().push(Box::new(INT8UB));
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 1);
     }
 
     #[test]
     fn sizeof_multiple_entries() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT16UB))
-            .push(Box::new(INT32UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()))
+            .push(Box::new(INT32UB.into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 7);
     }
 
     #[test]
     fn sizeof_with_named_entries() {
         let s = Sequence::new()
-            .named("a", Box::new(INT8UB))
-            .push(Box::new(Bytes::new(3)));
+            .named("a", Box::new(INT8UB.into()))
+            .push(Box::new(Bytes::new(3).into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 4);
     }
 
@@ -517,16 +518,16 @@ mod tests {
     #[test]
     fn flagbuildnone_true_when_all_entries_are_build_none() {
         let s = Sequence::new()
-            .push(Box::new(Pass::new()))
-            .push(Box::new(Const::new_bytes(b"X".to_vec())));
+            .push(Box::new(Pass::new().into()))
+            .push(Box::new(Const::new_bytes(b"X".to_vec()).into()));
         assert!(s.flagbuildnone());
     }
 
     #[test]
     fn flagbuildnone_false_when_any_entry_requires_value() {
         let s = Sequence::new()
-            .push(Box::new(Pass::new()))
-            .push(Box::new(INT8UB));
+            .push(Box::new(Pass::new().into()))
+            .push(Box::new(INT8UB.into()));
         assert!(!s.flagbuildnone());
     }
 
@@ -543,8 +544,8 @@ mod tests {
     #[test]
     fn roundtrip_two_entries() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT16UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()));
 
         let data = Value::List(vec![Value::UInt(0x12), Value::UInt(0x3456)]);
 
@@ -559,8 +560,8 @@ mod tests {
     #[test]
     fn roundtrip_with_const() {
         let s = Sequence::new()
-            .push(Box::new(Const::new_bytes(b"PK".to_vec())))
-            .push(Box::new(INT8UB));
+            .push(Box::new(Const::new_bytes(b"PK".to_vec()).into()))
+            .push(Box::new(INT8UB.into()));
 
         let data = Value::List(vec![Value::Bytes(b"PK".to_vec()), Value::UInt(10)]);
 
@@ -575,9 +576,9 @@ mod tests {
     #[test]
     fn roundtrip_with_pass() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(Pass::new()))
-            .push(Box::new(INT8UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(Pass::new().into()))
+            .push(Box::new(INT8UB.into()));
 
         let data = Value::List(vec![Value::UInt(1), Value::None, Value::UInt(2)]);
 
@@ -593,8 +594,8 @@ mod tests {
     #[test]
     fn roundtrip_with_named_entries() {
         let s = Sequence::new()
-            .named("x", Box::new(INT8UB))
-            .named("y", Box::new(INT8UB));
+            .named("x", Box::new(INT8UB.into()))
+            .named("y", Box::new(INT8UB.into()));
 
         let data = Value::List(vec![Value::UInt(42), Value::UInt(99)]);
 
@@ -613,8 +614,8 @@ mod tests {
     #[test]
     fn parse_error_enriches_path_with_entry_name() {
         let s = Sequence::new()
-            .named("a", Box::new(INT8UB))
-            .named("b", Box::new(INT16UB));
+            .named("a", Box::new(INT8UB.into()))
+            .named("b", Box::new(INT16UB.into()));
         // Only provide 1 byte, second entry needs 2
         let c: &dyn Construct = &s;
         let err = c.parse_bytes(b"\x01").unwrap_err();
@@ -633,8 +634,8 @@ mod tests {
     #[test]
     fn parse_error_anonymous_entry_uses_index() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT16UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()));
         // Only provide 1 byte, second entry needs 2
         let c: &dyn Construct = &s;
         let err = c.parse_bytes(b"\x01").unwrap_err();
@@ -652,7 +653,7 @@ mod tests {
 
     #[test]
     fn build_error_enriches_path_with_entry_name() {
-        let s = Sequence::new().named("num", Box::new(INT8UB));
+        let s = Sequence::new().named("num", Box::new(INT8UB.into()));
         let data = Value::List(vec![Value::String("not a number".to_string())]);
         let c: &dyn Construct = &s;
         let err = c.build_bytes(&data).unwrap_err();
@@ -671,8 +672,8 @@ mod tests {
     #[test]
     fn sizeof_error_enriches_path_with_entry_name() {
         let s = Sequence::new()
-            .named("a", Box::new(INT8UB))
-            .named("b", Box::new(Terminated::new()));
+            .named("a", Box::new(INT8UB.into()))
+            .named("b", Box::new(Terminated::new().into()));
         let err = s.sizeof(&Context::new()).unwrap_err();
         match &err {
             ConstructError::Sizeof { path, .. } => {
@@ -697,7 +698,7 @@ mod tests {
         struct StopConstruct;
 
         impl Construct for StopConstruct {
-            fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
                 Err(ConstructError::StopField {
                     path: String::new(),
                 })
@@ -705,7 +706,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Err(ConstructError::StopField {
@@ -718,9 +719,9 @@ mod tests {
         }
 
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(StopConstruct))
-            .push(Box::new(INT8UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(crate::combined::dynamic(StopConstruct)))
+            .push(Box::new(INT8UB.into()));
 
         // parse: should stop after first entry, third is never read
         let c: &dyn Construct = &s;
@@ -736,9 +737,9 @@ mod tests {
 
     #[test]
     fn extend_combines_entries() {
-        let header = Sequence::new().push(Box::new(INT8UB));
+        let header = Sequence::new().push(Box::new(INT8UB.into()));
 
-        let full = Sequence::new().push(Box::new(INT8UB)).extend(header);
+        let full = Sequence::new().push(Box::new(INT8UB.into())).extend(header);
 
         // This should parse first entry then second entry
         let c: &dyn Construct = &full;
@@ -755,8 +756,8 @@ mod tests {
     #[test]
     fn convenience_parse_and_build_roundtrip() {
         let s = Sequence::new()
-            .push(Box::new(INT8UB))
-            .push(Box::new(INT16UB));
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()));
 
         let data = Value::List(vec![Value::UInt(100), Value::UInt(1000)]);
 
@@ -785,7 +786,7 @@ mod tests {
 
     #[test]
     fn build_ignores_extra_elements_in_list() {
-        let s = Sequence::new().push(Box::new(INT8UB));
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
         // Provide 2 elements when only 1 is needed
         let built = as_dyn!(s)
             .build_bytes(&Value::List(vec![Value::UInt(42), Value::UInt(99)]))

@@ -17,10 +17,11 @@
 //! | [`Check`] | `Check` (line ~3081) |
 //! | [`StopIf`] | `StopIf` (line ~4079) |
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::Pass;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -78,15 +79,15 @@ pub type StopCondFunc = Box<dyn Fn(&Context) -> bool>;
 ///         ctx.get("use_short")
 ///             .map(|v| v.as_bool().unwrap_or(false))
 ///             .unwrap_or(false)
-///     }),
-///     Box::new(INT16UB),
-///     Box::new(INT8UB),
+///     }.into()),
+///     Box::new(INT16UB.into()),
+///     Box::new(INT8UB.into()),
 /// );
 ///
 /// let c: &dyn Construct = &ite;
 ///
 /// // Build with use_short=true → uses INT16UB
-/// let mut stream = construct::core::stream::ByteStream::new_write();
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_write());
 /// let mut ctx = construct::core::context::Context::new();
 /// ctx.insert("use_short", Value::Bool(true));
 /// c.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap();
@@ -97,9 +98,9 @@ pub struct IfThenElse {
     /// `false` to use `else_constr`.
     pub cond: CondFunc,
     /// The sub-construct used when the condition is `true`.
-    pub then_constr: Box<dyn Construct>,
+    pub then_constr: Box<CombinedConstruct>,
     /// The sub-construct used when the condition is `false`.
-    pub else_constr: Box<dyn Construct>,
+    pub else_constr: Box<CombinedConstruct>,
 }
 
 impl IfThenElse {
@@ -112,8 +113,8 @@ impl IfThenElse {
     /// - `else_constr` — sub-construct used when the condition is `false`
     pub fn new(
         cond: CondFunc,
-        then_constr: Box<dyn Construct>,
-        else_constr: Box<dyn Construct>,
+        then_constr: Box<CombinedConstruct>,
+        else_constr: Box<CombinedConstruct>,
     ) -> Self {
         IfThenElse {
             cond,
@@ -124,7 +125,7 @@ impl IfThenElse {
 }
 
 impl Construct for IfThenElse {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         if (self.cond)(ctx) {
             self.then_constr.parse(stream, ctx)
         } else {
@@ -132,7 +133,7 @@ impl Construct for IfThenElse {
         }
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         if (self.cond)(ctx) {
             self.then_constr.build(data, stream, ctx)
         } else {
@@ -190,11 +191,11 @@ impl Construct for IfThenElse {
 ///                 field: "n".to_string(),
 ///             }
 ///         })
-///     }),
+///     }.into()),
 ///     vec![
-///         (Value::UInt(1), Box::new(INT8UB) as Box<dyn Construct>),
-///         (Value::UInt(2), Box::new(INT16UB) as Box<dyn Construct>),
-///         (Value::UInt(4), Box::new(INT32UB) as Box<dyn Construct>),
+///         (Value::UInt(1), Box::new(INT8UB.into())),
+///         (Value::UInt(2), Box::new(INT16UB.into())),
+///         (Value::UInt(4), Box::new(INT32UB.into())),
 ///     ],
 ///     None,
 /// );
@@ -202,14 +203,14 @@ impl Construct for IfThenElse {
 /// let c: &dyn Construct = &sw;
 ///
 /// // Build with n=1 → INT8UB
-/// let mut stream = construct::core::stream::ByteStream::new_write();
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_write());
 /// let mut ctx = construct::core::context::Context::new();
 /// ctx.insert("n", Value::UInt(1));
 /// c.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap();
 /// assert_eq!(stream.into_bytes(), vec![0x05]);
 ///
 /// // Build with n=4 → INT32UB
-/// let mut stream2 = construct::core::stream::ByteStream::new_write();
+/// let mut stream2 = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_write());
 /// let mut ctx2 = construct::core::context::Context::new();
 /// ctx2.insert("n", Value::UInt(4));
 /// c.build(&Value::UInt(5), &mut stream2, &mut ctx2).unwrap();
@@ -221,10 +222,10 @@ pub struct Switch {
     pub keyfunc: KeyFunc,
     /// Ordered list of (key, sub-construct) pairs. The first matching key
     /// (by [`PartialEq`]) wins.
-    pub cases: Vec<(Value, Box<dyn Construct>)>,
+    pub cases: Vec<(Value, Box<CombinedConstruct>)>,
     /// Optional default sub-construct used when no case matches.
     /// If `None`, [`Pass`](crate::constructs::Pass) is used as default.
-    pub default: Option<Box<dyn Construct>>,
+    pub default: Option<Box<CombinedConstruct>>,
     /// Internal Pass instance used as the implicit default when `default`
     /// is `None`.
     pass_default: Pass,
@@ -242,8 +243,8 @@ impl Switch {
     ///   [`Pass`](crate::constructs::Pass) is used
     pub fn new(
         keyfunc: KeyFunc,
-        cases: Vec<(Value, Box<dyn Construct>)>,
-        default: Option<Box<dyn Construct>>,
+        cases: Vec<(Value, Box<CombinedConstruct>)>,
+        default: Option<Box<CombinedConstruct>>,
     ) -> Self {
         Switch {
             keyfunc,
@@ -269,13 +270,13 @@ impl Switch {
 }
 
 impl Construct for Switch {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let key = (self.keyfunc)(ctx)?;
         let sc = self.resolve(&key);
         sc.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let key = (self.keyfunc)(ctx)?;
         let sc = self.resolve(&key);
         sc.build(data, stream, ctx)
@@ -334,21 +335,21 @@ impl Construct for Switch {
 ///             message: "x must be 42".to_string(),
 ///         })
 ///     }
-/// }));
+/// }.into()));
 ///
 /// let c: &dyn Construct = &chk;
 ///
 /// // Pass: x == 42
 /// let mut ctx = construct::core::context::Context::new();
 /// ctx.insert("x", Value::UInt(42));
-/// let mut stream = construct::core::stream::ByteStream::new_read(b"");
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b""));
 /// let parsed = c.parse(&mut stream, &mut ctx).unwrap();
 /// assert_eq!(parsed, Value::None);
 ///
 /// // Fail: x != 42
 /// let mut ctx2 = construct::core::context::Context::new();
 /// ctx2.insert("x", Value::UInt(99));
-/// let mut stream2 = construct::core::stream::ByteStream::new_read(b"");
+/// let mut stream2 = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b""));
 /// let err = c.parse(&mut stream2, &mut ctx2).unwrap_err();
 /// assert!(matches!(err, ConstructError::Check { .. }));
 /// ```
@@ -370,12 +371,12 @@ impl Check {
 }
 
 impl Construct for Check {
-    fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         (self.check)(ctx)?;
         Ok(Value::None)
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         (self.check)(ctx)?;
         Ok(())
     }
@@ -426,21 +427,21 @@ const STOPIF_SIZEOF_REASON: &str =
 ///     ctx.get("should_stop")
 ///         .map(|v| v.as_bool().unwrap_or(false))
 ///         .unwrap_or(false)
-/// }));
+/// }.into()));
 ///
 /// let c: &dyn Construct = &stop;
 ///
 /// // Condition true → StopField error
 /// let mut ctx = construct::core::context::Context::new();
 /// ctx.insert("should_stop", Value::Bool(true));
-/// let mut stream = construct::core::stream::ByteStream::new_read(b"");
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b""));
 /// let err = c.parse(&mut stream, &mut ctx).unwrap_err();
 /// assert!(matches!(err, ConstructError::StopField { .. }));
 ///
 /// // Condition false → returns None
 /// let mut ctx2 = construct::core::context::Context::new();
 /// ctx2.insert("should_stop", Value::Bool(false));
-/// let mut stream2 = construct::core::stream::ByteStream::new_read(b"");
+/// let mut stream2 = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b""));
 /// let parsed = c.parse(&mut stream2, &mut ctx2).unwrap();
 /// assert_eq!(parsed, Value::None);
 /// ```
@@ -462,7 +463,7 @@ impl StopIf {
 }
 
 impl Construct for StopIf {
-    fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         if (self.cond)(ctx) {
             Err(ConstructError::StopField {
                 path: String::new(),
@@ -472,7 +473,7 @@ impl Construct for StopIf {
         }
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         if (self.cond)(ctx) {
             Err(ConstructError::StopField {
                 path: String::new(),
@@ -504,7 +505,7 @@ impl Construct for StopIf {
 /// This is a convenience alias equivalent to:
 ///
 /// ```ignore
-/// IfThenElse::new(cond, then_constr, Box::new(Pass::new()))
+/// IfThenElse::new(cond, then_constr, Box::new(Pass::new().into()))
 /// ```
 ///
 /// Corresponds to Python `If(condfunc, subcon)`.
@@ -523,27 +524,27 @@ impl Construct for StopIf {
 ///         ctx.get("flag")
 ///             .map(|v| v.as_bool().unwrap_or(false))
 ///             .unwrap_or(false)
-///     }),
-///     Box::new(INT8UB),
+///     }.into()),
+///     Box::new(INT8UB.into()),
 /// );
 ///
 /// let c: &dyn Construct = &d;
 ///
 /// // flag = true → reads a byte
-/// let mut stream = construct::core::stream::ByteStream::new_read(b"\x07");
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b"\x07"));
 /// let mut ctx = Context::new();
 /// ctx.insert("flag", Value::Bool(true));
 /// assert_eq!(c.parse(&mut stream, &mut ctx).unwrap(), Value::UInt(7));
 ///
 /// // flag = false → returns None, reads nothing
-/// let mut stream2 = construct::core::stream::ByteStream::new_read(b"\x07");
+/// let mut stream2 = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b"\x07"));
 /// let mut ctx2 = Context::new();
 /// ctx2.insert("flag", Value::Bool(false));
 /// assert_eq!(c.parse(&mut stream2, &mut ctx2).unwrap(), Value::None);
 /// ```
 #[allow(non_snake_case)]
-pub fn If(cond: CondFunc, then_constr: Box<dyn Construct>) -> IfThenElse {
-    IfThenElse::new(cond, then_constr, Box::new(Pass::new()))
+pub fn If(cond: CondFunc, then_constr: Box<CombinedConstruct>) -> IfThenElse {
+    IfThenElse::new(cond, then_constr, Box::new(Pass::new().into()))
 }
 
 // ===========================================================================
@@ -556,20 +557,21 @@ mod tests {
     use crate::constructs::format_field::{Endianness, FormatField, FormatKind};
     use crate::constructs::meta::Pass;
     use crate::core::stream::ByteStream;
+    use crate::core::stream::Stream;
 
     /// Helper: creates a U8 big-endian construct for tests.
-    fn u8be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U8))
+    fn u8be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U8).into())
     }
 
     /// Helper: creates a U16 big-endian construct for tests.
-    fn u16be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U16))
+    fn u16be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U16).into())
     }
 
     /// Helper: creates a U32 big-endian construct for tests.
-    fn u32be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U32))
+    fn u32be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U32).into())
     }
 
     // ======================================================================
@@ -578,7 +580,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_parse_true_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| true.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let parsed = c.parse_bytes(b"\x00\x05").unwrap();
@@ -587,7 +589,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_parse_false_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| false), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| false.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let parsed = c.parse_bytes(b"\x05").unwrap();
@@ -596,7 +598,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_build_true_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| true.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let bytes = c.build_bytes(&Value::UInt(5)).unwrap();
@@ -605,7 +607,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_build_false_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| false), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| false.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let bytes = c.build_bytes(&Value::UInt(5)).unwrap();
@@ -614,7 +616,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_roundtrip_true() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| true.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let original = Value::UInt(1000);
@@ -625,7 +627,7 @@ mod tests {
 
     #[test]
     fn ifthenelse_roundtrip_false() {
-        let ite = IfThenElse::new(Box::new(|_ctx| false), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| false.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let original = Value::UInt(42);
@@ -636,14 +638,14 @@ mod tests {
 
     #[test]
     fn ifthenelse_sizeof_true_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| true.into()), u16be(), u8be());
         let ctx = Context::new();
         assert_eq!(ite.sizeof(&ctx).unwrap(), 2);
     }
 
     #[test]
     fn ifthenelse_sizeof_false_branch() {
-        let ite = IfThenElse::new(Box::new(|_ctx| false), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| false.into()), u16be(), u8be());
         let ctx = Context::new();
         assert_eq!(ite.sizeof(&ctx).unwrap(), 1);
     }
@@ -652,23 +654,26 @@ mod tests {
     fn ifthenelse_uses_context() {
         let ite = IfThenElse::new(
             Box::new(|ctx| {
-                ctx.get("use_short")
-                    .map(|v| v.as_bool().unwrap_or(false))
-                    .unwrap_or(false)
+                {
+                    ctx.get("use_short")
+                        .map(|v| v.as_bool().unwrap_or(false))
+                        .unwrap_or(false)
+                }
+                .into()
             }),
             u16be(),
             u8be(),
         );
 
         // use_short = true → INT16UB
-        let mut stream = ByteStream::new_read(b"\x00\x05\xAA");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x05\xAA"));
         let mut ctx = Context::new();
         ctx.insert("use_short", Value::Bool(true));
         let parsed = ite.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::UInt(5));
 
         // use_short = false → INT8UB
-        let mut stream2 = ByteStream::new_read(b"\x07");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b"\x07"));
         let mut ctx2 = Context::new();
         ctx2.insert("use_short", Value::Bool(false));
         let parsed2 = ite.parse(&mut stream2, &mut ctx2).unwrap();
@@ -678,22 +683,26 @@ mod tests {
     #[test]
     fn ifthenelse_flagbuildnone_both_pass() {
         let ite = IfThenElse::new(
-            Box::new(|_ctx| true),
-            Box::new(Pass::new()),
-            Box::new(Pass::new()),
+            Box::new(|_ctx| true.into()),
+            Box::new(Pass::new().into()),
+            Box::new(Pass::new().into()),
         );
         assert!(ite.flagbuildnone());
     }
 
     #[test]
     fn ifthenelse_flagbuildnone_one_fails() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), Box::new(Pass::new()), u8be());
+        let ite = IfThenElse::new(
+            Box::new(|_ctx| true.into()),
+            Box::new(Pass::new().into()),
+            u8be(),
+        );
         assert!(!ite.flagbuildnone());
     }
 
     #[test]
     fn ifthenelse_parse_error_propagates() {
-        let ite = IfThenElse::new(Box::new(|_ctx| true), u16be(), u8be());
+        let ite = IfThenElse::new(Box::new(|_ctx| true.into()), u16be(), u8be());
 
         let c: &dyn Construct = &ite;
         let err = c.parse_bytes(b"\x05").unwrap_err();
@@ -708,26 +717,29 @@ mod tests {
     fn switch_parse_matching_case() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be()), (Value::UInt(2), u16be())],
             None,
         );
 
         // n=1 → parse as U8
-        let mut stream = ByteStream::new_read(b"\x05\xAA");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x05\xAA"));
         let mut ctx = Context::new();
         ctx.insert("n", Value::UInt(1));
         let parsed = sw.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::UInt(5));
 
         // n=2 → parse as U16
-        let mut stream2 = ByteStream::new_read(b"\x00\x0A");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x0A"));
         let mut ctx2 = Context::new();
         ctx2.insert("n", Value::UInt(2));
         let parsed2 = sw.parse(&mut stream2, &mut ctx2).unwrap();
@@ -738,19 +750,22 @@ mod tests {
     fn switch_parse_default_pass() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be())],
             None,
         );
 
         // n=99 → no case matches → default is Pass → returns None
-        let mut stream = ByteStream::new_read(b"\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x05"));
         let mut ctx = Context::new();
         ctx.insert("n", Value::UInt(99));
         let parsed = sw.parse(&mut stream, &mut ctx).unwrap();
@@ -763,26 +778,29 @@ mod tests {
     fn switch_build_matching_case() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be()), (Value::UInt(2), u16be())],
             None,
         );
 
         // n=1 → build as U8
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         ctx.insert("n", Value::UInt(1));
         sw.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![5]);
 
         // n=2 → build as U16
-        let mut stream2 = ByteStream::new_write();
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
         ctx2.insert("n", Value::UInt(2));
         sw.build(&Value::UInt(5), &mut stream2, &mut ctx2).unwrap();
@@ -793,12 +811,15 @@ mod tests {
     fn switch_roundtrip() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(4), u32be())],
             None,
@@ -808,13 +829,13 @@ mod tests {
 
         // n=4 → INT32UB
         let original = Value::UInt(0xDEADBEEF);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         ctx.insert("n", Value::UInt(4));
         c.build(&original, &mut stream, &mut ctx).unwrap();
         let bytes = stream.into_bytes();
 
-        let mut parse_stream = ByteStream::new_read(&bytes);
+        let mut parse_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         let mut parse_ctx = Context::new();
         parse_ctx.insert("n", Value::UInt(4));
         let parsed = sw.parse(&mut parse_stream, &mut parse_ctx).unwrap();
@@ -825,12 +846,15 @@ mod tests {
     fn switch_sizeof_matching_case() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![
                 (Value::UInt(1), u8be()),
@@ -857,12 +881,15 @@ mod tests {
     fn switch_sizeof_default_pass() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be())],
             None,
@@ -878,12 +905,15 @@ mod tests {
     fn switch_with_explicit_default() {
         let sw = Switch::new(
             Box::new(|ctx| {
-                ctx.get("n")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "n".to_string(),
-                    })
+                {
+                    ctx.get("n")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "n".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be())],
             Some(u16be()),
@@ -891,7 +921,7 @@ mod tests {
 
         // n=99 → no case → default = u16be
         let c: &dyn Construct = &sw;
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         ctx.insert("n", Value::UInt(99));
         c.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap();
@@ -906,16 +936,19 @@ mod tests {
     fn switch_keyfunc_error_propagates() {
         let sw = Switch::new(
             Box::new(|_ctx| {
-                Err(ConstructError::Generic {
-                    path: String::new(),
-                    message: "keyfunc error".to_string(),
-                })
+                {
+                    Err(ConstructError::Generic {
+                        path: String::new(),
+                        message: "keyfunc error".to_string(),
+                    })
+                }
+                .into()
             }),
             vec![],
             None,
         );
 
-        let mut stream = ByteStream::new_read(b"\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x05"));
         let mut ctx = Context::new();
         let err = sw.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -924,9 +957,12 @@ mod tests {
     #[test]
     fn switch_flagbuildnone() {
         let sw = Switch::new(
-            Box::new(|_ctx| Ok(Value::UInt(1))),
-            vec![(Value::UInt(1), Box::new(Pass::new()) as Box<dyn Construct>)],
-            Some(Box::new(Pass::new())),
+            Box::new(|_ctx| Ok(Value::UInt(1)).into()),
+            vec![(
+                Value::UInt(1),
+                Box::new(Pass::new().into()) as Box<CombinedConstruct>,
+            )],
+            Some(Box::new(Pass::new().into())),
         );
         assert!(sw.flagbuildnone());
     }
@@ -934,7 +970,7 @@ mod tests {
     #[test]
     fn switch_flagbuildnone_false_when_case_needs_value() {
         let sw = Switch::new(
-            Box::new(|_ctx| Ok(Value::UInt(1))),
+            Box::new(|_ctx| Ok(Value::UInt(1)).into()),
             vec![(Value::UInt(1), u8be())],
             None,
         );
@@ -947,10 +983,10 @@ mod tests {
 
     #[test]
     fn check_parse_passes() {
-        let chk = Check::new(Box::new(|_ctx| Ok(())));
+        let chk = Check::new(Box::new(|_ctx| Ok(()).into()));
 
         let c: &dyn Construct = &chk;
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let parsed = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::None);
@@ -959,14 +995,17 @@ mod tests {
     #[test]
     fn check_parse_fails() {
         let chk = Check::new(Box::new(|_ctx| {
-            Err(ConstructError::Check {
-                path: String::new(),
-                message: "check failed during parsing".to_string(),
-            })
+            {
+                Err(ConstructError::Check {
+                    path: String::new(),
+                    message: "check failed during parsing".to_string(),
+                })
+            }
+            .into()
         }));
 
         let c: &dyn Construct = &chk;
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let err = c.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Check { .. }));
@@ -974,10 +1013,10 @@ mod tests {
 
     #[test]
     fn check_build_passes() {
-        let chk = Check::new(Box::new(|_ctx| Ok(())));
+        let chk = Check::new(Box::new(|_ctx| Ok(()).into()));
 
         let c: &dyn Construct = &chk;
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -986,14 +1025,17 @@ mod tests {
     #[test]
     fn check_build_fails() {
         let chk = Check::new(Box::new(|_ctx| {
-            Err(ConstructError::Check {
-                path: String::new(),
-                message: "check failed during building".to_string(),
-            })
+            {
+                Err(ConstructError::Check {
+                    path: String::new(),
+                    message: "check failed during building".to_string(),
+                })
+            }
+            .into()
         }));
 
         let c: &dyn Construct = &chk;
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c.build(&Value::None, &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Check { .. }));
@@ -1001,7 +1043,7 @@ mod tests {
 
     #[test]
     fn check_sizeof_returns_zero() {
-        let chk = Check::new(Box::new(|_ctx| Ok(())));
+        let chk = Check::new(Box::new(|_ctx| Ok(()).into()));
         let ctx = Context::new();
         assert_eq!(chk.sizeof(&ctx).unwrap(), 0);
     }
@@ -1009,26 +1051,29 @@ mod tests {
     #[test]
     fn check_uses_context() {
         let chk = Check::new(Box::new(|ctx| {
-            let value = ctx.get("x").cloned().unwrap_or(Value::None);
-            if value == Value::UInt(42) {
-                Ok(())
-            } else {
-                Err(ConstructError::Check {
-                    path: String::new(),
-                    message: "x must be 42".to_string(),
-                })
+            {
+                let value = ctx.get("x").cloned().unwrap_or(Value::None);
+                if value == Value::UInt(42) {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Check {
+                        path: String::new(),
+                        message: "x must be 42".to_string(),
+                    })
+                }
             }
+            .into()
         }));
 
         // Pass: x == 42
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         ctx.insert("x", Value::UInt(42));
         let parsed = chk.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::None);
 
         // Fail: x != 42
-        let mut stream2 = ByteStream::new_read(b"");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx2 = Context::new();
         ctx2.insert("x", Value::UInt(99));
         let err = chk.parse(&mut stream2, &mut ctx2).unwrap_err();
@@ -1037,14 +1082,14 @@ mod tests {
 
     #[test]
     fn check_flagbuildnone() {
-        let chk = Check::new(Box::new(|_ctx| Ok(())));
+        let chk = Check::new(Box::new(|_ctx| Ok(()).into()));
         assert!(chk.flagbuildnone());
     }
 
     #[test]
     fn check_does_not_consume_stream() {
-        let chk = Check::new(Box::new(|_ctx| Ok(())));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let chk = Check::new(Box::new(|_ctx| Ok(()).into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         chk.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(stream.tell().unwrap(), 0);
@@ -1056,9 +1101,9 @@ mod tests {
 
     #[test]
     fn stopif_parse_returns_none_when_false() {
-        let stop = StopIf::new(Box::new(|_ctx| false));
+        let stop = StopIf::new(Box::new(|_ctx| false.into()));
 
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let parsed = stop.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::None);
@@ -1066,9 +1111,9 @@ mod tests {
 
     #[test]
     fn stopif_parse_raises_stop_field_when_true() {
-        let stop = StopIf::new(Box::new(|_ctx| true));
+        let stop = StopIf::new(Box::new(|_ctx| true.into()));
 
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let err = stop.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::StopField { .. }));
@@ -1076,9 +1121,9 @@ mod tests {
 
     #[test]
     fn stopif_build_does_nothing_when_false() {
-        let stop = StopIf::new(Box::new(|_ctx| false));
+        let stop = StopIf::new(Box::new(|_ctx| false.into()));
 
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         stop.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -1086,9 +1131,9 @@ mod tests {
 
     #[test]
     fn stopif_build_raises_stop_field_when_true() {
-        let stop = StopIf::new(Box::new(|_ctx| true));
+        let stop = StopIf::new(Box::new(|_ctx| true.into()));
 
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = stop.build(&Value::None, &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::StopField { .. }));
@@ -1096,7 +1141,7 @@ mod tests {
 
     #[test]
     fn stopif_sizeof_returns_error() {
-        let stop = StopIf::new(Box::new(|_ctx| false));
+        let stop = StopIf::new(Box::new(|_ctx| false.into()));
         let ctx = Context::new();
         let err = stop.sizeof(&ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
@@ -1105,20 +1150,23 @@ mod tests {
     #[test]
     fn stopif_uses_context() {
         let stop = StopIf::new(Box::new(|ctx| {
-            ctx.get("should_stop")
-                .map(|v| v.as_bool().unwrap_or(false))
-                .unwrap_or(false)
+            {
+                ctx.get("should_stop")
+                    .map(|v| v.as_bool().unwrap_or(false))
+                    .unwrap_or(false)
+            }
+            .into()
         }));
 
         // should_stop = true → StopField
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         ctx.insert("should_stop", Value::Bool(true));
         let err = stop.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::StopField { .. }));
 
         // should_stop = false → None
-        let mut stream2 = ByteStream::new_read(b"");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx2 = Context::new();
         ctx2.insert("should_stop", Value::Bool(false));
         let parsed = stop.parse(&mut stream2, &mut ctx2).unwrap();
@@ -1127,14 +1175,14 @@ mod tests {
 
     #[test]
     fn stopif_flagbuildnone() {
-        let stop = StopIf::new(Box::new(|_ctx| false));
+        let stop = StopIf::new(Box::new(|_ctx| false.into()));
         assert!(stop.flagbuildnone());
     }
 
     #[test]
     fn stopif_does_not_consume_stream() {
-        let stop = StopIf::new(Box::new(|_ctx| false));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let stop = StopIf::new(Box::new(|_ctx| false.into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         stop.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(stream.tell().unwrap(), 0);
@@ -1149,12 +1197,15 @@ mod tests {
         // Use IfThenElse to decide whether to use a Switch
         let inner_switch = Switch::new(
             Box::new(|ctx| {
-                ctx.get("type")
-                    .cloned()
-                    .ok_or_else(|| ConstructError::FieldMissing {
-                        path: String::new(),
-                        field: "type".to_string(),
-                    })
+                {
+                    ctx.get("type")
+                        .cloned()
+                        .ok_or_else(|| ConstructError::FieldMissing {
+                            path: String::new(),
+                            field: "type".to_string(),
+                        })
+                }
+                .into()
             }),
             vec![(Value::UInt(1), u8be()), (Value::UInt(2), u16be())],
             None,
@@ -1162,16 +1213,19 @@ mod tests {
 
         let ite = IfThenElse::new(
             Box::new(|ctx| {
-                ctx.get("enabled")
-                    .map(|v| v.as_bool().unwrap_or(false))
-                    .unwrap_or(false)
+                {
+                    ctx.get("enabled")
+                        .map(|v| v.as_bool().unwrap_or(false))
+                        .unwrap_or(false)
+                }
+                .into()
             }),
-            Box::new(inner_switch),
-            Box::new(Pass::new()),
+            Box::new(inner_switch.into()),
+            Box::new(Pass::new().into()),
         );
 
         // enabled=true, type=2 → parse U16
-        let mut stream = ByteStream::new_read(b"\x00\x0A");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x0A"));
         let mut ctx = Context::new();
         ctx.insert("enabled", Value::Bool(true));
         ctx.insert("type", Value::UInt(2));
@@ -1179,7 +1233,7 @@ mod tests {
         assert_eq!(parsed, Value::UInt(10));
 
         // enabled=false → Pass
-        let mut stream2 = ByteStream::new_read(b"\x00\x0A");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x0A"));
         let mut ctx2 = Context::new();
         ctx2.insert("enabled", Value::Bool(false));
         ctx2.insert("type", Value::UInt(2));
@@ -1192,9 +1246,12 @@ mod tests {
         // IfThenElse where the true branch includes a condition check
         let ite = IfThenElse::new(
             Box::new(|ctx| {
-                ctx.get("validate")
-                    .map(|v| v.as_bool().unwrap_or(false))
-                    .unwrap_or(false)
+                {
+                    ctx.get("validate")
+                        .map(|v| v.as_bool().unwrap_or(false))
+                        .unwrap_or(false)
+                }
+                .into()
             }),
             u8be(),
             u8be(),
@@ -1202,7 +1259,7 @@ mod tests {
 
         // Parse with validate=false → no special behavior
         let c: &dyn Construct = &ite;
-        let mut stream = ByteStream::new_read(b"\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x05"));
         let mut ctx = Context::new();
         ctx.insert("validate", Value::Bool(false));
         let parsed = c.parse(&mut stream, &mut ctx).unwrap();

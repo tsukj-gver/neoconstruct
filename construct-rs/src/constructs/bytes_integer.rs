@@ -22,6 +22,7 @@
 use crate::binary;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -128,7 +129,7 @@ impl BytesInteger {
 }
 
 impl Construct for BytesInteger {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         if self.length == 0 {
             return Err(ConstructError::Generic {
                 path: String::new(),
@@ -148,7 +149,7 @@ impl Construct for BytesInteger {
         Ok(map_to_value(number, self.length, self.signed))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let number = value_to_i128(data)?;
 
         if self.length == 0 {
@@ -229,7 +230,7 @@ impl BitsInteger {
 }
 
 impl Construct for BitsInteger {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         if self.length == 0 {
             return Err(ConstructError::Generic {
                 path: String::new(),
@@ -264,7 +265,7 @@ impl Construct for BitsInteger {
         Ok(map_to_value(number, effective_byte_len, self.signed))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let number = value_to_i128(data)?;
 
         if self.length == 0 {
@@ -381,7 +382,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_1byte_unsigned() {
         let c = BytesInteger::new(1, false, false);
-        let mut stream = ByteStream::new_read(&[0xFF]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xFF]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(255));
@@ -390,7 +391,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_1byte_signed_negative() {
         let c = BytesInteger::new(1, true, false);
-        let mut stream = ByteStream::new_read(&[0x80]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x80]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Int(-128));
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_2byte_unsigned() {
         let c = BytesInteger::new(2, false, false);
-        let mut stream = ByteStream::new_read(&[0x01, 0x02]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01, 0x02]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0x0102));
@@ -408,7 +409,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_4byte_unsigned() {
         let c = BytesInteger::new(4, false, false);
-        let mut stream = ByteStream::new_read(b"\x00\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x02\x03"));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0x00010203));
@@ -418,7 +419,7 @@ mod tests {
     fn bytes_integer_parse_8byte_unsigned() {
         let c = BytesInteger::new(8, false, false);
         let data = [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2A];
-        let mut stream = ByteStream::new_read(&data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(42));
@@ -427,7 +428,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_3byte_unsigned() {
         let c = BytesInteger::new(3, false, false);
-        let mut stream = ByteStream::new_read(&[0x01, 0x02, 0x03]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01, 0x02, 0x03]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::BigInt(0x010203));
@@ -437,7 +438,7 @@ mod tests {
     fn bytes_integer_parse_3byte_signed_negative() {
         let c = BytesInteger::new(3, true, false);
         // 0xFFFFFF = -1 in 24-bit two's complement
-        let mut stream = ByteStream::new_read(&[0xFF, 0xFF, 0xFF]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xFF, 0xFF, 0xFF]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::BigInt(-1));
@@ -449,7 +450,7 @@ mod tests {
     fn bytes_integer_parse_2byte_swapped() {
         let c = BytesInteger::new(2, false, true);
         // 0x02 0x01 in stream → reversed to 0x01 0x02 → 258
-        let mut stream = ByteStream::new_read(&[0x02, 0x01]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x02, 0x01]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0x0102));
@@ -459,7 +460,8 @@ mod tests {
     fn bytes_integer_parse_4byte_swapped() {
         let c = BytesInteger::new(4, false, true);
         // 0x03 0x02 0x01 0x00 in stream → reversed to 0x00 0x01 0x02 0x03
-        let mut stream = ByteStream::new_read(&[0x03, 0x02, 0x01, 0x00]);
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(&[0x03, 0x02, 0x01, 0x00]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0x00010203));
@@ -470,7 +472,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_length_zero() {
         let c = BytesInteger::new(0, false, false);
-        let mut stream = ByteStream::new_read(&[0x01]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01]));
         let mut ctx = Context::new();
         let err = c.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -480,7 +482,7 @@ mod tests {
     #[test]
     fn bytes_integer_parse_insufficient_data() {
         let c = BytesInteger::new(4, false, false);
-        let mut stream = ByteStream::new_read(&[0x01, 0x02]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01, 0x02]));
         let mut ctx = Context::new();
         let err = c.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -491,7 +493,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_1byte_unsigned() {
         let c = BytesInteger::new(1, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(255), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![0xFF]);
@@ -500,7 +502,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_1byte_signed_negative() {
         let c = BytesInteger::new(1, true, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::Int(-1), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![0xFF]);
@@ -509,7 +511,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_4byte_unsigned() {
         let c = BytesInteger::new(4, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(0x01020304), &mut stream, &mut ctx)
             .unwrap();
@@ -519,7 +521,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_3byte_unsigned() {
         let c = BytesInteger::new(3, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::BigInt(0x010203), &mut stream, &mut ctx)
             .unwrap();
@@ -531,7 +533,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_4byte_swapped() {
         let c = BytesInteger::new(4, false, true);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(0x01020304), &mut stream, &mut ctx)
             .unwrap();
@@ -544,7 +546,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_length_zero() {
         let c = BytesInteger::new(0, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c.build(&Value::UInt(1), &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -554,7 +556,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_wrong_type() {
         let c = BytesInteger::new(4, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c
             .build(&Value::String("not int".to_string()), &mut stream, &mut ctx)
@@ -565,7 +567,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_overflow() {
         let c = BytesInteger::new(1, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c
             .build(&Value::UInt(256), &mut stream, &mut ctx)
@@ -576,7 +578,7 @@ mod tests {
     #[test]
     fn bytes_integer_build_negative_unsigned() {
         let c = BytesInteger::new(1, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c.build(&Value::Int(-1), &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -684,7 +686,7 @@ mod tests {
     #[test]
     fn bits_integer_parse_1bit() {
         let c = BitsInteger::new(1, false, false);
-        let mut stream = ByteStream::new_read(&[0x01]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(1));
@@ -694,7 +696,7 @@ mod tests {
     fn bits_integer_parse_4bit() {
         let c = BitsInteger::new(4, false, false);
         // 0b0101 = 5
-        let mut stream = ByteStream::new_read(&[0, 1, 0, 1]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0, 1, 0, 1]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(5));
@@ -704,7 +706,8 @@ mod tests {
     fn bits_integer_parse_8bit() {
         let c = BitsInteger::new(8, false, false);
         // 0b00010011 = 19
-        let mut stream = ByteStream::new_read(&[0, 0, 0, 1, 0, 0, 1, 1]);
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(&[0, 0, 0, 1, 0, 0, 1, 1]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(19));
@@ -714,7 +717,7 @@ mod tests {
     fn bits_integer_parse_signed_negative() {
         let c = BitsInteger::new(4, true, false);
         // 0b1111 = -1 (4-bit two's complement)
-        let mut stream = ByteStream::new_read(&[1, 1, 1, 1]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1, 1, 1, 1]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Int(-1));
@@ -724,7 +727,7 @@ mod tests {
     fn bits_integer_parse_signed_min() {
         let c = BitsInteger::new(4, true, false);
         // 0b1000 = -8 (4-bit two's complement minimum)
-        let mut stream = ByteStream::new_read(&[1, 0, 0, 0]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1, 0, 0, 0]));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Int(-8));
@@ -740,7 +743,7 @@ mod tests {
         let c = BitsInteger::new(16, false, true);
         // Before swap: 00000000 11111111 → after swap: 11111111 00000000
         let input: Vec<u8> = vec![0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1];
-        let mut stream = ByteStream::new_read(&input);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&input));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         // After swap: 11111111 00000000 = 0xFF00 = 65280
@@ -752,7 +755,7 @@ mod tests {
     #[test]
     fn bits_integer_parse_length_zero() {
         let c = BitsInteger::new(0, false, false);
-        let mut stream = ByteStream::new_read(&[0x01]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01]));
         let mut ctx = Context::new();
         let err = c.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -763,7 +766,7 @@ mod tests {
     fn bits_integer_parse_swapped_non_multiple_of_8() {
         // BitsInteger with swapped and length not a multiple of 8
         let c = BitsInteger::new(4, false, true);
-        let mut stream = ByteStream::new_read(&[0, 1, 0, 1]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0, 1, 0, 1]));
         let mut ctx = Context::new();
         let err = c.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -775,7 +778,7 @@ mod tests {
     #[test]
     fn bits_integer_build_1bit() {
         let c = BitsInteger::new(1, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(1), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![1]);
@@ -784,7 +787,7 @@ mod tests {
     #[test]
     fn bits_integer_build_4bit() {
         let c = BitsInteger::new(4, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![0, 1, 0, 1]);
@@ -793,7 +796,7 @@ mod tests {
     #[test]
     fn bits_integer_build_8bit() {
         let c = BitsInteger::new(8, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(19), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![0, 0, 0, 1, 0, 0, 1, 1]);
@@ -802,7 +805,7 @@ mod tests {
     #[test]
     fn bits_integer_build_signed_negative() {
         let c = BitsInteger::new(4, true, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::Int(-1), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![1, 1, 1, 1]);
@@ -813,7 +816,7 @@ mod tests {
     #[test]
     fn bits_integer_build_16bit_swapped() {
         let c = BitsInteger::new(16, false, true);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         c.build(&Value::UInt(0xFF00), &mut stream, &mut ctx)
             .unwrap();
@@ -828,7 +831,7 @@ mod tests {
     #[test]
     fn bits_integer_build_length_zero() {
         let c = BitsInteger::new(0, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c.build(&Value::UInt(1), &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -837,7 +840,7 @@ mod tests {
     #[test]
     fn bits_integer_build_wrong_type() {
         let c = BitsInteger::new(4, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c
             .build(&Value::Bool(true), &mut stream, &mut ctx)
@@ -848,7 +851,7 @@ mod tests {
     #[test]
     fn bits_integer_build_overflow() {
         let c = BitsInteger::new(4, false, false);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         // Max 4-bit unsigned is 15, 16 overflows
         let err = c
@@ -860,7 +863,7 @@ mod tests {
     #[test]
     fn bits_integer_build_swapped_non_multiple_of_8() {
         let c = BitsInteger::new(4, false, true);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = c.build(&Value::UInt(5), &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));

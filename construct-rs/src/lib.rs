@@ -6,6 +6,7 @@
 //! The same definition can both parse binary data and build binary data.
 
 pub mod binary;
+pub mod combined;
 pub mod constructs;
 pub mod containers;
 pub mod core;

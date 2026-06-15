@@ -19,8 +19,6 @@ permission:
     "git cherry-pick*": "deny"
     "git stash*": "deny"
     "git merge*": "deny"
-    "git add*": "deny"
-    "git commit*": "deny"
     "git tag*": "deny"
     "rm *": "deny"
     "del *": "deny"

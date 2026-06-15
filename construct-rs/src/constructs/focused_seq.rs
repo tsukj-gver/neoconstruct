@@ -19,9 +19,9 @@
 //!     "num",
 //!     vec![
 //!         construct::constructs::struct_::StructField::anonymous(
-//!             Box::new(Const::new_bytes(b"SIG".to_vec())),
+//!             Box::new(Const::new_bytes(b"SIG".to_vec()).into()),
 //!         ),
-//!         construct::constructs::struct_::StructField::new("num", Box::new(INT8UB)),
+//!         construct::constructs::struct_::StructField::new("num", Box::new(INT8UB.into())),
 //!     ],
 //! );
 //!
@@ -35,10 +35,11 @@
 //!
 //! [`Struct`]: crate::constructs::Struct
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::struct_::StructField;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -85,7 +86,7 @@ impl FocusedSeq {
     /// let fs = FocusedSeq::new(
     ///     "value",
     ///     vec![
-    ///         StructField::new("value", Box::new(INT8UB)),
+    ///         StructField::new("value", Box::new(INT8UB.into())),
     ///     ],
     /// );
     /// ```
@@ -97,20 +98,20 @@ impl FocusedSeq {
     }
 
     /// Builder-style method to add a named field.
-    pub fn field(mut self, name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn field(mut self, name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         self.subcons.push(StructField::new(name, subcon));
         self
     }
 
     /// Builder-style method to add an anonymous field.
-    pub fn anonymous(mut self, subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(mut self, subcon: Box<CombinedConstruct>) -> Self {
         self.subcons.push(StructField::anonymous(subcon));
         self
     }
 }
 
 impl Construct for FocusedSeq {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let mut child_ctx = ctx.subcontext();
         let mut focused_value: Option<Value> = None;
 
@@ -144,7 +145,7 @@ impl Construct for FocusedSeq {
         })
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let mut child_ctx = ctx.subcontext();
 
         // Insert the focused value into context under its name
@@ -236,8 +237,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "num",
             vec![
-                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()))),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()).into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
         let result = as_dyn!(fs).parse_bytes(b"SIG\xFF").unwrap();
@@ -246,7 +247,10 @@ mod tests {
 
     #[test]
     fn parse_single_focused_field() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT8UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
+        );
         let result = as_dyn!(fs).parse_bytes(b"\x42").unwrap();
         assert_eq!(result, Value::UInt(0x42));
     }
@@ -255,7 +259,7 @@ mod tests {
     fn parse_missing_focus_field_returns_error() {
         let fs = FocusedSeq::new(
             "nonexistent",
-            vec![StructField::new("value", Box::new(INT8UB))],
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
         );
         let err = as_dyn!(fs).parse_bytes(b"\x42").unwrap_err();
         assert!(matches!(err, ConstructError::FieldMissing { .. }));
@@ -266,9 +270,9 @@ mod tests {
         let fs = FocusedSeq::new(
             "b",
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
-                StructField::new("c", Box::new(INT8UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
+                StructField::new("c", Box::new(INT8UB.into())),
             ],
         );
         let result = as_dyn!(fs).parse_bytes(b"\x01\x02\x03\x04").unwrap();
@@ -282,8 +286,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "data",
             vec![
-                StructField::new("length", Box::new(INT8UB)),
-                StructField::new("data", Box::new(Bytes::new(3))),
+                StructField::new("length", Box::new(INT8UB.into())),
+                StructField::new("data", Box::new(Bytes::new(3).into())),
             ],
         );
         let result = as_dyn!(fs).parse_bytes(b"\x03ABC").unwrap();
@@ -299,8 +303,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "num",
             vec![
-                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()))),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()).into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
         let built = as_dyn!(fs).build_bytes(&Value::UInt(255)).unwrap();
@@ -309,7 +313,10 @@ mod tests {
 
     #[test]
     fn build_single_field() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT8UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
+        );
         let built = as_dyn!(fs).build_bytes(&Value::UInt(0x42)).unwrap();
         assert_eq!(built, vec![0x42]);
     }
@@ -320,8 +327,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "num",
             vec![
-                StructField::anonymous(Box::new(Pass::new())),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::anonymous(Box::new(Pass::new().into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
         let built = as_dyn!(fs).build_bytes(&Value::UInt(0x42)).unwrap();
@@ -337,8 +344,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "b",
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         assert_eq!(fs.sizeof(&Context::new()).unwrap(), 3);
@@ -346,7 +353,10 @@ mod tests {
 
     #[test]
     fn sizeof_single_field() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT8UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
+        );
         assert_eq!(fs.sizeof(&Context::new()).unwrap(), 1);
     }
 
@@ -356,7 +366,10 @@ mod tests {
 
     #[test]
     fn flagbuildnone_false_when_focused_requires_value() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT8UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
+        );
         assert!(!fs.flagbuildnone());
     }
 
@@ -365,8 +378,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "value",
             vec![
-                StructField::anonymous(Box::new(Pass::new())),
-                StructField::new("value", Box::new(Pass::new())),
+                StructField::anonymous(Box::new(Pass::new().into())),
+                StructField::new("value", Box::new(Pass::new().into())),
             ],
         );
         assert!(fs.flagbuildnone());
@@ -381,8 +394,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "num",
             vec![
-                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()))),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::anonymous(Box::new(Const::new_bytes(b"SIG".to_vec()).into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
 
@@ -399,8 +412,8 @@ mod tests {
         let fs = FocusedSeq::new(
             "num",
             vec![
-                StructField::anonymous(Box::new(Const::new_bytes(b"\x00".to_vec()))),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::anonymous(Box::new(Const::new_bytes(b"\x00".to_vec()).into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
 
@@ -418,7 +431,10 @@ mod tests {
 
     #[test]
     fn parse_error_enriches_path() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT16UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT16UB.into()))],
+        );
         let err = as_dyn!(fs).parse_bytes(b"\x01").unwrap_err();
         match &err {
             ConstructError::Stream { path, .. } => {
@@ -433,7 +449,10 @@ mod tests {
 
     #[test]
     fn build_error_enriches_path() {
-        let fs = FocusedSeq::new("value", vec![StructField::new("value", Box::new(INT8UB))]);
+        let fs = FocusedSeq::new(
+            "value",
+            vec![StructField::new("value", Box::new(INT8UB.into()))],
+        );
         let err = as_dyn!(fs)
             .build_bytes(&Value::String("not a number".to_string()))
             .unwrap_err();
@@ -459,7 +478,7 @@ mod tests {
         struct StopConstruct;
 
         impl Construct for StopConstruct {
-            fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
                 Err(ConstructError::StopField {
                     path: String::new(),
                 })
@@ -467,7 +486,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Err(ConstructError::StopField {
@@ -482,9 +501,9 @@ mod tests {
         let fs = FocusedSeq::new(
             "value",
             vec![
-                StructField::new("value", Box::new(INT8UB)),
-                StructField::anonymous(Box::new(StopConstruct)),
-                StructField::new("other", Box::new(INT8UB)),
+                StructField::new("value", Box::new(INT8UB.into())),
+                StructField::anonymous(Box::new(crate::combined::dynamic(StopConstruct))),
+                StructField::new("other", Box::new(INT8UB.into())),
             ],
         );
 

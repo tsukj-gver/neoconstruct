@@ -4,8 +4,11 @@ mode: primary
 permission:
   edit:
     "*": "deny"
+    "./**": "allow"
+    "docs/**": "allow"
+    ".opencode/**": "allow"
     "construct/**": "deny"
-    "docs/**": "deny"
+    "refs/**": "deny"
     "construct-rs/**": "deny"
     "plans/**": "allow"
   bash:

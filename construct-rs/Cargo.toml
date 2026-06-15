@@ -9,6 +9,7 @@ license = "MIT"
 [dependencies]
 thiserror = "2"
 indexmap = "2"
+enum_dispatch = "0.3"
 
 [features]
 default = []

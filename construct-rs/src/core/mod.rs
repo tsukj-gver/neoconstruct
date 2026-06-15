@@ -15,10 +15,11 @@ pub mod stream;
 
 use std::path::Path;
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::Result;
 use crate::core::stream::ByteStream;
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::value::Value;
 
 // ===========================================================================
@@ -36,6 +37,7 @@ use crate::value::Value;
 ///
 /// Corresponds to the Python `Construct` class
 /// (`construct/construct/core.py` line ~321).
+#[enum_dispatch::enum_dispatch]
 pub trait Construct {
     /// Parses a [`Value`] from the given stream.
     ///
@@ -47,7 +49,7 @@ pub trait Construct {
     /// Returns [`ConstructError`] if the stream does not contain enough data,
     /// the data does not match the expected format, or any other parsing
     /// failure occurs.
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value>;
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value>;
 
     /// Builds binary data from `data` and writes it to the given stream.
     ///
@@ -55,7 +57,7 @@ pub trait Construct {
     ///
     /// Returns [`ConstructError`] if `data` is not valid for this construct,
     /// the stream write fails, or any other building failure occurs.
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()>;
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()>;
 
     /// Computes the byte size of this construct in the given context.
     ///
@@ -79,6 +81,26 @@ pub trait Construct {
     /// Corresponds to the Python `Construct.flagbuildnone` attribute.
     fn flagbuildnone(&self) -> bool {
         false
+    }
+}
+
+/// Blanket forwarding impl so that `Box<dyn Construct>` can be used where
+/// `impl Construct` is expected (e.g. inside [`CombinedConstruct::Dynamic`]).
+impl Construct for Box<dyn Construct> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
+        (**self).parse(stream, ctx)
+    }
+
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        (**self).build(data, stream, ctx)
+    }
+
+    fn sizeof(&self, ctx: &Context) -> Result<usize> {
+        (**self).sizeof(ctx)
+    }
+
+    fn flagbuildnone(&self) -> bool {
+        (**self).flagbuildnone()
     }
 }
 
@@ -112,7 +134,7 @@ impl dyn Construct {
     /// Propagates any [`ConstructError`] from the underlying
     /// [`Construct::parse`] call.
     pub fn parse_bytes(&self, data: &[u8]) -> Result<Value> {
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         self.parse(&mut stream, &mut ctx)
             .map_err(|e| e.with_path_prefix(PARSE_PATH))
@@ -136,11 +158,14 @@ impl dyn Construct {
     /// Propagates any [`ConstructError`] from the underlying
     /// [`Construct::build`] call.
     pub fn build_bytes(&self, data: &Value) -> Result<Vec<u8>> {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         self.build(data, &mut stream, &mut ctx)
             .map_err(|e| e.with_path_prefix(BUILD_PATH))?;
-        Ok(stream.into_bytes())
+        match stream {
+            CombinedStream::ByteStream(bs) => Ok(bs.into_bytes()),
+            _ => Ok(Vec::new()),
+        }
     }
 
     /// Parses a [`Value`] from a file.
@@ -197,15 +222,15 @@ impl dyn Construct {
 /// | `self.subcon._sizeof(...)` | `self.subcon.sizeof(...)` |
 pub struct Subconstruct {
     /// The inner construct that all operations are delegated to.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Construct for Subconstruct {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.subcon.build(data, stream, ctx)
     }
 
@@ -243,7 +268,7 @@ pub type ParsedHook = Box<dyn Fn(&Value, &Context) + Send + Sync>;
 /// | `path += " -> %s" % (self.name,)` | `with_path_prefix(name)` |
 pub struct Renamed {
     /// The inner construct being named.
-    pub inner: Box<dyn Construct>,
+    pub inner: Box<CombinedConstruct>,
     /// The name assigned to the construct.
     pub name: String,
     /// Optional docstring. Corresponds to the Python `Renamed.docs` attribute,
@@ -265,9 +290,9 @@ impl Renamed {
     /// ```ignore
     /// let field = Renamed::new(my_construct, "my_field");
     /// ```
-    pub fn new(inner: Box<dyn Construct>, name: impl Into<String>) -> Self {
+    pub fn new<C: Into<CombinedConstruct>>(inner: C, name: impl Into<String>) -> Self {
         Renamed {
-            inner,
+            inner: Box::new(inner.into()),
             name: name.into(),
             docs: None,
             parsed: None,
@@ -295,7 +320,7 @@ impl Renamed {
 }
 
 impl Construct for Renamed {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let obj = self
             .inner
             .parse(stream, ctx)
@@ -306,7 +331,7 @@ impl Construct for Renamed {
         Ok(obj)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.inner
             .build(data, stream, ctx)
             .map_err(|e| e.with_path_prefix(&self.name))
@@ -326,8 +351,10 @@ impl Construct for Renamed {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constructs::format_field::INT32UB;
     use crate::core::error::ConstructError;
     use crate::core::stream::ByteStream;
+    use crate::core::stream::Stream;
     use indexmap::IndexMap;
 
     // -- Helper: a minimal Construct implementation for testing -----------
@@ -338,13 +365,18 @@ mod tests {
     struct U32Big;
 
     impl Construct for U32Big {
-        fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+        fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
             let bytes = stream.read_bytes(4)?;
             let val = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             Ok(Value::UInt(val as u64))
         }
 
-        fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+        fn build(
+            &self,
+            data: &Value,
+            stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<()> {
             let val = data.to_u64()?;
             if val > u32::MAX as u64 {
                 return Err(ConstructError::Generic {
@@ -365,14 +397,19 @@ mod tests {
     struct FailingConstruct;
 
     impl Construct for FailingConstruct {
-        fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+        fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
             Err(ConstructError::Generic {
                 path: String::new(),
                 message: "always fails".to_string(),
             })
         }
 
-        fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+        fn build(
+            &self,
+            _data: &Value,
+            _stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<()> {
             Err(ConstructError::Generic {
                 path: String::new(),
                 message: "always fails".to_string(),
@@ -392,7 +429,7 @@ mod tests {
     struct VarBytes;
 
     impl Construct for VarBytes {
-        fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+        fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
             let length = ctx
                 .get_recursive("length")
                 .ok_or_else(|| ConstructError::FieldMissing {
@@ -404,7 +441,12 @@ mod tests {
             Ok(Value::Bytes(bytes))
         }
 
-        fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+        fn build(
+            &self,
+            data: &Value,
+            stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<()> {
             let bytes = data.as_bytes()?;
             stream.write_bytes(bytes)
         }
@@ -429,7 +471,7 @@ mod tests {
 
     #[test]
     fn u32big_parse_reads_4_bytes() {
-        let mut stream = ByteStream::new_read(b"\x00\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x02\x03"));
         let mut ctx = Context::new();
         let result = U32Big.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0x00010203));
@@ -437,7 +479,7 @@ mod tests {
 
     #[test]
     fn u32big_build_writes_4_bytes() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         U32Big
             .build(&Value::UInt(42), &mut stream, &mut ctx)
@@ -453,7 +495,7 @@ mod tests {
 
     #[test]
     fn u32big_parse_insufficient_data_returns_error() {
-        let mut stream = ByteStream::new_read(b"\x00\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01"));
         let mut ctx = Context::new();
         let err = U32Big.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -461,7 +503,7 @@ mod tests {
 
     #[test]
     fn u32big_build_wrong_type_returns_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = U32Big
             .build(
@@ -478,14 +520,14 @@ mod tests {
     #[test]
     fn u32big_build_then_parse_roundtrip() {
         let original = Value::UInt(0xDEADBEEF);
-        let mut build_stream = ByteStream::new_write();
+        let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut build_ctx = Context::new();
         U32Big
             .build(&original, &mut build_stream, &mut build_ctx)
             .unwrap();
         let bytes = build_stream.into_bytes();
 
-        let mut parse_stream = ByteStream::new_read(&bytes);
+        let mut parse_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         let mut parse_ctx = Context::new();
         let parsed = U32Big.parse(&mut parse_stream, &mut parse_ctx).unwrap();
         assert_eq!(parsed, original);
@@ -585,9 +627,9 @@ mod tests {
     #[test]
     fn subconstruct_delegates_parse() {
         let sub = Subconstruct {
-            subcon: Box::new(U32Big),
+            subcon: Box::new(INT32UB.into()),
         };
-        let mut stream = ByteStream::new_read(b"\x00\x00\x01\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x01\x00"));
         let mut ctx = Context::new();
         let result = sub.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(256));
@@ -596,9 +638,9 @@ mod tests {
     #[test]
     fn subconstruct_delegates_build() {
         let sub = Subconstruct {
-            subcon: Box::new(U32Big),
+            subcon: Box::new(INT32UB.into()),
         };
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         sub.build(&Value::UInt(1), &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![0, 0, 0, 1]);
@@ -607,7 +649,7 @@ mod tests {
     #[test]
     fn subconstruct_delegates_sizeof() {
         let sub = Subconstruct {
-            subcon: Box::new(U32Big),
+            subcon: Box::new(INT32UB.into()),
         };
         let ctx = Context::new();
         assert_eq!(sub.sizeof(&ctx).unwrap(), 4);
@@ -616,9 +658,9 @@ mod tests {
     #[test]
     fn subconstruct_propagates_parse_error() {
         let sub = Subconstruct {
-            subcon: Box::new(FailingConstruct),
+            subcon: Box::new(crate::combined::dynamic(FailingConstruct)),
         };
-        let mut stream = ByteStream::new_read(b"\x00\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x02\x03"));
         let mut ctx = Context::new();
         let err = sub.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -627,9 +669,9 @@ mod tests {
     #[test]
     fn subconstruct_propagates_build_error() {
         let sub = Subconstruct {
-            subcon: Box::new(FailingConstruct),
+            subcon: Box::new(crate::combined::dynamic(FailingConstruct)),
         };
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = sub.build(&Value::None, &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -638,7 +680,7 @@ mod tests {
     #[test]
     fn subconstruct_propagates_sizeof_error() {
         let sub = Subconstruct {
-            subcon: Box::new(FailingConstruct),
+            subcon: Box::new(crate::combined::dynamic(FailingConstruct)),
         };
         let ctx = Context::new();
         let err = sub.sizeof(&ctx).unwrap_err();
@@ -648,16 +690,16 @@ mod tests {
     #[test]
     fn subconstruct_build_then_parse_roundtrip() {
         let sub = Subconstruct {
-            subcon: Box::new(U32Big),
+            subcon: Box::new(INT32UB.into()),
         };
         let original = Value::UInt(999);
-        let mut build_stream = ByteStream::new_write();
+        let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut build_ctx = Context::new();
         sub.build(&original, &mut build_stream, &mut build_ctx)
             .unwrap();
         let bytes = build_stream.into_bytes();
 
-        let mut parse_stream = ByteStream::new_read(&bytes);
+        let mut parse_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         let mut parse_ctx = Context::new();
         let parsed = sub.parse(&mut parse_stream, &mut parse_ctx).unwrap();
         assert_eq!(parsed, original);
@@ -669,20 +711,20 @@ mod tests {
 
     #[test]
     fn renamed_new_creates_wrapper() {
-        let renamed = Renamed::new(Box::new(U32Big), "my_field");
+        let renamed = Renamed::new(INT32UB, "my_field");
         assert_eq!(renamed.name, "my_field");
     }
 
     #[test]
     fn renamed_new_accepts_string() {
-        let renamed = Renamed::new(Box::new(U32Big), String::from("field"));
+        let renamed = Renamed::new(INT32UB, String::from("field"));
         assert_eq!(renamed.name, "field");
     }
 
     #[test]
     fn renamed_parse_delegates_and_enriches_path_on_error() {
-        let renamed = Renamed::new(Box::new(FailingConstruct), "failing_field");
-        let mut stream = ByteStream::new_read(b"\x00\x01\x02\x03");
+        let renamed = Renamed::new(crate::combined::dynamic(FailingConstruct), "failing_field");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x02\x03"));
         let mut ctx = Context::new();
         let err = renamed.parse(&mut stream, &mut ctx).unwrap_err();
         match err {
@@ -696,8 +738,8 @@ mod tests {
 
     #[test]
     fn renamed_build_delegates_and_enriches_path_on_error() {
-        let renamed = Renamed::new(Box::new(FailingConstruct), "build_field");
-        let mut stream = ByteStream::new_write();
+        let renamed = Renamed::new(crate::combined::dynamic(FailingConstruct), "build_field");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = renamed
             .build(&Value::None, &mut stream, &mut ctx)
@@ -713,7 +755,7 @@ mod tests {
 
     #[test]
     fn renamed_sizeof_delegates_and_enriches_path_on_error() {
-        let renamed = Renamed::new(Box::new(FailingConstruct), "sizeof_field");
+        let renamed = Renamed::new(crate::combined::dynamic(FailingConstruct), "sizeof_field");
         let ctx = Context::new();
         let err = renamed.sizeof(&ctx).unwrap_err();
         match err {
@@ -727,8 +769,8 @@ mod tests {
 
     #[test]
     fn renamed_parse_succeeds_without_error() {
-        let renamed = Renamed::new(Box::new(U32Big), "counter");
-        let mut stream = ByteStream::new_read(b"\x00\x00\x00\x2A");
+        let renamed = Renamed::new(INT32UB, "counter");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x00\x2A"));
         let mut ctx = Context::new();
         let result = renamed.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(42));
@@ -736,8 +778,8 @@ mod tests {
 
     #[test]
     fn renamed_build_succeeds_without_error() {
-        let renamed = Renamed::new(Box::new(U32Big), "counter");
-        let mut stream = ByteStream::new_write();
+        let renamed = Renamed::new(INT32UB, "counter");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         renamed
             .build(&Value::UInt(42), &mut stream, &mut ctx)
@@ -747,23 +789,23 @@ mod tests {
 
     #[test]
     fn renamed_sizeof_succeeds() {
-        let renamed = Renamed::new(Box::new(U32Big), "counter");
+        let renamed = Renamed::new(INT32UB, "counter");
         let ctx = Context::new();
         assert_eq!(renamed.sizeof(&ctx).unwrap(), 4);
     }
 
     #[test]
     fn renamed_build_then_parse_roundtrip() {
-        let renamed = Renamed::new(Box::new(U32Big), "value");
+        let renamed = Renamed::new(INT32UB, "value");
         let original = Value::UInt(0x12345678);
-        let mut build_stream = ByteStream::new_write();
+        let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut build_ctx = Context::new();
         renamed
             .build(&original, &mut build_stream, &mut build_ctx)
             .unwrap();
         let bytes = build_stream.into_bytes();
 
-        let mut parse_stream = ByteStream::new_read(&bytes);
+        let mut parse_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         let mut parse_ctx = Context::new();
         let parsed = renamed.parse(&mut parse_stream, &mut parse_ctx).unwrap();
         assert_eq!(parsed, original);
@@ -774,10 +816,10 @@ mod tests {
     #[test]
     fn nested_renamed_chains_error_path() {
         // outer_name > inner_name
-        let inner = Renamed::new(Box::new(FailingConstruct), "inner_field");
-        let outer = Renamed::new(Box::new(inner), "outer_field");
+        let inner = Renamed::new(crate::combined::dynamic(FailingConstruct), "inner_field");
+        let outer = Renamed::new(inner, "outer_field");
 
-        let mut stream = ByteStream::new_read(b"\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00"));
         let mut ctx = Context::new();
         let err = outer.parse(&mut stream, &mut ctx).unwrap_err();
 
@@ -795,7 +837,7 @@ mod tests {
 
     #[test]
     fn renamed_parse_bytes_error_path() {
-        let renamed = Renamed::new(Box::new(FailingConstruct), "field");
+        let renamed = Renamed::new(crate::combined::dynamic(FailingConstruct), "field");
         let c: &dyn Construct = &renamed;
         let err = c.parse_bytes(b"\x00").unwrap_err();
         // path: "(parsing)" from parse_bytes + "field" from Renamed
@@ -804,7 +846,7 @@ mod tests {
 
     #[test]
     fn renamed_build_bytes_error_path() {
-        let renamed = Renamed::new(Box::new(FailingConstruct), "field");
+        let renamed = Renamed::new(crate::combined::dynamic(FailingConstruct), "field");
         let c: &dyn Construct = &renamed;
         let err = c.build_bytes(&Value::None).unwrap_err();
         // path: "(building)" from build_bytes + "field" from Renamed
@@ -819,7 +861,7 @@ mod tests {
     fn var_bytes_parse_with_context_length() {
         let mut ctx = Context::new();
         ctx.insert("length", Value::UInt(3));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         let result = VarBytes.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bytes(vec![1, 2, 3]));
     }
@@ -827,7 +869,7 @@ mod tests {
     #[test]
     fn var_bytes_parse_missing_context_length_returns_error() {
         let mut ctx = Context::new();
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let err = VarBytes.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::FieldMissing { .. }));
     }
@@ -855,7 +897,7 @@ mod tests {
 
         let result = outer_ctx.with_subcontext(|child_ctx| {
             child_ctx.insert("extra", Value::String("hello".to_string()));
-            let mut stream = ByteStream::new_read(b"\xAA\xBB\xCC\xDD");
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xAA\xBB\xCC\xDD"));
             VarBytes.parse(&mut stream, child_ctx)
         });
 
@@ -872,7 +914,7 @@ mod tests {
         struct TwoFields;
 
         impl Construct for TwoFields {
-            fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
                 let a_bytes = stream.read_bytes(4)?;
                 let a = u32::from_be_bytes([a_bytes[0], a_bytes[1], a_bytes[2], a_bytes[3]]);
                 let b_bytes = stream.read_bytes(4)?;
@@ -887,7 +929,7 @@ mod tests {
             fn build(
                 &self,
                 data: &Value,
-                stream: &mut dyn Stream,
+                stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 let container = data.as_container()?;
@@ -915,7 +957,8 @@ mod tests {
         }
 
         // Parse
-        let mut stream = ByteStream::new_read(b"\x00\x00\x00\x01\x00\x00\x00\x02");
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x00\x01\x00\x00\x00\x02"));
         let mut ctx = Context::new();
         let result = TwoFields.parse(&mut stream, &mut ctx).unwrap();
 
@@ -924,7 +967,7 @@ mod tests {
         assert_eq!(container.get("b").unwrap(), &Value::UInt(2));
 
         // Build
-        let mut build_stream = ByteStream::new_write();
+        let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut build_ctx = Context::new();
         TwoFields
             .build(&result, &mut build_stream, &mut build_ctx)

@@ -11,10 +11,13 @@
 //!
 //! Corresponds to Python `Array`, `GreedyRange`, and `RepeatUntil`.
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::CombinedExpr;
 use crate::expr::Evaluate;
 use crate::value::Value;
 
@@ -51,7 +54,7 @@ const CONTEXT_INDEX_KEY: &str = "_index";
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let arr = Array::new(3, Box::new(INT8UB));
+/// let arr = Array::new(3, Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &arr;
 ///
 /// // Parse
@@ -70,7 +73,7 @@ pub struct Array {
     /// The exact number of elements to parse/build.
     pub count: usize,
     /// The sub-construct applied to each element.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// If `true`, parse returns an empty list (elements are consumed but
     /// discarded). During build, elements are still written but no result
     /// list is accumulated.
@@ -87,9 +90,9 @@ impl Array {
     /// use construct::constructs::repetition::Array;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let arr = Array::new(5, Box::new(INT8UB));
+    /// let arr = Array::new(5, Box::new(INT8UB.into()));
     /// ```
-    pub fn new(count: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(count: usize, subcon: Box<CombinedConstruct>) -> Self {
         Array {
             count,
             subcon,
@@ -110,12 +113,12 @@ impl Array {
     /// use construct::core::Construct;
     /// use construct::value::Value;
     ///
-    /// let arr = Array::new_discard(3, Box::new(INT8UB));
+    /// let arr = Array::new_discard(3, Box::new(INT8UB.into()));
     /// let c: &dyn Construct = &arr;
     /// let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
     /// assert_eq!(parsed, Value::List(vec![]));
     /// ```
-    pub fn new_discard(count: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new_discard(count: usize, subcon: Box<CombinedConstruct>) -> Self {
         Array {
             count,
             subcon,
@@ -125,7 +128,7 @@ impl Array {
 }
 
 impl Construct for Array {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let mut list = Vec::with_capacity(if self.discard { 0 } else { self.count });
 
         for i in 0..self.count {
@@ -142,7 +145,7 @@ impl Construct for Array {
         Ok(Value::List(list))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let list = data.as_list().map_err(|e| {
             if matches!(e, ConstructError::TypeMismatch { .. }) {
                 ConstructError::TypeMismatch {
@@ -204,25 +207,25 @@ impl Construct for Array {
 /// use construct::expr::this_;
 ///
 /// let d = Struct::new()
-///     .field("count", Box::new(INT8UB))
+///     .field("count", Box::new(INT8UB.into()))
 ///     .field("items", Box::new(ArrayExpr::new(
-///         Box::new(this_().field("count")),
-///         Box::new(INT8UB),
-///     )));
+///         Box::new(this_().field("count").into()),
+///         Box::new(INT8UB.into()),
+///     ).into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x03\x01\x02\x03").unwrap();
 /// ```
 pub struct ArrayExpr {
     /// Expression that evaluates to the element count.
-    pub count_expr: Box<dyn Evaluate>,
+    pub count_expr: Box<CombinedExpr>,
     /// The sub-construct applied to each element.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl ArrayExpr {
     /// Creates a new `ArrayExpr` with the given count expression and
     /// sub-construct.
-    pub fn new(count_expr: Box<dyn Evaluate>, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(count_expr: Box<CombinedExpr>, subcon: Box<CombinedConstruct>) -> Self {
         ArrayExpr { count_expr, subcon }
     }
 
@@ -238,7 +241,7 @@ impl ArrayExpr {
 }
 
 impl Construct for ArrayExpr {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let count = self.resolve_count(ctx)?;
         let mut list = Vec::with_capacity(count);
         for i in 0..count {
@@ -252,7 +255,7 @@ impl Construct for ArrayExpr {
         Ok(Value::List(list))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let expected = self.resolve_count(ctx)?;
         let list = data.as_list().map_err(|_| ConstructError::TypeMismatch {
             path: String::new(),
@@ -309,7 +312,7 @@ impl Construct for ArrayExpr {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let gr = GreedyRange::new(Box::new(INT8UB));
+/// let gr = GreedyRange::new(Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &gr;
 ///
 /// let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
@@ -319,7 +322,7 @@ impl Construct for ArrayExpr {
 /// ```
 pub struct GreedyRange {
     /// The sub-construct applied to each element.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// If `true`, parse returns an empty list (elements are consumed but
     /// discarded).
     pub discard: bool,
@@ -334,9 +337,9 @@ impl GreedyRange {
     /// use construct::constructs::repetition::GreedyRange;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let gr = GreedyRange::new(Box::new(INT8UB));
+    /// let gr = GreedyRange::new(Box::new(INT8UB.into()));
     /// ```
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         GreedyRange {
             subcon,
             discard: false,
@@ -353,9 +356,9 @@ impl GreedyRange {
     /// use construct::constructs::repetition::GreedyRange;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let gr = GreedyRange::new_discard(Box::new(INT8UB));
+    /// let gr = GreedyRange::new_discard(Box::new(INT8UB.into()));
     /// ```
-    pub fn new_discard(subcon: Box<dyn Construct>) -> Self {
+    pub fn new_discard(subcon: Box<CombinedConstruct>) -> Self {
         GreedyRange {
             subcon,
             discard: true,
@@ -364,7 +367,7 @@ impl GreedyRange {
 }
 
 impl Construct for GreedyRange {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let mut list = Vec::new();
         let mut i: u64 = 0;
 
@@ -396,7 +399,7 @@ impl Construct for GreedyRange {
         Ok(Value::List(list))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let list = data.as_list().map_err(|e| {
             if matches!(e, ConstructError::TypeMismatch { .. }) {
                 ConstructError::TypeMismatch {
@@ -473,8 +476,8 @@ pub type RepeatPredicate = Box<dyn Fn(&Value, &[Value], &Context) -> bool>;
 /// let ru = RepeatUntil::new(
 ///     Box::new(|obj, _list, _ctx| {
 ///         obj.to_u64().unwrap_or(0) > 7
-///     }),
-///     Box::new(INT8UB),
+///     }.into()),
+///     Box::new(INT8UB.into()),
 /// );
 /// let c: &dyn Construct = &ru;
 ///
@@ -488,7 +491,7 @@ pub struct RepeatUntil {
     /// The last element for which the predicate returns `true` is included.
     pub predicate: RepeatPredicate,
     /// The sub-construct applied to each element.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// If `true`, parse returns an empty list (elements are consumed but
     /// discarded).
     pub discard: bool,
@@ -504,11 +507,11 @@ impl RepeatUntil {
     /// use construct::constructs::format_field::INT8UB;
     ///
     /// let ru = RepeatUntil::new(
-    ///     Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 5),
-    ///     Box::new(INT8UB),
+    ///     Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 5u64),
+    ///     Box::new(INT8UB.into()),
     /// );
     /// ```
-    pub fn new(predicate: RepeatPredicate, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(predicate: RepeatPredicate, subcon: Box<CombinedConstruct>) -> Self {
         RepeatUntil {
             predicate,
             subcon,
@@ -519,7 +522,7 @@ impl RepeatUntil {
     /// Creates a new `RepeatUntil` with `discard = true`.
     ///
     /// Parsed elements are consumed from the stream but not collected.
-    pub fn new_discard(predicate: RepeatPredicate, subcon: Box<dyn Construct>) -> Self {
+    pub fn new_discard(predicate: RepeatPredicate, subcon: Box<CombinedConstruct>) -> Self {
         RepeatUntil {
             predicate,
             subcon,
@@ -529,7 +532,7 @@ impl RepeatUntil {
 }
 
 impl Construct for RepeatUntil {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let mut list = Vec::new();
         let mut i: u64 = 0;
 
@@ -553,7 +556,7 @@ impl Construct for RepeatUntil {
         }
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let list = data.as_list().map_err(|e| {
             if matches!(e, ConstructError::TypeMismatch { .. }) {
                 ConstructError::TypeMismatch {
@@ -609,6 +612,7 @@ mod tests {
     use super::*;
     use crate::constructs::format_field::INT8UB;
     use crate::core::error::ConstructError;
+    use crate::core::stream::Stream;
 
     /// Helper macro to treat a construct as `&dyn Construct`.
     macro_rules! as_dyn {
@@ -623,7 +627,7 @@ mod tests {
 
     #[test]
     fn array_parse_three_bytes() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         let result = as_dyn!(arr).parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(
             result,
@@ -633,28 +637,28 @@ mod tests {
 
     #[test]
     fn array_parse_zero_count_returns_empty_list() {
-        let arr = Array::new(0, Box::new(INT8UB));
+        let arr = Array::new(0, Box::new(INT8UB.into()));
         let result = as_dyn!(arr).parse_bytes(b"").unwrap();
         assert_eq!(result, Value::List(vec![]));
     }
 
     #[test]
     fn array_parse_one_element() {
-        let arr = Array::new(1, Box::new(INT8UB));
+        let arr = Array::new(1, Box::new(INT8UB.into()));
         let result = as_dyn!(arr).parse_bytes(b"\x42").unwrap();
         assert_eq!(result, Value::List(vec![Value::UInt(0x42)]));
     }
 
     #[test]
     fn array_parse_insufficient_data_returns_error() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         let err = as_dyn!(arr).parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
     }
 
     #[test]
     fn array_parse_discard_returns_empty_list() {
-        let arr = Array::new_discard(3, Box::new(INT8UB));
+        let arr = Array::new_discard(3, Box::new(INT8UB.into()));
         let result = as_dyn!(arr).parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(result, Value::List(vec![]));
         // Verify the data was actually consumed (stream position advanced)
@@ -665,7 +669,7 @@ mod tests {
         /// A test construct that captures `_index` from context during parse.
         struct IndexCapture;
         impl Construct for IndexCapture {
-            fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
                 let idx = ctx
                     .get_recursive(CONTEXT_INDEX_KEY)
                     .cloned()
@@ -675,7 +679,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Ok(())
@@ -685,7 +689,7 @@ mod tests {
             }
         }
 
-        let arr = Array::new(3, Box::new(IndexCapture));
+        let arr = Array::new(3, Box::new(crate::combined::dynamic(IndexCapture)));
         let result = as_dyn!(arr).parse_bytes(b"").unwrap();
         assert_eq!(
             result,
@@ -699,7 +703,7 @@ mod tests {
 
     #[test]
     fn array_build_three_bytes() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         let built = as_dyn!(arr)
             .build_bytes(&Value::List(vec![
                 Value::UInt(1),
@@ -712,14 +716,14 @@ mod tests {
 
     #[test]
     fn array_build_zero_count_with_empty_list() {
-        let arr = Array::new(0, Box::new(INT8UB));
+        let arr = Array::new(0, Box::new(INT8UB.into()));
         let built = as_dyn!(arr).build_bytes(&Value::List(vec![])).unwrap();
         assert!(built.is_empty());
     }
 
     #[test]
     fn array_build_wrong_count_returns_error() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         let err = as_dyn!(arr)
             .build_bytes(&Value::List(vec![Value::UInt(1), Value::UInt(2)]))
             .unwrap_err();
@@ -736,7 +740,7 @@ mod tests {
 
     #[test]
     fn array_build_non_list_returns_type_mismatch() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         let err = as_dyn!(arr).build_bytes(&Value::Int(42)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
     }
@@ -747,13 +751,13 @@ mod tests {
 
     #[test]
     fn array_sizeof_is_count_times_subcon_size() {
-        let arr = Array::new(5, Box::new(INT8UB));
+        let arr = Array::new(5, Box::new(INT8UB.into()));
         assert_eq!(arr.sizeof(&Context::new()).unwrap(), 5);
     }
 
     #[test]
     fn array_sizeof_zero_count() {
-        let arr = Array::new(0, Box::new(INT8UB));
+        let arr = Array::new(0, Box::new(INT8UB.into()));
         assert_eq!(arr.sizeof(&Context::new()).unwrap(), 0);
     }
 
@@ -763,7 +767,7 @@ mod tests {
 
     #[test]
     fn array_roundtrip() {
-        let arr = Array::new(4, Box::new(INT8UB));
+        let arr = Array::new(4, Box::new(INT8UB.into()));
         let original = Value::List(vec![
             Value::UInt(10),
             Value::UInt(20),
@@ -783,7 +787,7 @@ mod tests {
 
     #[test]
     fn greedy_range_parse_all_bytes() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let result = as_dyn!(gr).parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(
             result,
@@ -793,14 +797,14 @@ mod tests {
 
     #[test]
     fn greedy_range_parse_empty_stream() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let result = as_dyn!(gr).parse_bytes(b"").unwrap();
         assert_eq!(result, Value::List(vec![]));
     }
 
     #[test]
     fn greedy_range_parse_discard_returns_empty() {
-        let gr = GreedyRange::new_discard(Box::new(INT8UB));
+        let gr = GreedyRange::new_discard(Box::new(INT8UB.into()));
         let result = as_dyn!(gr).parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(result, Value::List(vec![]));
     }
@@ -815,7 +819,7 @@ mod tests {
         // - Parse 2 bytes (fail, only 1 byte left)
         // - Seek back to position 4
         // - Result: 2 elements (4 bytes consumed)
-        let gr = GreedyRange::new(Box::new(Bytes::new(2)));
+        let gr = GreedyRange::new(Box::new(Bytes::new(2).into()));
         let result = as_dyn!(gr).parse_bytes(b"\x01\x02\x03\x04\x05").unwrap();
         let list = result.as_list().unwrap();
         assert_eq!(list.len(), 2);
@@ -833,7 +837,7 @@ mod tests {
         }
 
         impl Construct for StopAfter {
-            fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
                 let pos = stream.tell()? as usize;
                 if pos >= self.limit {
                     return Err(ConstructError::StopField {
@@ -846,7 +850,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Ok(())
@@ -856,7 +860,7 @@ mod tests {
             }
         }
 
-        let gr = GreedyRange::new(Box::new(StopAfter { limit: 3 }));
+        let gr = GreedyRange::new(Box::new(crate::combined::dynamic(StopAfter { limit: 3 })));
         let result = as_dyn!(gr).parse_bytes(b"\x0A\x0B\x0C\x0D").unwrap();
         // Should parse 3 elements (0, 1, 2), then StopField at position 3
         assert_eq!(
@@ -869,7 +873,7 @@ mod tests {
     fn greedy_range_parse_sets_index_in_context() {
         struct IndexCapture;
         impl Construct for IndexCapture {
-            fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
                 let idx = ctx
                     .get_recursive(CONTEXT_INDEX_KEY)
                     .cloned()
@@ -886,7 +890,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Ok(())
@@ -896,7 +900,7 @@ mod tests {
             }
         }
 
-        let gr = GreedyRange::new(Box::new(IndexCapture));
+        let gr = GreedyRange::new(Box::new(crate::combined::dynamic(IndexCapture)));
         let result = as_dyn!(gr).parse_bytes(b"").unwrap();
         assert_eq!(
             result,
@@ -910,7 +914,7 @@ mod tests {
 
     #[test]
     fn greedy_range_build_three_bytes() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let built = as_dyn!(gr)
             .build_bytes(&Value::List(vec![
                 Value::UInt(1),
@@ -923,14 +927,14 @@ mod tests {
 
     #[test]
     fn greedy_range_build_empty_list() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let built = as_dyn!(gr).build_bytes(&Value::List(vec![])).unwrap();
         assert!(built.is_empty());
     }
 
     #[test]
     fn greedy_range_build_non_list_returns_type_mismatch() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let err = as_dyn!(gr).build_bytes(&Value::None).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
     }
@@ -941,7 +945,7 @@ mod tests {
 
     #[test]
     fn greedy_range_sizeof_returns_error() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let err = gr.sizeof(&Context::new()).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
     }
@@ -952,7 +956,7 @@ mod tests {
 
     #[test]
     fn greedy_range_roundtrip() {
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let original = Value::List(vec![Value::UInt(10), Value::UInt(20), Value::UInt(30)]);
 
         let c: &dyn Construct = &gr;
@@ -969,8 +973,8 @@ mod tests {
     fn repeat_until_parse_stops_on_predicate() {
         // Stop when value > 7
         let ru = RepeatUntil::new(
-            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7),
-            Box::new(INT8UB),
+            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7u64),
+            Box::new(INT8UB.into()),
         );
         let result = as_dyn!(ru).parse_bytes(b"\x01\x02\x08").unwrap();
         assert_eq!(
@@ -981,7 +985,10 @@ mod tests {
 
     #[test]
     fn repeat_until_parse_first_element_matches() {
-        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB));
+        let ru = RepeatUntil::new(
+            Box::new(|_obj, _list, _ctx| true.into()),
+            Box::new(INT8UB.into()),
+        );
         let result = as_dyn!(ru).parse_bytes(b"\x42").unwrap();
         assert_eq!(result, Value::List(vec![Value::UInt(0x42)]));
     }
@@ -989,8 +996,8 @@ mod tests {
     #[test]
     fn repeat_until_parse_discard_returns_empty_list() {
         let ru = RepeatUntil::new_discard(
-            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7),
-            Box::new(INT8UB),
+            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7u64),
+            Box::new(INT8UB.into()),
         );
         let result = as_dyn!(ru).parse_bytes(b"\x01\x08").unwrap();
         // Elements are consumed but not collected
@@ -1002,10 +1009,13 @@ mod tests {
         // Stop when the last two elements are [0, 0]
         let ru = RepeatUntil::new(
             Box::new(|_obj, list, _ctx| {
-                let len = list.len();
-                len >= 2 && list[len - 2] == Value::UInt(0) && list[len - 1] == Value::UInt(0)
+                {
+                    let len = list.len();
+                    len >= 2 && list[len - 2] == Value::UInt(0) && list[len - 1] == Value::UInt(0)
+                }
+                .into()
             }),
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
         );
         let result = as_dyn!(ru).parse_bytes(b"\x01\x00\x00\xFF").unwrap();
         // Should stop after [1, 0, 0] because last two are [0, 0]
@@ -1019,7 +1029,7 @@ mod tests {
     fn repeat_until_parse_sets_index_in_context() {
         struct IndexCapture;
         impl Construct for IndexCapture {
-            fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
                 let idx = ctx
                     .get_recursive(CONTEXT_INDEX_KEY)
                     .cloned()
@@ -1029,7 +1039,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Ok(())
@@ -1040,8 +1050,8 @@ mod tests {
         }
 
         let ru = RepeatUntil::new(
-            Box::new(|obj, _list, _ctx| obj == &Value::UInt(2)),
-            Box::new(IndexCapture),
+            Box::new(|obj, _list, _ctx| obj == &Value::UInt(2).into()),
+            Box::new(crate::combined::dynamic(IndexCapture)),
         );
         let result = as_dyn!(ru).parse_bytes(b"").unwrap();
         assert_eq!(
@@ -1053,8 +1063,8 @@ mod tests {
     #[test]
     fn repeat_until_parse_insufficient_data_returns_error() {
         let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| false), // never satisfied
-            Box::new(INT8UB),
+            Box::new(|_obj, _list, _ctx| false.into()), // never satisfied
+            Box::new(INT8UB.into()),
         );
         let err = as_dyn!(ru).parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -1067,8 +1077,8 @@ mod tests {
     #[test]
     fn repeat_until_build_with_matching_element() {
         let ru = RepeatUntil::new(
-            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7),
-            Box::new(INT8UB),
+            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7u64),
+            Box::new(INT8UB.into()),
         );
         let built = as_dyn!(ru)
             .build_bytes(&Value::List(vec![
@@ -1083,8 +1093,8 @@ mod tests {
     #[test]
     fn repeat_until_build_no_match_returns_error() {
         let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| false), // never satisfied
-            Box::new(INT8UB),
+            Box::new(|_obj, _list, _ctx| false.into()), // never satisfied
+            Box::new(INT8UB.into()),
         );
         let err = as_dyn!(ru)
             .build_bytes(&Value::List(vec![Value::UInt(1), Value::UInt(2)]))
@@ -1094,7 +1104,10 @@ mod tests {
 
     #[test]
     fn repeat_until_build_non_list_returns_type_mismatch() {
-        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB));
+        let ru = RepeatUntil::new(
+            Box::new(|_obj, _list, _ctx| true.into()),
+            Box::new(INT8UB.into()),
+        );
         let err = as_dyn!(ru)
             .build_bytes(&Value::String("nope".to_string()))
             .unwrap_err();
@@ -1107,7 +1120,10 @@ mod tests {
 
     #[test]
     fn repeat_until_sizeof_returns_error() {
-        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB));
+        let ru = RepeatUntil::new(
+            Box::new(|_obj, _list, _ctx| true.into()),
+            Box::new(INT8UB.into()),
+        );
         let err = ru.sizeof(&Context::new()).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
     }
@@ -1119,8 +1135,8 @@ mod tests {
     #[test]
     fn repeat_until_roundtrip() {
         let ru = RepeatUntil::new(
-            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) >= 5),
-            Box::new(INT8UB),
+            Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) >= 5u64),
+            Box::new(INT8UB.into()),
         );
         let original = Value::List(vec![Value::UInt(1), Value::UInt(3), Value::UInt(5)]);
 
@@ -1136,7 +1152,7 @@ mod tests {
 
     #[test]
     fn array_parse_error_has_index_in_path() {
-        let arr = Array::new(3, Box::new(INT8UB));
+        let arr = Array::new(3, Box::new(INT8UB.into()));
         // Only 1 byte available; parsing element [1] should fail
         let err = as_dyn!(arr).parse_bytes(b"\x01").unwrap_err();
         // Path should include "[1]"
@@ -1150,7 +1166,7 @@ mod tests {
     #[test]
     fn array_build_error_has_index_in_path() {
         // Array of 2 INT8UB elements. Second element is a String (wrong type).
-        let arr = Array::new(2, Box::new(INT8UB));
+        let arr = Array::new(2, Box::new(INT8UB.into()));
         let err = as_dyn!(arr)
             .build_bytes(&Value::List(vec![
                 Value::UInt(1),
@@ -1167,7 +1183,7 @@ mod tests {
     #[test]
     fn greedy_range_build_error_has_index_in_path() {
         // GreedyRange with INT8UB. Second element is a String (wrong type).
-        let gr = GreedyRange::new(Box::new(INT8UB));
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
         let err = as_dyn!(gr)
             .build_bytes(&Value::List(vec![
                 Value::UInt(1),
@@ -1188,11 +1204,14 @@ mod tests {
         // RepeatUntil with Bytes(2), stop when bytes start with 0xFF
         let ru = RepeatUntil::new(
             Box::new(|obj, _list, _ctx| {
-                obj.as_bytes()
-                    .map(|b| !b.is_empty() && b[0] == 0xFF)
-                    .unwrap_or(false)
+                {
+                    obj.as_bytes()
+                        .map(|b| !b.is_empty() && b[0] == 0xFF)
+                        .unwrap_or(false)
+                }
+                .into()
             }),
-            Box::new(Bytes::new(2)),
+            Box::new(Bytes::new(2).into()),
         );
         // Only 1 byte, so Bytes(2) will fail on first attempt
         let err = as_dyn!(ru).parse_bytes(b"\x01").unwrap_err();

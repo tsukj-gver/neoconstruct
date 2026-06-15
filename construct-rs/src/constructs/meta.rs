@@ -15,8 +15,10 @@ use std::io::SeekFrom;
 
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::CombinedExpr;
 use crate::expr::Evaluate;
 use crate::value::Value;
 
@@ -63,11 +65,11 @@ impl Default for Pass {
 }
 
 impl Construct for Pass {
-    fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         Ok(Value::None)
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         Ok(())
     }
 
@@ -119,7 +121,7 @@ impl Default for Terminated {
 }
 
 impl Construct for Terminated {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         if stream.is_eof()? {
             Ok(Value::None)
         } else {
@@ -133,7 +135,7 @@ impl Construct for Terminated {
         }
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         Ok(())
     }
 
@@ -189,12 +191,12 @@ impl Default for Tell {
 }
 
 impl Construct for Tell {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let pos = stream.tell()?;
         Ok(Value::UInt(pos))
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         // Tell does not write anything; it only reports the position.
         // In Python, _build returns stream.tell(), but the Rust build
         // signature writes nothing and returns ().
@@ -286,12 +288,12 @@ impl Seek {
 }
 
 impl Construct for Seek {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let new_pos = stream.seek_from(self.whence.to_seek_from(self.at))?;
         Ok(Value::UInt(new_pos))
     }
 
-    fn build(&self, _data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         stream.seek_from(self.whence.to_seek_from(self.at))?;
         Ok(())
     }
@@ -355,14 +357,14 @@ const ERROR_SIZEOF_REASON: &str =
     "Error does not have size, because it interrupts parsing and building";
 
 impl Construct for Error {
-    fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         Err(ConstructError::Check {
             path: String::new(),
             message: ERROR_PARSE_MESSAGE.to_string(),
         })
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         Err(ConstructError::Check {
             path: String::new(),
             message: ERROR_BUILD_MESSAGE.to_string(),
@@ -398,10 +400,10 @@ impl Construct for Error {
 /// use construct::value::Value;
 /// use construct::expr::this_;
 ///
-/// let d = SeekExpr::new(Box::new(this_().field("pos")));
+/// let d = SeekExpr::new(Box::new(this_().field("pos").into()));
 /// let c: &dyn Construct = &d;
 ///
-/// let mut stream = construct::core::stream::ByteStream::new_read(b"0123456789");
+/// let mut stream = construct::core::stream::CombinedStream::ByteStream(construct::core::stream::ByteStream::new_read(b"0123456789"));
 /// let mut ctx = construct::core::context::Context::new();
 /// ctx.insert("pos", Value::UInt(3));
 /// let parsed = c.parse(&mut stream, &mut ctx).unwrap();
@@ -409,7 +411,7 @@ impl Construct for Error {
 /// ```
 pub struct SeekExpr {
     /// Expression that evaluates to the seek offset.
-    pub at_expr: Box<dyn Evaluate>,
+    pub at_expr: Box<CombinedExpr>,
     /// Origin from which the offset is measured.
     pub whence: SeekWhence,
 }
@@ -417,7 +419,7 @@ pub struct SeekExpr {
 impl SeekExpr {
     /// Creates a new `SeekExpr` that seeks to an absolute position from the
     /// start of the stream.
-    pub fn new(at_expr: Box<dyn Evaluate>) -> Self {
+    pub fn new(at_expr: Box<CombinedExpr>) -> Self {
         SeekExpr {
             at_expr,
             whence: SeekWhence::Start,
@@ -425,7 +427,7 @@ impl SeekExpr {
     }
 
     /// Creates a new `SeekExpr` with a custom `whence` origin.
-    pub fn with_whence(at_expr: Box<dyn Evaluate>, whence: SeekWhence) -> Self {
+    pub fn with_whence(at_expr: Box<CombinedExpr>, whence: SeekWhence) -> Self {
         SeekExpr { at_expr, whence }
     }
 
@@ -440,13 +442,13 @@ impl SeekExpr {
 }
 
 impl Construct for SeekExpr {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let offset = self.resolve_offset(ctx)?;
         let new_pos = stream.seek_from(self.whence.to_seek_from(offset))?;
         Ok(Value::UInt(new_pos))
     }
 
-    fn build(&self, _data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let offset = self.resolve_offset(ctx)?;
         stream.seek_from(self.whence.to_seek_from(offset))?;
         Ok(())
@@ -480,7 +482,7 @@ mod tests {
 
     #[test]
     fn pass_parse_returns_none() {
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let result = Pass.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::None);
@@ -488,7 +490,7 @@ mod tests {
 
     #[test]
     fn pass_parse_does_not_consume_data() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let mut ctx = Context::new();
         let result = Pass.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::None);
@@ -497,7 +499,7 @@ mod tests {
 
     #[test]
     fn pass_build_does_nothing() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         Pass.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -524,7 +526,7 @@ mod tests {
 
     #[test]
     fn terminated_parse_at_eof_returns_none() {
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let result = Terminated.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::None);
@@ -532,7 +534,7 @@ mod tests {
 
     #[test]
     fn terminated_parse_after_reading_all_returns_none() {
-        let mut stream = ByteStream::new_read(b"\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01"));
         let mut ctx = Context::new();
         let _ = stream.read_bytes(1).unwrap();
         let result = Terminated.parse(&mut stream, &mut ctx).unwrap();
@@ -541,7 +543,7 @@ mod tests {
 
     #[test]
     fn terminated_parse_not_at_eof_returns_terminated_error() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         let err = Terminated.parse(&mut stream, &mut ctx).unwrap_err();
         match err {
@@ -554,7 +556,7 @@ mod tests {
 
     #[test]
     fn terminated_parse_partial_read_shows_correct_remaining() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         let mut ctx = Context::new();
         let _ = stream.read_bytes(2).unwrap();
         let err = Terminated.parse(&mut stream, &mut ctx).unwrap_err();
@@ -568,7 +570,7 @@ mod tests {
 
     #[test]
     fn terminated_build_does_nothing() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         Terminated
             .build(&Value::None, &mut stream, &mut ctx)
@@ -589,7 +591,7 @@ mod tests {
 
     #[test]
     fn tell_parse_at_start_returns_0() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let mut ctx = Context::new();
         let result = Tell.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0));
@@ -597,7 +599,7 @@ mod tests {
 
     #[test]
     fn tell_parse_after_seek_returns_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         stream.seek(3).unwrap();
         let mut ctx = Context::new();
         let result = Tell.parse(&mut stream, &mut ctx).unwrap();
@@ -606,7 +608,7 @@ mod tests {
 
     #[test]
     fn tell_parse_on_empty_stream_returns_0() {
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let result = Tell.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(0));
@@ -614,7 +616,7 @@ mod tests {
 
     #[test]
     fn tell_parse_does_not_advance_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         let _ = Tell.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(stream.tell().unwrap(), 0);
@@ -622,7 +624,7 @@ mod tests {
 
     #[test]
     fn tell_build_does_not_write() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         Tell.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -663,7 +665,7 @@ mod tests {
     #[test]
     fn seek_parse_from_start() {
         let s = Seek::new(5);
-        let mut stream = ByteStream::new_read(b"01234x");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"01234x"));
         let mut ctx = Context::new();
         let result = s.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::UInt(5));
@@ -673,7 +675,7 @@ mod tests {
     #[test]
     fn seek_parse_from_current() {
         let s = Seek::with_whence(2, SeekWhence::Current);
-        let mut stream = ByteStream::new_read(b"012345");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"012345"));
         stream.seek(1).unwrap();
         let mut ctx = Context::new();
         let result = s.parse(&mut stream, &mut ctx).unwrap();
@@ -683,7 +685,7 @@ mod tests {
     #[test]
     fn seek_parse_from_end() {
         let s = Seek::with_whence(-1, SeekWhence::End);
-        let mut stream = ByteStream::new_read(b"01234");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"01234"));
         let mut ctx = Context::new();
         let result = s.parse(&mut stream, &mut ctx).unwrap();
         // size=5, seek from end -1 → position 4
@@ -693,7 +695,7 @@ mod tests {
     #[test]
     fn seek_build_from_start() {
         let s = Seek::new(5);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream.write_bytes(b"0123456789").unwrap();
         let mut ctx = Context::new();
         s.build(&Value::None, &mut stream, &mut ctx).unwrap();
@@ -728,7 +730,7 @@ mod tests {
 
     #[test]
     fn error_parse_returns_check_error() {
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let err = Error.parse(&mut stream, &mut ctx).unwrap_err();
         match err {
@@ -741,7 +743,7 @@ mod tests {
 
     #[test]
     fn error_build_returns_check_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = Error
             .build(&Value::None, &mut stream, &mut ctx)

@@ -20,6 +20,7 @@
 
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -99,7 +100,7 @@ impl Default for UTIndex {
 }
 
 impl Construct for UTIndex {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let mut result: i64 = 0;
         let mut sign: i64 = 1;
         let mut i: usize = 0;
@@ -138,7 +139,7 @@ impl Construct for UTIndex {
         Ok(Value::Int(sign * result))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let obj = data.to_i64().map_err(|e| e.with_path_prefix("UTIndex"))?;
 
         // unsigned_abs avoids panic on i64::MIN. The result is a u64, and the

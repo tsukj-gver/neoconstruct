@@ -25,9 +25,10 @@
 //! `_decode` / `_encode` methods. In Rust we use owned closures instead,
 //! making each `Adapter` instance a concrete, self-contained construct.
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::Result;
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -90,15 +91,15 @@ pub type CheckFunc = Box<dyn Fn(&Value, &Context) -> Result<()>>;
 ///
 /// // Double the value: parse reads N, returns 2*N; build receives 2*N, writes N
 /// let adapter = Adapter::new(
-///     Box::new(INT8UB),
+///     Box::new(INT8UB.into()),
 ///     Box::new(|v, _ctx| {
 ///         let n = v.to_u64()?;
 ///         Ok(Value::UInt(n * 2))
-///     }),
+///     }.into()),
 ///     Box::new(|v, _ctx| {
 ///         let n = v.to_u64()?;
 ///         Ok(Value::UInt(n / 2))
-///     }),
+///     }.into()),
 /// );
 ///
 /// let c: &dyn Construct = &adapter;
@@ -110,7 +111,7 @@ pub type CheckFunc = Box<dyn Fn(&Value, &Context) -> Result<()>>;
 /// ```
 pub struct Adapter {
     /// The inner construct whose raw value is being adapted.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Decode function applied after parsing the inner construct.
     pub decode: DecodeFunc,
     /// Encode function applied before building the inner construct.
@@ -126,7 +127,7 @@ impl Adapter {
     /// - `subcon` — the inner construct
     /// - `decode` — function applied to the value produced by `subcon.parse()`
     /// - `encode` — function applied to the user value before `subcon.build()`
-    pub fn new(subcon: Box<dyn Construct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
         Adapter {
             subcon,
             decode,
@@ -136,12 +137,12 @@ impl Adapter {
 }
 
 impl Construct for Adapter {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.subcon.parse(stream, ctx)?;
         (self.decode)(&raw, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let encoded = (self.encode)(data, ctx)?;
         self.subcon.build(&encoded, stream, ctx)
     }
@@ -177,11 +178,11 @@ impl Construct for Adapter {
 ///
 /// // Negate: parse reads N, returns 255-N; build receives 255-N, writes N
 /// let adapter = SymmetricAdapter::new(
-///     Box::new(INT8UB),
+///     Box::new(INT8UB.into()),
 ///     Box::new(|v, _ctx| {
 ///         let n = v.to_u64()?;
 ///         Ok(Value::UInt(255 - n))
-///     }),
+///     }.into()),
 /// );
 ///
 /// let c: &dyn Construct = &adapter;
@@ -193,7 +194,7 @@ impl Construct for Adapter {
 /// ```
 pub struct SymmetricAdapter {
     /// The inner construct whose raw value is being adapted.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The symmetric function applied during both parse and build.
     pub func: SymmetricFunc,
 }
@@ -206,18 +207,18 @@ impl SymmetricAdapter {
     ///
     /// - `subcon` — the inner construct
     /// - `func` — the function applied to values in both directions
-    pub fn new(subcon: Box<dyn Construct>, func: SymmetricFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, func: SymmetricFunc) -> Self {
         SymmetricAdapter { subcon, func }
     }
 }
 
 impl Construct for SymmetricAdapter {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.subcon.parse(stream, ctx)?;
         (self.func)(&raw, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let encoded = (self.func)(data, ctx)?;
         self.subcon.build(&encoded, stream, ctx)
     }
@@ -242,7 +243,7 @@ impl Construct for SymmetricAdapter {
 /// Functionally identical to [`Adapter`].
 pub struct ExprAdapter {
     /// The inner construct whose raw value is being adapted.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Decode function applied after parsing the inner construct.
     pub decode: DecodeFunc,
     /// Encode function applied before building the inner construct.
@@ -258,7 +259,7 @@ impl ExprAdapter {
     /// - `subcon` — the inner construct
     /// - `decode` — function applied to the value produced by `subcon.parse()`
     /// - `encode` — function applied to the user value before `subcon.build()`
-    pub fn new(subcon: Box<dyn Construct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
         ExprAdapter {
             subcon,
             decode,
@@ -268,12 +269,12 @@ impl ExprAdapter {
 }
 
 impl Construct for ExprAdapter {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.subcon.parse(stream, ctx)?;
         (self.decode)(&raw, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let encoded = (self.encode)(data, ctx)?;
         self.subcon.build(&encoded, stream, ctx)
     }
@@ -308,7 +309,7 @@ impl Construct for ExprAdapter {
 /// use construct::value::Value;
 ///
 /// let validator = Validator::new(
-///     Box::new(INT8UB),
+///     Box::new(INT8UB.into()),
 ///     Box::new(|v, _ctx| {
 ///         let n = v.to_u64()?;
 ///         if n <= 10 {
@@ -319,7 +320,7 @@ impl Construct for ExprAdapter {
 ///                 message: format!("value {} exceeds maximum 10", n),
 ///             })
 ///         }
-///     }),
+///     }.into()),
 /// );
 ///
 /// let c: &dyn Construct = &validator;
@@ -333,7 +334,7 @@ impl Construct for ExprAdapter {
 /// ```
 pub struct Validator {
     /// The inner construct whose value is being validated.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The validation function. Returns `Ok(())` on success.
     pub check: CheckFunc,
 }
@@ -347,19 +348,19 @@ impl Validator {
     /// - `subcon` — the inner construct
     /// - `check` — function that validates the value; returns `Ok(())` on
     ///   success or `Err(ConstructError::Validation)` on failure
-    pub fn new(subcon: Box<dyn Construct>, check: CheckFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFunc) -> Self {
         Validator { subcon, check }
     }
 }
 
 impl Construct for Validator {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.subcon.parse(stream, ctx)?;
         (self.check)(&raw, ctx)?;
         Ok(raw)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         (self.check)(data, ctx)?;
         self.subcon.build(data, stream, ctx)
     }
@@ -379,7 +380,7 @@ impl Construct for Validator {
 /// Functionally identical to [`Validator`].
 pub struct ExprValidator {
     /// The inner construct whose value is being validated.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The validation function. Returns `Ok(())` on success.
     pub check: CheckFunc,
 }
@@ -393,19 +394,19 @@ impl ExprValidator {
     /// - `subcon` — the inner construct
     /// - `check` — function that validates the value; returns `Ok(())` on
     ///   success or `Err(ConstructError::Validation)` on failure
-    pub fn new(subcon: Box<dyn Construct>, check: CheckFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFunc) -> Self {
         ExprValidator { subcon, check }
     }
 }
 
 impl Construct for ExprValidator {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.subcon.parse(stream, ctx)?;
         (self.check)(&raw, ctx)?;
         Ok(raw)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         (self.check)(data, ctx)?;
         self.subcon.build(data, stream, ctx)
     }
@@ -427,13 +428,13 @@ mod tests {
     use crate::core::stream::ByteStream;
 
     /// Helper: creates a U8 big-endian construct for tests.
-    fn u8be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U8))
+    fn u8be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U8).into())
     }
 
     /// Helper: creates a U16 big-endian construct for tests.
-    fn u16be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U16))
+    fn u16be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U16).into())
     }
 
     // ======================================================================
@@ -446,12 +447,18 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n * 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n * 2))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n / 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n / 2))
+                }
+                .into()
             }),
         );
 
@@ -466,12 +473,18 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n * 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n * 2))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n / 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n / 2))
+                }
+                .into()
             }),
         );
 
@@ -486,12 +499,18 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n * 3))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n * 3))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n / 3))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n / 3))
+                }
+                .into()
             }),
         );
 
@@ -506,8 +525,8 @@ mod tests {
     fn adapter_sizeof_delegates_to_subcon() {
         let adapter = Adapter::new(
             u16be(),
-            Box::new(|v, _ctx| Ok(v.clone())),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
         );
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
@@ -518,12 +537,15 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|_v, _ctx| {
-                Err(ConstructError::Validation {
-                    path: String::new(),
-                    message: "decode failed".to_string(),
-                })
+                {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "decode failed".to_string(),
+                    })
+                }
+                .into()
             }),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
         );
 
         let c: &dyn Construct = &adapter;
@@ -535,12 +557,15 @@ mod tests {
     fn adapter_encode_error_propagates() {
         let adapter = Adapter::new(
             u8be(),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
             Box::new(|_v, _ctx| {
-                Err(ConstructError::Validation {
-                    path: String::new(),
-                    message: "encode failed".to_string(),
-                })
+                {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "encode failed".to_string(),
+                    })
+                }
+                .into()
             }),
         );
 
@@ -554,8 +579,8 @@ mod tests {
         // Build adapter on u8, then feed empty data
         let adapter = Adapter::new(
             u8be(),
-            Box::new(|v, _ctx| Ok(v.clone())),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
         );
 
         let c: &dyn Construct = &adapter;
@@ -569,17 +594,20 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, ctx| {
-                let offset = ctx
-                    .get("offset")
-                    .map(|val| val.to_u64().unwrap_or(0))
-                    .unwrap_or(0);
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n + offset))
+                {
+                    let offset = ctx
+                        .get("offset")
+                        .map(|val| val.to_u64().unwrap_or(0))
+                        .unwrap_or(0);
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n + offset))
+                }
+                .into()
             }),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
         );
 
-        let mut stream = ByteStream::new_read(b"\x0A");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x0A"));
         let mut ctx = Context::new();
         ctx.insert("offset", Value::UInt(100));
         let parsed = adapter.parse(&mut stream, &mut ctx).unwrap();
@@ -596,8 +624,11 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(255 - n))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(255 - n))
+                }
+                .into()
             }),
         );
 
@@ -611,8 +642,11 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(255 - n))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(255 - n))
+                }
+                .into()
             }),
         );
 
@@ -626,8 +660,11 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(255 - n))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(255 - n))
+                }
+                .into()
             }),
         );
 
@@ -640,7 +677,7 @@ mod tests {
 
     #[test]
     fn symmetric_adapter_sizeof_delegates_to_subcon() {
-        let adapter = SymmetricAdapter::new(u16be(), Box::new(|v, _ctx| Ok(v.clone())));
+        let adapter = SymmetricAdapter::new(u16be(), Box::new(|v, _ctx| Ok(v.clone()).into()));
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
     }
@@ -650,10 +687,13 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|_v, _ctx| {
-                Err(ConstructError::Validation {
-                    path: String::new(),
-                    message: "symmetric fail".to_string(),
-                })
+                {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "symmetric fail".to_string(),
+                    })
+                }
+                .into()
             }),
         );
 
@@ -670,7 +710,7 @@ mod tests {
     #[test]
     fn symmetric_adapter_identity_roundtrip() {
         // Identity function: no transformation
-        let adapter = SymmetricAdapter::new(u8be(), Box::new(|v, _ctx| Ok(v.clone())));
+        let adapter = SymmetricAdapter::new(u8be(), Box::new(|v, _ctx| Ok(v.clone()).into()));
 
         let c: &dyn Construct = &adapter;
         let original = Value::UInt(42);
@@ -689,12 +729,18 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n + 1000))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n + 1000))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n.saturating_sub(1000)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n.saturating_sub(1000)))
+                }
+                .into()
             }),
         );
 
@@ -708,12 +754,18 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n + 1000))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n + 1000))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n.saturating_sub(1000)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n.saturating_sub(1000)))
+                }
+                .into()
             }),
         );
 
@@ -727,12 +779,18 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n + 1000))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n + 1000))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n.saturating_sub(1000)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n.saturating_sub(1000)))
+                }
+                .into()
             }),
         );
 
@@ -747,8 +805,8 @@ mod tests {
     fn expr_adapter_sizeof_delegates_to_subcon() {
         let adapter = ExprAdapter::new(
             u16be(),
-            Box::new(|v, _ctx| Ok(v.clone())),
-            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone()).into()),
         );
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
@@ -763,15 +821,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n <= 10 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("value {} exceeds maximum 10", n),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n <= 10 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("value {} exceeds maximum 10", n),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -785,15 +846,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n <= 10 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("value {} exceeds maximum 10", n),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n <= 10 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("value {} exceeds maximum 10", n),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -807,15 +871,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n <= 10 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("value {} exceeds maximum 10", n),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n <= 10 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("value {} exceeds maximum 10", n),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -829,15 +896,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n <= 10 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("value {} exceeds maximum 10", n),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n <= 10 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("value {} exceeds maximum 10", n),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -851,15 +921,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n <= 200 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: "out of range".to_string(),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n <= 200 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: "out of range".to_string(),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -872,7 +945,7 @@ mod tests {
 
     #[test]
     fn validator_sizeof_delegates_to_subcon() {
-        let validator = Validator::new(u16be(), Box::new(|_v, _ctx| Ok(())));
+        let validator = Validator::new(u16be(), Box::new(|_v, _ctx| Ok(()).into()));
         let ctx = Context::new();
         assert_eq!(validator.sizeof(&ctx).unwrap(), 2);
     }
@@ -881,7 +954,7 @@ mod tests {
     fn validator_value_passes_through_unchanged() {
         // Validator must return the exact same value from the subcon,
         // not a modified copy.
-        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(())));
+        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(()).into()));
 
         let c: &dyn Construct = &validator;
         let parsed = c.parse_bytes(b"\xAB").unwrap();
@@ -890,7 +963,7 @@ mod tests {
 
     #[test]
     fn validator_subcon_error_propagates() {
-        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(())));
+        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(()).into()));
 
         let c: &dyn Construct = &validator;
         let err = c.parse_bytes(b"").unwrap_err();
@@ -903,30 +976,33 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, ctx| {
-                let max = ctx
-                    .get("max_value")
-                    .map(|val| val.to_u64().unwrap_or(0))
-                    .unwrap_or(0);
-                let n = v.to_u64()?;
-                if n <= max {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("value {} exceeds context max {}", n, max),
-                    })
+                {
+                    let max = ctx
+                        .get("max_value")
+                        .map(|val| val.to_u64().unwrap_or(0))
+                        .unwrap_or(0);
+                    let n = v.to_u64()?;
+                    if n <= max {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("value {} exceeds context max {}", n, max),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
-        let mut stream = ByteStream::new_read(b"\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x05"));
         let mut ctx = Context::new();
         ctx.insert("max_value", Value::UInt(10));
         let parsed = validator.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::UInt(5));
 
         // Now with a too-low max
-        let mut stream2 = ByteStream::new_read(b"\x05");
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(b"\x05"));
         let mut ctx2 = Context::new();
         ctx2.insert("max_value", Value::UInt(3));
         let err = validator.parse(&mut stream2, &mut ctx2).unwrap_err();
@@ -942,15 +1018,18 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n > 0 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: "value must be positive".to_string(),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n > 0 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: "value must be positive".to_string(),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -964,15 +1043,18 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n > 0 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: "value must be positive".to_string(),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n > 0 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: "value must be positive".to_string(),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -986,15 +1068,18 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n > 0 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: "value must be positive".to_string(),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n > 0 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: "value must be positive".to_string(),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -1013,15 +1098,18 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if (1..=100).contains(&n) {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: "out of range".to_string(),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if (1..=100).contains(&n) {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: "out of range".to_string(),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -1034,7 +1122,7 @@ mod tests {
 
     #[test]
     fn expr_validator_sizeof_delegates_to_subcon() {
-        let validator = ExprValidator::new(u16be(), Box::new(|_v, _ctx| Ok(())));
+        let validator = ExprValidator::new(u16be(), Box::new(|_v, _ctx| Ok(()).into()));
         let ctx = Context::new();
         assert_eq!(validator.sizeof(&ctx).unwrap(), 2);
     }
@@ -1048,12 +1136,18 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::Int(-(n as i64)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::Int(-(n as i64)))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_i64()?;
-                Ok(Value::UInt((-n) as u64))
+                {
+                    let n = v.to_i64()?;
+                    Ok(Value::UInt((-n) as u64))
+                }
+                .into()
             }),
         );
 
@@ -1067,12 +1161,18 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::Int(-(n as i64)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::Int(-(n as i64)))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_i64()?;
-                Ok(Value::UInt((-n) as u64))
+                {
+                    let n = v.to_i64()?;
+                    Ok(Value::UInt((-n) as u64))
+                }
+                .into()
             }),
         );
 
@@ -1088,10 +1188,13 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|_v, _ctx| {
-                Err(ConstructError::Validation {
-                    path: String::new(),
-                    message: "always reject".to_string(),
-                })
+                {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "always reject".to_string(),
+                    })
+                }
+                .into()
             }),
         );
 
@@ -1111,32 +1214,38 @@ mod tests {
         // Decode: convert bytes to a hex string
         // Encode: convert hex string back to bytes
         let adapter = Adapter::new(
-            Box::new(Bytes::new(4)),
+            Box::new(Bytes::new(4).into()),
             Box::new(|v, _ctx| {
-                let bytes = v.as_bytes()?;
-                let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
-                Ok(Value::String(hex))
+                {
+                    let bytes = v.as_bytes()?;
+                    let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+                    Ok(Value::String(hex))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let s = v.as_string()?;
-                let mut bytes = Vec::new();
-                let chars: Vec<char> = s.chars().collect();
-                let mut i = 0;
-                while i + 1 < chars.len() {
-                    let byte_val =
-                        u8::from_str_radix(&chars[i..i + 2].iter().collect::<String>(), 16);
-                    match byte_val {
-                        Ok(b) => bytes.push(b),
-                        Err(_) => {
-                            return Err(ConstructError::Generic {
-                                path: String::new(),
-                                message: format!("invalid hex string: {}", s),
-                            });
+                {
+                    let s = v.as_string()?;
+                    let mut bytes = Vec::new();
+                    let chars: Vec<char> = s.chars().collect();
+                    let mut i = 0;
+                    while i + 1 < chars.len() {
+                        let byte_val =
+                            u8::from_str_radix(&chars[i..i + 2].iter().collect::<String>(), 16);
+                        match byte_val {
+                            Ok(b) => bytes.push(b),
+                            Err(_) => {
+                                return Err(ConstructError::Generic {
+                                    path: String::new(),
+                                    message: format!("invalid hex string: {}", s),
+                                });
+                            }
                         }
+                        i += 2;
                     }
-                    i += 2;
+                    Ok(Value::Bytes(bytes))
                 }
-                Ok(Value::Bytes(bytes))
+                .into()
             }),
         );
 
@@ -1163,24 +1272,36 @@ mod tests {
         let inner = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n + 10))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n + 10))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n.saturating_sub(10)))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n.saturating_sub(10)))
+                }
+                .into()
             }),
         );
 
         let outer = Adapter::new(
-            Box::new(inner),
+            Box::new(inner.into()),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n * 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n * 2))
+                }
+                .into()
             }),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                Ok(Value::UInt(n / 2))
+                {
+                    let n = v.to_u64()?;
+                    Ok(Value::UInt(n / 2))
+                }
+                .into()
             }),
         );
 
@@ -1204,15 +1325,18 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                let n = v.to_u64()?;
-                if n == 0 {
-                    Ok(())
-                } else {
-                    Err(ConstructError::Validation {
-                        path: String::new(),
-                        message: format!("expected 0, got {}", n),
-                    })
+                {
+                    let n = v.to_u64()?;
+                    if n == 0 {
+                        Ok(())
+                    } else {
+                        Err(ConstructError::Validation {
+                            path: String::new(),
+                            message: format!("expected 0, got {}", n),
+                        })
+                    }
                 }
+                .into()
             }),
         );
 
@@ -1229,10 +1353,13 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|_v, _ctx| {
-                Err(ConstructError::Validation {
-                    path: String::new(),
-                    message: "nothing is valid".to_string(),
-                })
+                {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "nothing is valid".to_string(),
+                    })
+                }
+                .into()
             }),
         );
 

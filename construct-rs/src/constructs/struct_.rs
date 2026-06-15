@@ -32,8 +32,8 @@
 //! use construct::value::Value;
 //!
 //! let s = Struct::new()
-//!     .field("num", Box::new(INT8UB))
-//!     .field("data", Box::new(Bytes::new(3)));
+//!     .field("num", Box::new(INT8UB.into()))
+//!     .field("data", Box::new(Bytes::new(3).into()));
 //!
 //! let c: &dyn Construct = &s;
 //! let parsed = c.parse_bytes(b"\x04ABC").unwrap();
@@ -48,9 +48,10 @@
 
 use indexmap::IndexMap;
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -69,7 +70,7 @@ pub struct StructField {
     /// The field name, or `None` for anonymous fields.
     pub name: Option<String>,
     /// The sub-construct that parses / builds this field.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl StructField {
@@ -78,9 +79,9 @@ impl StructField {
     /// # Examples
     ///
     /// ```ignore
-    /// let field = StructField::new("count", Box::new(INT8UB));
+    /// let field = StructField::new("count", Box::new(INT8UB.into()));
     /// ```
-    pub fn new(name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         StructField {
             name: Some(name.into()),
             subcon,
@@ -95,9 +96,9 @@ impl StructField {
     /// # Examples
     ///
     /// ```ignore
-    /// let field = StructField::anonymous(Box::new(Pass::new()));
+    /// let field = StructField::anonymous(Box::new(Pass::new().into()));
     /// ```
-    pub fn anonymous(subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(subcon: Box<CombinedConstruct>) -> Self {
         StructField { name: None, subcon }
     }
 }
@@ -158,9 +159,9 @@ impl Struct {
     /// use construct::constructs::struct_::Struct;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let s = Struct::new().field("count", Box::new(INT8UB));
+    /// let s = Struct::new().field("count", Box::new(INT8UB.into()));
     /// ```
-    pub fn field(mut self, name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn field(mut self, name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         self.fields.push(StructField::new(name, subcon));
         self
     }
@@ -176,9 +177,9 @@ impl Struct {
     /// use construct::constructs::struct_::Struct;
     /// use construct::constructs::meta::Pass;
     ///
-    /// let s = Struct::new().anonymous(Box::new(Pass::new()));
+    /// let s = Struct::new().anonymous(Box::new(Pass::new().into()));
     /// ```
-    pub fn anonymous(mut self, subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(mut self, subcon: Box<CombinedConstruct>) -> Self {
         self.fields.push(StructField::anonymous(subcon));
         self
     }
@@ -194,8 +195,8 @@ impl Struct {
     /// use construct::constructs::struct_::Struct;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let header = Struct::new().field("magic", Box::new(INT8UB));
-    /// let full = Struct::new().field("version", Box::new(INT8UB)).extend(header);
+    /// let header = Struct::new().field("magic", Box::new(INT8UB.into()));
+    /// let full = Struct::new().field("version", Box::new(INT8UB.into())).extend(header);
     /// ```
     pub fn extend(mut self, other: Struct) -> Self {
         // Move fields from other into self
@@ -214,7 +215,7 @@ impl Default for Struct {
 }
 
 impl Construct for Struct {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Pre-allocate with the known field count to avoid repeated rehashing.
         let mut container: IndexMap<String, Value> = IndexMap::with_capacity(self.fields.len());
         let mut child_ctx = ctx.subcontext();
@@ -242,7 +243,7 @@ impl Construct for Struct {
         Ok(Value::Container(container))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // If data is None, treat as empty container
         let container = match data {
             Value::None => Ok(IndexMap::new()),
@@ -369,7 +370,7 @@ mod tests {
 
     #[test]
     fn parse_single_named_field() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x2A").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.get("num").unwrap(), &Value::UInt(42));
@@ -379,8 +380,8 @@ mod tests {
     #[test]
     fn parse_two_named_fields() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x01\x02").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.get("a").unwrap(), &Value::UInt(1));
@@ -390,9 +391,9 @@ mod tests {
     #[test]
     fn parse_preserves_field_order() {
         let s = Struct::new()
-            .field("first", Box::new(INT8UB))
-            .field("second", Box::new(INT8UB))
-            .field("third", Box::new(INT8UB));
+            .field("first", Box::new(INT8UB.into()))
+            .field("second", Box::new(INT8UB.into()))
+            .field("third", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x01\x02\x03").unwrap();
         let container = result.as_container().unwrap();
         let keys: Vec<&str> = container.keys().map(String::as_str).collect();
@@ -402,9 +403,9 @@ mod tests {
     #[test]
     fn parse_anonymous_field_discards_value() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .anonymous(Box::new(Bytes::new(2)))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .anonymous(Box::new(Bytes::new(2).into()))
+            .field("b", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"\x01XX\x02").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.len(), 2);
@@ -416,8 +417,8 @@ mod tests {
     fn parse_const_field_skipped_in_output() {
         // Const is anonymous, its value is not in the container
         let s = Struct::new()
-            .anonymous(Box::new(Const::new_bytes(b"MZ".to_vec())))
-            .field("data", Box::new(INT8UB));
+            .anonymous(Box::new(Const::new_bytes(b"MZ".to_vec()).into()))
+            .field("data", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"MZ\x42").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.len(), 1);
@@ -428,8 +429,8 @@ mod tests {
     fn parse_named_const_included_in_output() {
         // A named Const field DOES appear in the output
         let s = Struct::new()
-            .field("magic", Box::new(Const::new_bytes(b"MZ".to_vec())))
-            .field("data", Box::new(INT8UB));
+            .field("magic", Box::new(Const::new_bytes(b"MZ".to_vec()).into()))
+            .field("data", Box::new(INT8UB.into()));
         let result = as_dyn!(s).parse_bytes(b"MZ\x42").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.len(), 2);
@@ -445,8 +446,8 @@ mod tests {
         // A later field reads a length from context set by an earlier field
         // This tests context nesting
         let s = Struct::new()
-            .field("length", Box::new(INT8UB))
-            .field("data", Box::new(Bytes::new(3)));
+            .field("length", Box::new(INT8UB.into()))
+            .field("data", Box::new(Bytes::new(3).into()));
         let result = as_dyn!(s).parse_bytes(b"\x03ABC").unwrap();
         let container = result.as_container().unwrap();
         assert_eq!(container.get("length").unwrap(), &Value::UInt(3));
@@ -471,7 +472,7 @@ mod tests {
 
     #[test]
     fn build_single_named_field() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         let mut container = IndexMap::new();
         container.insert("num".to_string(), Value::UInt(42));
         let built = as_dyn!(s)
@@ -483,8 +484,8 @@ mod tests {
     #[test]
     fn build_two_named_fields() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT8UB.into()));
         let mut container = IndexMap::new();
         container.insert("a".to_string(), Value::UInt(1));
         container.insert("b".to_string(), Value::UInt(2));
@@ -498,8 +499,8 @@ mod tests {
     fn build_anonymous_field_uses_none() {
         // Anonymous field with flagbuildnone=true (like Pass) builds with None
         let s = Struct::new()
-            .field("data", Box::new(INT8UB))
-            .anonymous(Box::new(Pass::new()));
+            .field("data", Box::new(INT8UB.into()))
+            .anonymous(Box::new(Pass::new().into()));
         let mut container = IndexMap::new();
         container.insert("data".to_string(), Value::UInt(0xFF));
         let built = as_dyn!(s)
@@ -512,8 +513,8 @@ mod tests {
     fn build_const_field_from_none() {
         // Const has flagbuildnone=true; builds from Value::None
         let s = Struct::new()
-            .anonymous(Box::new(Const::new_bytes(b"MZ".to_vec())))
-            .field("data", Box::new(INT8UB));
+            .anonymous(Box::new(Const::new_bytes(b"MZ".to_vec()).into()))
+            .field("data", Box::new(INT8UB.into()));
         let mut container = IndexMap::new();
         container.insert("data".to_string(), Value::UInt(0x42));
         let built = as_dyn!(s)
@@ -526,15 +527,15 @@ mod tests {
     fn build_from_none_value_builds_empty_container() {
         // If all fields have flagbuildnone=true, Struct can build from None
         let s = Struct::new()
-            .anonymous(Box::new(Const::new_bytes(b"HI".to_vec())))
-            .anonymous(Box::new(Pass::new()));
+            .anonymous(Box::new(Const::new_bytes(b"HI".to_vec()).into()))
+            .anonymous(Box::new(Pass::new().into()));
         let built = as_dyn!(s).build_bytes(&Value::None).unwrap();
         assert_eq!(built, b"HI");
     }
 
     #[test]
     fn build_missing_named_field_returns_error() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         let container = IndexMap::new(); // missing "num"
         let err = as_dyn!(s)
             .build_bytes(&Value::Container(container))
@@ -544,7 +545,7 @@ mod tests {
 
     #[test]
     fn build_wrong_type_returns_error() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         let err = as_dyn!(s).build_bytes(&Value::Int(42)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
     }
@@ -561,24 +562,24 @@ mod tests {
 
     #[test]
     fn sizeof_single_field() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 1);
     }
 
     #[test]
     fn sizeof_multiple_fields() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT16UB))
-            .field("c", Box::new(INT32UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()))
+            .field("c", Box::new(INT32UB.into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 7);
     }
 
     #[test]
     fn sizeof_with_anonymous_fields() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .anonymous(Box::new(Bytes::new(3)));
+            .field("a", Box::new(INT8UB.into()))
+            .anonymous(Box::new(Bytes::new(3).into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 4);
     }
 
@@ -589,16 +590,16 @@ mod tests {
     #[test]
     fn flagbuildnone_true_when_all_fields_are_build_none() {
         let s = Struct::new()
-            .anonymous(Box::new(Pass::new()))
-            .anonymous(Box::new(Const::new_bytes(b"X".to_vec())));
+            .anonymous(Box::new(Pass::new().into()))
+            .anonymous(Box::new(Const::new_bytes(b"X".to_vec()).into()));
         assert!(s.flagbuildnone());
     }
 
     #[test]
     fn flagbuildnone_false_when_any_field_requires_value() {
         let s = Struct::new()
-            .anonymous(Box::new(Pass::new()))
-            .field("data", Box::new(INT8UB));
+            .anonymous(Box::new(Pass::new().into()))
+            .field("data", Box::new(INT8UB.into()));
         assert!(!s.flagbuildnone());
     }
 
@@ -615,8 +616,8 @@ mod tests {
     #[test]
     fn roundtrip_two_fields() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT16UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
 
         let mut container = IndexMap::new();
         container.insert("a".to_string(), Value::UInt(0x12));
@@ -633,8 +634,8 @@ mod tests {
     #[test]
     fn roundtrip_with_const() {
         let s = Struct::new()
-            .anonymous(Box::new(Const::new_bytes(b"PK".to_vec())))
-            .field("version", Box::new(INT8UB));
+            .anonymous(Box::new(Const::new_bytes(b"PK".to_vec()).into()))
+            .field("version", Box::new(INT8UB.into()));
 
         let mut container = IndexMap::new();
         container.insert("version".to_string(), Value::UInt(10));
@@ -650,9 +651,9 @@ mod tests {
     #[test]
     fn roundtrip_with_pass() {
         let s = Struct::new()
-            .field("x", Box::new(INT8UB))
-            .anonymous(Box::new(Pass::new()))
-            .field("y", Box::new(INT8UB));
+            .field("x", Box::new(INT8UB.into()))
+            .anonymous(Box::new(Pass::new().into()))
+            .field("y", Box::new(INT8UB.into()));
 
         let mut container = IndexMap::new();
         container.insert("x".to_string(), Value::UInt(1));
@@ -669,12 +670,12 @@ mod tests {
     #[test]
     fn roundtrip_nested_struct() {
         // Inner struct: { inner_a: u8 }
-        let inner = Struct::new().field("inner_a", Box::new(INT8UB));
+        let inner = Struct::new().field("inner_a", Box::new(INT8UB.into()));
 
         // Outer struct: { outer: inner, b: u8 }
         let outer = Struct::new()
-            .field("outer", Box::new(inner))
-            .field("b", Box::new(INT8UB));
+            .field("outer", Box::new(inner.into()))
+            .field("b", Box::new(INT8UB.into()));
 
         let mut inner_map = IndexMap::new();
         inner_map.insert("inner_a".to_string(), Value::UInt(0xAA));
@@ -697,8 +698,8 @@ mod tests {
     #[test]
     fn parse_error_enriches_path_with_field_name() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT16UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
         // Only provide 1 byte, second field needs 2
         let c: &dyn Construct = &s;
         let err = c.parse_bytes(b"\x01").unwrap_err();
@@ -716,7 +717,7 @@ mod tests {
 
     #[test]
     fn build_error_enriches_path_with_field_name() {
-        let s = Struct::new().field("num", Box::new(INT8UB));
+        let s = Struct::new().field("num", Box::new(INT8UB.into()));
         let mut container = IndexMap::new();
         container.insert("num".to_string(), Value::String("not a number".to_string()));
         let c: &dyn Construct = &s;
@@ -736,8 +737,8 @@ mod tests {
     #[test]
     fn sizeof_error_enriches_path_with_field_name() {
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(Terminated::new()));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(Terminated::new().into()));
         let err = s.sizeof(&Context::new()).unwrap_err();
         match &err {
             ConstructError::Sizeof { path, .. } => {
@@ -762,7 +763,7 @@ mod tests {
         struct StopConstruct;
 
         impl Construct for StopConstruct {
-            fn parse(&self, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+            fn parse(&self, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
                 Err(ConstructError::StopField {
                     path: String::new(),
                 })
@@ -770,7 +771,7 @@ mod tests {
             fn build(
                 &self,
                 _data: &Value,
-                _stream: &mut dyn Stream,
+                _stream: &mut CombinedStream,
                 _ctx: &mut Context,
             ) -> Result<()> {
                 Err(ConstructError::StopField {
@@ -783,9 +784,9 @@ mod tests {
         }
 
         let s = Struct::new()
-            .field("a", Box::new(INT8UB))
-            .field("stopper", Box::new(StopConstruct))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("stopper", Box::new(crate::combined::dynamic(StopConstruct)))
+            .field("b", Box::new(INT8UB.into()));
 
         // parse: should stop after "a", "b" is never read
         let c: &dyn Construct = &s;
@@ -801,11 +802,11 @@ mod tests {
 
     #[test]
     fn extend_combines_fields() {
-        let header = Struct::new().field("magic", Box::new(INT8UB));
+        let header = Struct::new().field("magic", Box::new(INT8UB.into()));
 
         // extend takes other by value, moving its fields
         let full = Struct::new()
-            .field("version", Box::new(INT8UB))
+            .field("version", Box::new(INT8UB.into()))
             .extend(header);
 
         // This should parse "version" then "magic"
@@ -823,8 +824,8 @@ mod tests {
     #[test]
     fn convenience_parse_and_build_roundtrip() {
         let s = Struct::new()
-            .field("x", Box::new(INT8UB))
-            .field("y", Box::new(INT16UB));
+            .field("x", Box::new(INT8UB.into()))
+            .field("y", Box::new(INT16UB.into()));
 
         let mut container = IndexMap::new();
         container.insert("x".to_string(), Value::UInt(100));

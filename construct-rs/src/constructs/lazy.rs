@@ -8,7 +8,7 @@
 //! # Rust simplification
 //!
 //! Rust's ownership model makes it impractical to return a [`Value`] that
-//! internally borrows the `&mut dyn Stream` (the stream is borrowed mutably
+//! internally borrows the `&mut CombinedStream` (the stream is borrowed mutably
 //! for the duration of `parse` and cannot be stored inside the returned
 //! value). Additionally, [`Value`] is an enum without a "thunk"/"lazy"
 //! variant.
@@ -37,10 +37,12 @@
 //! [`Struct`]: crate::constructs::struct_::Struct
 //! [`Array`]: crate::constructs::repetition::Array
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::repetition::Array;
 use crate::constructs::struct_::Struct;
 use crate::core::context::Context;
 use crate::core::error::Result;
+use crate::core::stream::CombinedStream;
 use crate::core::stream::{ByteStream, Stream};
 use crate::core::Construct;
 use crate::value::Value;
@@ -62,7 +64,7 @@ pub use crate::constructs::stream_ops::LazyBound;
 ///
 /// # Rust simplification
 ///
-/// Because [`Value`] cannot hold a borrow of the `&mut dyn Stream`, this
+/// Because [`Value`] cannot hold a borrow of the `&mut CombinedStream`, this
 /// implementation parses the sub-construct **eagerly** during `parse`. The
 /// offset is still recorded (for diagnostic parity) but the value is consumed
 /// immediately. The `Lazy` type is preserved so that API contracts match the
@@ -86,14 +88,14 @@ pub use crate::constructs::stream_ops::LazyBound;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Lazy::new(Box::new(INT8UB));
+/// let d = Lazy::new(Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x2a").unwrap();
 /// assert_eq!(parsed, Value::UInt(42));
 /// ```
 pub struct Lazy {
     /// The inner construct that is (notionally) parsed on demand.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Lazy {
@@ -105,15 +107,15 @@ impl Lazy {
     /// use construct::constructs::lazy::Lazy;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let d = Lazy::new(Box::new(INT8UB));
+    /// let d = Lazy::new(Box::new(INT8UB.into()));
     /// ```
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Lazy { subcon }
     }
 }
 
 impl Construct for Lazy {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Record the offset for diagnostic parity with the Python version.
         // The actual parse happens eagerly because `Value` cannot hold a
         // borrow of the stream.
@@ -121,7 +123,7 @@ impl Construct for Lazy {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.subcon.build(data, stream, ctx)
     }
 
@@ -163,8 +165,8 @@ impl Construct for Lazy {
 /// use construct::value::Value;
 ///
 /// let s = LazyStruct::new()
-///     .field("a", Box::new(INT8UB))
-///     .field("b", Box::new(INT8UB));
+///     .field("a", Box::new(INT8UB.into()))
+///     .field("b", Box::new(INT8UB.into()));
 ///
 /// let c: &dyn Construct = &s;
 /// let parsed = c.parse_bytes(b"\x01\x02").unwrap();
@@ -195,7 +197,7 @@ impl LazyStruct {
     ///
     /// See [`Struct::field`](crate::constructs::struct_::Struct::field) for
     /// details on named-field semantics.
-    pub fn field(mut self, name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn field(mut self, name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         self.inner = self.inner.field(name, subcon);
         self
     }
@@ -204,7 +206,7 @@ impl LazyStruct {
     ///
     /// See [`Struct::anonymous`](crate::constructs::struct_::Struct::anonymous)
     /// for details on anonymous-field semantics.
-    pub fn anonymous(mut self, subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(mut self, subcon: Box<CombinedConstruct>) -> Self {
         self.inner = self.inner.anonymous(subcon);
         self
     }
@@ -217,12 +219,12 @@ impl Default for LazyStruct {
 }
 
 impl Construct for LazyStruct {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Simplified eager parse — delegates entirely to the inner Struct.
         self.inner.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.inner.build(data, stream, ctx)
     }
 
@@ -266,7 +268,7 @@ impl Construct for LazyStruct {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = LazyArray::new(3, Box::new(INT8UB));
+/// let d = LazyArray::new(3, Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
 /// assert_eq!(parsed, Value::List(vec![
@@ -284,7 +286,7 @@ pub struct LazyArray {
 impl LazyArray {
     /// Creates a new `LazyArray` that processes exactly `count` elements
     /// using `subcon`.
-    pub fn new(count: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(count: usize, subcon: Box<CombinedConstruct>) -> Self {
         LazyArray {
             inner: Array::new(count, subcon),
         }
@@ -298,12 +300,12 @@ impl LazyArray {
 }
 
 impl Construct for LazyArray {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Simplified eager parse — delegates entirely to the inner Array.
         self.inner.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.inner.build(data, stream, ctx)
     }
 
@@ -354,14 +356,14 @@ impl Construct for LazyArray {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Rebuffered::new(Box::new(INT8UB));
+/// let d = Rebuffered::new(Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x05garbage").unwrap();
 /// assert_eq!(parsed, Value::UInt(5));
 /// ```
 pub struct Rebuffered {
     /// The inner construct operating on the buffered stream.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Optional maximum number of bytes to retain in the buffer. In this
     /// simplified implementation the value is accepted but the buffer is not
     /// truncated (all remaining bytes are buffered), matching the Python
@@ -371,7 +373,7 @@ pub struct Rebuffered {
 
 impl Rebuffered {
     /// Creates a new `Rebuffered` with no tail cutoff (buffers everything).
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Rebuffered {
             subcon,
             tailcutoff: None,
@@ -389,7 +391,7 @@ impl Rebuffered {
 }
 
 impl Construct for Rebuffered {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Record where we started in the real stream.
         let start = stream.tell()?;
 
@@ -397,7 +399,7 @@ impl Construct for Rebuffered {
         let data = stream.read_remaining()?;
 
         // Parse the sub-construct from the fully-buffered, seekable stream.
-        let mut buffered = ByteStream::new_read(&data);
+        let mut buffered = CombinedStream::ByteStream(ByteStream::new_read(&data));
         let result = self.subcon.parse(&mut buffered, ctx)?;
 
         // Reposition the original stream to just past the bytes the sub-construct
@@ -408,7 +410,7 @@ impl Construct for Rebuffered {
         Ok(result)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Sequential writes do not benefit from buffering, so delegate directly.
         self.subcon.build(data, stream, ctx)
     }
@@ -429,6 +431,7 @@ mod tests {
     use crate::constructs::format_field::{INT16UB, INT8UB};
     use crate::constructs::meta::Pass;
     use crate::core::error::ConstructError;
+    use crate::core::stream::Stream;
     use indexmap::IndexMap;
 
     // ======================================================================
@@ -437,7 +440,7 @@ mod tests {
 
     #[test]
     fn lazy_parse_returns_value() {
-        let d = Lazy::new(Box::new(INT8UB));
+        let d = Lazy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x2a").unwrap();
         assert_eq!(parsed, Value::UInt(42));
@@ -445,8 +448,8 @@ mod tests {
 
     #[test]
     fn lazy_parse_advances_stream() {
-        let d = Lazy::new(Box::new(INT8UB));
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let d = Lazy::new(Box::new(INT8UB.into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let mut ctx = Context::new();
         let parsed = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(parsed, Value::UInt(1));
@@ -456,7 +459,7 @@ mod tests {
 
     #[test]
     fn lazy_build_delegates() {
-        let d = Lazy::new(Box::new(INT8UB));
+        let d = Lazy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::UInt(7)).unwrap();
         assert_eq!(built, vec![7]);
@@ -464,13 +467,13 @@ mod tests {
 
     #[test]
     fn lazy_sizeof_delegates() {
-        let d = Lazy::new(Box::new(INT8UB));
+        let d = Lazy::new(Box::new(INT8UB.into()));
         assert_eq!(d.sizeof(&Context::new()).unwrap(), 1);
     }
 
     #[test]
     fn lazy_roundtrip() {
-        let d = Lazy::new(Box::new(INT16UB));
+        let d = Lazy::new(Box::new(INT16UB.into()));
         let c: &dyn Construct = &d;
         let original = Value::UInt(0x0102);
         let built = c.build_bytes(&original).unwrap();
@@ -480,7 +483,7 @@ mod tests {
 
     #[test]
     fn lazy_propagates_parse_error() {
-        let d = Lazy::new(Box::new(Bytes::new(5)));
+        let d = Lazy::new(Box::new(Bytes::new(5).into()));
         let c: &dyn Construct = &d;
         let err = c.parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -493,8 +496,8 @@ mod tests {
     #[test]
     fn lazystruct_parse_returns_container() {
         let s = LazyStruct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT8UB.into()));
         let c: &dyn Construct = &s;
         let parsed = c.parse_bytes(b"\x01\x02").unwrap();
         let container = parsed.as_container().unwrap();
@@ -505,9 +508,9 @@ mod tests {
     #[test]
     fn lazystruct_parse_preserves_order() {
         let s = LazyStruct::new()
-            .field("first", Box::new(INT8UB))
-            .field("second", Box::new(INT8UB))
-            .field("third", Box::new(INT8UB));
+            .field("first", Box::new(INT8UB.into()))
+            .field("second", Box::new(INT8UB.into()))
+            .field("third", Box::new(INT8UB.into()));
         let c: &dyn Construct = &s;
         let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
         let container = parsed.as_container().unwrap();
@@ -518,8 +521,8 @@ mod tests {
     #[test]
     fn lazystruct_build() {
         let s = LazyStruct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT8UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT8UB.into()));
         let mut container = IndexMap::new();
         container.insert("a".to_string(), Value::UInt(1));
         container.insert("b".to_string(), Value::UInt(2));
@@ -530,7 +533,7 @@ mod tests {
 
     #[test]
     fn lazystruct_build_missing_field_errors() {
-        let s = LazyStruct::new().field("a", Box::new(INT8UB));
+        let s = LazyStruct::new().field("a", Box::new(INT8UB.into()));
         let c: &dyn Construct = &s;
         let err = c
             .build_bytes(&Value::Container(IndexMap::new()))
@@ -540,7 +543,7 @@ mod tests {
 
     #[test]
     fn lazystruct_build_wrong_type_errors() {
-        let s = LazyStruct::new().field("a", Box::new(INT8UB));
+        let s = LazyStruct::new().field("a", Box::new(INT8UB.into()));
         let c: &dyn Construct = &s;
         let err = c.build_bytes(&Value::Int(5)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
@@ -549,28 +552,28 @@ mod tests {
     #[test]
     fn lazystruct_sizeof() {
         let s = LazyStruct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT16UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
         assert_eq!(s.sizeof(&Context::new()).unwrap(), 3);
     }
 
     #[test]
     fn lazystruct_flagbuildnone_all_pass() {
-        let s = LazyStruct::new().anonymous(Box::new(Pass::new()));
+        let s = LazyStruct::new().anonymous(Box::new(Pass::new().into()));
         assert!(s.flagbuildnone());
     }
 
     #[test]
     fn lazystruct_flagbuildnone_false_with_value_field() {
-        let s = LazyStruct::new().field("a", Box::new(INT8UB));
+        let s = LazyStruct::new().field("a", Box::new(INT8UB.into()));
         assert!(!s.flagbuildnone());
     }
 
     #[test]
     fn lazystruct_roundtrip() {
         let s = LazyStruct::new()
-            .field("a", Box::new(INT8UB))
-            .field("b", Box::new(INT16UB));
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
         let mut container = IndexMap::new();
         container.insert("a".to_string(), Value::UInt(0x12));
         container.insert("b".to_string(), Value::UInt(0x3456));
@@ -594,7 +597,7 @@ mod tests {
 
     #[test]
     fn lazyarray_parse_returns_list() {
-        let d = LazyArray::new(3, Box::new(INT8UB));
+        let d = LazyArray::new(3, Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(
@@ -605,13 +608,13 @@ mod tests {
 
     #[test]
     fn lazyarray_count_accessor() {
-        let d = LazyArray::new(5, Box::new(INT8UB));
+        let d = LazyArray::new(5, Box::new(INT8UB.into()));
         assert_eq!(d.count(), 5);
     }
 
     #[test]
     fn lazyarray_build() {
-        let d = LazyArray::new(3, Box::new(INT8UB));
+        let d = LazyArray::new(3, Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let built = c
             .build_bytes(&Value::List(vec![
@@ -625,7 +628,7 @@ mod tests {
 
     #[test]
     fn lazyarray_build_wrong_count_errors() {
-        let d = LazyArray::new(3, Box::new(INT8UB));
+        let d = LazyArray::new(3, Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let err = c
             .build_bytes(&Value::List(vec![Value::UInt(1), Value::UInt(2)]))
@@ -635,7 +638,7 @@ mod tests {
 
     #[test]
     fn lazyarray_build_wrong_type_errors() {
-        let d = LazyArray::new(2, Box::new(INT8UB));
+        let d = LazyArray::new(2, Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let err = c.build_bytes(&Value::Int(5)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
@@ -643,13 +646,13 @@ mod tests {
 
     #[test]
     fn lazyarray_sizeof() {
-        let d = LazyArray::new(4, Box::new(INT16UB));
+        let d = LazyArray::new(4, Box::new(INT16UB.into()));
         assert_eq!(d.sizeof(&Context::new()).unwrap(), 8);
     }
 
     #[test]
     fn lazyarray_roundtrip() {
-        let d = LazyArray::new(3, Box::new(INT8UB));
+        let d = LazyArray::new(3, Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let original = Value::List(vec![Value::UInt(10), Value::UInt(20), Value::UInt(30)]);
         let built = c.build_bytes(&original).unwrap();
@@ -665,7 +668,7 @@ mod tests {
     fn lazybound_reexported_from_lazy_module() {
         // LazyBound is implemented in stream_ops; this test verifies it is
         // accessible via the lazy module path.
-        let d = LazyBound::new(Box::new(|| Box::new(INT8UB)));
+        let d = LazyBound::new(Box::new(|| Box::new(INT8UB.into())));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x2a").unwrap();
         assert_eq!(parsed, Value::UInt(42));
@@ -677,7 +680,7 @@ mod tests {
 
     #[test]
     fn rebuffered_parse_basic() {
-        let d = Rebuffered::new(Box::new(INT8UB));
+        let d = Rebuffered::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x05").unwrap();
         assert_eq!(parsed, Value::UInt(5));
@@ -688,8 +691,8 @@ mod tests {
         // After Rebuffered parses a sub-construct that consumes N bytes,
         // the original stream cursor must be positioned exactly N bytes
         // forward — even though Rebuffered internally buffers everything.
-        let d = Rebuffered::new(Box::new(Bytes::new(2)));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let d = Rebuffered::new(Box::new(Bytes::new(2).into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         let mut ctx = Context::new();
 
         let parsed = d.parse(&mut stream, &mut ctx).unwrap();
@@ -706,8 +709,8 @@ mod tests {
     #[test]
     fn rebuffered_parse_consumes_everything_when_subcon_is_greedy() {
         use crate::constructs::bytes::GreedyBytes;
-        let d = Rebuffered::new(Box::new(GreedyBytes));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let d = Rebuffered::new(Box::new(GreedyBytes.into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
 
         let parsed = d.parse(&mut stream, &mut ctx).unwrap();
@@ -724,7 +727,9 @@ mod tests {
         use crate::constructs::stream_ops::Pointer;
 
         // Pointer reads 1 byte at absolute offset 2 within the buffered stream.
-        let d = Rebuffered::new(Box::new(Pointer::new(2, Box::new(Bytes::new(1)))));
+        let d = Rebuffered::new(Box::new(
+            Pointer::new(2, Box::new(Bytes::new(1).into())).into(),
+        ));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\xAA\xBB\xCC").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![0xCC]));
@@ -732,7 +737,7 @@ mod tests {
 
     #[test]
     fn rebuffered_build_delegates() {
-        let d = Rebuffered::new(Box::new(INT8UB));
+        let d = Rebuffered::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::UInt(9)).unwrap();
         assert_eq!(built, vec![9]);
@@ -740,13 +745,13 @@ mod tests {
 
     #[test]
     fn rebuffered_sizeof_delegates() {
-        let d = Rebuffered::new(Box::new(INT16UB));
+        let d = Rebuffered::new(Box::new(INT16UB.into()));
         assert_eq!(d.sizeof(&Context::new()).unwrap(), 2);
     }
 
     #[test]
     fn rebuffered_roundtrip() {
-        let d = Rebuffered::new(Box::new(INT16UB));
+        let d = Rebuffered::new(Box::new(INT16UB.into()));
         let c: &dyn Construct = &d;
         let original = Value::UInt(0x1234);
         let built = c.build_bytes(&original).unwrap();
@@ -758,7 +763,7 @@ mod tests {
     fn rebuffered_with_tailcutoff_still_parses() {
         // tailcutoff is accepted but does not limit buffering in this
         // simplified implementation; parsing must still succeed.
-        let d = Rebuffered::new(Box::new(Bytes::new(3))).with_tailcutoff(1);
+        let d = Rebuffered::new(Box::new(Bytes::new(3).into())).with_tailcutoff(1);
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![1, 2, 3]));
@@ -767,7 +772,7 @@ mod tests {
     #[test]
     fn rebuffered_parse_error_propagates() {
         // Reading 5 bytes when only 1 is available must surface a Stream error.
-        let d = Rebuffered::new(Box::new(Bytes::new(5)));
+        let d = Rebuffered::new(Box::new(Bytes::new(5).into()));
         let c: &dyn Construct = &d;
         let err = c.parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));

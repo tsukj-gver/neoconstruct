@@ -29,8 +29,8 @@
 //! let u = Union::new(
 //!     Some(UnionTarget::Index(0)),
 //!     vec![
-//!         StructField::new("chars", Box::new(Bytes::new(4))),
-//!         StructField::new("num", Box::new(INT8UB)),
+//!         StructField::new("chars", Box::new(Bytes::new(4).into())),
+//!         StructField::new("num", Box::new(INT8UB.into())),
 //!     ],
 //! );
 //!
@@ -43,9 +43,11 @@
 
 use indexmap::IndexMap;
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::struct_::StructField;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -116,8 +118,8 @@ impl Union {
     /// let u = Union::new(
     ///     Some(UnionTarget::Index(0)),
     ///     vec![
-    ///         StructField::new("data", Box::new(Bytes::new(4))),
-    ///         StructField::new("num", Box::new(INT8UB)),
+    ///         StructField::new("data", Box::new(Bytes::new(4).into())),
+    ///         StructField::new("num", Box::new(INT8UB.into())),
     ///     ],
     /// );
     /// ```
@@ -126,20 +128,20 @@ impl Union {
     }
 
     /// Builder-style method to add a named field.
-    pub fn field(mut self, name: impl Into<String>, subcon: Box<dyn Construct>) -> Self {
+    pub fn field(mut self, name: impl Into<String>, subcon: Box<CombinedConstruct>) -> Self {
         self.subcons.push(StructField::new(name, subcon));
         self
     }
 
     /// Builder-style method to add an anonymous field.
-    pub fn anonymous(mut self, subcon: Box<dyn Construct>) -> Self {
+    pub fn anonymous(mut self, subcon: Box<CombinedConstruct>) -> Self {
         self.subcons.push(StructField::anonymous(subcon));
         self
     }
 }
 
 impl Construct for Union {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Pre-allocate with the known subcon count to avoid repeated rehashing.
         let mut container: IndexMap<String, Value> = IndexMap::with_capacity(self.subcons.len());
         let mut child_ctx = ctx.subcontext();
@@ -210,7 +212,7 @@ impl Construct for Union {
         Ok(Value::Container(container))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Data must be a Container
         let container = match data {
             Value::None => IndexMap::new(),
@@ -339,6 +341,8 @@ mod tests {
     use crate::constructs::bytes::Bytes;
     use crate::constructs::format_field::{INT16UB, INT32UB, INT8UB};
     use crate::core::error::ConstructError;
+    use crate::core::stream::ByteStream;
+    use crate::core::stream::Stream;
     use crate::core::Construct;
 
     // Helper: convert Union to &dyn Construct
@@ -357,8 +361,8 @@ mod tests {
         let u = Union::new(
             Some(UnionTarget::Index(0)),
             vec![
-                StructField::new("chars", Box::new(Bytes::new(4))),
-                StructField::new("num", Box::new(INT8UB)),
+                StructField::new("chars", Box::new(Bytes::new(4).into())),
+                StructField::new("num", Box::new(INT8UB.into())),
             ],
         );
         let result = as_dyn!(u).parse_bytes(b"\x01\x02\x03\x04").unwrap();
@@ -375,13 +379,14 @@ mod tests {
         let u = Union::new(
             None,
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         let c: &dyn Construct = &u;
         let data = b"\x01\x02\x03";
-        let mut stream = crate::core::stream::ByteStream::new_read(data);
+        let mut stream =
+            crate::core::stream::CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
 
@@ -398,12 +403,13 @@ mod tests {
         let u = Union::new(
             Some(UnionTarget::Name("b".to_string())),
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         let data = b"\x01\x02\x03";
-        let mut stream = crate::core::stream::ByteStream::new_read(data);
+        let mut stream =
+            crate::core::stream::CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let c: &dyn Construct = &u;
         let _result = c.parse(&mut stream, &mut ctx).unwrap();
@@ -417,12 +423,13 @@ mod tests {
         let u = Union::new(
             Some(UnionTarget::Index(1)),
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         let data = b"\x01\x02\x03";
-        let mut stream = crate::core::stream::ByteStream::new_read(data);
+        let mut stream =
+            crate::core::stream::CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let c: &dyn Construct = &u;
         let _result = c.parse(&mut stream, &mut ctx).unwrap();
@@ -435,7 +442,7 @@ mod tests {
     fn parse_union_invalid_index_returns_error() {
         let u = Union::new(
             Some(UnionTarget::Index(5)),
-            vec![StructField::new("a", Box::new(INT8UB))],
+            vec![StructField::new("a", Box::new(INT8UB.into()))],
         );
         let err = as_dyn!(u).parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Index { .. }));
@@ -445,7 +452,7 @@ mod tests {
     fn parse_union_invalid_name_returns_error() {
         let u = Union::new(
             Some(UnionTarget::Name("nonexistent".to_string())),
-            vec![StructField::new("a", Box::new(INT8UB))],
+            vec![StructField::new("a", Box::new(INT8UB.into()))],
         );
         let err = as_dyn!(u).parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::FieldMissing { .. }));
@@ -460,8 +467,8 @@ mod tests {
         let u = Union::new(
             None,
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         let mut container = IndexMap::new();
@@ -477,8 +484,8 @@ mod tests {
         let u = Union::new(
             None,
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
             ],
         );
         let mut container = IndexMap::new();
@@ -493,7 +500,7 @@ mod tests {
 
     #[test]
     fn build_union_no_matching_key_returns_error() {
-        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB))]);
+        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB.into()))]);
         let mut container = IndexMap::new();
         container.insert("z".to_string(), Value::UInt(1));
         let err = as_dyn!(u)
@@ -504,7 +511,7 @@ mod tests {
 
     #[test]
     fn build_union_empty_container_returns_error() {
-        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB))]);
+        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB.into()))]);
         let err = as_dyn!(u)
             .build_bytes(&Value::Container(IndexMap::new()))
             .unwrap_err();
@@ -513,7 +520,7 @@ mod tests {
 
     #[test]
     fn build_union_wrong_type_returns_error() {
-        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB))]);
+        let u = Union::new(None, vec![StructField::new("a", Box::new(INT8UB.into()))]);
         let err = as_dyn!(u).build_bytes(&Value::Int(42)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
     }
@@ -527,9 +534,9 @@ mod tests {
         let u = Union::new(
             None,
             vec![
-                StructField::new("a", Box::new(INT8UB)),
-                StructField::new("b", Box::new(INT16UB)),
-                StructField::new("c", Box::new(INT32UB)),
+                StructField::new("a", Box::new(INT8UB.into())),
+                StructField::new("b", Box::new(INT16UB.into())),
+                StructField::new("c", Box::new(INT32UB.into())),
             ],
         );
         assert_eq!(u.sizeof(&Context::new()).unwrap(), 4);
@@ -537,7 +544,7 @@ mod tests {
 
     #[test]
     fn sizeof_single_field() {
-        let u = Union::new(None, vec![StructField::new("a", Box::new(INT16UB))]);
+        let u = Union::new(None, vec![StructField::new("a", Box::new(INT16UB.into()))]);
         assert_eq!(u.sizeof(&Context::new()).unwrap(), 2);
     }
 
@@ -550,8 +557,8 @@ mod tests {
         let u = Union::new(
             Some(UnionTarget::Index(0)),
             vec![
-                StructField::new("num", Box::new(INT8UB)),
-                StructField::new("bytes", Box::new(Bytes::new(1))),
+                StructField::new("num", Box::new(INT8UB.into())),
+                StructField::new("bytes", Box::new(Bytes::new(1).into())),
             ],
         );
 

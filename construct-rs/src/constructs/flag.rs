@@ -8,6 +8,7 @@
 
 use crate::core::context::Context;
 use crate::core::error::Result;
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -56,12 +57,12 @@ impl Default for Flag {
 }
 
 impl Construct for Flag {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let data = stream.read_bytes(1)?;
         Ok(Value::Bool(data[0] != FLAG_FALSE))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let flag = data.as_bool().map_err(|e| e.with_path_prefix("Flag"))?;
         let byte = if flag { FLAG_TRUE } else { FLAG_FALSE };
         stream.write_bytes(&[byte])?;
@@ -83,7 +84,7 @@ mod tests {
 
     #[test]
     fn parse_zero_returns_false() {
-        let mut stream = ByteStream::new_read(b"\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00"));
         let mut ctx = Context::new();
         let result = Flag.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bool(false));
@@ -91,7 +92,7 @@ mod tests {
 
     #[test]
     fn parse_one_returns_true() {
-        let mut stream = ByteStream::new_read(b"\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01"));
         let mut ctx = Context::new();
         let result = Flag.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bool(true));
@@ -100,7 +101,7 @@ mod tests {
     #[test]
     fn parse_arbitrary_nonzero_returns_true() {
         for byte in [0x02, 0x7F, 0x80, 0xFF] {
-            let mut stream = ByteStream::new_read(&[byte]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[byte]));
             let mut ctx = Context::new();
             let result = Flag.parse(&mut stream, &mut ctx).unwrap();
             assert_eq!(result, Value::Bool(true), "byte {byte:#x} should be true");
@@ -109,7 +110,7 @@ mod tests {
 
     #[test]
     fn parse_insufficient_data_returns_stream_error() {
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let err = Flag.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -119,7 +120,7 @@ mod tests {
 
     #[test]
     fn build_true_writes_0x01() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         Flag.build(&Value::Bool(true), &mut stream, &mut ctx)
             .unwrap();
@@ -128,7 +129,7 @@ mod tests {
 
     #[test]
     fn build_false_writes_0x00() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         Flag.build(&Value::Bool(false), &mut stream, &mut ctx)
             .unwrap();
@@ -137,7 +138,7 @@ mod tests {
 
     #[test]
     fn build_non_bool_returns_type_mismatch() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = Flag
             .build(&Value::Int(1), &mut stream, &mut ctx)

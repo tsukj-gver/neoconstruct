@@ -10,8 +10,10 @@ use std::io::{self, ErrorKind};
 use crate::binary;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
+use crate::expr::CombinedExpr;
 use crate::expr::Evaluate;
 use crate::value::Value;
 
@@ -50,12 +52,12 @@ impl Bytes {
 }
 
 impl Construct for Bytes {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let data = stream.read_bytes(self.length)?;
         Ok(Value::Bytes(data))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         match data {
             Value::Bytes(bytes) => {
                 if bytes.len() != self.length {
@@ -129,12 +131,12 @@ impl Default for GreedyBytes {
 }
 
 impl Construct for GreedyBytes {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let data = stream.read_remaining()?;
         Ok(Value::Bytes(data))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let bytes = data.as_bytes()?;
         stream.write_bytes(bytes)
     }
@@ -172,10 +174,10 @@ impl Construct for GreedyBytes {
 /// use construct::expr::this_;
 ///
 /// let d = Struct::new()
-///     .field("len", Box::new(INT8UB))
+///     .field("len", Box::new(INT8UB.into()))
 ///     .field("data", Box::new(BytesExpr::new(
-///         Box::new(this_().field("len")),
-///     )));
+///         Box::new(this_().field("len").into()),
+///     ).into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x03ABC").unwrap();
 /// let container = parsed.as_container().unwrap();
@@ -184,12 +186,12 @@ impl Construct for GreedyBytes {
 /// ```
 pub struct BytesExpr {
     /// Expression that evaluates to the number of bytes to read/write.
-    pub length_expr: Box<dyn Evaluate>,
+    pub length_expr: Box<CombinedExpr>,
 }
 
 impl BytesExpr {
     /// Creates a new `BytesExpr` with the given length expression.
-    pub fn new(length_expr: Box<dyn Evaluate>) -> Self {
+    pub fn new(length_expr: Box<CombinedExpr>) -> Self {
         BytesExpr { length_expr }
     }
 
@@ -205,13 +207,13 @@ impl BytesExpr {
 }
 
 impl Construct for BytesExpr {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let length = self.resolve_length(ctx)?;
         let data = stream.read_bytes(length)?;
         Ok(Value::Bytes(data))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let expected = self.resolve_length(ctx)?;
         let bytes = data.as_bytes().map_err(|_| ConstructError::TypeMismatch {
             path: String::new(),
@@ -255,7 +257,7 @@ mod tests {
     #[test]
     fn bytes_parse_basic() {
         let b = Bytes::new(4);
-        let mut stream = ByteStream::new_read(b"beef");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"beef"));
         let mut ctx = Context::new();
         let result = b.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bytes(b"beef".to_vec()));
@@ -264,7 +266,7 @@ mod tests {
     #[test]
     fn bytes_build_bytes() {
         let b = Bytes::new(4);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         b.build(&Value::Bytes(b"beef".to_vec()), &mut stream, &mut ctx)
             .unwrap();
@@ -288,7 +290,7 @@ mod tests {
     #[test]
     fn bytes_build_wrong_length() {
         let b = Bytes::new(4);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = b
             .build(&Value::Bytes(b"hi".to_vec()), &mut stream, &mut ctx)
@@ -299,7 +301,7 @@ mod tests {
     #[test]
     fn bytes_build_wrong_type() {
         let b = Bytes::new(4);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = b
             .build(&Value::String("hi".to_string()), &mut stream, &mut ctx)
@@ -310,7 +312,7 @@ mod tests {
     #[test]
     fn bytes_parse_insufficient_data() {
         let b = Bytes::new(4);
-        let mut stream = ByteStream::new_read(b"ab");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"ab"));
         let mut ctx = Context::new();
         let err = b.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -362,7 +364,7 @@ mod tests {
 
     #[test]
     fn greedy_bytes_parse_basic() {
-        let mut stream = ByteStream::new_read(b"asislight");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"asislight"));
         let mut ctx = Context::new();
         let result = GreedyBytes.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bytes(b"asislight".to_vec()));
@@ -370,7 +372,7 @@ mod tests {
 
     #[test]
     fn greedy_bytes_parse_empty() {
-        let mut stream = ByteStream::new_write(); // empty stream
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write()); // empty stream
         let mut ctx = Context::new();
         let result = GreedyBytes.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bytes(vec![]));
@@ -378,7 +380,7 @@ mod tests {
 
     #[test]
     fn greedy_bytes_build_basic() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         GreedyBytes
             .build(&Value::Bytes(b"asislight".to_vec()), &mut stream, &mut ctx)
@@ -388,7 +390,7 @@ mod tests {
 
     #[test]
     fn greedy_bytes_build_wrong_type() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = GreedyBytes
             .build(&Value::Int(42), &mut stream, &mut ctx)
@@ -416,7 +418,7 @@ mod tests {
     fn greedy_bytes_parse_partial() {
         // GreedyBytes with data remaining in a larger stream
         let data = b"\x01\x02\x03\x04\x05";
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         // Read 2 bytes first, then GreedyBytes should get the rest
         let _first = stream.read_bytes(2).unwrap();
         let mut ctx = Context::new();

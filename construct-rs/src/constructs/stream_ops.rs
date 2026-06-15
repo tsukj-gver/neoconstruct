@@ -27,10 +27,13 @@ use std::io::SeekFrom;
 use indexmap::IndexMap;
 
 use crate::binary;
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::{ByteStream, Stream};
 use crate::core::Construct;
+use crate::expr::CombinedExpr;
 use crate::expr::Evaluate;
 use crate::value::Value;
 
@@ -59,7 +62,7 @@ use crate::value::Value;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Bitwise::new(Box::new(Bytes::new(8)));
+/// let d = Bitwise::new(Box::new(Bytes::new(8).into()));
 /// // Bytes(8) in a Bitwise context reads 8 bits as individual byte values
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\xff").unwrap();
@@ -67,23 +70,23 @@ use crate::value::Value;
 /// ```
 pub struct Bitwise {
     /// The inner construct operating on the bit-level stream.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Bitwise {
     /// Creates a new `Bitwise` wrapper around `subcon`.
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Bitwise { subcon }
     }
 }
 
 impl Construct for Bitwise {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Read remaining bytes from the stream, convert to bits
         let data = stream.read_remaining()?;
         let bits = binary::bytes2bits(&data);
         // Create a sub-stream from the bits and parse subcon
-        let mut sub_stream = ByteStream::new_read(&bits);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&bits));
         let result = self.subcon.parse(&mut sub_stream, ctx)?;
         // Read back any remaining bits and convert to bytes (should be 0)
         let remaining_bits = sub_stream.read_remaining()?;
@@ -93,9 +96,9 @@ impl Construct for Bitwise {
         Ok(result)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Build subcon into a sub-stream (bits)
-        let mut sub_stream = ByteStream::new_write();
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let bits = sub_stream.into_bytes();
         // Convert bits back to bytes
@@ -126,27 +129,27 @@ impl Construct for Bitwise {
 /// Corresponds to Python `Bytewise(subcon)`.
 pub struct Bytewise {
     /// The inner construct operating on byte-level data.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Bytewise {
     /// Creates a new `Bytewise` wrapper around `subcon`.
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Bytewise { subcon }
     }
 }
 
 impl Construct for Bytewise {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // In a bit context, we read bits and convert to bytes
         let bits = stream.read_remaining()?;
         let bytes = binary::bits2bytes(&bits)?;
-        let mut sub_stream = ByteStream::new_read(&bytes);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let bytes = sub_stream.into_bytes();
         let bits = binary::bytes2bits(&bytes);
@@ -181,7 +184,7 @@ impl Construct for Bytewise {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Pointer::new(8, Box::new(Bytes::new(1)));
+/// let d = Pointer::new(8, Box::new(Bytes::new(1).into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"abcdefghijkl").unwrap();
 /// assert_eq!(parsed, Value::Bytes(b"i".to_vec()));
@@ -190,19 +193,19 @@ pub struct Pointer {
     /// The absolute position to seek to.
     pub offset: i64,
     /// The inner construct to parse/build at the target position.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Pointer {
     /// Creates a new `Pointer` that reads/writes `subcon` at the given
     /// absolute `offset`.
-    pub fn new(offset: i64, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(offset: i64, subcon: Box<CombinedConstruct>) -> Self {
         Pointer { offset, subcon }
     }
 }
 
 impl Construct for Pointer {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let fallback = stream.tell()?;
         if self.offset >= 0 {
             stream.seek(self.offset as u64)?;
@@ -216,7 +219,7 @@ impl Construct for Pointer {
         parse_result.and_then(|v| seek_result.map(|_| v))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let fallback = stream.tell()?;
         if self.offset >= 0 {
             stream.seek(self.offset as u64)?;
@@ -261,26 +264,26 @@ impl Construct for Pointer {
 /// use construct::expr::this_;
 ///
 /// let d = Struct::new()
-///     .field("offset", Box::new(INT8UB))
+///     .field("offset", Box::new(INT8UB.into()))
 ///     .field("data", Box::new(PointerExpr::new(
-///         Box::new(this_().field("offset")),
-///         Box::new(Bytes::new(1)),
-///     )));
+///         Box::new(this_().field("offset").into()),
+///         Box::new(Bytes::new(1).into()),
+///     ).into()));
 /// let c: &dyn Construct = &d;
 /// // offset=3, then Pointer reads 1 byte at position 3 = 'C'
 /// let parsed = c.parse_bytes(b"\x03ABC").unwrap();
 /// ```
 pub struct PointerExpr {
     /// Expression that evaluates to the absolute stream offset.
-    pub offset_expr: Box<dyn Evaluate>,
+    pub offset_expr: Box<CombinedExpr>,
     /// The inner construct to parse/build at the target position.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl PointerExpr {
     /// Creates a new `PointerExpr` with the given offset expression and
     /// sub-construct.
-    pub fn new(offset_expr: Box<dyn Evaluate>, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(offset_expr: Box<CombinedExpr>, subcon: Box<CombinedConstruct>) -> Self {
         PointerExpr {
             offset_expr,
             subcon,
@@ -298,7 +301,7 @@ impl PointerExpr {
 }
 
 impl Construct for PointerExpr {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let offset = self.resolve_offset(ctx)?;
         let fallback = stream.tell()?;
         if offset >= 0 {
@@ -311,7 +314,7 @@ impl Construct for PointerExpr {
         parse_result.and_then(|v| seek_result.map(|_| v))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let offset = self.resolve_offset(ctx)?;
         let fallback = stream.tell()?;
         if offset >= 0 {
@@ -352,25 +355,25 @@ impl Construct for PointerExpr {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Peek::new(Box::new(INT8UB));
+/// let d = Peek::new(Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x2a").unwrap();
 /// assert_eq!(parsed, Value::UInt(42));
 /// ```
 pub struct Peek {
     /// The inner construct to peek-parse.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Peek {
     /// Creates a new `Peek` wrapper around `subcon`.
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Peek { subcon }
     }
 }
 
 impl Construct for Peek {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let fallback = stream.tell()?;
         // Try to parse; on error (except Check/StopField), return None
         let result = self.subcon.parse(stream, ctx);
@@ -383,7 +386,7 @@ impl Construct for Peek {
         }
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         // Peek does not build anything
         Ok(())
     }
@@ -420,7 +423,7 @@ impl Construct for Peek {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = RawCopy::new(Box::new(INT8UB));
+/// let d = RawCopy::new(Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\xff").unwrap();
 /// let container = parsed.as_container().unwrap();
@@ -429,18 +432,18 @@ impl Construct for Peek {
 /// ```
 pub struct RawCopy {
     /// The inner construct to copy raw bytes from.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl RawCopy {
     /// Creates a new `RawCopy` wrapper around `subcon`.
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         RawCopy { subcon }
     }
 }
 
 impl Construct for RawCopy {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let offset1 = stream.tell()?;
         let obj = self.subcon.parse(stream, ctx)?;
         let offset2 = stream.tell()?;
@@ -459,7 +462,7 @@ impl Construct for RawCopy {
         Ok(Value::Container(map))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let container = data.as_container()?;
 
         if let Some(Value::Bytes(raw_data)) = container.get("data") {
@@ -509,7 +512,7 @@ impl Construct for RawCopy {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes));
+/// let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()));
 /// // Length byte = 3, then 3 bytes of data
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x03ABC").unwrap();
@@ -517,9 +520,9 @@ impl Construct for RawCopy {
 /// ```
 pub struct Prefixed {
     /// The construct used to parse/build the length prefix.
-    pub length_field: Box<dyn Construct>,
+    pub length_field: Box<CombinedConstruct>,
     /// The inner construct that processes the prefixed data.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Whether the length field includes its own size.
     pub include_length: bool,
 }
@@ -527,7 +530,7 @@ pub struct Prefixed {
 impl Prefixed {
     /// Creates a new `Prefixed` construct with the given length field and
     /// subcon. `include_length` defaults to `false`.
-    pub fn new(length_field: Box<dyn Construct>, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(length_field: Box<CombinedConstruct>, subcon: Box<CombinedConstruct>) -> Self {
         Prefixed {
             length_field,
             subcon,
@@ -543,7 +546,7 @@ impl Prefixed {
 }
 
 impl Construct for Prefixed {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let length_val = self.length_field.parse(stream, ctx)?;
         let mut length = length_val.to_u64()? as usize;
 
@@ -553,13 +556,13 @@ impl Construct for Prefixed {
         }
 
         let data = stream.read_bytes(length)?;
-        let mut sub_stream = ByteStream::new_read(&data);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Build subcon into a separate buffer
-        let mut sub_stream = ByteStream::new_write();
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built_data = sub_stream.into_bytes();
 
@@ -608,7 +611,7 @@ pub type TransformFunc = Box<dyn Fn(&[u8]) -> Result<Vec<u8>>>;
 /// main stream.
 pub struct Transformed {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Decoding function applied before parsing subcon.
     pub decode: TransformFunc,
     /// Number of bytes to read before decoding, or `None` to read all.
@@ -622,7 +625,7 @@ pub struct Transformed {
 impl Transformed {
     /// Creates a new `Transformed` construct.
     pub fn new(
-        subcon: Box<dyn Construct>,
+        subcon: Box<CombinedConstruct>,
         decode: TransformFunc,
         decode_amount: Option<usize>,
         encode: TransformFunc,
@@ -639,18 +642,18 @@ impl Transformed {
 }
 
 impl Construct for Transformed {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let data = match self.decode_amount {
             Some(amount) => stream.read_bytes(amount)?,
             None => stream.read_remaining()?,
         };
         let decoded = (self.decode)(&data)?;
-        let mut sub_stream = ByteStream::new_read(&decoded);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
         let encoded = (self.encode)(&built)?;
@@ -706,7 +709,7 @@ impl Construct for Transformed {
 /// encoderunit, sizecomputer)`.
 pub struct Restreamed {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Chunk decoder function.
     pub decoder: TransformFunc,
     /// Size of chunks fed to the decoder.
@@ -722,7 +725,7 @@ pub struct Restreamed {
 impl Restreamed {
     /// Creates a new `Restreamed` construct.
     pub fn new(
-        subcon: Box<dyn Construct>,
+        subcon: Box<CombinedConstruct>,
         decoder: TransformFunc,
         decoder_unit: usize,
         encoder: TransformFunc,
@@ -741,7 +744,7 @@ impl Restreamed {
 }
 
 impl Construct for Restreamed {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         // Read all remaining data and decode in chunks
         let raw = stream.read_remaining()?;
         let mut decoded = Vec::new();
@@ -758,13 +761,13 @@ impl Construct for Restreamed {
             decoded.extend_from_slice(&decoded_chunk);
         }
 
-        let mut sub_stream = ByteStream::new_read(&decoded);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Build subcon into buffer
-        let mut sub_stream = ByteStream::new_write();
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
 
@@ -818,7 +821,7 @@ impl Construct for Restreamed {
 #[cfg(feature = "compression")]
 pub struct Compressed {
     /// The inner construct operating on decompressed data.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The compression algorithm to use.
     pub algorithm: CompressionAlgorithm,
 }
@@ -836,7 +839,7 @@ pub enum CompressionAlgorithm {
 #[cfg(feature = "compression")]
 impl Compressed {
     /// Creates a new `Compressed` construct using the specified algorithm.
-    pub fn new(subcon: Box<dyn Construct>, algorithm: CompressionAlgorithm) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, algorithm: CompressionAlgorithm) -> Self {
         Compressed { subcon, algorithm }
     }
 
@@ -901,15 +904,15 @@ impl Compressed {
 
 #[cfg(feature = "compression")]
 impl Construct for Compressed {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let data = stream.read_remaining()?;
         let decoded = self.decode(&data)?;
-        let mut sub_stream = ByteStream::new_read(&decoded);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
         let encoded = self.encode(&built)?;
@@ -956,12 +959,12 @@ pub type ChecksumBytesFunc = Box<dyn Fn(&Context) -> Result<Vec<u8>>>;
 ///
 /// // Simple checksum: sum of bytes modulo 256
 /// let d = Checksum::new(
-///     Box::new(Bytes::new(1)),
-///     Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
+///     Box::new(Bytes::new(1).into()),
+///     Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
 ///     Box::new(|ctx: &Context| {
 ///         // In a real use case, this would read bytes from a RawCopy field
 ///         Ok(vec![0x01, 0x02, 0x03])
-///     }),
+///     }.into()),
 /// );
 /// // Checksum of [1, 2, 3] = 6
 /// let c: &dyn Construct = &d;
@@ -970,7 +973,7 @@ pub type ChecksumBytesFunc = Box<dyn Fn(&Context) -> Result<Vec<u8>>>;
 /// ```
 pub struct Checksum {
     /// The construct used to parse/build the checksum value.
-    pub checksum_field: Box<dyn Construct>,
+    pub checksum_field: Box<CombinedConstruct>,
     /// Function that computes the checksum from raw bytes.
     pub hash_func: ChecksumFunc,
     /// Function that extracts the bytes to be checksummed from the context.
@@ -980,7 +983,7 @@ pub struct Checksum {
 impl Checksum {
     /// Creates a new `Checksum` construct.
     pub fn new(
-        checksum_field: Box<dyn Construct>,
+        checksum_field: Box<CombinedConstruct>,
         hash_func: ChecksumFunc,
         bytes_func: ChecksumBytesFunc,
     ) -> Self {
@@ -993,7 +996,7 @@ impl Checksum {
 }
 
 impl Construct for Checksum {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let parsed = self.checksum_field.parse(stream, ctx)?;
         let raw_bytes = (self.bytes_func)(ctx)?;
         let expected = (self.hash_func)(&raw_bytes);
@@ -1013,7 +1016,7 @@ impl Construct for Checksum {
         Ok(parsed)
     }
 
-    fn build(&self, _data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let raw_bytes = (self.bytes_func)(ctx)?;
         let checksum = (self.hash_func)(&raw_bytes);
         self.checksum_field
@@ -1049,7 +1052,7 @@ impl Construct for Checksum {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = ByteSwapped::new(Box::new(BytesInteger::new(4, false, false)));
+/// let d = ByteSwapped::new(Box::new(BytesInteger::new(4, false, false).into()));
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\x01\x02\x03\x04").unwrap();
 /// // Bytes swapped: [4, 3, 2, 1] interpreted as big-endian = 0x04030201
@@ -1057,29 +1060,29 @@ impl Construct for Checksum {
 /// ```
 pub struct ByteSwapped {
     /// The inner construct whose byte output is to be reversed.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl ByteSwapped {
     /// Creates a new `ByteSwapped` wrapper.
     ///
     /// The subcon must have a fixed, known size.
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         ByteSwapped { subcon }
     }
 }
 
 impl Construct for ByteSwapped {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let size = self.subcon.sizeof(ctx)?;
         let data = stream.read_bytes(size)?;
         let swapped = binary::swapbytes(&data);
-        let mut sub_stream = ByteStream::new_read(&swapped);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&swapped));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
         let swapped = binary::swapbytes(&built);
@@ -1115,7 +1118,7 @@ impl Construct for ByteSwapped {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1)));
+/// let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1).into()));
 /// // 0b10101010 → swapbits → 0b01010101
 /// let c: &dyn Construct = &d;
 /// let parsed = c.parse_bytes(b"\xaa").unwrap();
@@ -1123,7 +1126,7 @@ impl Construct for ByteSwapped {
 /// ```
 pub struct BitsSwapped {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Whether the subcon has a fixed known size.
     pub fixed_size: bool,
 }
@@ -1149,7 +1152,7 @@ impl BitsSwapped {
     ///
     /// Uses the `Transformed` approach: reads exactly `sizeof(subcon)` bytes,
     /// swaps bits, and parses.
-    pub fn new_fixed(subcon: Box<dyn Construct>) -> Self {
+    pub fn new_fixed(subcon: Box<CombinedConstruct>) -> Self {
         BitsSwapped {
             subcon,
             fixed_size: true,
@@ -1159,7 +1162,7 @@ impl BitsSwapped {
     /// Creates a new `BitsSwapped` for a variable-size subcon.
     ///
     /// Uses a simplified approach that reads remaining data.
-    pub fn new_variable(subcon: Box<dyn Construct>) -> Self {
+    pub fn new_variable(subcon: Box<CombinedConstruct>) -> Self {
         BitsSwapped {
             subcon,
             fixed_size: false,
@@ -1168,7 +1171,7 @@ impl BitsSwapped {
 }
 
 impl Construct for BitsSwapped {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let data = if self.fixed_size {
             let size = self.subcon.sizeof(ctx)?;
             stream.read_bytes(size)?
@@ -1176,12 +1179,12 @@ impl Construct for BitsSwapped {
             stream.read_remaining()?
         };
         let swapped = swapbitsinbytes(&data);
-        let mut sub_stream = ByteStream::new_read(&swapped);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&swapped));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
         let swapped = swapbitsinbytes(&built);
@@ -1210,23 +1213,23 @@ impl Construct for BitsSwapped {
 /// Corresponds to Python `LazyBound(subconfunc)`.
 pub struct LazyBound {
     /// Function that returns the construct to use.
-    pub subcon_func: Box<dyn Fn() -> Box<dyn Construct>>,
+    pub subcon_func: Box<dyn Fn() -> Box<CombinedConstruct>>,
 }
 
 impl LazyBound {
     /// Creates a new `LazyBound` with the given subcon factory function.
-    pub fn new(subcon_func: Box<dyn Fn() -> Box<dyn Construct>>) -> Self {
+    pub fn new(subcon_func: Box<dyn Fn() -> Box<CombinedConstruct>>) -> Self {
         LazyBound { subcon_func }
     }
 }
 
 impl Construct for LazyBound {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let subcon = (self.subcon_func)();
         subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let subcon = (self.subcon_func)();
         subcon.build(data, stream, ctx)
     }
@@ -1246,6 +1249,7 @@ mod tests {
     use super::*;
     use crate::constructs::bytes::{Bytes, GreedyBytes};
     use crate::constructs::format_field::INT8UB;
+    use crate::core::stream::Stream;
 
     // -- Helper constructs for testing ---------------------------------------
 
@@ -1253,13 +1257,18 @@ mod tests {
     struct U16Big;
 
     impl Construct for U16Big {
-        fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+        fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
             let bytes = stream.read_bytes(2)?;
             let val = u16::from_be_bytes([bytes[0], bytes[1]]);
             Ok(Value::UInt(val as u64))
         }
 
-        fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+        fn build(
+            &self,
+            data: &Value,
+            stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<()> {
             let val = data.to_u64()? as u16;
             stream.write_bytes(&val.to_be_bytes())
         }
@@ -1278,7 +1287,7 @@ mod tests {
         // Bitwise(Bytes(8)) in Python: input \x01\x03 → bytes2bits → 16 bits as bytes
         // Bytes(8) reads 8 items (bits) from the bit stream.
         // For \xff: bytes2bits([0xff]) = [1,1,1,1,1,1,1,1]
-        let d = Bitwise::new(Box::new(Bytes::new(8)));
+        let d = Bitwise::new(Box::new(Bytes::new(8).into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\xff").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![1, 1, 1, 1, 1, 1, 1, 1]));
@@ -1287,7 +1296,7 @@ mod tests {
     #[test]
     fn bitwise_build_basic() {
         // Build: bits [1,1,1,1,1,1,1,1] → bits2bytes → [0xff]
-        let d = Bitwise::new(Box::new(Bytes::new(8)));
+        let d = Bitwise::new(Box::new(Bytes::new(8).into()));
         let c: &dyn Construct = &d;
         let built = c
             .build_bytes(&Value::Bytes(vec![1, 1, 1, 1, 1, 1, 1, 1]))
@@ -1297,7 +1306,7 @@ mod tests {
 
     #[test]
     fn bitwise_roundtrip() {
-        let d = Bitwise::new(Box::new(Bytes::new(8)));
+        let d = Bitwise::new(Box::new(Bytes::new(8).into()));
         let c: &dyn Construct = &d;
         // The subcon sees bits as bytes, so the value is a byte array of bits
         let original = Value::Bytes(vec![1, 1, 1, 1, 1, 1, 1, 1]);
@@ -1308,7 +1317,7 @@ mod tests {
 
     #[test]
     fn bitwise_sizeof() {
-        let d = Bitwise::new(Box::new(Bytes::new(8)));
+        let d = Bitwise::new(Box::new(Bytes::new(8).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 1); // 8 bits = 1 byte
     }
@@ -1316,7 +1325,7 @@ mod tests {
     #[test]
     fn bitwise_sizeof_rounds_up() {
         // 12 bits should round up to 2 bytes
-        let d = Bitwise::new(Box::new(Bytes::new(12)));
+        let d = Bitwise::new(Box::new(Bytes::new(12).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 2);
     }
@@ -1327,9 +1336,9 @@ mod tests {
 
     #[test]
     fn bytewise_parse_basic() {
-        let d = Bytewise::new(Box::new(Bytes::new(2)));
+        let d = Bytewise::new(Box::new(Bytes::new(2).into()));
         let bits: Vec<u8> = vec![1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0, 0, 1, 1, 0, 0];
-        let mut stream = ByteStream::new_read(&bits);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&bits));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         // bits2bytes of [1,0,1,0,1,0,1,0] = 0xAA, [1,1,0,0,1,1,0,0] = 0xCC
@@ -1338,7 +1347,7 @@ mod tests {
 
     #[test]
     fn bytewise_sizeof() {
-        let d = Bytewise::new(Box::new(Bytes::new(2)));
+        let d = Bytewise::new(Box::new(Bytes::new(2).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 16); // 2 bytes = 16 bits
     }
@@ -1349,7 +1358,7 @@ mod tests {
 
     #[test]
     fn pointer_parse_absolute_offset() {
-        let d = Pointer::new(8, Box::new(Bytes::new(1)));
+        let d = Pointer::new(8, Box::new(Bytes::new(1).into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"abcdefghijkl").unwrap();
         assert_eq!(parsed, Value::Bytes(b"i".to_vec()));
@@ -1357,7 +1366,7 @@ mod tests {
 
     #[test]
     fn pointer_build_absolute_offset() {
-        let d = Pointer::new(8, Box::new(Bytes::new(1)));
+        let d = Pointer::new(8, Box::new(Bytes::new(1).into()));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::Bytes(b"Z".to_vec())).unwrap();
         assert_eq!(built.len(), 9); // 8 nulls + Z
@@ -1366,14 +1375,14 @@ mod tests {
 
     #[test]
     fn pointer_sizeof_is_zero() {
-        let d = Pointer::new(5, Box::new(Bytes::new(2)));
+        let d = Pointer::new(5, Box::new(Bytes::new(2).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 0);
     }
 
     #[test]
     fn pointer_roundtrip() {
-        let d = Pointer::new(4, Box::new(U16Big));
+        let d = Pointer::new(4, Box::new(crate::combined::dynamic(U16Big)));
         let c: &dyn Construct = &d;
         let original = Value::UInt(0x0102);
         let built = c.build_bytes(&original).unwrap();
@@ -1383,7 +1392,7 @@ mod tests {
 
     #[test]
     fn pointer_parse_negative_offset() {
-        let d = Pointer::new(-2, Box::new(Bytes::new(1)));
+        let d = Pointer::new(-2, Box::new(Bytes::new(1).into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"abcdefghijkl").unwrap();
         // len=12, offset=-2 from end → position 10, read 1 byte = 'k'
@@ -1396,9 +1405,9 @@ mod tests {
 
     #[test]
     fn peek_parse_does_not_advance() {
-        let d = Peek::new(Box::new(INT8UB));
+        let d = Peek::new(Box::new(INT8UB.into()));
         let data = b"\x2a\xFF";
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
 
         let parsed = d.parse(&mut stream, &mut ctx).unwrap();
@@ -1413,9 +1422,9 @@ mod tests {
 
     #[test]
     fn peek_parse_on_error_returns_none() {
-        let d = Peek::new(Box::new(Bytes::new(100)));
+        let d = Peek::new(Box::new(Bytes::new(100).into()));
         let data = b"\x01\x02";
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::None);
@@ -1424,8 +1433,8 @@ mod tests {
 
     #[test]
     fn peek_build_does_nothing() {
-        let d = Peek::new(Box::new(INT8UB));
-        let mut stream = ByteStream::new_write();
+        let d = Peek::new(Box::new(INT8UB.into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         d.build(&Value::UInt(42), &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -1433,14 +1442,14 @@ mod tests {
 
     #[test]
     fn peek_sizeof_is_zero() {
-        let d = Peek::new(Box::new(INT8UB));
+        let d = Peek::new(Box::new(INT8UB.into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 0);
     }
 
     #[test]
     fn peek_flagbuildnone() {
-        let d = Peek::new(Box::new(INT8UB));
+        let d = Peek::new(Box::new(INT8UB.into()));
         assert!(d.flagbuildnone());
     }
 
@@ -1450,7 +1459,7 @@ mod tests {
 
     #[test]
     fn rawcopy_parse_returns_container() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\xff").unwrap();
         let container = parsed.as_container().unwrap();
@@ -1463,7 +1472,7 @@ mod tests {
 
     #[test]
     fn rawcopy_build_from_data() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let mut map = IndexMap::new();
         map.insert("data".to_string(), Value::Bytes(vec![0x42]));
@@ -1473,7 +1482,7 @@ mod tests {
 
     #[test]
     fn rawcopy_build_from_value() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let mut map = IndexMap::new();
         map.insert("value".to_string(), Value::UInt(0x42));
@@ -1483,7 +1492,7 @@ mod tests {
 
     #[test]
     fn rawcopy_build_missing_keys_returns_error() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let result = c.build_bytes(&Value::Container(IndexMap::new()));
         assert!(result.is_err());
@@ -1491,7 +1500,7 @@ mod tests {
 
     #[test]
     fn rawcopy_roundtrip() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\xab").unwrap();
         let built = c.build_bytes(&parsed).unwrap();
@@ -1500,7 +1509,7 @@ mod tests {
 
     #[test]
     fn rawcopy_sizeof() {
-        let d = RawCopy::new(Box::new(INT8UB));
+        let d = RawCopy::new(Box::new(INT8UB.into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 1);
     }
@@ -1511,7 +1520,7 @@ mod tests {
 
     #[test]
     fn prefixed_parse_basic() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes));
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x03ABC").unwrap();
         assert_eq!(parsed, Value::Bytes(b"ABC".to_vec()));
@@ -1519,7 +1528,7 @@ mod tests {
 
     #[test]
     fn prefixed_build_basic() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes));
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::Bytes(b"ABC".to_vec())).unwrap();
         assert_eq!(built, b"\x03ABC");
@@ -1527,7 +1536,7 @@ mod tests {
 
     #[test]
     fn prefixed_roundtrip() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes));
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()));
         let c: &dyn Construct = &d;
         let original = Value::Bytes(b"hello".to_vec());
         let built = c.build_bytes(&original).unwrap();
@@ -1537,14 +1546,15 @@ mod tests {
 
     #[test]
     fn prefixed_sizeof() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(Bytes::new(4)));
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(Bytes::new(4).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 5); // 1 (length) + 4 (data)
     }
 
     #[test]
     fn prefixed_with_include_length() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes)).with_include_length(true);
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()))
+            .with_include_length(true);
         let c: &dyn Construct = &d;
         let original = Value::Bytes(b"AB".to_vec());
         let built = c.build_bytes(&original).unwrap();
@@ -1563,10 +1573,10 @@ mod tests {
     #[test]
     fn transformed_parse_basic() {
         let d = Transformed::new(
-            Box::new(Bytes::new(2)),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(Bytes::new(2).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(2),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(2),
         );
         let c: &dyn Construct = &d;
@@ -1578,10 +1588,10 @@ mod tests {
     #[test]
     fn transformed_build_basic() {
         let d = Transformed::new(
-            Box::new(Bytes::new(2)),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(Bytes::new(2).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(2),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(2),
         );
         let c: &dyn Construct = &d;
@@ -1593,10 +1603,10 @@ mod tests {
     #[test]
     fn transformed_roundtrip() {
         let d = Transformed::new(
-            Box::new(Bytes::new(4)),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(Bytes::new(4).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(4),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
             Some(4),
         );
         let c: &dyn Construct = &d;
@@ -1609,10 +1619,10 @@ mod tests {
     #[test]
     fn transformed_sizeof_equal_amounts() {
         let d = Transformed::new(
-            Box::new(Bytes::new(2)),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(Bytes::new(2).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             Some(2),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             Some(2),
         );
         let ctx = Context::new();
@@ -1622,10 +1632,10 @@ mod tests {
     #[test]
     fn transformed_sizeof_unequal_amounts_errors() {
         let d = Transformed::new(
-            Box::new(Bytes::new(2)),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(Bytes::new(2).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             Some(2),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             Some(3),
         );
         let ctx = Context::new();
@@ -1635,10 +1645,10 @@ mod tests {
     #[test]
     fn transformed_read_all_when_amount_is_none() {
         let d = Transformed::new(
-            Box::new(GreedyBytes),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(GreedyBytes.into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             None,
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             None,
         );
         let c: &dyn Construct = &d;
@@ -1649,11 +1659,11 @@ mod tests {
     #[test]
     fn transformed_encode_amount_mismatch_errors() {
         let d = Transformed::new(
-            Box::new(Bytes::new(2)),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(Bytes::new(2).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             Some(2),
-            Box::new(|_data: &[u8]| Ok(vec![0u8; 5])), // produces 5 bytes
-            Some(2),                                   // but expects 2
+            Box::new(|_data: &[u8]| Ok(vec![0u8; 5]).into()), // produces 5 bytes
+            Some(2),                                          // but expects 2
         );
         let c: &dyn Construct = &d;
         let result = c.build_bytes(&Value::Bytes(vec![0x01, 0x02]));
@@ -1668,10 +1678,10 @@ mod tests {
     fn restreamed_parse_chunk_decode() {
         // Decode each byte by XORing with 0xFF
         let d = Restreamed::new(
-            Box::new(GreedyBytes),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
+            Box::new(GreedyBytes.into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
             1,
             None,
         );
@@ -1684,10 +1694,10 @@ mod tests {
     #[test]
     fn restreamed_build_chunk_encode() {
         let d = Restreamed::new(
-            Box::new(GreedyBytes),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
+            Box::new(GreedyBytes.into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
             1,
             None,
         );
@@ -1699,12 +1709,12 @@ mod tests {
     #[test]
     fn restreamed_sizeof_with_computer() {
         let d = Restreamed::new(
-            Box::new(Bytes::new(4)),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(Bytes::new(4).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             1,
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             1,
-            Some(Box::new(|n: usize| n)), // identity
+            Some(Box::new(|n: usize| n.into())), // identity
         );
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 4);
@@ -1713,10 +1723,10 @@ mod tests {
     #[test]
     fn restreamed_sizeof_without_computer_errors() {
         let d = Restreamed::new(
-            Box::new(Bytes::new(4)),
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(Bytes::new(4).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             1,
-            Box::new(|data: &[u8]| Ok(data.to_vec())),
+            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
             1,
             None,
         );
@@ -1727,12 +1737,12 @@ mod tests {
     #[test]
     fn restreamed_roundtrip() {
         let d = Restreamed::new(
-            Box::new(Bytes::new(3)),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect())),
+            Box::new(Bytes::new(3).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect()).into()),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect())),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect()).into()),
             1,
-            Some(Box::new(|n: usize| n)),
+            Some(Box::new(|n: usize| n.into())),
         );
         let c: &dyn Construct = &d;
         let original = Value::Bytes(vec![0x01, 0x02, 0x03]);
@@ -1751,7 +1761,7 @@ mod tests {
 
         #[test]
         fn compressed_zlib_roundtrip() {
-            let d = Compressed::new(Box::new(GreedyBytes), CompressionAlgorithm::Zlib);
+            let d = Compressed::new(Box::new(GreedyBytes.into()), CompressionAlgorithm::Zlib);
             let c: &dyn Construct = &d;
             let original = Value::Bytes(b"hello world, this is a compression test!".to_vec());
             let built = c.build_bytes(&original).unwrap();
@@ -1761,7 +1771,7 @@ mod tests {
 
         #[test]
         fn compressed_deflate_roundtrip() {
-            let d = Compressed::new(Box::new(GreedyBytes), CompressionAlgorithm::Deflate);
+            let d = Compressed::new(Box::new(GreedyBytes.into()), CompressionAlgorithm::Deflate);
             let c: &dyn Construct = &d;
             let original = Value::Bytes(b"test data for deflate".to_vec());
             let built = c.build_bytes(&original).unwrap();
@@ -1771,14 +1781,14 @@ mod tests {
 
         #[test]
         fn compressed_sizeof_errors() {
-            let d = Compressed::new(Box::new(GreedyBytes), CompressionAlgorithm::Zlib);
+            let d = Compressed::new(Box::new(GreedyBytes.into()), CompressionAlgorithm::Zlib);
             let ctx = Context::new();
             assert!(d.sizeof(&ctx).is_err());
         }
 
         #[test]
         fn compressed_zlib_actually_compresses() {
-            let d = Compressed::new(Box::new(GreedyBytes), CompressionAlgorithm::Zlib);
+            let d = Compressed::new(Box::new(GreedyBytes.into()), CompressionAlgorithm::Zlib);
             let c: &dyn Construct = &d;
             // 100 zero bytes should compress very well
             let original = Value::Bytes(vec![0u8; 100]);
@@ -1798,9 +1808,9 @@ mod tests {
     #[test]
     fn checksum_build_computes_and_writes() {
         let d = Checksum::new(
-            Box::new(Bytes::new(1)),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
+            Box::new(Bytes::new(1).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
         );
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::None).unwrap();
@@ -1811,14 +1821,14 @@ mod tests {
     #[test]
     fn checksum_parse_validates() {
         let d = Checksum::new(
-            Box::new(Bytes::new(1)),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
+            Box::new(Bytes::new(1).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
         );
 
         // Valid checksum: 1+2+3=6
         let mut ctx = Context::new();
-        let mut stream = ByteStream::new_read(b"\x06");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x06"));
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Bytes(vec![6]));
     }
@@ -1826,14 +1836,14 @@ mod tests {
     #[test]
     fn checksum_parse_rejects_invalid() {
         let d = Checksum::new(
-            Box::new(Bytes::new(1)),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
+            Box::new(Bytes::new(1).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
         );
 
         // Invalid checksum: should be 6, not 99
         let mut ctx = Context::new();
-        let mut stream = ByteStream::new_read(b"\x63");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x63"));
         let result = d.parse(&mut stream, &mut ctx);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConstructError::Check { .. }));
@@ -1842,9 +1852,9 @@ mod tests {
     #[test]
     fn checksum_sizeof() {
         let d = Checksum::new(
-            Box::new(Bytes::new(4)),
-            Box::new(|data: &[u8]| data.to_vec()),
-            Box::new(|_ctx: &Context| Ok(vec![])),
+            Box::new(Bytes::new(4).into()),
+            Box::new(|data: &[u8]| data.to_vec().into()),
+            Box::new(|_ctx: &Context| Ok(vec![]).into()),
         );
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 4);
@@ -1853,9 +1863,9 @@ mod tests {
     #[test]
     fn checksum_flagbuildnone() {
         let d = Checksum::new(
-            Box::new(Bytes::new(1)),
-            Box::new(|data: &[u8]| data.to_vec()),
-            Box::new(|_ctx: &Context| Ok(vec![])),
+            Box::new(Bytes::new(1).into()),
+            Box::new(|data: &[u8]| data.to_vec().into()),
+            Box::new(|_ctx: &Context| Ok(vec![]).into()),
         );
         assert!(d.flagbuildnone());
     }
@@ -1866,7 +1876,7 @@ mod tests {
 
     #[test]
     fn byteswapped_parse_reverses_bytes() {
-        let d = ByteSwapped::new(Box::new(Bytes::new(4)));
+        let d = ByteSwapped::new(Box::new(Bytes::new(4).into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x01\x02\x03\x04").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![0x04, 0x03, 0x02, 0x01]));
@@ -1874,7 +1884,7 @@ mod tests {
 
     #[test]
     fn byteswapped_build_reverses_bytes() {
-        let d = ByteSwapped::new(Box::new(Bytes::new(4)));
+        let d = ByteSwapped::new(Box::new(Bytes::new(4).into()));
         let c: &dyn Construct = &d;
         let built = c
             .build_bytes(&Value::Bytes(vec![0x01, 0x02, 0x03, 0x04]))
@@ -1884,7 +1894,7 @@ mod tests {
 
     #[test]
     fn byteswapped_roundtrip() {
-        let d = ByteSwapped::new(Box::new(Bytes::new(4)));
+        let d = ByteSwapped::new(Box::new(Bytes::new(4).into()));
         let c: &dyn Construct = &d;
         let original = Value::Bytes(vec![0xAA, 0xBB, 0xCC, 0xDD]);
         let built = c.build_bytes(&original).unwrap();
@@ -1894,7 +1904,7 @@ mod tests {
 
     #[test]
     fn byteswapped_sizeof() {
-        let d = ByteSwapped::new(Box::new(Bytes::new(4)));
+        let d = ByteSwapped::new(Box::new(Bytes::new(4).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 4);
     }
@@ -1905,7 +1915,7 @@ mod tests {
 
     #[test]
     fn bitsswapped_parse_reverses_bits() {
-        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1)));
+        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1).into()));
         let c: &dyn Construct = &d;
         // 0xAA = 10101010 → reversed bits = 01010101 = 0x55
         let parsed = c.parse_bytes(b"\xaa").unwrap();
@@ -1914,7 +1924,7 @@ mod tests {
 
     #[test]
     fn bitsswapped_build_reverses_bits() {
-        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1)));
+        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(1).into()));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::Bytes(vec![0x55])).unwrap();
         assert_eq!(built, vec![0xAA]);
@@ -1922,7 +1932,7 @@ mod tests {
 
     #[test]
     fn bitsswapped_roundtrip() {
-        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(2)));
+        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(2).into()));
         let c: &dyn Construct = &d;
         let original = Value::Bytes(vec![0xAA, 0x55]);
         let built = c.build_bytes(&original).unwrap();
@@ -1932,7 +1942,7 @@ mod tests {
 
     #[test]
     fn bitsswapped_variable_size() {
-        let d = BitsSwapped::new_variable(Box::new(GreedyBytes));
+        let d = BitsSwapped::new_variable(Box::new(GreedyBytes.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\xf0\x0f").unwrap();
         // 0xF0 = 11110000 → 00001111 = 0x0F
@@ -1942,7 +1952,7 @@ mod tests {
 
     #[test]
     fn bitsswapped_sizeof() {
-        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(2)));
+        let d = BitsSwapped::new_fixed(Box::new(Bytes::new(2).into()));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 2);
     }
@@ -1980,7 +1990,7 @@ mod tests {
 
     #[test]
     fn lazybound_parse_delegates() {
-        let d = LazyBound::new(Box::new(|| Box::new(INT8UB)));
+        let d = LazyBound::new(Box::new(|| Box::new(INT8UB.into())));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x2a").unwrap();
         assert_eq!(parsed, Value::UInt(42));
@@ -1988,7 +1998,7 @@ mod tests {
 
     #[test]
     fn lazybound_build_delegates() {
-        let d = LazyBound::new(Box::new(|| Box::new(INT8UB)));
+        let d = LazyBound::new(Box::new(|| Box::new(INT8UB.into())));
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::UInt(42)).unwrap();
         assert_eq!(built, vec![42]);
@@ -1996,14 +2006,14 @@ mod tests {
 
     #[test]
     fn lazybound_sizeof_delegates() {
-        let d = LazyBound::new(Box::new(|| Box::new(INT8UB)));
+        let d = LazyBound::new(Box::new(|| Box::new(INT8UB.into())));
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 1);
     }
 
     #[test]
     fn lazybound_roundtrip() {
-        let d = LazyBound::new(Box::new(|| Box::new(INT8UB)));
+        let d = LazyBound::new(Box::new(|| Box::new(INT8UB.into())));
         let c: &dyn Construct = &d;
         let original = Value::UInt(200);
         let built = c.build_bytes(&original).unwrap();
@@ -2017,7 +2027,7 @@ mod tests {
 
     #[test]
     fn pointer_convenience_roundtrip() {
-        let d = Pointer::new(0, Box::new(U16Big));
+        let d = Pointer::new(0, Box::new(crate::combined::dynamic(U16Big)));
         let c: &dyn Construct = &d;
         let original = Value::UInt(0x1234);
         let built = c.build_bytes(&original).unwrap();
@@ -2027,10 +2037,10 @@ mod tests {
 
     #[test]
     fn peek_convenience_peek_twice() {
-        let peek1 = Peek::new(Box::new(INT8UB));
+        let peek1 = Peek::new(Box::new(INT8UB.into()));
         let data = b"\x0a\x0b";
 
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let first = peek1.parse(&mut stream, &mut ctx).unwrap();
         let second = peek1.parse(&mut stream, &mut ctx).unwrap();
@@ -2040,7 +2050,7 @@ mod tests {
 
     #[test]
     fn prefixed_empty_data() {
-        let d = Prefixed::new(Box::new(INT8UB), Box::new(GreedyBytes));
+        let d = Prefixed::new(Box::new(INT8UB.into()), Box::new(GreedyBytes.into()));
         let c: &dyn Construct = &d;
         let parsed = c.parse_bytes(b"\x00").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![]));

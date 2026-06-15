@@ -21,6 +21,7 @@
 
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -152,7 +153,7 @@ impl FormatField {
 }
 
 impl Construct for FormatField {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let n = self.byte_size();
         let data = stream.read_bytes(n)?;
 
@@ -202,7 +203,7 @@ impl Construct for FormatField {
         Ok(value)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let bytes = match self.kind {
             FormatKind::I8 => {
                 let v = data.to_i64()?;
@@ -548,14 +549,14 @@ mod tests {
 
     #[test]
     fn parse_int8ub_zero() {
-        let mut stream = ByteStream::new_read(b"\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00"));
         let mut ctx = Context::new();
         assert_eq!(INT8UB.parse(&mut stream, &mut ctx).unwrap(), Value::UInt(0));
     }
 
     #[test]
     fn parse_int8ub_max() {
-        let mut stream = ByteStream::new_read(b"\xFF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFF"));
         let mut ctx = Context::new();
         assert_eq!(
             INT8UB.parse(&mut stream, &mut ctx).unwrap(),
@@ -565,14 +566,14 @@ mod tests {
 
     #[test]
     fn parse_int8sb_negative() {
-        let mut stream = ByteStream::new_read(b"\xFF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFF"));
         let mut ctx = Context::new();
         assert_eq!(INT8SB.parse(&mut stream, &mut ctx).unwrap(), Value::Int(-1));
     }
 
     #[test]
     fn parse_int8sb_min() {
-        let mut stream = ByteStream::new_read(b"\x80");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x80"));
         let mut ctx = Context::new();
         assert_eq!(
             INT8SB.parse(&mut stream, &mut ctx).unwrap(),
@@ -582,7 +583,7 @@ mod tests {
 
     #[test]
     fn parse_int16ub() {
-        let mut stream = ByteStream::new_read(b"\x01\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x00"));
         let mut ctx = Context::new();
         assert_eq!(
             INT16UB.parse(&mut stream, &mut ctx).unwrap(),
@@ -592,7 +593,7 @@ mod tests {
 
     #[test]
     fn parse_int16sb_negative() {
-        let mut stream = ByteStream::new_read(b"\xFF\xFF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFF\xFF"));
         let mut ctx = Context::new();
         assert_eq!(
             INT16SB.parse(&mut stream, &mut ctx).unwrap(),
@@ -602,7 +603,7 @@ mod tests {
 
     #[test]
     fn parse_int32ub() {
-        let mut stream = ByteStream::new_read(b"\x00\x00\x01\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x01\x00"));
         let mut ctx = Context::new();
         assert_eq!(
             INT32UB.parse(&mut stream, &mut ctx).unwrap(),
@@ -612,7 +613,7 @@ mod tests {
 
     #[test]
     fn parse_int32sb_negative() {
-        let mut stream = ByteStream::new_read(b"\xFF\xFF\xFF\xFF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFF\xFF\xFF\xFF"));
         let mut ctx = Context::new();
         assert_eq!(
             INT32SB.parse(&mut stream, &mut ctx).unwrap(),
@@ -622,7 +623,8 @@ mod tests {
 
     #[test]
     fn parse_int64ub() {
-        let mut stream = ByteStream::new_read(b"\x00\x00\x00\x00\x00\x00\x01\x00");
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x00\x00\x00\x00\x01\x00"));
         let mut ctx = Context::new();
         assert_eq!(
             INT64UB.parse(&mut stream, &mut ctx).unwrap(),
@@ -632,7 +634,8 @@ mod tests {
 
     #[test]
     fn parse_int64sb_negative() {
-        let mut stream = ByteStream::new_read(b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF");
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(b"\xFF\xFF\xFF\xFF\xFF\xFF\xFF\xFF"));
         let mut ctx = Context::new();
         assert_eq!(
             INT64SB.parse(&mut stream, &mut ctx).unwrap(),
@@ -646,7 +649,7 @@ mod tests {
 
     #[test]
     fn parse_int16ul() {
-        let mut stream = ByteStream::new_read(b"\x00\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01"));
         let mut ctx = Context::new();
         assert_eq!(
             INT16UL.parse(&mut stream, &mut ctx).unwrap(),
@@ -656,7 +659,7 @@ mod tests {
 
     #[test]
     fn parse_int32ul() {
-        let mut stream = ByteStream::new_read(b"\x00\x01\x00\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x00\x00"));
         let mut ctx = Context::new();
         assert_eq!(
             INT32UL.parse(&mut stream, &mut ctx).unwrap(),
@@ -666,7 +669,8 @@ mod tests {
 
     #[test]
     fn parse_int64ul() {
-        let mut stream = ByteStream::new_read(b"\x00\x01\x00\x00\x00\x00\x00\x00");
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x01\x00\x00\x00\x00\x00\x00"));
         let mut ctx = Context::new();
         assert_eq!(
             INT64UL.parse(&mut stream, &mut ctx).unwrap(),
@@ -676,14 +680,14 @@ mod tests {
 
     #[test]
     fn parse_int8sl_negative() {
-        let mut stream = ByteStream::new_read(b"\xFE");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFE"));
         let mut ctx = Context::new();
         assert_eq!(INT8SL.parse(&mut stream, &mut ctx).unwrap(), Value::Int(-2));
     }
 
     #[test]
     fn parse_int16sl_negative() {
-        let mut stream = ByteStream::new_read(b"\xFE\xFF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\xFE\xFF"));
         let mut ctx = Context::new();
         assert_eq!(
             INT16SL.parse(&mut stream, &mut ctx).unwrap(),
@@ -697,7 +701,7 @@ mod tests {
 
     #[test]
     fn build_int8ub() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT8UB
             .build(&Value::UInt(42), &mut stream, &mut ctx)
@@ -707,7 +711,7 @@ mod tests {
 
     #[test]
     fn build_int8sb_negative() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT8SB
             .build(&Value::Int(-1), &mut stream, &mut ctx)
@@ -717,7 +721,7 @@ mod tests {
 
     #[test]
     fn build_int16ub() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT16UB
             .build(&Value::UInt(256), &mut stream, &mut ctx)
@@ -727,7 +731,7 @@ mod tests {
 
     #[test]
     fn build_int32ub() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT32UB
             .build(&Value::UInt(0xDEADBEEF), &mut stream, &mut ctx)
@@ -737,7 +741,7 @@ mod tests {
 
     #[test]
     fn build_int64ub() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT64UB
             .build(&Value::UInt(0x0102030405060708), &mut stream, &mut ctx)
@@ -754,7 +758,7 @@ mod tests {
 
     #[test]
     fn build_int16ul() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT16UL
             .build(&Value::UInt(256), &mut stream, &mut ctx)
@@ -764,7 +768,7 @@ mod tests {
 
     #[test]
     fn build_int32ul() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT32UL
             .build(&Value::UInt(0xDEADBEEF), &mut stream, &mut ctx)
@@ -774,7 +778,7 @@ mod tests {
 
     #[test]
     fn build_int64ul() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT64UL
             .build(&Value::UInt(0x0102030405060708), &mut stream, &mut ctx)
@@ -791,7 +795,7 @@ mod tests {
 
     #[test]
     fn parse_float32b() {
-        let mut stream = ByteStream::new_read(b"\x3F\x80\x00\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x3F\x80\x00\x00"));
         let mut ctx = Context::new();
         let result = FLOAT32B.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Float(1.0));
@@ -799,7 +803,8 @@ mod tests {
 
     #[test]
     fn parse_float64b() {
-        let mut stream = ByteStream::new_read(b"\x40\x09\x21\xFB\x54\x44\x2D\x18");
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(b"\x40\x09\x21\xFB\x54\x44\x2D\x18"));
         let mut ctx = Context::new();
         let result = FLOAT64B.parse(&mut stream, &mut ctx).unwrap();
         assert!((result.as_float().unwrap() - std::f64::consts::PI).abs() < 1e-10);
@@ -807,7 +812,7 @@ mod tests {
 
     #[test]
     fn build_float32b() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT32B
             .build(&Value::Float(1.0), &mut stream, &mut ctx)
@@ -817,7 +822,7 @@ mod tests {
 
     #[test]
     fn build_float64b() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT64B
             .build(&Value::Float(std::f64::consts::PI), &mut stream, &mut ctx)
@@ -828,7 +833,7 @@ mod tests {
 
     #[test]
     fn parse_float32l() {
-        let mut stream = ByteStream::new_read(b"\x00\x00\x80\x3F");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x00\x80\x3F"));
         let mut ctx = Context::new();
         let result = FLOAT32L.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Float(1.0));
@@ -836,7 +841,7 @@ mod tests {
 
     #[test]
     fn build_float32l() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT32L
             .build(&Value::Float(1.0), &mut stream, &mut ctx)
@@ -923,7 +928,7 @@ mod tests {
 
     #[test]
     fn parse_float16b_one() {
-        let mut stream = ByteStream::new_read(b"\x3C\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x3C\x00"));
         let mut ctx = Context::new();
         let result = FLOAT16B.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Float(1.0));
@@ -931,7 +936,7 @@ mod tests {
 
     #[test]
     fn build_float16b_one() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT16B
             .build(&Value::Float(1.0), &mut stream, &mut ctx)
@@ -941,7 +946,7 @@ mod tests {
 
     #[test]
     fn parse_float16l_one() {
-        let mut stream = ByteStream::new_read(b"\x00\x3C");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00\x3C"));
         let mut ctx = Context::new();
         let result = FLOAT16L.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::Float(1.0));
@@ -949,7 +954,7 @@ mod tests {
 
     #[test]
     fn build_float16l_one() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT16L
             .build(&Value::Float(1.0), &mut stream, &mut ctx)
@@ -1089,7 +1094,7 @@ mod tests {
 
     #[test]
     fn parse_insufficient_data_returns_stream_error() {
-        let mut stream = ByteStream::new_read(b"\x00");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00"));
         let mut ctx = Context::new();
         let err = INT32UB.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -1097,7 +1102,7 @@ mod tests {
 
     #[test]
     fn build_wrong_type_returns_type_mismatch() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = INT32UB
             .build(
@@ -1111,7 +1116,7 @@ mod tests {
 
     #[test]
     fn build_value_out_of_range_returns_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = INT8UB
             .build(&Value::UInt(256), &mut stream, &mut ctx)
@@ -1121,7 +1126,7 @@ mod tests {
 
     #[test]
     fn build_signed_out_of_range_returns_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = INT8SB
             .build(&Value::Int(128), &mut stream, &mut ctx)
@@ -1131,7 +1136,7 @@ mod tests {
 
     #[test]
     fn build_negative_for_unsigned_returns_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = INT8UB
             .build(&Value::Int(-1), &mut stream, &mut ctx)
@@ -1145,7 +1150,7 @@ mod tests {
         // uses to_i64/to_u64 which reject floats.
         // This is intentional: Python's struct auto-truncates, but we
         // require explicit types for safety.
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = INT8UB
             .build(&Value::Float(42.0), &mut stream, &mut ctx)
@@ -1160,11 +1165,11 @@ mod tests {
     #[test]
     fn byte_alias_is_int8ub() {
         let val = Value::UInt(42);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         BYTE.build(&val, &mut stream, &mut ctx).unwrap();
         let bytes = stream.into_bytes();
-        let mut stream2 = ByteStream::new_read(&bytes);
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
         let mut ctx2 = Context::new();
         assert_eq!(INT8UB.parse(&mut stream2, &mut ctx2).unwrap(), val);
     }
@@ -1230,7 +1235,7 @@ mod tests {
 
     #[test]
     fn build_int32_from_uint_value() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT32UB
             .build(&Value::UInt(42), &mut stream, &mut ctx)
@@ -1240,7 +1245,7 @@ mod tests {
 
     #[test]
     fn build_int32_from_int_value() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT32SB
             .build(&Value::Int(-1), &mut stream, &mut ctx)
@@ -1250,7 +1255,7 @@ mod tests {
 
     #[test]
     fn build_int8_from_bigint_value() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         INT8UB
             .build(&Value::BigInt(100), &mut stream, &mut ctx)
@@ -1265,7 +1270,7 @@ mod tests {
     #[test]
     fn build_float_from_int_value() {
         // to_f64() accepts all numeric types
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT32B
             .build(&Value::Int(1), &mut stream, &mut ctx)
@@ -1275,7 +1280,7 @@ mod tests {
 
     #[test]
     fn build_float_from_uint_value() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         FLOAT32B
             .build(&Value::UInt(1), &mut stream, &mut ctx)

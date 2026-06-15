@@ -16,9 +16,10 @@
 //! | [`Hex`] | `Hex` (line ~3523) |
 //! | [`HexDump`] | `HexDump` (line ~3583) |
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::Result;
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -48,7 +49,7 @@ use crate::value::Value;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let h = Hex::new(Box::new(INT32UB));
+/// let h = Hex::new(Box::new(INT32UB.into()));
 /// let c: &dyn Construct = &h;
 ///
 /// let parsed = c.parse_bytes(b"\x00\x00\x01\x02").unwrap();
@@ -59,7 +60,7 @@ use crate::value::Value;
 /// ```
 pub struct Hex {
     /// The inner construct whose value is displayed in hex.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Hex {
@@ -68,17 +69,17 @@ impl Hex {
     /// # Parameters
     ///
     /// - `subcon` — the inner construct to delegate parse/build to
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         Hex { subcon }
     }
 }
 
 impl Construct for Hex {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.subcon.build(data, stream, ctx)
     }
 
@@ -108,7 +109,7 @@ impl Construct for Hex {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let h = HexDump::new(Box::new(GreedyBytes::new()));
+/// let h = HexDump::new(Box::new(GreedyBytes::new().into()));
 /// let c: &dyn Construct = &h;
 ///
 /// let parsed = c.parse_bytes(b"\x00\x00\x01\x02").unwrap();
@@ -119,7 +120,7 @@ impl Construct for Hex {
 /// ```
 pub struct HexDump {
     /// The inner construct whose value is displayed as a hex dump.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl HexDump {
@@ -128,17 +129,17 @@ impl HexDump {
     /// # Parameters
     ///
     /// - `subcon` — the inner construct to delegate parse/build to
-    pub fn new(subcon: Box<dyn Construct>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>) -> Self {
         HexDump { subcon }
     }
 }
 
 impl Construct for HexDump {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.subcon.build(data, stream, ctx)
     }
 
@@ -159,8 +160,8 @@ mod tests {
     use crate::core::error::ConstructError;
 
     /// Helper: creates a U32 big-endian construct for tests.
-    fn u32be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U32))
+    fn u32be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U32).into())
     }
 
     // ======================================================================
@@ -220,7 +221,7 @@ mod tests {
 
     #[test]
     fn hex_with_bytes_subcon() {
-        let h = Hex::new(Box::new(Bytes::new(4)));
+        let h = Hex::new(Box::new(Bytes::new(4).into()));
         let c: &dyn Construct = &h;
         let parsed = c.parse_bytes(b"\xDE\xAD\xBE\xEF").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]));
@@ -237,7 +238,7 @@ mod tests {
 
     #[test]
     fn hexdump_parse_returns_raw_value() {
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let c: &dyn Construct = &h;
         let parsed = c.parse_bytes(b"\x00\x00\x01\x02").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![0x00, 0x00, 0x01, 0x02]));
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn hexdump_build_passes_value_through() {
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let c: &dyn Construct = &h;
         let bytes = c
             .build_bytes(&Value::Bytes(vec![0xDE, 0xAD, 0xBE, 0xEF]))
@@ -255,7 +256,7 @@ mod tests {
 
     #[test]
     fn hexdump_roundtrip() {
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let c: &dyn Construct = &h;
         let original = Value::Bytes(vec![0x00, 0x01, 0x02, 0x03, 0x04]);
         let bytes = c.build_bytes(&original).unwrap();
@@ -265,7 +266,7 @@ mod tests {
 
     #[test]
     fn hexdump_sizeof_returns_error_for_greedy() {
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let ctx = Context::new();
         let err = h.sizeof(&ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
@@ -273,14 +274,14 @@ mod tests {
 
     #[test]
     fn hexdump_sizeof_delegates_for_fixed() {
-        let h = HexDump::new(Box::new(Bytes::new(8)));
+        let h = HexDump::new(Box::new(Bytes::new(8).into()));
         let ctx = Context::new();
         assert_eq!(h.sizeof(&ctx).unwrap(), 8);
     }
 
     #[test]
     fn hexdump_parse_empty_data() {
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let c: &dyn Construct = &h;
         let parsed = c.parse_bytes(b"").unwrap();
         assert_eq!(parsed, Value::Bytes(vec![]));
@@ -289,7 +290,7 @@ mod tests {
     #[test]
     fn hexdump_build_error_propagates() {
         // GreedyBytes expects Bytes value; pass a non-bytes to trigger error
-        let h = HexDump::new(Box::new(GreedyBytes::new()));
+        let h = HexDump::new(Box::new(GreedyBytes::new().into()));
         let c: &dyn Construct = &h;
         let err = c.build_bytes(&Value::Int(42)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));

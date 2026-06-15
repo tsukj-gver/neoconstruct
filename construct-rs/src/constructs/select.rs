@@ -21,8 +21,8 @@
 //! use construct::value::Value;
 //!
 //! let s = Select::new(vec![
-//!     Box::new(INT32UB),
-//!     Box::new(Bytes::new(4)),
+//!     INT32UB.into(),
+//!     Bytes::new(4).into(),
 //! ]);
 //!
 //! let c: &dyn Construct = &s;
@@ -31,8 +31,10 @@
 //! assert_eq!(parsed, Value::UInt(42));
 //! ```
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -58,7 +60,7 @@ use crate::value::Value;
 /// Corresponds to Python `Select`.
 pub struct Select {
     /// The list of sub-constructs to try in order.
-    subcons: Vec<Box<dyn Construct>>,
+    subcons: Vec<CombinedConstruct>,
 }
 
 impl Select {
@@ -72,11 +74,11 @@ impl Select {
     /// use construct::constructs::meta::Pass;
     ///
     /// let s = Select::new(vec![
-    ///     Box::new(INT8UB),
-    ///     Box::new(Pass::new()),
+    ///     INT8UB.into(),
+    ///     Pass::new().into(),
     /// ]);
     /// ```
-    pub fn new(subcons: Vec<Box<dyn Construct>>) -> Self {
+    pub fn new(subcons: Vec<CombinedConstruct>) -> Self {
         Select { subcons }
     }
 
@@ -88,16 +90,16 @@ impl Select {
     /// use construct::constructs::select::Select;
     /// use construct::constructs::format_field::INT8UB;
     ///
-    /// let s = Select::new(vec![]).push(Box::new(INT8UB));
+    /// let s = Select::new(vec![]).push(INT8UB);
     /// ```
-    pub fn push(mut self, subcon: Box<dyn Construct>) -> Self {
-        self.subcons.push(subcon);
+    pub fn push(mut self, subcon: impl Into<CombinedConstruct>) -> Self {
+        self.subcons.push(subcon.into());
         self
     }
 }
 
 impl Construct for Select {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let fallback = stream.tell()?;
 
         for sc in &self.subcons {
@@ -125,11 +127,12 @@ impl Construct for Select {
         })
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Try building each subconstruct into an internal buffer.
         // The first one that succeeds gets written to the actual stream.
         for sc in &self.subcons {
-            let mut build_stream = crate::core::stream::ByteStream::new_write();
+            let mut build_stream =
+                CombinedStream::ByteStream(crate::core::stream::ByteStream::new_write());
             match sc.build(data, &mut build_stream, ctx) {
                 Ok(()) => {
                     let bytes = build_stream.into_bytes();
@@ -176,6 +179,8 @@ mod tests {
     use crate::constructs::format_field::{INT16UB, INT32UB, INT8UB};
     use crate::constructs::meta::Pass;
     use crate::core::error::ConstructError;
+    use crate::core::stream::ByteStream;
+    use crate::core::stream::Stream;
     use crate::core::Construct;
 
     macro_rules! as_dyn {
@@ -190,7 +195,7 @@ mod tests {
 
     #[test]
     fn parse_first_matching_subcon() {
-        let s = Select::new(vec![Box::new(INT32UB), Box::new(Bytes::new(4))]);
+        let s = Select::new(vec![INT32UB.into(), Bytes::new(4).into()]);
         let result = as_dyn!(s).parse_bytes(b"\x00\x00\x00\x2A").unwrap();
         assert_eq!(result, Value::UInt(42));
     }
@@ -201,14 +206,14 @@ mod tests {
         // Actually, let's use two different formats where first fails on data.
         // A simpler approach: use INT32UB which needs 4 bytes, and Bytes(1).
         // With only 1 byte, INT32UB fails, Bytes(1) succeeds.
-        let s = Select::new(vec![Box::new(INT32UB), Box::new(Bytes::new(1))]);
+        let s = Select::new(vec![INT32UB.into(), Bytes::new(1).into()]);
         let result = as_dyn!(s).parse_bytes(b"\x2A").unwrap();
         assert_eq!(result, Value::Bytes(vec![0x2A]));
     }
 
     #[test]
     fn parse_all_fail_returns_select_error() {
-        let s = Select::new(vec![Box::new(INT32UB), Box::new(INT16UB)]);
+        let s = Select::new(vec![INT32UB.into(), INT16UB.into()]);
         let err = as_dyn!(s).parse_bytes(b"\x01").unwrap_err();
         assert!(matches!(err, ConstructError::Select { .. }));
     }
@@ -217,11 +222,12 @@ mod tests {
     fn parse_rewinds_stream_on_failure() {
         // If first subcon fails, stream is rewound before trying second
         let s = Select::new(vec![
-            Box::new(INT32UB), // needs 4 bytes
-            Box::new(INT8UB),  // needs 1 byte
+            INT32UB.into(), // needs 4 bytes
+            INT8UB.into(),  // needs 1 byte
         ]);
         let data = b"\x2A";
-        let mut stream = crate::core::stream::ByteStream::new_read(data);
+        let mut stream =
+            crate::core::stream::CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let c: &dyn Construct = &s;
         let result = c.parse(&mut stream, &mut ctx).unwrap();
@@ -241,7 +247,7 @@ mod tests {
     #[test]
     fn parse_pass_subcon_succeeds_on_empty() {
         // Select(INT8UB, Pass) on empty data -> Pass matches
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
         let result = as_dyn!(s).parse_bytes(b"").unwrap();
         assert_eq!(result, Value::None);
     }
@@ -252,7 +258,7 @@ mod tests {
 
     #[test]
     fn build_first_matching_subcon() {
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Bytes::new(1))]);
+        let s = Select::new(vec![INT8UB.into(), Bytes::new(1).into()]);
         // INT8UB can build from UInt(42)
         let built = as_dyn!(s).build_bytes(&Value::UInt(42)).unwrap();
         assert_eq!(built, vec![42]);
@@ -260,7 +266,7 @@ mod tests {
 
     #[test]
     fn build_falls_through_to_second_subcon() {
-        let s = Select::new(vec![Box::new(INT32UB), Box::new(Bytes::new(3))]);
+        let s = Select::new(vec![INT32UB.into(), Bytes::new(3).into()]);
         // INT32UB can build from UInt(42) -> succeeds
         let built = as_dyn!(s).build_bytes(&Value::UInt(42)).unwrap();
         assert_eq!(built, vec![0, 0, 0, 42]);
@@ -268,7 +274,7 @@ mod tests {
 
     #[test]
     fn build_all_fail_returns_select_error() {
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(INT16UB)]);
+        let s = Select::new(vec![INT8UB.into(), INT16UB.into()]);
         // Both will fail on a string value
         let err = as_dyn!(s)
             .build_bytes(&Value::Bytes(vec![1, 2]))
@@ -289,7 +295,7 @@ mod tests {
 
     #[test]
     fn sizeof_returns_error() {
-        let s = Select::new(vec![Box::new(INT8UB)]);
+        let s = Select::new(vec![INT8UB.into()]);
         let err = s.sizeof(&Context::new()).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
     }
@@ -300,13 +306,13 @@ mod tests {
 
     #[test]
     fn flagbuildnone_true_if_any_subcon_is_build_none() {
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
         assert!(s.flagbuildnone());
     }
 
     #[test]
     fn flagbuildnone_false_if_all_subcons_require_value() {
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(INT16UB)]);
+        let s = Select::new(vec![INT8UB.into(), INT16UB.into()]);
         assert!(!s.flagbuildnone());
     }
 
@@ -322,7 +328,7 @@ mod tests {
 
     #[test]
     fn roundtrip_build_then_parse() {
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
 
         let c: &dyn Construct = &s;
         let built = c.build_bytes(&Value::UInt(0x42)).unwrap();
@@ -337,7 +343,7 @@ mod tests {
     #[test]
     fn optional_pattern_parse_succeeds() {
         // Select(INT8UB, Pass) matches valid data
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
         let result = as_dyn!(s).parse_bytes(b"\x2A").unwrap();
         assert_eq!(result, Value::UInt(42));
     }
@@ -345,7 +351,7 @@ mod tests {
     #[test]
     fn optional_pattern_parse_returns_none_on_empty() {
         // Select(INT8UB, Pass) on empty data -> INT8UB fails, Pass succeeds
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
         let result = as_dyn!(s).parse_bytes(b"").unwrap();
         assert_eq!(result, Value::None);
     }
@@ -353,7 +359,7 @@ mod tests {
     #[test]
     fn optional_pattern_build_none() {
         // Select(INT8UB, Pass) build None -> INT8UB fails, Pass succeeds
-        let s = Select::new(vec![Box::new(INT8UB), Box::new(Pass::new())]);
+        let s = Select::new(vec![INT8UB.into(), Pass::new().into()]);
         let built = as_dyn!(s).build_bytes(&Value::None).unwrap();
         assert!(built.is_empty());
     }

@@ -14,9 +14,10 @@
 
 use indexmap::IndexMap;
 
+use crate::combined::CombinedConstruct;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -43,7 +44,7 @@ use crate::value::Value;
 /// use construct::value::Value;
 ///
 /// let e = Enum::new(
-///     Box::new(INT8UB),
+///     Box::new(INT8UB.into()),
 ///     [("one".to_string(), 1), ("two".to_string(), 2), ("four".to_string(), 4)].into_iter().collect(),
 /// );
 ///
@@ -59,7 +60,7 @@ use crate::value::Value;
 /// ```
 pub struct Enum {
     /// The inner construct that reads/writes the raw integer.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Encoding map: label name → integer value.
     pub mapping: IndexMap<String, u64>,
     /// Decoding map: integer value → label name.
@@ -81,9 +82,9 @@ impl Enum {
     /// let mut mapping = indexmap::IndexMap::new();
     /// mapping.insert("yes".to_string(), 1);
     /// mapping.insert("no".to_string(), 0);
-    /// let e = Enum::new(Box::new(INT8UB), mapping);
+    /// let e = Enum::new(Box::new(INT8UB.into()), mapping);
     /// ```
-    pub fn new(subcon: Box<dyn Construct>, mapping: IndexMap<String, u64>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, mapping: IndexMap<String, u64>) -> Self {
         let decmap: IndexMap<u64, String> = mapping
             .iter()
             .map(|(name, &value)| (value, name.clone()))
@@ -102,7 +103,7 @@ impl Construct for Enum {
     ///
     /// If the parsed integer has a mapping, returns [`Value::String`].
     /// If not, returns the raw integer value unchanged (default mapping).
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let obj = self.subcon.parse(stream, ctx)?;
         let int_val = obj.to_u64().map_err(|e| e.with_path_prefix("Enum"))?;
         match self.decmap.get(&int_val) {
@@ -120,7 +121,7 @@ impl Construct for Enum {
     ///
     /// Returns [`ConstructError::Mapping`] if a string label is not found
     /// in the encoding map.
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let build_val = match data {
             Value::String(label) => match self.mapping.get(label) {
                 Some(&v) => Value::UInt(v),
@@ -176,7 +177,7 @@ impl Construct for Enum {
 /// flags.insert("read".to_string(), 1);
 /// flags.insert("write".to_string(), 2);
 /// flags.insert("exec".to_string(), 4);
-/// let fe = FlagsEnum::new(Box::new(INT8UB), flags);
+/// let fe = FlagsEnum::new(Box::new(INT8UB.into()), flags);
 ///
 /// // Parse 0b101 → read=true, write=false, exec=true
 /// let parsed = (&fe as &dyn Construct).parse_bytes(b"\x05").unwrap();
@@ -187,7 +188,7 @@ impl Construct for Enum {
 /// ```
 pub struct FlagsEnum {
     /// The inner construct that reads/writes the raw integer.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Mapping of flag names to their integer bit values.
     pub flags: IndexMap<String, u64>,
 }
@@ -205,9 +206,9 @@ impl FlagsEnum {
     /// let mut flags = IndexMap::new();
     /// flags.insert("a".to_string(), 1);
     /// flags.insert("b".to_string(), 2);
-    /// let fe = FlagsEnum::new(Box::new(INT8UB), flags);
+    /// let fe = FlagsEnum::new(Box::new(INT8UB.into()), flags);
     /// ```
-    pub fn new(subcon: Box<dyn Construct>, flags: IndexMap<String, u64>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, flags: IndexMap<String, u64>) -> Self {
         FlagsEnum { subcon, flags }
     }
 }
@@ -218,7 +219,7 @@ impl Construct for FlagsEnum {
     /// For each flag in `flags`, the corresponding entry in the returned
     /// container is `true` if `(value & flag_value) == flag_value`, and
     /// `false` otherwise.
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let obj = self.subcon.parse(stream, ctx)?;
         let int_val = obj.to_u64().map_err(|e| e.with_path_prefix("FlagsEnum"))?;
 
@@ -242,7 +243,7 @@ impl Construct for FlagsEnum {
     /// not found in the flags mapping.
     /// Returns [`ConstructError::TypeMismatch`] if `data` is not a
     /// [`Value::Container`].
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let container = data
             .as_container()
             .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
@@ -312,7 +313,7 @@ impl Construct for FlagsEnum {
 ///     (Value::String("A".to_string()), Value::UInt(0)),
 ///     (Value::String("B".to_string()), Value::UInt(1)),
 /// ];
-/// let m = Mapping::new(Box::new(INT8UB), mapping);
+/// let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 ///
 /// // Parse: 0 → "A"
 /// assert_eq!((&m as &dyn Construct).parse_bytes(b"\x00").unwrap(), Value::String("A".to_string()));
@@ -321,7 +322,7 @@ impl Construct for FlagsEnum {
 /// ```
 pub struct Mapping {
     /// The inner construct used for reading/writing raw values.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Forward (encoding) pairs: (build key, build value passed to subcon).
     pub mapping: Vec<(Value, Value)>,
     /// Reverse (decoding) pairs: (parsed value from subcon, return value).
@@ -346,9 +347,9 @@ impl Mapping {
     ///     (Value::String("on".to_string()), Value::UInt(1)),
     ///     (Value::String("off".to_string()), Value::UInt(0)),
     /// ];
-    /// let m = Mapping::new(Box::new(INT8UB), mapping);
+    /// let m = Mapping::new(Box::new(INT8UB.into()), mapping);
     /// ```
-    pub fn new(subcon: Box<dyn Construct>, mapping: Vec<(Value, Value)>) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, mapping: Vec<(Value, Value)>) -> Self {
         let decmapping: Vec<(Value, Value)> = mapping
             .iter()
             .map(|(k, v)| (v.clone(), k.clone()))
@@ -393,7 +394,7 @@ impl Construct for Mapping {
     ///
     /// Returns [`ConstructError::Mapping`] if the parsed value is not found
     /// in the decoding map.
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let obj = self.subcon.parse(stream, ctx)?;
         match self.find_decoded(&obj) {
             Some(decoded) => Ok(decoded.clone()),
@@ -412,7 +413,7 @@ impl Construct for Mapping {
     ///
     /// Returns [`ConstructError::Mapping`] if `data` is not found in the
     /// encoding map.
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         match self.find_encoded(data) {
             Some(encoded) => self
                 .subcon
@@ -468,7 +469,7 @@ mod tests {
     #[test]
     fn enum_new_builds_decmap() {
         let mapping = make_mapping(&[("one", 1), ("two", 2)]);
-        let e = Enum::new(Box::new(INT8UB), mapping);
+        let e = Enum::new(Box::new(INT8UB.into()), mapping);
         assert_eq!(e.decmap.get(&1), Some(&"one".to_string()));
         assert_eq!(e.decmap.get(&2), Some(&"two".to_string()));
         assert_eq!(e.decmap.get(&99), None);
@@ -478,7 +479,10 @@ mod tests {
 
     #[test]
     fn enum_parse_mapped_returns_string() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let result = as_dyn!(e).parse_bytes(b"\x01").unwrap();
         assert_eq!(result, Value::String("one".to_string()));
     }
@@ -486,7 +490,7 @@ mod tests {
     #[test]
     fn enum_parse_mapped_returns_correct_label() {
         let e = Enum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("alpha", 10), ("beta", 20)]),
         );
         let result = as_dyn!(e).parse_bytes(b"\x14").unwrap();
@@ -497,14 +501,17 @@ mod tests {
 
     #[test]
     fn enum_parse_unmapped_returns_raw_integer() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let result = as_dyn!(e).parse_bytes(b"\xFF").unwrap();
         assert_eq!(result, Value::UInt(255));
     }
 
     #[test]
     fn enum_parse_zero_unmapped_returns_zero() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let result = as_dyn!(e).parse_bytes(b"\x00").unwrap();
         assert_eq!(result, Value::UInt(0));
     }
@@ -513,7 +520,7 @@ mod tests {
 
     #[test]
     fn enum_parse_with_int16() {
-        let e = Enum::new(Box::new(INT16UB), make_mapping(&[("big", 1000)]));
+        let e = Enum::new(Box::new(INT16UB.into()), make_mapping(&[("big", 1000)]));
         let result = as_dyn!(e).parse_bytes(b"\x03\xe8").unwrap();
         assert_eq!(result, Value::String("big".to_string()));
     }
@@ -522,7 +529,7 @@ mod tests {
 
     #[test]
     fn enum_parse_insufficient_data_returns_stream_error() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let err = as_dyn!(e).parse_bytes(b"").unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));
     }
@@ -531,7 +538,10 @@ mod tests {
 
     #[test]
     fn enum_build_from_string_label() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let built = as_dyn!(e)
             .build_bytes(&Value::String("one".to_string()))
             .unwrap();
@@ -540,7 +550,10 @@ mod tests {
 
     #[test]
     fn enum_build_from_string_label_two() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let built = as_dyn!(e)
             .build_bytes(&Value::String("two".to_string()))
             .unwrap();
@@ -551,14 +564,17 @@ mod tests {
 
     #[test]
     fn enum_build_from_uint_passthrough() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let built = as_dyn!(e).build_bytes(&Value::UInt(5)).unwrap();
         assert_eq!(built, vec![5]);
     }
 
     #[test]
     fn enum_build_from_int_passthrough() {
-        let e = Enum::new(Box::new(INT8SB), make_mapping(&[("neg", 200)]));
+        let e = Enum::new(Box::new(INT8SB.into()), make_mapping(&[("neg", 200)]));
         // Build with a signed integer value that's not in the mapping
         let built = as_dyn!(e).build_bytes(&Value::Int(-10)).unwrap();
         assert_eq!(built, vec![0xF6]); // -10 as u8 = 246 = 0xF6
@@ -568,7 +584,7 @@ mod tests {
 
     #[test]
     fn enum_build_unknown_string_returns_mapping_error() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let err = as_dyn!(e)
             .build_bytes(&Value::String("unknown".to_string()))
             .unwrap_err();
@@ -580,7 +596,7 @@ mod tests {
 
     #[test]
     fn enum_build_error_has_enum_path() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let err = as_dyn!(e)
             .build_bytes(&Value::String("nope".to_string()))
             .unwrap_err();
@@ -591,13 +607,13 @@ mod tests {
 
     #[test]
     fn enum_sizeof_delegates_to_subcon() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         assert_eq!(e.sizeof(&Context::new()).unwrap(), 1);
     }
 
     #[test]
     fn enum_sizeof_int16() {
-        let e = Enum::new(Box::new(INT16UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT16UB.into()), make_mapping(&[("one", 1)]));
         assert_eq!(e.sizeof(&Context::new()).unwrap(), 2);
     }
 
@@ -605,7 +621,10 @@ mod tests {
 
     #[test]
     fn enum_roundtrip_mapped() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let e = Enum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let built = as_dyn!(e)
             .build_bytes(&Value::String("one".to_string()))
             .unwrap();
@@ -615,7 +634,7 @@ mod tests {
 
     #[test]
     fn enum_roundtrip_unmapped_integer() {
-        let e = Enum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let e = Enum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let built = as_dyn!(e).build_bytes(&Value::UInt(42)).unwrap();
         let parsed = as_dyn!(e).parse_bytes(&built).unwrap();
         assert_eq!(parsed, Value::UInt(42));
@@ -630,7 +649,7 @@ mod tests {
     #[test]
     fn flags_enum_new_stores_flags() {
         let flags = make_mapping(&[("read", 1), ("write", 2)]);
-        let fe = FlagsEnum::new(Box::new(INT8UB), flags);
+        let fe = FlagsEnum::new(Box::new(INT8UB.into()), flags);
         assert_eq!(fe.flags.len(), 2);
         assert_eq!(fe.flags.get("read"), Some(&1));
         assert_eq!(fe.flags.get("write"), Some(&2));
@@ -641,7 +660,7 @@ mod tests {
     #[test]
     fn flags_enum_parse_all_set() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
         let parsed = as_dyn!(fe).parse_bytes(b"\x07").unwrap();
@@ -654,7 +673,7 @@ mod tests {
     #[test]
     fn flags_enum_parse_none_set() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
         let parsed = as_dyn!(fe).parse_bytes(b"\x00").unwrap();
@@ -667,7 +686,7 @@ mod tests {
     #[test]
     fn flags_enum_parse_partial() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
         let parsed = as_dyn!(fe).parse_bytes(b"\x05").unwrap(); // 0b101 = one + four
@@ -682,7 +701,7 @@ mod tests {
     #[test]
     fn flags_enum_parse_preserves_order() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("alpha", 1), ("beta", 2), ("gamma", 4)]),
         );
         let parsed = as_dyn!(fe).parse_bytes(b"\x03").unwrap();
@@ -697,7 +716,10 @@ mod tests {
 
     #[test]
     fn flags_enum_parse_extra_bits_ignored() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let fe = FlagsEnum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         // 0xFF has many bits set but only flags 1 and 2 are defined
         let parsed = as_dyn!(fe).parse_bytes(b"\xFF").unwrap();
         let container = parsed.as_container().unwrap();
@@ -710,7 +732,7 @@ mod tests {
     #[test]
     fn flags_enum_build_basic() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
         let mut container = IndexMap::new();
@@ -725,7 +747,10 @@ mod tests {
 
     #[test]
     fn flags_enum_build_all_false() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let fe = FlagsEnum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let mut container = IndexMap::new();
         container.insert("one".to_string(), Value::Bool(false));
         container.insert("two".to_string(), Value::Bool(false));
@@ -738,7 +763,7 @@ mod tests {
     #[test]
     fn flags_enum_build_all_true() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
         let mut container = IndexMap::new();
@@ -755,7 +780,10 @@ mod tests {
 
     #[test]
     fn flags_enum_build_skips_underscore_keys() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1), ("two", 2)]));
+        let fe = FlagsEnum::new(
+            Box::new(INT8UB.into()),
+            make_mapping(&[("one", 1), ("two", 2)]),
+        );
         let mut container = IndexMap::new();
         container.insert("one".to_string(), Value::Bool(true));
         container.insert("_flagsenum".to_string(), Value::Bool(true));
@@ -770,7 +798,7 @@ mod tests {
 
     #[test]
     fn flags_enum_build_unknown_flag_returns_mapping_error() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let fe = FlagsEnum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let mut container = IndexMap::new();
         container.insert("one".to_string(), Value::Bool(true));
         container.insert("unknown".to_string(), Value::Bool(true));
@@ -785,7 +813,7 @@ mod tests {
 
     #[test]
     fn flags_enum_build_non_container_returns_type_mismatch() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let fe = FlagsEnum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         let err = as_dyn!(fe).build_bytes(&Value::UInt(3)).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));
         assert_eq!(err.path(), "(building).FlagsEnum");
@@ -795,7 +823,7 @@ mod tests {
 
     #[test]
     fn flags_enum_sizeof_delegates_to_subcon() {
-        let fe = FlagsEnum::new(Box::new(INT8UB), make_mapping(&[("one", 1)]));
+        let fe = FlagsEnum::new(Box::new(INT8UB.into()), make_mapping(&[("one", 1)]));
         assert_eq!(fe.sizeof(&Context::new()).unwrap(), 1);
     }
 
@@ -804,7 +832,7 @@ mod tests {
     #[test]
     fn flags_enum_roundtrip() {
         let fe = FlagsEnum::new(
-            Box::new(INT8UB),
+            Box::new(INT8UB.into()),
             make_mapping(&[("one", 1), ("two", 2), ("four", 4)]),
         );
 
@@ -836,7 +864,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         // decmapping: (UInt(0), String("A")), (UInt(1), String("B"))
         assert_eq!(
@@ -857,7 +885,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let result = as_dyn!(m).parse_bytes(b"\x00").unwrap();
         assert_eq!(result, Value::String("A".to_string()));
@@ -869,7 +897,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let result = as_dyn!(m).parse_bytes(b"\x01").unwrap();
         assert_eq!(result, Value::String("B".to_string()));
@@ -880,7 +908,7 @@ mod tests {
     #[test]
     fn mapping_parse_unmapped_returns_mapping_error() {
         let mapping = vec![(Value::String("A".to_string()), Value::UInt(0))];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let err = as_dyn!(m).parse_bytes(b"\xFF").unwrap_err();
         assert!(matches!(err, ConstructError::Mapping { .. }));
@@ -895,7 +923,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let built = as_dyn!(m)
             .build_bytes(&Value::String("A".to_string()))
@@ -909,7 +937,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let built = as_dyn!(m)
             .build_bytes(&Value::String("B".to_string()))
@@ -922,7 +950,7 @@ mod tests {
     #[test]
     fn mapping_build_unmapped_returns_mapping_error() {
         let mapping = vec![(Value::String("A".to_string()), Value::UInt(0))];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let err = as_dyn!(m)
             .build_bytes(&Value::String("Z".to_string()))
@@ -936,7 +964,7 @@ mod tests {
     #[test]
     fn mapping_build_subcon_error_propagates() {
         let mapping = vec![(Value::String("A".to_string()), Value::UInt(256))];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         // 256 doesn't fit in u8 → FormatField error
         let err = as_dyn!(m)
@@ -951,14 +979,14 @@ mod tests {
     #[test]
     fn mapping_sizeof_delegates_to_subcon() {
         let mapping = vec![(Value::String("A".to_string()), Value::UInt(0))];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
         assert_eq!(m.sizeof(&Context::new()).unwrap(), 1);
     }
 
     #[test]
     fn mapping_sizeof_int16() {
         let mapping = vec![(Value::String("A".to_string()), Value::UInt(0))];
-        let m = Mapping::new(Box::new(INT16UB), mapping);
+        let m = Mapping::new(Box::new(INT16UB.into()), mapping);
         assert_eq!(m.sizeof(&Context::new()).unwrap(), 2);
     }
 
@@ -970,7 +998,7 @@ mod tests {
             (Value::String("A".to_string()), Value::UInt(0)),
             (Value::String("B".to_string()), Value::UInt(1)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         let built = as_dyn!(m)
             .build_bytes(&Value::String("B".to_string()))
@@ -987,7 +1015,7 @@ mod tests {
             (Value::Int(10), Value::UInt(100)),
             (Value::Int(20), Value::UInt(200)),
         ];
-        let m = Mapping::new(Box::new(INT8UB), mapping);
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
 
         // Parse: UInt(100) → Int(10)
         let parsed = as_dyn!(m).parse_bytes(b"\x64").unwrap();
@@ -1002,14 +1030,14 @@ mod tests {
 
     #[test]
     fn mapping_empty_parse_fails() {
-        let m = Mapping::new(Box::new(INT8UB), vec![]);
+        let m = Mapping::new(Box::new(INT8UB.into()), vec![]);
         let err = as_dyn!(m).parse_bytes(b"\x00").unwrap_err();
         assert!(matches!(err, ConstructError::Mapping { .. }));
     }
 
     #[test]
     fn mapping_empty_build_fails() {
-        let m = Mapping::new(Box::new(INT8UB), vec![]);
+        let m = Mapping::new(Box::new(INT8UB.into()), vec![]);
         let err = as_dyn!(m).build_bytes(&Value::UInt(0)).unwrap_err();
         assert!(matches!(err, ConstructError::Mapping { .. }));
     }

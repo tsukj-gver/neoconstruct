@@ -1,7 +1,7 @@
 # AGENTS.md
 
 > 本文档包含 construct-rs 项目中所有角色在任何任务、任何状态下都必须知晓的信息。
-> 无论你被分配为何种角色（PM / ARCH / DEV / REF / REV），开始工作前必须阅读并遵守本文档。
+> 无论你被分配为何种角色（PM / ARCH / DEV / REV / VET），开始工作前必须阅读并遵守本文档。
 
 ---
 
@@ -52,36 +52,36 @@ construct_rust/
 每个子任务严格按以下管道流转，不可跳步：
 
 ```
-PENDING → DESIGNING → CODING → VERIFYING → REVIEWING → ACCEPTED
- (PM)      (ARCH)      (DEV)     (REF)       (REV)       (PM)
+PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
+ (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)
 ```
 
 - **PENDING**：PM 从总纲选取任务
 - **DESIGNING**：ARCH 编写/确认模块设计文档
+- **DESIGN_REVIEW**：REV 检视设计的延续性、性能、整体性、可行性、完备性
 - **CODING**：DEV 编码 + 单元测试 + 自检
-- **VERIFYING**：REF 对照 Python 版本验证行为一致性
-- **REVIEWING**：REV 审查代码逻辑、安全、质量
+- **CODE_REVIEW**：VET 审查代码逻辑、行为一致性、错误处理、安全、边界条件
 - **ACCEPTED**：PM 确认完成
 
-**驳回规则**：REF 或 REV 可驳回至 CODING；ARCH 可驳回至 DESIGNING。驳回必须附具体原因。
+**驳回规则**：REV 可驳回至 DESIGNING；VET 可驳回至 CODING。驳回必须附具体原因。
 
-**角色隔离**：同一子任务中，DEV 不得兼任 REF 或 REV。
+**角色隔离**：同一子任务中，DEV 不得兼任 REV 或 VET。REV（设计检视）和 VET（代码审查）必须是不同 agent，避免确认偏误。
 
-**简化流程**：对于 `trivial` 性质的子任务（如项目初始化、纯文档更新），PM 可标注为 trivial，跳过 DESIGNING 和 VERIFYING 阶段，仅走 CODING → REVIEWING。REF 验证和 ARCH 设计在 trivial 任务中不强制。
+**简化流程**：对于 `trivial` 性质的子任务（如项目初始化、纯文档更新），PM 可标注为 trivial，跳过 DESIGNING 和 DESIGN_REVIEW 阶段，仅走 CODING → CODE_REVIEW。
 
-**合并设计**：关联紧密的多个子任务（如 Value 类型 + Context 容器），PM 可合并为一次 ARCH 分派，产出一份合并的模块设计文档。
+**合并设计**：关联紧密的多个子任务，PM 可合并为一次 ARCH 分派，产出一份合并的模块设计文档。
 
-**设计质疑（Argue 机制）**：任何角色在执行任务过程中发现设计文档存在不合理、冲突或遗漏时，可向 PM 提出质疑。PM 将质疑转发给 ARCH，ARCH 必须回应（确认设计正确并附解释、修改设计文档、或标记为后续处理）。质疑和回复都记录在过程记录中。详见 `docs/workflow/工作流文档.md`。
+**设计质疑（Argue 机制）**：任何角色在执行任务过程中发现设计文档存在不合理、冲突或遗漏时，可向 PM 提出质疑。PM 将质疑转发给 ARCH，ARCH 必须回应。详见 `docs/workflow/工作流文档.md`。
 
 ## 4. 文件读写规则
 
 | 角色 | 可写 | 只读 |
 |------|------|------|
 | PM | `plans/00-项目进度.md`（总进度）、`plans/phaseN/过程记录.md`（状态更新）、`plans/phaseN/总纲.md`（清单勾选） | 全部 |
-| ARCH | `docs/模块设计-*.md`、`docs/总设计文档.md` | `plans/`、`construct/` |
+| ARCH | `docs/`（设计文档） | `plans/`、`construct/` |
 | DEV | `construct-rs/src/**`、`construct-py/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
-| REF | `plans/phaseN/过程记录.md`（验证结果） | 全部 |
-| REV | `plans/phaseN/过程记录.md`（审查结果） | 全部 |
+| REV | `plans/phaseN/过程记录.md`（设计检视结果） | 全部 |
+| VET | `plans/phaseN/过程记录.md`（代码审查结果） | 全部 |
 
 **禁止修改**：
 - `construct/` 目录下的任何文件（Python 原版，只读参考）
@@ -97,7 +97,7 @@ PENDING → DESIGNING → CODING → VERIFYING → REVIEWING → ACCEPTED
 
 | 项目 | 内容 |
 |------|------|
-| 状态 | 未开始 / 设计中 / 开发中 / 验证中 / 审查中 / 已通过 / 已驳回 |
+| 状态 | 未开始 / 设计中 / 待检视 / 开发中 / 待审查 / 已通过 / 已驳回 |
 | 负责人 | [角色缩写] |
 | 开始时间 | YYYY-MM-DD |
 | 完成时间 | YYYY-MM-DD |
@@ -106,7 +106,7 @@ PENDING → DESIGNING → CODING → VERIFYING → REVIEWING → ACCEPTED
 - [时间] [角色] 操作描述
 
 ### [角色专属段落]
-（REF：对照验证结果 / REV：代码审查结果 / ARCH：设计说明 / DEV：自检结果）
+（REV：设计检视结果 / VET：代码审查结果 / ARCH：设计说明 / DEV：自检结果）
 
 ### 备注
 （补充说明、驳回原因记录等）
@@ -244,9 +244,11 @@ Phase 9 (性能优化) ←── 依赖 Phase 1-8
 ├── pm.md          ← PM（主 agent，mode: primary）
 ├── architect.md   ← ARCH（子 agent，mode: subagent）
 ├── developer.md   ← DEV（子 agent，mode: subagent）
-├── validator.md   ← REF（子 agent，mode: subagent）
-└── reviewer.md    ← REV（子 agent，mode: subagent）
+├── reviewer.md    ← REV（子 agent，mode: subagent）— 设计检视
+├── vetter.md      ← VET（子 agent，mode: subagent）— 代码审查
 ```
+
+> **已移除** `validator.md`（REF 角色已并入 VET）。
 
 ### PM 分派方式
 
@@ -254,7 +256,7 @@ PM 通过 opencode 的 Task 工具分派任务给子 agent：
 
 ```
 Task 工具参数：
-  subagent_type: "architect" | "developer" | "validator" | "reviewer"
+  subagent_type: "architect" | "developer" | "reviewer" | "vetter"
   description: "3-5词任务描述"
   prompt: "包含子任务信息、必读文件、输出要求的完整指令"
 ```
@@ -266,8 +268,8 @@ Task 工具参数：
 | pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
 | architect | `docs/` | `construct-rs/`, `construct-py/`, `plans/`, `construct/` |
 | developer | `construct-rs/`, `construct-py/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
-| validator | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
 | reviewer | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
+| vetter | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
 
 ### 切换 agent
 
@@ -300,7 +302,7 @@ Task 工具参数：
 
 | 操作 | 执行者 | 规则 |
 |------|--------|------|
-| `git commit` | 仅 PM | 每个子任务 ACCEPTED 后执行一次提交 |
+| `git commit` | PM + DEV | PM：每个子任务 ACCEPTED 后正式提交；DEV：开发过程中可做 checkpoint 提交防止丢失 |
 | `git tag` | 仅 PM | 阶段验收通过后打 tag |
 | `git status` / `git diff` | 所有角色 | 只读，用于查看变更 |
 
@@ -329,8 +331,10 @@ phase-N-complete
 阶段验收通过 → PM 执行 git tag phase-N-complete
 ```
 
+DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint，防止工作丢失。
+
 ### 禁止事项
 
-- DEV / REF / REV **禁止**执行 `git add`、`git commit`、`git tag`、`git push`
+- REV / VET **禁止**执行 `git add`、`git commit`、`git tag`、`git push`
 - 所有角色**禁止**执行 `git push`（本地仓库，无需远程推送）
 - **禁止**提交 `construct/` 目录下的任何变更（Python 原版仓库有独立 git）

@@ -12,6 +12,7 @@
 
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -323,7 +324,7 @@ impl CString {
 }
 
 impl Construct for CString {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let term_size = self.encoding.term_size();
         let mut data = Vec::new();
         loop {
@@ -344,7 +345,7 @@ impl Construct for CString {
         Ok(Value::String(s))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let s = data.as_string()?;
         let encoded = self.encoding.encode(s)?;
         stream.write_bytes(&encoded)?;
@@ -424,7 +425,7 @@ impl PaddedString {
 }
 
 impl Construct for PaddedString {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let data = stream.read_bytes(self.length)?;
         // Strip trailing null bytes, aligned to the encoding unit size.
         let unit = self.encoding.term_size();
@@ -437,7 +438,7 @@ impl Construct for PaddedString {
         Ok(Value::String(s))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let s = data.as_string()?;
         let encoded = self.encoding.encode(s)?;
         if encoded.len() > self.length {
@@ -567,7 +568,7 @@ mod tests {
     #[test]
     fn cstring_parse_basic_utf8() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_read(b"hello\x00world");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"hello\x00world"));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("hello".to_string()));
@@ -576,7 +577,7 @@ mod tests {
     #[test]
     fn cstring_parse_empty_string() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_read(b"\x00data");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x00data"));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("".to_string()));
@@ -585,7 +586,7 @@ mod tests {
     #[test]
     fn cstring_parse_eof_before_terminator_returns_error() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_read(b"hello");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"hello"));
         let mut ctx = Context::new();
         let err = d.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(err.to_string().contains("ended before null terminator"));
@@ -594,7 +595,7 @@ mod tests {
     #[test]
     fn cstring_build_basic_utf8() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         d.build(&Value::String("hello".to_string()), &mut stream, &mut ctx)
             .unwrap();
@@ -604,7 +605,7 @@ mod tests {
     #[test]
     fn cstring_build_empty_string() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         d.build(&Value::String("".to_string()), &mut stream, &mut ctx)
             .unwrap();
@@ -614,7 +615,7 @@ mod tests {
     #[test]
     fn cstring_build_non_string_returns_error() {
         let d = CString::utf8();
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = d
             .build(&Value::UInt(42), &mut stream, &mut ctx)
@@ -643,7 +644,8 @@ mod tests {
     fn cstring_parse_utf16be() {
         let d = CString::new(StringEncoding::Utf16Be);
         // "AB\0" in UTF-16 BE: 00 41 00 42 00 00
-        let mut stream = ByteStream::new_read(&[0x00, 0x41, 0x00, 0x42, 0x00, 0x00]);
+        let mut stream =
+            CombinedStream::ByteStream(ByteStream::new_read(&[0x00, 0x41, 0x00, 0x42, 0x00, 0x00]));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("AB".to_string()));
@@ -656,7 +658,7 @@ mod tests {
     #[test]
     fn paddedstring_parse_strips_trailing_zeros() {
         let d = PaddedString::utf8(10);
-        let mut stream = ByteStream::new_read(b"hello\0\0\0\0\0");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"hello\0\0\0\0\0"));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("hello".to_string()));
@@ -665,7 +667,7 @@ mod tests {
     #[test]
     fn paddedstring_parse_exact_length() {
         let d = PaddedString::utf8(5);
-        let mut stream = ByteStream::new_read(b"hello");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"hello"));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("hello".to_string()));
@@ -674,7 +676,7 @@ mod tests {
     #[test]
     fn paddedstring_parse_all_padding() {
         let d = PaddedString::utf8(4);
-        let mut stream = ByteStream::new_read(b"\0\0\0\0");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\0\0\0\0"));
         let mut ctx = Context::new();
         let result = d.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::String("".to_string()));
@@ -683,7 +685,7 @@ mod tests {
     #[test]
     fn paddedstring_build_pads_to_length() {
         let d = PaddedString::utf8(10);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         d.build(&Value::String("hello".to_string()), &mut stream, &mut ctx)
             .unwrap();
@@ -693,7 +695,7 @@ mod tests {
     #[test]
     fn paddedstring_build_exact_length() {
         let d = PaddedString::utf8(5);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         d.build(&Value::String("hello".to_string()), &mut stream, &mut ctx)
             .unwrap();
@@ -703,7 +705,7 @@ mod tests {
     #[test]
     fn paddedstring_build_too_long_returns_error() {
         let d = PaddedString::utf8(3);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = d
             .build(&Value::String("hello".to_string()), &mut stream, &mut ctx)
@@ -714,7 +716,7 @@ mod tests {
     #[test]
     fn paddedstring_build_non_string_returns_error() {
         let d = PaddedString::utf8(4);
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         let err = d.build(&Value::Int(42), &mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::TypeMismatch { .. }));

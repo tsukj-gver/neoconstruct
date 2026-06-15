@@ -6,10 +6,11 @@
 //!
 //! Corresponds to Python `Const(value, subcon)`.
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::bytes::Bytes;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::Stream;
+use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -40,7 +41,7 @@ pub struct Const {
     /// The expected constant value.
     pub value: Value,
     /// The inner construct used for parsing and building.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
 }
 
 impl Const {
@@ -62,7 +63,7 @@ impl Const {
         let length = value.len();
         Const {
             value: Value::Bytes(value),
-            subcon: Box::new(Bytes::new(length)),
+            subcon: Box::new(Bytes::new(length).into()),
         }
     }
 
@@ -76,16 +77,16 @@ impl Const {
     /// use construct::core::Construct;
     /// use construct::value::Value;
     ///
-    /// let c = Const::new_value(Value::UInt(255), Box::new(INT8UB));
+    /// let c = Const::new_value(Value::UInt(255), Box::new(INT8UB.into()));
     /// assert_eq!(c.value, Value::UInt(255));
     /// ```
-    pub fn new_value(value: Value, subcon: Box<dyn Construct>) -> Self {
+    pub fn new_value(value: Value, subcon: Box<CombinedConstruct>) -> Self {
         Const { value, subcon }
     }
 }
 
 impl Construct for Const {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let obj = self.subcon.parse(stream, ctx)?;
         if obj != self.value {
             return Err(ConstructError::Const {
@@ -97,7 +98,7 @@ impl Construct for Const {
         Ok(obj)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Python: if obj not in (None, self.value): raise ConstError
         if !data.is_none() && *data != self.value {
             return Err(ConstructError::Const {
@@ -145,7 +146,7 @@ mod tests {
 
     #[test]
     fn new_value_creates_custom_const() {
-        let c = Const::new_value(Value::UInt(255), Box::new(INT8UB));
+        let c = Const::new_value(Value::UInt(255), Box::new(INT8UB.into()));
         assert_eq!(c.value, Value::UInt(255));
     }
 
@@ -160,7 +161,7 @@ mod tests {
 
     #[test]
     fn parse_matching_uint_returns_value() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let result = c.parse_bytes(b"\x2A").unwrap();
         assert_eq!(result, Value::UInt(42));
     }
@@ -190,7 +191,7 @@ mod tests {
 
     #[test]
     fn parse_mismatching_uint_returns_const_error() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let err = c.parse_bytes(b"\x2B").unwrap_err();
         assert!(matches!(err, ConstructError::Const { .. }));
     }
@@ -234,21 +235,21 @@ mod tests {
 
     #[test]
     fn build_uint_const_with_none() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let built = c.build_bytes(&Value::None).unwrap();
         assert_eq!(built, vec![42]);
     }
 
     #[test]
     fn build_uint_const_with_matching_value() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let built = c.build_bytes(&Value::UInt(42)).unwrap();
         assert_eq!(built, vec![42]);
     }
 
     #[test]
     fn build_uint_const_with_wrong_value_returns_error() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let err = c.build_bytes(&Value::UInt(99)).unwrap_err();
         assert!(matches!(err, ConstructError::Const { .. }));
     }
@@ -263,7 +264,7 @@ mod tests {
 
     #[test]
     fn sizeof_delegates_to_subcon_uint() {
-        let c = Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c = Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         assert_eq!(c.sizeof(&Context::new()).unwrap(), 1);
     }
 
@@ -279,7 +280,7 @@ mod tests {
 
     #[test]
     fn roundtrip_uint_const() {
-        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB));
+        let c: &dyn Construct = &Const::new_value(Value::UInt(42), Box::new(INT8UB.into()));
         let built = c.build_bytes(&Value::None).unwrap();
         let parsed = c.parse_bytes(&built).unwrap();
         assert_eq!(parsed, Value::UInt(42));

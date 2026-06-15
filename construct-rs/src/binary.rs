@@ -555,7 +555,7 @@ mod tests {
 
     #[test]
     fn swapbytes_empty() {
-        assert_eq!(swapbytes(&[]), vec![]);
+        assert_eq!(swapbytes(&[]), Vec::<u8>::new());
     }
 
     #[test]
@@ -583,7 +583,7 @@ mod tests {
 
     #[test]
     fn swapbytesinbits_empty() {
-        assert_eq!(swapbytesinbits(&[]).unwrap(), vec![]);
+        assert_eq!(swapbytesinbits(&[]).unwrap(), Vec::<u8>::new());
     }
 
     // =========================================================================
@@ -640,7 +640,7 @@ mod tests {
 
     #[test]
     fn bits2bytes_empty() {
-        assert_eq!(bits2bytes(&[]).unwrap(), vec![]);
+        assert_eq!(bits2bytes(&[]).unwrap(), Vec::<u8>::new());
     }
 
     // =========================================================================

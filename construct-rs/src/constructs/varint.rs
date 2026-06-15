@@ -7,6 +7,7 @@
 
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::Stream;
 use crate::core::Construct;
 use crate::value::Value;
@@ -54,7 +55,7 @@ impl Default for VarInt {
 }
 
 impl Construct for VarInt {
-    fn parse(&self, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<Value> {
         let mut acc: Vec<u8> = Vec::new();
         loop {
             let byte = stream.read_bytes(1)?;
@@ -79,7 +80,7 @@ impl Construct for VarInt {
         }
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         let value = match data {
             Value::Int(i) => {
                 if *i < 0 {
@@ -196,7 +197,7 @@ fn zigzag_decode(x: u128) -> i128 {
 }
 
 impl Construct for ZigZag {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let varint_val = VarInt.parse(stream, ctx)?;
 
         let unsigned = match varint_val {
@@ -228,7 +229,7 @@ impl Construct for ZigZag {
         }
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let signed = match data {
             Value::Int(i) => *i as i128,
             Value::UInt(u) => *u as i128,
@@ -380,7 +381,7 @@ mod tests {
     #[test]
     fn varint_parse_stream_ends_prematurely() {
         // Continuation bit set but no more data
-        let mut stream = ByteStream::new_read(&[0x80]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x80]));
         let mut ctx = Context::new();
         let err = VarInt.parse(&mut stream, &mut ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Stream { .. }));

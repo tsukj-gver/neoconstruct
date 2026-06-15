@@ -15,9 +15,11 @@
 //! | [`NamedTuple`] | Adapter that maps a Struct/Sequence to a named list |
 //! | [`TimestampAdapter`] | Epoch-based integer timestamp adapter |
 
+use crate::combined::CombinedConstruct;
 use crate::constructs::Pass;
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
+use crate::core::stream::CombinedStream;
 use crate::core::stream::{ByteStream, Stream};
 use crate::core::Construct;
 use crate::value::Value;
@@ -52,7 +54,7 @@ pub type ComputeFunc = Box<dyn Fn(&Context) -> Result<Value>>;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42))));
+/// let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42)).into()));
 /// let c: &dyn Construct = &c;
 /// assert_eq!(c.parse_bytes(b"").unwrap(), Value::Int(42));
 /// assert_eq!(c.sizeof(&Default::default()).unwrap(), 0);
@@ -70,11 +72,11 @@ impl Computed {
 }
 
 impl Construct for Computed {
-    fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         (self.func)(ctx)
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         // Build evaluates the function but discards the result; the stream
         // is unaffected. This matches the Python behaviour where _build
         // returns the computed value but does not write anything.
@@ -118,8 +120,8 @@ impl Construct for Computed {
 /// use construct::value::Value;
 ///
 /// let r = Rebuild::new(
-///     Box::new(INT8UB),
-///     Box::new(|_ctx| Ok(Value::UInt(7))),
+///     Box::new(INT8UB.into()),
+///     Box::new(|_ctx| Ok(Value::UInt(7)).into()),
 /// );
 /// let c: &dyn Construct = &r;
 /// // Build ignores the input and uses the function
@@ -128,7 +130,7 @@ impl Construct for Computed {
 /// ```
 pub struct Rebuild {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Function that computes the build value from the context.
     pub func: ComputeFunc,
 }
@@ -136,17 +138,17 @@ pub struct Rebuild {
 impl Rebuild {
     /// Creates a new `Rebuild` with the given inner construct and context
     /// function.
-    pub fn new(subcon: Box<dyn Construct>, func: ComputeFunc) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, func: ComputeFunc) -> Self {
         Rebuild { subcon, func }
     }
 }
 
 impl Construct for Rebuild {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, _data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let value = (self.func)(ctx)?;
         self.subcon.build(&value, stream, ctx)
     }
@@ -184,7 +186,7 @@ impl Construct for Rebuild {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let d = Default::new(Box::new(INT8UB), Value::UInt(0));
+/// let d = Default::new(Box::new(INT8UB.into()), Value::UInt(0));
 /// let c: &dyn Construct = &d;
 ///
 /// // Build with explicit value
@@ -197,7 +199,7 @@ impl Construct for Rebuild {
 /// ```
 pub struct Default {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The default value used when the build input is `None`.
     pub value: Value,
 }
@@ -205,17 +207,17 @@ pub struct Default {
 impl Default {
     /// Creates a new `Default` with the given inner construct and fallback
     /// value.
-    pub fn new(subcon: Box<dyn Construct>, value: Value) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, value: Value) -> Self {
         Default { subcon, value }
     }
 }
 
 impl Construct for Default {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.subcon.parse(stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let effective = if data.is_none() { &self.value } else { data };
         self.subcon.build(effective, stream, ctx)
     }
@@ -259,7 +261,7 @@ const CONTEXT_INDEX_KEY: &str = "_index";
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let arr = Array::new(3, Box::new(Index::new()));
+/// let arr = Array::new(3, Box::new(Index::new().into()));
 /// let c: &dyn Construct = &arr;
 /// let parsed = c.parse_bytes(b"").unwrap();
 /// assert_eq!(parsed, Value::List(vec![Value::UInt(0), Value::UInt(1), Value::UInt(2)]));
@@ -280,11 +282,11 @@ impl std::default::Default for Index {
 }
 
 impl Construct for Index {
-    fn parse(&self, _stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, _stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         Ok(ctx.get(CONTEXT_INDEX_KEY).cloned().unwrap_or(Value::None))
     }
 
-    fn build(&self, _data: &Value, _stream: &mut dyn Stream, _ctx: &mut Context) -> Result<()> {
+    fn build(&self, _data: &Value, _stream: &mut CombinedStream, _ctx: &mut Context) -> Result<()> {
         // Build returns the index from context (like parse), but since build
         // returns () we just do nothing.
         Ok(())
@@ -328,7 +330,7 @@ const DEFAULT_PAD_PATTERN: u8 = 0x00;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let p = Padded::new(4, Box::new(INT8UB), 0x00, false);
+/// let p = Padded::new(4, Box::new(INT8UB.into()), 0x00, false);
 /// let c: &dyn Construct = &p;
 ///
 /// let parsed = c.parse_bytes(b"\xFF\x00\x00\x00").unwrap();
@@ -339,7 +341,7 @@ const DEFAULT_PAD_PATTERN: u8 = 0x00;
 /// ```
 pub struct Padded {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Total length in bytes (data + padding).
     pub length: usize,
     /// Padding pattern byte.
@@ -351,7 +353,7 @@ pub struct Padded {
 impl Padded {
     /// Creates a new `Padded` construct with the given length, sub-construct,
     /// padding pattern, and strict mode.
-    pub fn new(length: usize, subcon: Box<dyn Construct>, pattern: u8, strict: bool) -> Self {
+    pub fn new(length: usize, subcon: Box<CombinedConstruct>, pattern: u8, strict: bool) -> Self {
         Padded {
             subcon,
             length,
@@ -362,13 +364,13 @@ impl Padded {
 
     /// Creates a new `Padded` with default null-byte padding and non-strict
     /// mode.
-    pub fn new_default(length: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new_default(length: usize, subcon: Box<CombinedConstruct>) -> Self {
         Self::new(length, subcon, DEFAULT_PAD_PATTERN, false)
     }
 }
 
 impl Construct for Padded {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let pos_before = stream.tell()?;
         let obj = self.subcon.parse(stream, ctx)?;
         let pos_after = stream.tell()?;
@@ -405,7 +407,7 @@ impl Construct for Padded {
         Ok(obj)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let pos_before = stream.tell()?;
         self.subcon.build(data, stream, ctx)?;
         let pos_after = stream.tell()?;
@@ -462,7 +464,7 @@ const ALIGNED_MIN_MODULUS: usize = 2;
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let a = Aligned::new(4, Box::new(INT16UB), 0x00);
+/// let a = Aligned::new(4, Box::new(INT16UB.into()), 0x00);
 /// let c: &dyn Construct = &a;
 ///
 /// let parsed = c.parse_bytes(b"\x00\x01\x00\x00").unwrap();
@@ -472,7 +474,7 @@ const ALIGNED_MIN_MODULUS: usize = 2;
 /// ```
 pub struct Aligned {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Alignment modulus (must be >= 2).
     pub modulus: usize,
     /// Padding pattern byte.
@@ -486,7 +488,7 @@ impl Aligned {
     /// # Errors
     ///
     /// Returns [`ConstructError::Padding`] if `modulus < 2`.
-    pub fn new(modulus: usize, subcon: Box<dyn Construct>, pattern: u8) -> Self {
+    pub fn new(modulus: usize, subcon: Box<CombinedConstruct>, pattern: u8) -> Self {
         Aligned {
             subcon,
             modulus,
@@ -495,7 +497,7 @@ impl Aligned {
     }
 
     /// Creates a new `Aligned` with default null-byte padding.
-    pub fn new_default(modulus: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new_default(modulus: usize, subcon: Box<CombinedConstruct>) -> Self {
         Self::new(modulus, subcon, DEFAULT_PAD_PATTERN)
     }
 
@@ -515,7 +517,7 @@ impl Aligned {
 }
 
 impl Construct for Aligned {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         self.validate_modulus()?;
         let pos_before = stream.tell()?;
         let obj = self.subcon.parse(stream, ctx)?;
@@ -528,7 +530,7 @@ impl Construct for Aligned {
         Ok(obj)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         self.validate_modulus()?;
         let pos_before = stream.tell()?;
         self.subcon.build(data, stream, ctx)?;
@@ -573,7 +575,7 @@ impl Construct for Aligned {
 /// use construct::core::Construct;
 /// use construct::value::Value;
 ///
-/// let fs = FixedSized::new(4, Box::new(INT8UB));
+/// let fs = FixedSized::new(4, Box::new(INT8UB.into()));
 /// let c: &dyn Construct = &fs;
 ///
 /// let parsed = c.parse_bytes(b"\xFF\x00\x00\x00").unwrap();
@@ -584,27 +586,27 @@ impl Construct for Aligned {
 /// ```
 pub struct FixedSized {
     /// The inner construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// Total size in bytes (data + padding).
     pub length: usize,
 }
 
 impl FixedSized {
     /// Creates a new `FixedSized` with the given length and sub-construct.
-    pub fn new(length: usize, subcon: Box<dyn Construct>) -> Self {
+    pub fn new(length: usize, subcon: Box<CombinedConstruct>) -> Self {
         FixedSized { subcon, length }
     }
 }
 
 impl Construct for FixedSized {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let data = stream.read_bytes(self.length)?;
-        let mut sub_stream = ByteStream::new_read(&data);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
         self.subcon.parse(&mut sub_stream, ctx)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
-        let mut sub_stream = ByteStream::new_write();
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
         self.subcon.build(data, &mut sub_stream, ctx)?;
         let built = sub_stream.into_bytes();
 
@@ -662,10 +664,10 @@ impl Construct for FixedSized {
 /// use construct::value::Value;
 ///
 /// let seq = Sequence::new()
-///     .push(Box::new(INT8UB))
-///     .push(Box::new(INT8UB))
-///     .push(Box::new(INT8UB));
-/// let nt = NamedTuple::new("coord", vec!["x".to_string(), "y".to_string(), "z".to_string()], Box::new(seq));
+///     .push(Box::new(INT8UB.into()))
+///     .push(Box::new(INT8UB.into()))
+///     .push(Box::new(INT8UB.into()));
+/// let nt = NamedTuple::new("coord", vec!["x".to_string(), "y".to_string(), "z".to_string()], Box::new(seq.into()));
 /// let c: &dyn Construct = &nt;
 ///
 /// let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
@@ -673,7 +675,7 @@ impl Construct for FixedSized {
 /// ```
 pub struct NamedTuple {
     /// The inner adapter (wrapping the actual subcon).
-    pub inner: Box<dyn Construct>,
+    pub inner: Box<CombinedConstruct>,
     /// The field names.
     pub field_names: Vec<String>,
     /// The tuple type name (for display/debug purposes).
@@ -686,7 +688,7 @@ impl NamedTuple {
     pub fn new(
         tuple_name: impl Into<String>,
         field_names: Vec<String>,
-        subcon: Box<dyn Construct>,
+        subcon: Box<CombinedConstruct>,
     ) -> Self {
         NamedTuple {
             inner: subcon,
@@ -697,12 +699,12 @@ impl NamedTuple {
 }
 
 impl Construct for NamedTuple {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw = self.inner.parse(stream, ctx)?;
         Self::decode_value(&raw, &self.field_names, &self.tuple_name)
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let encoded = Self::encode_value(data, &self.field_names)?;
         self.inner.build(&encoded, stream, ctx)
     }
@@ -852,7 +854,7 @@ impl TimestampEpoch {
 /// use construct::value::Value;
 ///
 /// let ts = TimestampAdapter::new(
-///     Box::new(INT32UB),
+///     Box::new(INT32UB.into()),
 ///     TimestampUnit::Seconds,
 ///     TimestampEpoch::Unix,
 /// );
@@ -863,7 +865,7 @@ impl TimestampEpoch {
 /// ```
 pub struct TimestampAdapter {
     /// The inner integer construct.
-    pub subcon: Box<dyn Construct>,
+    pub subcon: Box<CombinedConstruct>,
     /// The time unit of the integer value.
     pub unit: TimestampUnit,
     /// The epoch reference.
@@ -873,7 +875,7 @@ pub struct TimestampAdapter {
 impl TimestampAdapter {
     /// Creates a new `TimestampAdapter` with the given sub-construct, unit,
     /// and epoch.
-    pub fn new(subcon: Box<dyn Construct>, unit: TimestampUnit, epoch: TimestampEpoch) -> Self {
+    pub fn new(subcon: Box<CombinedConstruct>, unit: TimestampUnit, epoch: TimestampEpoch) -> Self {
         TimestampAdapter {
             subcon,
             unit,
@@ -908,7 +910,7 @@ impl TimestampAdapter {
 }
 
 impl Construct for TimestampAdapter {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         let raw_val = self.subcon.parse(stream, ctx)?;
         let raw_i64 = raw_val.to_i64()?;
 
@@ -920,7 +922,7 @@ impl Construct for TimestampAdapter {
         Ok(Value::Container(map))
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         let container = data.as_container()?;
         let secs = container
             .get("secs")
@@ -957,7 +959,7 @@ impl Construct for TimestampAdapter {
 /// This is a convenience alias equivalent to:
 ///
 /// ```ignore
-/// Padded::new(length, Box::new(Pass::new()), DEFAULT_PAD_PATTERN, false)
+/// Padded::new(length, Box::new(Pass::new().into()), DEFAULT_PAD_PATTERN, false)
 /// ```
 ///
 /// Corresponds to Python `Padding(length, pattern=b"\\x00")`.
@@ -985,7 +987,12 @@ impl Construct for TimestampAdapter {
 /// ```
 #[allow(non_snake_case)]
 pub fn Padding(length: usize) -> Padded {
-    Padded::new(length, Box::new(Pass::new()), DEFAULT_PAD_PATTERN, false)
+    Padded::new(
+        length,
+        Box::new(Pass::new().into()),
+        DEFAULT_PAD_PATTERN,
+        false,
+    )
 }
 
 // ===========================================================================
@@ -1000,18 +1007,18 @@ mod tests {
     use crate::core::stream::ByteStream;
 
     /// Helper: creates a U8 big-endian construct.
-    fn u8be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U8))
+    fn u8be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U8).into())
     }
 
     /// Helper: creates a U16 big-endian construct.
-    fn u16be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U16))
+    fn u16be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U16).into())
     }
 
     /// Helper: creates a U32 big-endian construct.
-    fn u32be() -> Box<dyn Construct> {
-        Box::new(FormatField::new(Endianness::Big, FormatKind::U32))
+    fn u32be() -> Box<CombinedConstruct> {
+        Box::new(FormatField::new(Endianness::Big, FormatKind::U32).into())
     }
 
     // ======================================================================
@@ -1020,7 +1027,7 @@ mod tests {
 
     #[test]
     fn computed_parse_returns_func_result() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42))));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42)).into()));
         let c: &dyn Construct = &c;
         let result = c.parse_bytes(b"").unwrap();
         assert_eq!(result, Value::Int(42));
@@ -1028,8 +1035,8 @@ mod tests {
 
     #[test]
     fn computed_parse_does_not_consume_stream() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         let _ = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(stream.tell().unwrap(), 0);
@@ -1037,7 +1044,7 @@ mod tests {
 
     #[test]
     fn computed_build_does_not_write() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
         let c: &dyn Construct = &c;
         let bytes = c.build_bytes(&Value::None).unwrap();
         assert!(bytes.is_empty());
@@ -1045,21 +1052,24 @@ mod tests {
 
     #[test]
     fn computed_sizeof_returns_zero() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
         assert_eq!(c.sizeof(&Context::new()).unwrap(), 0);
     }
 
     #[test]
     fn computed_uses_context() {
         let c = Computed::new(Box::new(|ctx| {
-            let val = ctx
-                .get_recursive("multiplier")
-                .cloned()
-                .unwrap_or(Value::UInt(1));
-            let m = val.to_u64()?;
-            Ok(Value::UInt(10 * m))
+            {
+                let val = ctx
+                    .get_recursive("multiplier")
+                    .cloned()
+                    .unwrap_or(Value::UInt(1));
+                let m = val.to_u64()?;
+                Ok(Value::UInt(10 * m))
+            }
+            .into()
         }));
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         ctx.insert("multiplier", Value::UInt(3));
         let result = c.parse(&mut stream, &mut ctx).unwrap();
@@ -1068,17 +1078,20 @@ mod tests {
 
     #[test]
     fn computed_flagbuildnone_is_true() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::None)));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::None).into()));
         assert!(c.flagbuildnone());
     }
 
     #[test]
     fn computed_func_error_propagates() {
         let c = Computed::new(Box::new(|_ctx| {
-            Err(ConstructError::Generic {
-                path: String::new(),
-                message: "computed failed".to_string(),
-            })
+            {
+                Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: "computed failed".to_string(),
+                })
+            }
+            .into()
         }));
         let c: &dyn Construct = &c;
         let err = c.parse_bytes(b"").unwrap_err();
@@ -1091,7 +1104,7 @@ mod tests {
 
     #[test]
     fn rebuild_parse_delegates_to_subcon() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(99))));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(99)).into()));
         let c: &dyn Construct = &r;
         let parsed = c.parse_bytes(b"\x07").unwrap();
         assert_eq!(parsed, Value::UInt(7));
@@ -1099,7 +1112,7 @@ mod tests {
 
     #[test]
     fn rebuild_build_ignores_input_uses_func() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(42))));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(42)).into()));
         let c: &dyn Construct = &r;
         let bytes = c.build_bytes(&Value::None).unwrap();
         assert_eq!(bytes, vec![42]);
@@ -1107,7 +1120,7 @@ mod tests {
 
     #[test]
     fn rebuild_build_ignores_non_none_input() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(10))));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(10)).into()));
         let c: &dyn Construct = &r;
         // Even with a non-None value, rebuild uses the func
         let bytes = c.build_bytes(&Value::UInt(99)).unwrap();
@@ -1116,13 +1129,13 @@ mod tests {
 
     #[test]
     fn rebuild_sizeof_delegates() {
-        let r = Rebuild::new(u16be(), Box::new(|_ctx| Ok(Value::UInt(0))));
+        let r = Rebuild::new(u16be(), Box::new(|_ctx| Ok(Value::UInt(0)).into()));
         assert_eq!(r.sizeof(&Context::new()).unwrap(), 2);
     }
 
     #[test]
     fn rebuild_flagbuildnone_is_true() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(0))));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(0)).into()));
         assert!(r.flagbuildnone());
     }
 
@@ -1131,23 +1144,26 @@ mod tests {
         let r = Rebuild::new(
             u8be(),
             Box::new(|ctx| {
-                let count = ctx
-                    .get_recursive("count")
-                    .cloned()
-                    .unwrap_or(Value::UInt(0));
-                Ok(count)
+                {
+                    let count = ctx
+                        .get_recursive("count")
+                        .cloned()
+                        .unwrap_or(Value::UInt(0));
+                    Ok(count)
+                }
+                .into()
             }),
         );
         let mut ctx = Context::new();
         ctx.insert("count", Value::UInt(5));
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         r.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert_eq!(stream.into_bytes(), vec![5]);
     }
 
     #[test]
     fn rebuild_roundtrip() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(77))));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(77)).into()));
         let c: &dyn Construct = &r;
         let bytes = c.build_bytes(&Value::None).unwrap();
         let parsed = c.parse_bytes(&bytes).unwrap();
@@ -1219,7 +1235,7 @@ mod tests {
     #[test]
     fn index_parse_returns_none_without_context() {
         let idx = Index::new();
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         let result = idx.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, Value::None);
@@ -1228,7 +1244,7 @@ mod tests {
     #[test]
     fn index_parse_returns_index_from_context() {
         let idx = Index::new();
-        let mut stream = ByteStream::new_read(b"");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
         ctx.insert("_index", Value::UInt(5));
         let result = idx.parse(&mut stream, &mut ctx).unwrap();
@@ -1238,7 +1254,7 @@ mod tests {
     #[test]
     fn index_build_does_nothing() {
         let idx = Index::new();
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         idx.build(&Value::None, &mut stream, &mut ctx).unwrap();
         assert!(stream.into_bytes().is_empty());
@@ -1257,7 +1273,7 @@ mod tests {
     #[test]
     fn index_in_array() {
         use crate::constructs::repetition::Array;
-        let arr = Array::new(3, Box::new(Index::new()));
+        let arr = Array::new(3, Box::new(Index::new().into()));
         let c: &dyn Construct = &arr;
         let parsed = c.parse_bytes(b"").unwrap();
         assert_eq!(
@@ -1475,7 +1491,7 @@ mod tests {
     fn fixed_sized_consumes_exact_bytes_on_parse() {
         let fs = FixedSized::new(4, u8be());
         let data = b"\xFF\x00\x00\x00\xAA\xBB";
-        let mut stream = ByteStream::new_read(data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         let mut ctx = Context::new();
         let _ = fs.parse(&mut stream, &mut ctx).unwrap();
         // Should have consumed exactly 4 bytes
@@ -1493,7 +1509,7 @@ mod tests {
         let nt = NamedTuple::new(
             "coord",
             vec!["x".to_string(), "y".to_string(), "z".to_string()],
-            Box::new(seq),
+            Box::new(seq.into()),
         );
         let c: &dyn Construct = &nt;
         let parsed = c.parse_bytes(b"\x01\x02\x03").unwrap();
@@ -1517,7 +1533,7 @@ mod tests {
         let nt = NamedTuple::new(
             "pair",
             vec!["a".to_string(), "b".to_string()],
-            Box::new(seq),
+            Box::new(seq.into()),
         );
         let c: &dyn Construct = &nt;
 
@@ -1533,7 +1549,7 @@ mod tests {
         let nt = NamedTuple::new(
             "point",
             vec!["x".to_string(), "y".to_string()],
-            Box::new(st),
+            Box::new(st.into()),
         );
         let c: &dyn Construct = &nt;
         let parsed = c.parse_bytes(b"\x05\x0A").unwrap();
@@ -1548,7 +1564,7 @@ mod tests {
         let nt = NamedTuple::new(
             "pair",
             vec!["a".to_string(), "b".to_string()],
-            Box::new(seq),
+            Box::new(seq.into()),
         );
         assert_eq!(nt.sizeof(&Context::new()).unwrap(), 2);
     }

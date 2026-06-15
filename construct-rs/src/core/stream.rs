@@ -40,6 +40,7 @@ use super::error::{ConstructError, Result};
 ///
 /// Corresponds to Python's `io.BytesIO` interface used in construct, but
 /// with a unified error type instead of raw I/O exceptions.
+#[enum_dispatch::enum_dispatch]
 pub trait Stream {
     /// Reads exactly `count` bytes from the current position.
     ///
@@ -123,6 +124,7 @@ pub trait Stream {
 /// let output = stream.into_bytes();
 /// assert_eq!(output, vec![4, 5, 6]);
 /// ```
+#[derive(Debug)]
 pub struct ByteStream {
     cursor: Cursor<Vec<u8>>,
 }
@@ -230,6 +232,231 @@ impl Stream for ByteStream {
 }
 
 // ===========================================================================
+// WindowedStream
+// ===========================================================================
+
+/// A stream wrapper that reports absolute positions while reading from a
+/// bounded slice of data.
+///
+/// This mirrors Python's `BytesIOWithOffsets`, which wraps a sub-slice of
+/// bytes read from a parent stream but adjusts `tell()` and `seek()` so that
+/// they reflect the **absolute** position within the parent stream.
+///
+/// `Prefixed` and similar constructs use this so that `Tell` inside a
+/// sub-stream reports the correct absolute offset.
+///
+/// # Examples
+///
+/// ```
+/// # use construct::core::stream::{WindowedStream, Stream};
+/// // Data starting at absolute offset 3 in the parent stream.
+/// let mut ws = WindowedStream::new(&[10, 20, 30], 3);
+/// assert_eq!(ws.tell().unwrap(), 3);       // absolute position
+/// let bytes = ws.read_bytes(2).unwrap();
+/// assert_eq!(bytes, vec![10, 20]);
+/// assert_eq!(ws.tell().unwrap(), 5);       // advanced to absolute 5
+/// ```
+#[derive(Debug)]
+pub struct WindowedStream {
+    /// The underlying byte data (the windowed slice).
+    data: Vec<u8>,
+    /// Current read position within `data` (0-based).
+    pos: usize,
+    /// Absolute offset of `data[0]` within the parent stream.
+    offset: u64,
+}
+
+impl WindowedStream {
+    /// Creates a new `WindowedStream` from a data slice and an absolute offset.
+    ///
+    /// The offset is the position in the parent stream where `data` starts.
+    /// `tell()` will return `offset` initially, and increase as bytes are read.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use construct::core::stream::{WindowedStream, Stream};
+    /// let mut ws = WindowedStream::new(b"\x01\x02", 10);
+    /// assert_eq!(ws.tell().unwrap(), 10);
+    /// ```
+    #[must_use]
+    pub fn new(data: &[u8], offset: u64) -> Self {
+        WindowedStream {
+            data: data.to_vec(),
+            pos: 0,
+            offset,
+        }
+    }
+}
+
+impl Stream for WindowedStream {
+    fn read_bytes(&mut self, count: usize) -> Result<Vec<u8>> {
+        let available = self.data.len().saturating_sub(self.pos);
+        if count > available {
+            return Err(ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "requested {count} bytes but only {available} remain in windowed stream"
+                    ),
+                ),
+            });
+        }
+        let result = self.data[self.pos..self.pos + count].to_vec();
+        self.pos += count;
+        Ok(result)
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<()> {
+        let available = self.data.len().saturating_sub(self.pos);
+        if buf.len() > available {
+            return Err(ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "requested {} bytes but only {available} remain in windowed stream",
+                        buf.len()
+                    ),
+                ),
+            });
+        }
+        buf.copy_from_slice(&self.data[self.pos..self.pos + buf.len()]);
+        self.pos += buf.len();
+        Ok(())
+    }
+
+    fn write_bytes(&mut self, _data: &[u8]) -> Result<()> {
+        Err(ConstructError::Stream {
+            path: String::new(),
+            source: std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "WindowedStream is read-only",
+            ),
+        })
+    }
+
+    fn seek(&mut self, pos: u64) -> Result<()> {
+        if pos < self.offset {
+            return Err(ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "seek target {pos} is before window start offset {}",
+                        self.offset
+                    ),
+                ),
+            });
+        }
+        let relative = (pos - self.offset) as usize;
+        if relative > self.data.len() {
+            return Err(ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "seek target {pos} is past window end (offset {} + len {})",
+                        self.offset,
+                        self.data.len()
+                    ),
+                ),
+            });
+        }
+        self.pos = relative;
+        Ok(())
+    }
+
+    fn tell(&mut self) -> Result<u64> {
+        Ok(self.offset + self.pos as u64)
+    }
+
+    fn size(&mut self) -> Result<u64> {
+        Ok(self.offset + self.data.len() as u64)
+    }
+
+    fn is_eof(&mut self) -> Result<bool> {
+        Ok(self.pos >= self.data.len())
+    }
+
+    fn read_remaining(&mut self) -> Result<Vec<u8>> {
+        let remaining = self.data[self.pos..].to_vec();
+        self.pos = self.data.len();
+        Ok(remaining)
+    }
+
+    fn seek_from(&mut self, pos: SeekFrom) -> Result<u64> {
+        let new_pos = match pos {
+            SeekFrom::Start(n) => self.offset + n,
+            SeekFrom::End(n) => {
+                let end = self.offset + self.data.len() as u64;
+                if n >= 0 {
+                    end + n as u64
+                } else {
+                    end.saturating_sub((-n) as u64)
+                }
+            }
+            SeekFrom::Current(n) => {
+                let cur = self.offset + self.pos as u64;
+                if n >= 0 {
+                    cur + n as u64
+                } else {
+                    cur.saturating_sub((-n) as u64)
+                }
+            }
+        };
+        self.seek(new_pos)?;
+        Ok(new_pos)
+    }
+}
+
+// ===========================================================================
+// CombinedStream enum
+// ===========================================================================
+
+/// enum_dispatch wrapper enum that replaces `&mut dyn Stream`.
+///
+/// Currently has 2 variants ([`ByteStream`] and [`WindowedStream`]).
+/// Phase 13 will add `PyStream` and `BitStream`.
+///
+/// `CombinedStream` implements [`Stream`] via `enum_dispatch`, dispatching
+/// method calls to the wrapped type through a `match` statement.
+#[derive(Debug)]
+#[enum_dispatch::enum_dispatch(Stream)]
+pub enum CombinedStream {
+    /// In-memory read/write byte stream.
+    ByteStream(ByteStream),
+    /// Bounded read-only window stream with absolute offset reporting.
+    WindowedStream(WindowedStream),
+}
+
+impl CombinedStream {
+    /// Consumes the stream and returns the internal byte buffer.
+    ///
+    /// Delegates to the inner [`ByteStream::into_bytes`] for `ByteStream`
+    /// variants. For `WindowedStream`, returns the windowed data slice.
+    pub fn into_bytes(self) -> Vec<u8> {
+        match self {
+            CombinedStream::ByteStream(bs) => bs.into_bytes(),
+            CombinedStream::WindowedStream(ws) => ws.data.clone(),
+        }
+    }
+
+    /// Returns a copy of the remaining bytes from the current position to
+    /// the end of the stream, without moving the cursor.
+    pub fn remaining_bytes(&mut self) -> Result<Vec<u8>> {
+        match self {
+            CombinedStream::ByteStream(bs) => bs.remaining_bytes(),
+            CombinedStream::WindowedStream(ws) => {
+                let pos = ws.pos;
+                Ok(ws.data.get(pos..).unwrap_or(&[]).to_vec())
+            }
+        }
+    }
+}
+
+// ===========================================================================
 // Helper functions
 // ===========================================================================
 
@@ -237,7 +464,7 @@ impl Stream for ByteStream {
 ///
 /// Corresponds to Python's `stream_read(stream, length, path)`.
 /// On error, the returned [`ConstructError`] carries the provided `path`.
-pub fn stream_read(stream: &mut dyn Stream, count: usize, path: &str) -> Result<Vec<u8>> {
+pub fn stream_read(stream: &mut CombinedStream, count: usize, path: &str) -> Result<Vec<u8>> {
     stream
         .read_bytes(count)
         .map_err(|e| e.with_path_prefix(path))
@@ -247,7 +474,7 @@ pub fn stream_read(stream: &mut dyn Stream, count: usize, path: &str) -> Result<
 ///
 /// Corresponds to Python's `stream_write(stream, data, length, path)`.
 /// On error, the returned [`ConstructError`] carries the provided `path`.
-pub fn stream_write(stream: &mut dyn Stream, data: &[u8], path: &str) -> Result<()> {
+pub fn stream_write(stream: &mut CombinedStream, data: &[u8], path: &str) -> Result<()> {
     stream
         .write_bytes(data)
         .map_err(|e| e.with_path_prefix(path))
@@ -260,7 +487,7 @@ pub fn stream_write(stream: &mut dyn Stream, data: &[u8], path: &str) -> Result<
 /// produce an error.
 ///
 /// On error, the returned [`ConstructError`] carries the provided `path`.
-pub fn stream_seek(stream: &mut dyn Stream, offset: i64, path: &str) -> Result<()> {
+pub fn stream_seek(stream: &mut CombinedStream, offset: i64, path: &str) -> Result<()> {
     if offset < 0 {
         let io_err = std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -283,7 +510,7 @@ pub fn stream_seek(stream: &mut dyn Stream, offset: i64, path: &str) -> Result<(
 ///
 /// Corresponds to Python's `stream_tell(stream, path)`.
 /// On error, the returned [`ConstructError`] carries the provided `path`.
-pub fn stream_tell(stream: &mut dyn Stream, path: &str) -> Result<u64> {
+pub fn stream_tell(stream: &mut CombinedStream, path: &str) -> Result<u64> {
     stream.tell().map_err(|e| e.with_path_prefix(path))
 }
 
@@ -292,7 +519,7 @@ pub fn stream_tell(stream: &mut dyn Stream, path: &str) -> Result<u64> {
 /// Corresponds to Python's `stream_size(stream)`. Unlike the Python
 /// version (which takes no `path`), this Rust wrapper enriches errors
 /// with the provided `path`.
-pub fn stream_size(stream: &mut dyn Stream, path: &str) -> Result<u64> {
+pub fn stream_size(stream: &mut CombinedStream, path: &str) -> Result<u64> {
     stream.size().map_err(|e| e.with_path_prefix(path))
 }
 
@@ -301,7 +528,7 @@ pub fn stream_size(stream: &mut dyn Stream, path: &str) -> Result<u64> {
 /// Corresponds to Python's `stream_iseof(stream)`. Unlike the Python
 /// version (which takes no `path`), this Rust wrapper enriches errors
 /// with the provided `path`.
-pub fn stream_iseof(stream: &mut dyn Stream, path: &str) -> Result<bool> {
+pub fn stream_iseof(stream: &mut CombinedStream, path: &str) -> Result<bool> {
     stream.is_eof().map_err(|e| e.with_path_prefix(path))
 }
 
@@ -312,19 +539,20 @@ pub fn stream_iseof(stream: &mut dyn Stream, path: &str) -> Result<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::stream::Stream;
 
     // -- ByteStream construction ---------------------------------------------
 
     #[test]
     fn new_read_preserves_data() {
         let data = b"\x01\x02\x03";
-        let stream = ByteStream::new_read(data);
+        let stream = CombinedStream::ByteStream(ByteStream::new_read(data));
         assert_eq!(stream.into_bytes(), vec![1, 2, 3]);
     }
 
     #[test]
     fn new_write_starts_empty() {
-        let stream = ByteStream::new_write();
+        let stream = CombinedStream::ByteStream(ByteStream::new_write());
         assert!(stream.into_bytes().is_empty());
     }
 
@@ -338,21 +566,21 @@ mod tests {
 
     #[test]
     fn read_bytes_returns_correct_data() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         let bytes = stream.read_bytes(3).unwrap();
         assert_eq!(bytes, vec![1, 2, 3]);
     }
 
     #[test]
     fn read_bytes_advances_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         let _ = stream.read_bytes(2).unwrap();
         assert_eq!(stream.tell().unwrap(), 2);
     }
 
     #[test]
     fn read_exact_fills_buffer() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         let mut buf = [0u8; 2];
         stream.read_exact(&mut buf).unwrap();
         assert_eq!(buf, [1, 2]);
@@ -360,7 +588,7 @@ mod tests {
 
     #[test]
     fn read_exact_advances_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut buf = [0u8; 1];
         stream.read_exact(&mut buf).unwrap();
         stream.read_exact(&mut buf).unwrap();
@@ -369,7 +597,7 @@ mod tests {
 
     #[test]
     fn read_zero_bytes_returns_empty() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let bytes = stream.read_bytes(0).unwrap();
         assert!(bytes.is_empty());
         assert_eq!(stream.tell().unwrap(), 0);
@@ -377,7 +605,7 @@ mod tests {
 
     #[test]
     fn read_past_end_returns_stream_error() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let result = stream.read_bytes(5);
         assert!(result.is_err());
         let err = result.unwrap_err();
@@ -390,7 +618,7 @@ mod tests {
 
     #[test]
     fn read_on_empty_stream_returns_error() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let result = stream.read_bytes(1);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConstructError::Stream { .. }));
@@ -400,21 +628,21 @@ mod tests {
 
     #[test]
     fn write_bytes_and_into_bytes() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream.write_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(stream.into_bytes(), vec![1, 2, 3]);
     }
 
     #[test]
     fn write_zero_bytes_is_noop() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream.write_bytes(b"").unwrap();
         assert!(stream.into_bytes().is_empty());
     }
 
     #[test]
     fn write_appends_at_position() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream.write_bytes(b"\x01\x02").unwrap();
         stream.write_bytes(b"\x03\x04").unwrap();
         assert_eq!(stream.into_bytes(), vec![1, 2, 3, 4]);
@@ -424,20 +652,20 @@ mod tests {
 
     #[test]
     fn tell_initially_zero() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         assert_eq!(stream.tell().unwrap(), 0);
     }
 
     #[test]
     fn seek_and_tell() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         stream.seek(3).unwrap();
         assert_eq!(stream.tell().unwrap(), 3);
     }
 
     #[test]
     fn seek_then_read() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         stream.seek(3).unwrap();
         let bytes = stream.read_bytes(2).unwrap();
         assert_eq!(bytes, vec![4, 5]);
@@ -445,7 +673,7 @@ mod tests {
 
     #[test]
     fn seek_to_zero_resets_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         stream.seek(2).unwrap();
         stream.seek(0).unwrap();
         assert_eq!(stream.tell().unwrap(), 0);
@@ -455,7 +683,7 @@ mod tests {
 
     #[test]
     fn seek_past_end_sets_position_without_extending() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         stream.seek(100).unwrap();
         assert_eq!(stream.tell().unwrap(), 100);
         // Size is still 2, not extended
@@ -466,26 +694,26 @@ mod tests {
 
     #[test]
     fn size_of_read_stream() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         assert_eq!(stream.size().unwrap(), 3);
     }
 
     #[test]
     fn size_of_empty_stream() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         assert_eq!(stream.size().unwrap(), 0);
     }
 
     #[test]
     fn size_after_writing() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream.write_bytes(b"\x01\x02\x03").unwrap();
         assert_eq!(stream.size().unwrap(), 3);
     }
 
     #[test]
     fn size_does_not_change_position() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         stream.seek(2).unwrap();
         let _ = stream.size().unwrap();
         assert_eq!(stream.tell().unwrap(), 2);
@@ -495,33 +723,33 @@ mod tests {
 
     #[test]
     fn is_eof_false_for_nonempty_at_start() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         assert!(!stream.is_eof().unwrap());
     }
 
     #[test]
     fn is_eof_true_after_reading_all() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let _ = stream.read_bytes(2).unwrap();
         assert!(stream.is_eof().unwrap());
     }
 
     #[test]
     fn is_eof_true_for_empty_stream() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         assert!(stream.is_eof().unwrap());
     }
 
     #[test]
     fn is_eof_false_in_middle() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         stream.seek(1).unwrap();
         assert!(!stream.is_eof().unwrap());
     }
 
     #[test]
     fn is_eof_true_past_end() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         stream.seek(10).unwrap();
         assert!(stream.is_eof().unwrap());
     }
@@ -530,20 +758,20 @@ mod tests {
 
     #[test]
     fn remaining_bytes_from_start() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         assert_eq!(stream.remaining_bytes().unwrap(), vec![1, 2, 3]);
     }
 
     #[test]
     fn remaining_bytes_from_middle() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         stream.seek(2).unwrap();
         assert_eq!(stream.remaining_bytes().unwrap(), vec![3, 4, 5]);
     }
 
     #[test]
     fn remaining_bytes_does_not_move_cursor() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         stream.seek(1).unwrap();
         let _ = stream.remaining_bytes().unwrap();
         assert_eq!(stream.tell().unwrap(), 1);
@@ -551,14 +779,14 @@ mod tests {
 
     #[test]
     fn remaining_bytes_at_end_is_empty() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         stream.seek(2).unwrap();
         assert!(stream.remaining_bytes().unwrap().is_empty());
     }
 
     #[test]
     fn remaining_bytes_on_empty_stream() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         assert!(stream.remaining_bytes().unwrap().is_empty());
     }
 
@@ -566,14 +794,14 @@ mod tests {
 
     #[test]
     fn stream_read_success() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let bytes = stream_read(&mut stream, 2, "test").unwrap();
         assert_eq!(bytes, vec![1, 2]);
     }
 
     #[test]
     fn stream_read_error_has_path() {
-        let mut stream = ByteStream::new_read(b"\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01"));
         let err = stream_read(&mut stream, 5, "myfield").unwrap_err();
         assert_eq!(err.path(), "myfield");
         assert!(matches!(err, ConstructError::Stream { .. }));
@@ -583,7 +811,7 @@ mod tests {
 
     #[test]
     fn stream_write_success() {
-        let mut stream = ByteStream::new_write();
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         stream_write(&mut stream, b"\x01\x02", "test").unwrap();
         assert_eq!(stream.into_bytes(), vec![1, 2]);
     }
@@ -592,14 +820,14 @@ mod tests {
 
     #[test]
     fn stream_seek_success() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04"));
         stream_seek(&mut stream, 2, "test").unwrap();
         assert_eq!(stream.tell().unwrap(), 2);
     }
 
     #[test]
     fn stream_seek_negative_offset_error_has_path() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let err = stream_seek(&mut stream, -1, "seekfield").unwrap_err();
         assert_eq!(err.path(), "seekfield");
         match err {
@@ -614,7 +842,7 @@ mod tests {
 
     #[test]
     fn stream_tell_success() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         let pos = stream_tell(&mut stream, "test").unwrap();
         assert_eq!(pos, 0);
     }
@@ -623,7 +851,7 @@ mod tests {
 
     #[test]
     fn stream_size_success() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let sz = stream_size(&mut stream, "test").unwrap();
         assert_eq!(sz, 3);
     }
@@ -632,14 +860,14 @@ mod tests {
 
     #[test]
     fn stream_iseof_true_after_read() {
-        let mut stream = ByteStream::new_read(b"\x01");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01"));
         let _ = stream.read_bytes(1).unwrap();
         assert!(stream_iseof(&mut stream, "test").unwrap());
     }
 
     #[test]
     fn stream_iseof_false_before_read() {
-        let mut stream = ByteStream::new_read(b"\x01\x02");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02"));
         assert!(!stream_iseof(&mut stream, "test").unwrap());
     }
 
@@ -647,11 +875,11 @@ mod tests {
 
     #[test]
     fn write_then_read_roundtrip() {
-        let mut writer = ByteStream::new_write();
+        let mut writer = CombinedStream::ByteStream(ByteStream::new_write());
         writer.write_bytes(b"\x0A\x0B\x0C").unwrap();
         let data = writer.into_bytes();
 
-        let mut reader = ByteStream::new_read(&data);
+        let mut reader = CombinedStream::ByteStream(ByteStream::new_read(&data));
         let bytes = reader.read_bytes(3).unwrap();
         assert_eq!(bytes, vec![0x0A, 0x0B, 0x0C]);
         assert!(reader.is_eof().unwrap());
@@ -659,13 +887,13 @@ mod tests {
 
     #[test]
     fn seek_write_seek_read_roundtrip() {
-        let mut writer = ByteStream::new_write();
+        let mut writer = CombinedStream::ByteStream(ByteStream::new_write());
         writer.write_bytes(b"\x01\x02\x03").unwrap();
         writer.seek(1).unwrap();
         writer.write_bytes(b"\xFF").unwrap();
         let data = writer.into_bytes();
 
-        let mut reader = ByteStream::new_read(&data);
+        let mut reader = CombinedStream::ByteStream(ByteStream::new_read(&data));
         assert_eq!(reader.read_bytes(3).unwrap(), vec![1, 0xFF, 3]);
     }
 
@@ -673,7 +901,7 @@ mod tests {
 
     #[test]
     fn sequential_reads_consume_data() {
-        let mut stream = ByteStream::new_read(b"\x01\x02\x03\x04\x05");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03\x04\x05"));
         assert_eq!(stream.read_bytes(2).unwrap(), vec![1, 2]);
         assert_eq!(stream.read_bytes(2).unwrap(), vec![3, 4]);
         assert_eq!(stream.read_bytes(1).unwrap(), vec![5]);
@@ -685,7 +913,7 @@ mod tests {
     #[test]
     fn large_data_roundtrip() {
         let data: Vec<u8> = (0..=255).cycle().take(1024).collect();
-        let mut stream = ByteStream::new_read(&data);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
         let read = stream.read_bytes(1024).unwrap();
         assert_eq!(read, data);
         assert!(stream.is_eof().unwrap());
