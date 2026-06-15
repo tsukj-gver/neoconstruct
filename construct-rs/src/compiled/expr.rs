@@ -24,10 +24,33 @@
 //! `CompiledExpr` field directly, avoiding re-evaluation-tree construction
 //! on every parse.
 
+use std::sync::Arc;
+
 use crate::core::context::Context;
 use crate::core::error::Result;
 use crate::expr::{CombinedExpr, Evaluate};
 use crate::value::Value;
+
+// ===========================================================================
+// ExprExtension trait (Phase 13)
+// ===========================================================================
+
+/// Trait for external (non-native) compiled expressions.
+///
+/// This is the Phase 13 extension point for expressions backed by Python
+/// callables or other non-native sources. The [`CompiledExpr::External`]
+/// variant wraps an `Arc<dyn ExprExtension>`, allowing construct-py to inject
+/// Python-callback-backed expressions into the compiled tree **without**
+/// construct-rs depending on pyo3.
+pub trait ExprExtension: Send + Sync + std::fmt::Debug {
+    /// Evaluates the expression against the given context.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConstructError`](crate::core::error::ConstructError) on
+    /// evaluation failure.
+    fn ext_eval(&self, ctx: &Context) -> Result<Value>;
+}
 
 // ===========================================================================
 // CompiledExpr
@@ -89,6 +112,11 @@ pub enum CompiledExpr {
     /// [`ConstExpr`](crate::expr::ConstExpr). Avoids tree traversal for
     /// literal expressions.
     Constant(Value),
+
+    /// An external (Phase 13) expression backed by an [`ExprExtension`]
+    /// trait object. Used for Python-callback-backed expressions injected
+    /// by construct-py.
+    External(Arc<dyn ExprExtension>),
 }
 
 impl CompiledExpr {
@@ -115,6 +143,7 @@ impl CompiledExpr {
         match self {
             CompiledExpr::Native(e) => e.evaluate(ctx, obj),
             CompiledExpr::Constant(v) => Ok(v.clone()),
+            CompiledExpr::External(ext) => ext.ext_eval(ctx),
         }
     }
 
@@ -208,6 +237,7 @@ pub fn compile_expr(expr: &CombinedExpr) -> Result<CompiledExpr> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::core::error::ConstructError;
     use crate::expr::{
         this_, BinExpr, BinOp, CondExpr, ConstExpr, FuncPath, ListPath, UniExpr, UniOp,
     };
@@ -435,5 +465,68 @@ mod tests {
         for expr in &cases {
             assert!(compile_expr(expr).is_ok(), "compile_expr returned Err");
         }
+    }
+
+    // -- Phase 13: External expression tests --------------------------------
+
+    /// Test ExprExtension that returns a fixed value.
+    #[derive(Debug)]
+    struct TestExtExpr {
+        value: Value,
+    }
+
+    impl ExprExtension for TestExtExpr {
+        fn ext_eval(&self, _ctx: &Context) -> Result<Value> {
+            Ok(self.value.clone())
+        }
+    }
+
+    #[test]
+    fn external_expr_eval_returns_extension_value() {
+        let ext = Arc::new(TestExtExpr {
+            value: Value::UInt(99),
+        });
+        let compiled = CompiledExpr::External(ext);
+        let ctx = Context::new();
+        let result = compiled.eval(&ctx, None).unwrap();
+        assert_eq!(result, Value::UInt(99));
+    }
+
+    #[test]
+    fn external_expr_eval_propagates_error() {
+        #[derive(Debug)]
+        struct ErrorExt;
+
+        impl ExprExtension for ErrorExt {
+            fn ext_eval(&self, _ctx: &Context) -> Result<Value> {
+                Err(crate::core::error::ConstructError::FieldMissing {
+                    path: "(ext-expr)".to_string(),
+                    field: "test".to_string(),
+                })
+            }
+        }
+
+        let compiled = CompiledExpr::External(Arc::new(ErrorExt));
+        let ctx = Context::new();
+        let err = compiled.eval(&ctx, None).unwrap_err();
+        assert!(matches!(err, ConstructError::FieldMissing { .. }));
+    }
+
+    #[test]
+    fn external_expr_debug_formats() {
+        let ext = Arc::new(TestExtExpr { value: Value::None });
+        let compiled = CompiledExpr::External(ext);
+        let _ = format!("{compiled:?}");
+    }
+
+    #[test]
+    fn external_expr_clone() {
+        let ext = Arc::new(TestExtExpr {
+            value: Value::Int(7),
+        });
+        let compiled = CompiledExpr::External(ext);
+        let cloned = compiled.clone();
+        let ctx = Context::new();
+        assert_eq!(cloned.eval(&ctx, None).unwrap(), Value::Int(7));
     }
 }

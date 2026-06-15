@@ -24,8 +24,30 @@
 //!    [`finish_subsink`](OutputSink::finish_subsink) or directly calls
 //!    [`into_value`](OutputSink::into_value) on the sub-sink.
 
+use std::any::Any;
+
 use crate::core::error::Result;
 use crate::value::Value;
+
+// ===========================================================================
+// ProducedOutput enum (Phase 13)
+// ===========================================================================
+
+/// A sink's final produced output after `exec_parse` completes.
+///
+/// This enum allows sinks to produce either a Rust [`Value`] (the Phase 12
+/// pure-Rust path via [`ValueSink`]) or an opaque boxed object (the Phase 13
+/// direct-to-Python path via `PyDictSink`). The opaque variant uses
+/// `Box<dyn Any + Send + Sync>` so that construct-rs does **not** depend on
+/// pyo3 — the actual `Py<PyDict>` / `Py<PyList>` is only downcastable inside
+/// construct-py.
+pub enum ProducedOutput {
+    /// Value-producing sink (ValueSink path). The standard Phase 12 output.
+    Value(Value),
+    /// Object-producing sink (PyDictSink path). Contains a boxed object
+    /// that only construct-py can downcast.
+    Object(Box<dyn Any + Send + Sync>),
+}
 
 // ===========================================================================
 // OutputSink trait
@@ -131,6 +153,68 @@ pub trait OutputSink {
     /// Returns [`ConstructError`](crate::core::error::ConstructError) if
     /// the sink contents cannot be converted.
     fn into_value(self: Box<Self>) -> Result<Value>;
+
+    // ── Phase 13 extensions ──
+
+    /// Consumes the sink and returns its produced output.
+    ///
+    /// - [`ValueSink`] returns [`ProducedOutput::Value`] (wraps `into_value`).
+    /// - `PyDictSink` (construct-py) returns [`ProducedOutput::Object`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates any conversion error.
+    fn into_produced(self: Box<Self>) -> Result<ProducedOutput>;
+
+    /// Finishes a **named Struct field** sub-sink: integrates its result into
+    /// `self` via [`set_field`](Self::set_field) **and** returns the child's
+    /// [`Value`] for context insertion.
+    ///
+    /// **Used by**: `CompiledStruct`, `CompiledUnion` — constructs whose
+    /// output is a named-keyed container.
+    ///
+    /// **Default implementation** (ValueSink-compatible): calls `into_value`
+    /// + `set_field`. This preserves Phase 12 behavior exactly.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any sink/conversion error.
+    fn finish_field(&mut self, name: &str, sub: Box<dyn OutputSink>) -> Result<Value> {
+        let value = sub.into_value()?;
+        self.set_field(name, value.clone())?;
+        Ok(value)
+    }
+
+    /// Finishes a **named Sequence entry** sub-sink: integrates its result
+    /// into `self` via [`push_item`](Self::push_item) **and** returns the
+    /// child's [`Value`] for context insertion by name.
+    ///
+    /// **Used by**: `CompiledSequence` — Sequence produces a positional
+    /// list, but entries may have names for context reference.
+    ///
+    /// **Default implementation**: calls `into_value` + `push_item`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any sink/conversion error.
+    fn finish_named_item(&mut self, _name: &str, sub: Box<dyn OutputSink>) -> Result<Value> {
+        let value = sub.into_value()?;
+        self.push_item(value.clone())?;
+        Ok(value)
+    }
+
+    /// Finishes an **anonymous** child sub-sink (Array items, anonymous
+    /// Sequence/Struct fields).
+    ///
+    /// **Default**: delegates to
+    /// [`finish_subsink`](Self::finish_subsink).
+    ///
+    /// # Errors
+    ///
+    /// Propagates any error from the sub-sink integration.
+    fn finish_item(&mut self, sub: Box<dyn OutputSink>) -> Result<()> {
+        self.finish_subsink(sub)
+    }
 }
 
 // ===========================================================================
@@ -243,6 +327,10 @@ impl OutputSink for ValueSink {
         } else {
             Ok(Value::List(sink.items))
         }
+    }
+
+    fn into_produced(self: Box<Self>) -> Result<ProducedOutput> {
+        self.into_value().map(ProducedOutput::Value)
     }
 }
 
@@ -427,6 +515,87 @@ mod tests {
             result,
             Value::List(vec![Value::Int(0), Value::Int(1), Value::Int(2)])
         );
+    }
+
+    // -- ValueSink: default and debug --------------------------------------
+
+    // -- Phase 13: into_produced / finish_field / finish_named_item / finish_item --
+
+    #[test]
+    fn valuesink_into_produced_returns_value_variant() {
+        let mut sink = ValueSink::new();
+        sink.set_scalar(Value::Int(42)).unwrap();
+        let boxed: Box<dyn OutputSink> = Box::new(sink);
+        let produced = boxed.into_produced().unwrap();
+        assert!(matches!(produced, ProducedOutput::Value(Value::Int(42))));
+    }
+
+    #[test]
+    fn valuesink_into_produced_for_container() {
+        let mut sink = ValueSink::new();
+        sink.set_field("a", Value::Int(1)).unwrap();
+        let boxed: Box<dyn OutputSink> = Box::new(sink);
+        let produced = boxed.into_produced().unwrap();
+        match produced {
+            ProducedOutput::Value(Value::Container(c)) => {
+                assert_eq!(c.get("a").unwrap(), &Value::Int(1));
+            }
+            _ => panic!("expected Value(Container)"),
+        }
+    }
+
+    #[test]
+    fn valuesink_finish_field_integrates_and_returns_value() {
+        let mut parent: Box<dyn OutputSink> = Box::new(ValueSink::new());
+        let mut sub = parent.sub_sink_for_field("x").unwrap();
+        sub.set_scalar(Value::Int(10)).unwrap();
+        let value = parent.finish_field("x", sub).unwrap();
+        assert_eq!(value, Value::Int(10));
+        let result = parent.into_value().unwrap();
+        let container = result.as_container().unwrap();
+        assert_eq!(container.get("x").unwrap(), &Value::Int(10));
+    }
+
+    #[test]
+    fn valuesink_finish_named_item_appends_and_returns_value() {
+        let mut parent: Box<dyn OutputSink> = Box::new(ValueSink::new());
+        let mut sub = parent.sub_sink_for_item().unwrap();
+        sub.set_scalar(Value::Int(20)).unwrap();
+        let value = parent.finish_named_item("entry", sub).unwrap();
+        assert_eq!(value, Value::Int(20));
+        let result = parent.into_value().unwrap();
+        let list = result.as_list().unwrap();
+        assert_eq!(list, &vec![Value::Int(20)]);
+    }
+
+    #[test]
+    fn valuesink_finish_item_pushes_anonymous_item() {
+        let mut parent: Box<dyn OutputSink> = Box::new(ValueSink::new());
+        let mut sub = parent.sub_sink_for_item().unwrap();
+        sub.set_scalar(Value::Int(30)).unwrap();
+        parent.finish_item(sub).unwrap();
+        let result = parent.into_value().unwrap();
+        let list = result.as_list().unwrap();
+        assert_eq!(list, &vec![Value::Int(30)]);
+    }
+
+    #[test]
+    fn valuesink_finish_field_with_nested_container() {
+        let mut parent: Box<dyn OutputSink> = Box::new(ValueSink::new());
+
+        // Field "header" is itself a container
+        let mut header_sub = parent.sub_sink_for_field("header").unwrap();
+        let mut inner_sub = header_sub.sub_sink_for_field("magic").unwrap();
+        inner_sub.set_scalar(Value::UInt(42)).unwrap();
+        let inner_val = header_sub.finish_field("magic", inner_sub).unwrap();
+        assert_eq!(inner_val, Value::UInt(42));
+        let header_val = parent.finish_field("header", header_sub).unwrap();
+        assert!(header_val.is_container());
+
+        let result = parent.into_value().unwrap();
+        let outer = result.as_container().unwrap();
+        let header = outer.get("header").unwrap().as_container().unwrap();
+        assert_eq!(header.get("magic").unwrap(), &Value::UInt(42));
     }
 
     // -- ValueSink: default and debug --------------------------------------

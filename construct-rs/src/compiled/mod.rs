@@ -22,11 +22,13 @@
 
 pub mod build;
 pub mod expr;
+pub mod input;
 pub mod sink;
 
 pub use build::BuildConstruct;
-pub use expr::{compile_expr, CompiledExpr};
-pub use sink::{OutputSink, ValueSink};
+pub use expr::{compile_expr, CompiledExpr, ExprExtension};
+pub use input::{Input, OwnedValueInput, ValueInput};
+pub use sink::{OutputSink, ProducedOutput, ValueSink};
 
 use std::sync::Arc;
 
@@ -93,8 +95,8 @@ pub trait CompiledExec {
         sink: &mut dyn OutputSink,
     ) -> Result<()>;
 
-    /// Builds binary data, reading field values from the `input` [`Value`]
-    /// tree, writing bytes to `stream`, and updating `ctx`.
+    /// Builds binary data, reading field values from `input` (an
+    /// [`Input`] abstraction), writing bytes to `stream`, and updating `ctx`.
     ///
     /// # Errors
     ///
@@ -102,7 +104,7 @@ pub trait CompiledExec {
     /// extraction.
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()>;
@@ -886,6 +888,78 @@ impl std::fmt::Debug for CompiledDynamic {
 }
 
 // ===========================================================================
+// CompiledExtension trait + CompiledExternal (Phase 13)
+// ===========================================================================
+
+/// Trait for external (non-built-in) compiled constructs.
+///
+/// This is the extension point for Phase 13's FFI layer: the
+/// [`CompiledNode::External`] variant wraps a `Box<dyn CompiledExtension>`,
+/// allowing construct-py to inject Python-callback-backed constructs into the
+/// compiled execution tree **without** construct-rs depending on pyo3.
+///
+/// The trait mirrors [`CompiledExec`] but operates through trait-object
+/// dispatch rather than `enum_dispatch`. The `ext_parse` method returns a
+/// [`ProducedOutput`] (allowing direct-to-Python output), while `ext_build`
+/// accepts an [`Input`] (allowing lazy Python-side reading).
+pub trait CompiledExtension: Send + Sync {
+    /// Parses from the stream and returns the produced output.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ConstructError`] from stream reading or parsing.
+    fn ext_parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<ProducedOutput>;
+
+    /// Builds binary data from the input, writing to the stream.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`ConstructError`] from value extraction or stream
+    /// writing.
+    fn ext_build(
+        &self,
+        input: &dyn Input,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()>;
+
+    /// Computes the byte size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConstructError::Sizeof`] if the size is not statically
+    /// determinable.
+    fn ext_sizeof(&self) -> Result<usize>;
+}
+
+/// Compiled node wrapping an external [`CompiledExtension`] trait object.
+///
+/// This is the Phase 13 extension point: it allows construct-py to insert
+/// Python-callback-backed constructs into the compiled tree. The
+/// [`CompiledExec`] implementation delegates to the inner
+/// [`CompiledExtension`] trait object.
+///
+/// # `ext_parse` → sink integration
+///
+/// `exec_parse` calls `ext_parse` which returns a [`ProducedOutput`]. For
+/// [`ProducedOutput::Value`], the value is deposited into the sink via
+/// `set_scalar`. For [`ProducedOutput::Object`], the opaque boxed object is
+/// stored internally and surfaced when the parent sink calls
+/// [`OutputSink::into_produced`] (Phase 13 PyDictSink path).
+pub struct CompiledExternal {
+    /// The external extension trait object.
+    pub inner: Box<dyn CompiledExtension>,
+}
+
+impl std::fmt::Debug for CompiledExternal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledExternal")
+            .field("inner", &"<dyn CompiledExtension>")
+            .finish()
+    }
+}
+
+// ===========================================================================
 // CompiledNode enum
 // ===========================================================================
 
@@ -1061,6 +1135,10 @@ pub enum CompiledNode {
     // -- escape-hatch --
     /// Wraps [`CompiledDynamic`].
     Dynamic(CompiledDynamic),
+    // -- Phase 13 extension --
+    /// Wraps [`CompiledExternal`] — an external (e.g. Python-callback-backed)
+    /// compiled construct injected via the [`CompiledExtension`] trait.
+    External(CompiledExternal),
 }
 
 // ===========================================================================
@@ -1101,7 +1179,7 @@ macro_rules! impl_compiled_exec_stub {
 
                 fn exec_build(
                     &self,
-                    _input: &Value,
+                    _input: &dyn Input,
                     _stream: &mut CombinedStream,
                     _ctx: &mut Context,
                 ) -> Result<()> {
@@ -1149,11 +1227,12 @@ macro_rules! impl_leaf_exec {
 
                 fn exec_build(
                     &self,
-                    input: &Value,
+                    input: &dyn Input,
                     stream: &mut CombinedStream,
                     ctx: &mut Context,
                 ) -> Result<()> {
-                    self.inner.build(input, stream, ctx)
+                    let value = input.as_value()?;
+                    self.inner.build(&value, stream, ctx)
                 }
 
                 fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -1217,7 +1296,7 @@ macro_rules! impl_forward_wrapper_exec {
 
                 fn exec_build(
                     &self,
-                    input: &Value,
+                    input: &dyn Input,
                     stream: &mut CombinedStream,
                     ctx: &mut Context,
                 ) -> Result<()> {
@@ -1258,18 +1337,20 @@ impl CompiledExec for CompiledConst {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        if !input.is_none() && *input != self.value {
+        let value = input.as_value()?;
+        if !value.is_none() && value != self.value {
             return Err(ConstructError::Const {
                 path: String::new(),
                 expected: format!("None or {:?}", self.value),
-                actual: format!("{:?}", input),
+                actual: format!("{:?}", value),
             });
         }
-        self.inner.exec_build(&self.value, stream, ctx)
+        let owned = OwnedValueInput::new(self.value.clone());
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -1298,12 +1379,14 @@ macro_rules! impl_adapter_exec {
 
                 fn exec_build(
                     &self,
-                    input: &Value,
+                    input: &dyn Input,
                     stream: &mut CombinedStream,
                     ctx: &mut Context,
                 ) -> Result<()> {
-                    let encoded = (self.encode)(input, ctx)?;
-                    self.inner.exec_build(&encoded, stream, ctx)
+                    let value = input.as_value()?;
+                    let encoded = (self.encode)(&value, ctx)?;
+                    let owned = OwnedValueInput::new(encoded);
+                    self.inner.exec_build(&owned, stream, ctx)
                 }
 
                 fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -1332,12 +1415,14 @@ impl CompiledExec for CompiledSymmetricAdapter {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let encoded = (self.func)(input, ctx)?;
-        self.inner.exec_build(&encoded, stream, ctx)
+        let value = input.as_value()?;
+        let encoded = (self.func)(&value, ctx)?;
+        let owned = OwnedValueInput::new(encoded);
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -1367,11 +1452,12 @@ macro_rules! impl_validator_exec {
 
                 fn exec_build(
                     &self,
-                    input: &Value,
+                    input: &dyn Input,
                     stream: &mut CombinedStream,
                     ctx: &mut Context,
                 ) -> Result<()> {
-                    (self.check)(input, ctx)?;
+                    let value = input.as_value()?;
+                    (self.check)(&value, ctx)?;
                     self.inner.exec_build(input, stream, ctx)
                 }
 
@@ -1404,11 +1490,12 @@ impl CompiledExec for CompiledEnum {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let build_val = match input {
+        let raw = input.as_value()?;
+        let build_val = match &raw {
             Value::String(label) => match self.mapping.get(label) {
                 Some(&v) => Value::UInt(v),
                 None => {
@@ -1425,8 +1512,9 @@ impl CompiledExec for CompiledEnum {
                 Value::UInt(v)
             }
         };
+        let owned = OwnedValueInput::new(build_val);
         self.inner
-            .exec_build(&build_val, stream, ctx)
+            .exec_build(&owned, stream, ctx)
             .map_err(|e| e.with_path_prefix("Enum"))
     }
 
@@ -1458,11 +1546,12 @@ impl CompiledExec for CompiledFlagsEnum {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let container = input
+        let raw = input.as_value()?;
+        let container = raw
             .as_container()
             .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
         let mut flags_val: u64 = 0;
@@ -1488,8 +1577,9 @@ impl CompiledExec for CompiledFlagsEnum {
                 }
             }
         }
+        let owned = OwnedValueInput::new(Value::UInt(flags_val));
         self.inner
-            .exec_build(&Value::UInt(flags_val), stream, ctx)
+            .exec_build(&owned, stream, ctx)
             .map_err(|e| e.with_path_prefix("FlagsEnum"))
     }
 
@@ -1524,21 +1614,23 @@ impl CompiledExec for CompiledMapping {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
+        let raw = input.as_value()?;
         for (k, v) in &self.mapping {
-            if k == input {
+            if k == &raw {
+                let owned = OwnedValueInput::new(v.clone());
                 return self
                     .inner
-                    .exec_build(v, stream, ctx)
+                    .exec_build(&owned, stream, ctx)
                     .map_err(|e| e.with_path_prefix("Mapping"));
             }
         }
         Err(ConstructError::Mapping {
             path: String::new(),
-            key: format!("{:?}", input),
+            key: format!("{:?}", raw),
         }
         .with_path_prefix("Mapping"))
     }
@@ -1571,14 +1663,39 @@ impl CompiledExec for CompiledMapping {
 /// Mirrors `constructs::repetition::CONTEXT_INDEX_KEY`.
 const REPETITION_INDEX_KEY: &str = "_index";
 
-/// Helper: parses a single child node into a named sub-sink, returning the
-/// child's parsed [`Value`].
+/// Helper: parses a single child node into a named sub-sink and integrates
+/// the result into the parent sink via `finish_field`, returning the child's
+/// parsed [`Value`] for context insertion.
 ///
 /// Creates a sub-sink via `parent_sink.sub_sink_for_field(name)`, delegates
-/// `exec_parse` to `node` with the sub-sink, then extracts the result via
-/// `into_value`. The parent sink is **not** updated by this helper — the
-/// caller is responsible for `set_field` / `push_item` if needed.
+/// `exec_parse` to `node` with the sub-sink, then calls
+/// [`OutputSink::finish_field`] which integrates the result (via `set_field`
+/// for ValueSink) and returns the [`Value`].
+///
+/// **Used by**: `CompiledStruct`, `CompiledUnion` — named-keyed container
+/// constructs. **Not** used by `CompiledFocusedSeq` (which uses
+/// [`exec_parse_field_value`] instead, since it only needs the Value for
+/// context, not sink integration).
 fn exec_parse_named_child(
+    node: &CompiledNode,
+    stream: &mut CombinedStream,
+    ctx: &mut Context,
+    parent_sink: &mut dyn OutputSink,
+    name: &str,
+) -> Result<Value> {
+    let mut sub_sink = parent_sink.sub_sink_for_field(name)?;
+    node.exec_parse(stream, ctx, sub_sink.as_mut())?;
+    parent_sink.finish_field(name, sub_sink)
+}
+
+/// Helper: parses a single child node into a named sub-sink and extracts the
+/// result as a [`Value`] **without** integrating it into the parent sink.
+///
+/// This is the Phase 12 behavior of `exec_parse_named_child` (before the
+/// Phase 13 finish_field migration). Used by `CompiledFocusedSeq` which only
+/// needs the Value for context insertion — the focused value is deposited via
+/// `set_scalar` at the end, not via per-field sink integration.
+fn exec_parse_field_value(
     node: &CompiledNode,
     stream: &mut CombinedStream,
     ctx: &mut Context,
@@ -1615,18 +1732,19 @@ impl CompiledExec for CompiledStruct {
                         Err(ConstructError::StopField { .. }) => break,
                         Err(e) => return Err(e.with_path_prefix(name)),
                     };
-                    // Dual write: sink (output) + context (for this.field refs).
-                    sink.set_field(name, value.clone())?;
+                    // sink already integrated by finish_field inside helper.
                     child_ctx.insert(name.clone(), value);
                 }
                 None => {
-                    // Anonymous field: parse into a discard sub-sink.
+                    // Anonymous field: parse into a sub-sink, finish_item.
                     let mut sub_sink = sink.sub_sink_for_item()?;
                     match field
                         .subcon
                         .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
                     {
-                        Ok(()) => {}
+                        Ok(()) => {
+                            sink.finish_item(sub_sink)?;
+                        }
                         Err(ConstructError::StopField { .. }) => break,
                         Err(e) => return Err(e.with_path_prefix("(anonymous)")),
                     }
@@ -1638,11 +1756,13 @@ impl CompiledExec for CompiledStruct {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let container = match input {
+        // Extract the container from input for field lookups.
+        let raw = input.as_value()?;
+        let container = match &raw {
             Value::None => IndexMap::new(),
             Value::Container(map) => map.clone(),
             other => {
@@ -1684,9 +1804,10 @@ impl CompiledExec for CompiledStruct {
                 child_ctx.insert(name.clone(), build_value.clone());
             }
 
+            let field_input = OwnedValueInput::new(build_value);
             match field
                 .subcon
-                .exec_build(&build_value, stream, &mut child_ctx)
+                .exec_build(&field_input, stream, &mut child_ctx)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => return Ok(()),
@@ -1736,35 +1857,33 @@ impl CompiledExec for CompiledSequence {
         for (idx, entry) in self.entries.iter().enumerate() {
             match &entry.name {
                 Some(name) => {
-                    let value = match exec_parse_named_child(
-                        &entry.subcon,
-                        stream,
-                        &mut child_ctx,
-                        sink,
-                        name,
-                    ) {
-                        Ok(v) => v,
+                    // Named entry: positionally appended via finish_named_item.
+                    let mut sub_sink = sink.sub_sink_for_item()?;
+                    match entry
+                        .subcon
+                        .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                    {
+                        Ok(()) => {}
                         Err(ConstructError::StopField { .. }) => break,
                         Err(e) => return Err(e.with_path_prefix(name)),
-                    };
-                    // Sequence always appends to the output list.
-                    sink.push_item(value.clone())?;
+                    }
+                    let value = sink.finish_named_item(name, sub_sink)?;
                     child_ctx.insert(name.clone(), value);
                 }
                 None => {
                     let mut sub_sink = sink.sub_sink_for_item()?;
-                    let value =
-                        match entry
-                            .subcon
-                            .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
-                        {
-                            Ok(()) => sub_sink.into_value()?,
-                            Err(ConstructError::StopField { .. }) => break,
-                            Err(e) => {
-                                return Err(e.with_path_prefix(&format!("[{idx}]")));
-                            }
-                        };
-                    sink.push_item(value)?;
+                    match entry
+                        .subcon
+                        .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                    {
+                        Ok(()) => {
+                            sink.finish_item(sub_sink)?;
+                        }
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => {
+                            return Err(e.with_path_prefix(&format!("[{idx}]")));
+                        }
+                    }
                 }
             }
         }
@@ -1773,11 +1892,12 @@ impl CompiledExec for CompiledSequence {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::None => vec![Value::None; self.entries.len()],
             Value::List(items) => items.clone(),
             other => {
@@ -1806,9 +1926,10 @@ impl CompiledExec for CompiledSequence {
                 child_ctx.insert(name.clone(), build_value.clone());
             }
 
+            let entry_input = OwnedValueInput::new(build_value);
             match entry
                 .subcon
-                .exec_build(&build_value, stream, &mut child_ctx)
+                .exec_build(&entry_input, stream, &mut child_ctx)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => return Ok(()),
@@ -1856,12 +1977,13 @@ impl CompiledExec for CompiledArray {
         for i in 0..self.count {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
             let mut sub_sink = sink.sub_sink_for_item()?;
-            let value = match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
-                Ok(()) => sub_sink.into_value()?,
+            match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => {
+                    if !self.discard {
+                        sink.finish_item(sub_sink)?;
+                    }
+                }
                 Err(e) => return Err(e.with_path_prefix(&format!("[{i}]"))),
-            };
-            if !self.discard {
-                sink.push_item(value)?;
             }
         }
         Ok(())
@@ -1869,11 +1991,12 @@ impl CompiledExec for CompiledArray {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::List(items) => items.clone(),
             other => {
                 return Err(ConstructError::TypeMismatch {
@@ -1894,7 +2017,8 @@ impl CompiledExec for CompiledArray {
 
         for (i, element) in list.iter().enumerate() {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
-            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+            let elem_input = OwnedValueInput::new(element.clone());
+            if let Err(e) = self.subcon.exec_build(&elem_input, stream, ctx) {
                 return Err(e.with_path_prefix(&format!("[{i}]")));
             }
         }
@@ -1931,18 +2055,19 @@ impl CompiledExec for CompiledArrayExpr {
         for i in 0..count {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
             let mut sub_sink = sink.sub_sink_for_item()?;
-            let value = match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
-                Ok(()) => sub_sink.into_value()?,
+            match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => {
+                    sink.finish_item(sub_sink)?;
+                }
                 Err(e) => return Err(e.with_path_prefix(&format!("[{i}]"))),
-            };
-            sink.push_item(value)?;
+            }
         }
         Ok(())
     }
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -1958,7 +2083,8 @@ impl CompiledExec for CompiledArrayExpr {
             .with_path_prefix("ArrayExpr")
         })? as usize;
 
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::List(items) => items.clone(),
             other => {
                 return Err(ConstructError::TypeMismatch {
@@ -1979,7 +2105,8 @@ impl CompiledExec for CompiledArrayExpr {
 
         for (i, element) in list.iter().enumerate() {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
-            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+            let elem_input = OwnedValueInput::new(element.clone());
+            if let Err(e) = self.subcon.exec_build(&elem_input, stream, ctx) {
                 return Err(e.with_path_prefix(&format!("[{i}]")));
             }
         }
@@ -2010,9 +2137,8 @@ impl CompiledExec for CompiledGreedyRange {
             let mut sub_sink = sink.sub_sink_for_item()?;
             match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
                 Ok(()) => {
-                    let value = sub_sink.into_value()?;
                     if !self.discard {
-                        sink.push_item(value)?;
+                        sink.finish_item(sub_sink)?;
                     }
                     i = i.saturating_add(1);
                 }
@@ -2029,11 +2155,12 @@ impl CompiledExec for CompiledGreedyRange {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::List(items) => items.clone(),
             other => {
                 return Err(ConstructError::TypeMismatch {
@@ -2046,7 +2173,8 @@ impl CompiledExec for CompiledGreedyRange {
 
         for (i, element) in list.iter().enumerate() {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
-            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+            let elem_input = OwnedValueInput::new(element.clone());
+            if let Err(e) = self.subcon.exec_build(&elem_input, stream, ctx) {
                 return Err(e.with_path_prefix(&format!("[{i}]")));
             }
         }
@@ -2095,11 +2223,12 @@ impl CompiledExec for CompiledRepeatUntil {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::List(items) => items.clone(),
             other => {
                 return Err(ConstructError::TypeMismatch {
@@ -2113,8 +2242,9 @@ impl CompiledExec for CompiledRepeatUntil {
         let mut built: Vec<Value> = Vec::new();
         for (i, element) in list.iter().enumerate() {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = OwnedValueInput::new(element.clone());
             self.subcon
-                .exec_build(element, stream, ctx)
+                .exec_build(&elem_input, stream, ctx)
                 .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
 
             if !self.discard {
@@ -2181,7 +2311,7 @@ impl CompiledExec for CompiledSelect {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2203,9 +2333,10 @@ impl CompiledExec for CompiledSelect {
                 }
             }
         }
+        let val = input.as_value().unwrap_or(Value::None);
         Err(ConstructError::Select {
             path: String::new(),
-            message: format!("no subconstruct matched for building: {:?}", input),
+            message: format!("no subconstruct matched for building: {val:?}"),
         })
     }
 
@@ -2248,7 +2379,7 @@ impl CompiledExec for CompiledUnion {
                     let forward_pos = stream.tell()?;
                     forward_by_index.push(forward_pos);
                     forward_by_name.insert(name.clone(), forward_pos);
-                    sink.set_field(name, value.clone())?;
+                    // sink already integrated by finish_field inside helper.
                     child_ctx.insert(name.clone(), value);
                 }
                 None => {
@@ -2293,11 +2424,12 @@ impl CompiledExec for CompiledUnion {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let container = match input {
+        let raw = input.as_value()?;
+        let container = match &raw {
             Value::None => IndexMap::new(),
             Value::Container(map) => map.clone(),
             other => {
@@ -2352,9 +2484,10 @@ impl CompiledExec for CompiledUnion {
                 child_ctx.insert(name.clone(), build_value.clone());
             }
 
+            let field_input = OwnedValueInput::new(build_value);
             return field
                 .subcon
-                .exec_build(&build_value, stream, &mut child_ctx)
+                .exec_build(&field_input, stream, &mut child_ctx)
                 .map_err(|e| {
                     if let Some(ref name) = field.name {
                         e.with_path_prefix(name)
@@ -2412,7 +2545,11 @@ impl CompiledExec for CompiledFocusedSeq {
         for field in &self.fields {
             match &field.name {
                 Some(name) => {
-                    let value = match exec_parse_named_child(
+                    // FocusedSeq uses exec_parse_field_value (extracts Value
+                    // for context WITHOUT sink integration) — NOT the
+                    // finish_field-based exec_parse_named_child. The focused
+                    // value is deposited via set_scalar at the end.
+                    let value = match exec_parse_field_value(
                         &field.subcon,
                         stream,
                         &mut child_ctx,
@@ -2454,19 +2591,20 @@ impl CompiledExec for CompiledFocusedSeq {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
+        let input_val = input.as_value()?;
         let mut child_ctx = ctx.subcontext();
-        child_ctx.insert(self.parsebuildfrom.clone(), input.clone());
+        child_ctx.insert(self.parsebuildfrom.clone(), input_val.clone());
 
         for field in &self.fields {
             let name_ref = field.name.as_deref();
 
             // The focused field gets the actual data; others get None.
             let build_value = if name_ref == Some(self.parsebuildfrom.as_str()) {
-                input.clone()
+                input_val.clone()
             } else {
                 Value::None
             };
@@ -2475,9 +2613,10 @@ impl CompiledExec for CompiledFocusedSeq {
                 child_ctx.insert(name.clone(), build_value.clone());
             }
 
+            let field_input = OwnedValueInput::new(build_value);
             match field
                 .subcon
-                .exec_build(&build_value, stream, &mut child_ctx)
+                .exec_build(&field_input, stream, &mut child_ctx)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => return Ok(()),
@@ -2533,7 +2672,7 @@ impl CompiledExec for CompiledIfThenElse {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2579,7 +2718,7 @@ impl CompiledExec for CompiledSwitch {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2624,7 +2763,7 @@ impl CompiledExec for CompiledCheck {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         _stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2654,7 +2793,7 @@ impl CompiledExec for CompiledStopIf {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         _stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2692,7 +2831,7 @@ impl CompiledExec for CompiledComputed {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         _stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2718,12 +2857,13 @@ impl CompiledExec for CompiledRebuild {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
         let value = (self.func)(ctx)?;
-        self.inner.exec_build(&value, stream, ctx)
+        let owned = OwnedValueInput::new(value);
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -2743,12 +2883,18 @@ impl CompiledExec for CompiledDefault {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let effective = if input.is_none() { &self.value } else { input };
-        self.inner.exec_build(effective, stream, ctx)
+        let raw = input.as_value()?;
+        let effective = if raw.is_none() {
+            self.value.clone()
+        } else {
+            raw
+        };
+        let owned = OwnedValueInput::new(effective);
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -2772,7 +2918,7 @@ impl CompiledExec for CompiledIndex {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> Result<()> {
@@ -2831,7 +2977,7 @@ impl CompiledExec for CompiledPadded {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2892,7 +3038,7 @@ impl CompiledExec for CompiledAligned {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2951,7 +3097,7 @@ impl CompiledExec for CompiledFixedSized {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -2998,12 +3144,14 @@ impl CompiledExec for CompiledNamedTuple {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let encoded = Self::encode_value(input, &self.field_names)?;
-        self.inner.exec_build(&encoded, stream, ctx)
+        let raw = input.as_value()?;
+        let encoded = Self::encode_value(&raw, &self.field_names)?;
+        let owned = OwnedValueInput::new(encoded);
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -3101,11 +3249,12 @@ impl CompiledExec for CompiledTimestampAdapter {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let container = input.as_container()?;
+        let raw = input.as_value()?;
+        let container = raw.as_container()?;
         let secs = container
             .get("secs")
             .ok_or_else(|| ConstructError::FieldMissing {
@@ -3121,7 +3270,8 @@ impl CompiledExec for CompiledTimestampAdapter {
             })?
             .to_u64()? as u32;
         let raw_i64 = secs_nanos_to_timestamp(secs, nanos, self.unit);
-        self.inner.exec_build(&Value::Int(raw_i64), stream, ctx)
+        let owned = OwnedValueInput::new(Value::Int(raw_i64));
+        self.inner.exec_build(&owned, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -3166,7 +3316,7 @@ impl CompiledExec for CompiledLazy {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3190,7 +3340,7 @@ impl CompiledExec for CompiledLazyStruct {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3223,11 +3373,12 @@ impl CompiledExec for CompiledLazyArray {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let list = match input {
+        let raw = input.as_value()?;
+        let list = match &raw {
             Value::List(items) => items.clone(),
             other => {
                 return Err(ConstructError::TypeMismatch {
@@ -3246,7 +3397,8 @@ impl CompiledExec for CompiledLazyArray {
         }
         for (i, element) in list.iter().enumerate() {
             ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
-            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+            let elem_input = OwnedValueInput::new(element.clone());
+            if let Err(e) = self.subcon.exec_build(&elem_input, stream, ctx) {
                 return Err(e.with_path_prefix(&format!("[{i}]")));
             }
         }
@@ -3277,7 +3429,7 @@ impl CompiledExec for CompiledRebuffered {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3309,7 +3461,7 @@ impl CompiledExec for CompiledBitwise {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3342,7 +3494,7 @@ impl CompiledExec for CompiledBytewise {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3375,7 +3527,7 @@ impl CompiledExec for CompiledPointer {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3415,7 +3567,7 @@ impl CompiledExec for CompiledPointerExpr {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3473,7 +3625,7 @@ impl CompiledExec for CompiledPeek {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> Result<()> {
@@ -3509,17 +3661,19 @@ impl CompiledExec for CompiledRawCopy {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        let container = input.as_container()?;
+        let raw = input.as_value()?;
+        let container = raw.as_container()?;
         if let Some(Value::Bytes(raw_data)) = container.get("data") {
             stream.write_bytes(raw_data)?;
             return Ok(());
         }
         if let Some(value) = container.get("value") {
-            self.inner.exec_build(value, stream, ctx)?;
+            let owned = OwnedValueInput::new(value.clone());
+            self.inner.exec_build(&owned, stream, ctx)?;
             return Ok(());
         }
         Err(ConstructError::Generic {
@@ -3554,7 +3708,7 @@ impl CompiledExec for CompiledPrefixed {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3568,7 +3722,7 @@ impl CompiledExec for CompiledPrefixed {
             length += lf_size as u64;
         }
         self.length_field
-            .exec_build(&Value::UInt(length), stream, ctx)?;
+            .exec_build(&OwnedValueInput::new(Value::UInt(length)), stream, ctx)?;
         stream.write_bytes(&built_data)
     }
 
@@ -3598,7 +3752,7 @@ impl CompiledExec for CompiledTransformed {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3658,7 +3812,7 @@ impl CompiledExec for CompiledRestreamed {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3735,7 +3889,7 @@ impl CompiledExec for CompiledCompressed {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3807,14 +3961,14 @@ impl CompiledExec for CompiledChecksum {
 
     fn exec_build(
         &self,
-        _input: &Value,
+        _input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
         let raw_bytes = (self.bytes_func)(ctx)?;
         let checksum = (self.hash_func)(&raw_bytes);
         self.checksum_field
-            .exec_build(&Value::Bytes(checksum), stream, ctx)
+            .exec_build(&OwnedValueInput::new(Value::Bytes(checksum)), stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -3839,7 +3993,7 @@ impl CompiledExec for CompiledByteSwapped {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3891,7 +4045,7 @@ impl CompiledExec for CompiledBitsSwapped {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
@@ -3920,11 +4074,12 @@ impl CompiledExec for CompiledLazyBound {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
-        self.inner.build(input, stream, ctx)
+        let value = input.as_value()?;
+        self.inner.build(&value, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -3958,12 +4113,13 @@ impl CompiledExec for CompiledDynamic {
 
     fn exec_build(
         &self,
-        input: &Value,
+        input: &dyn Input,
         stream: &mut CombinedStream,
         ctx: &mut Context,
     ) -> Result<()> {
         // Delegate to the wrapped construct's old-path build.
-        self.inner.build(input, stream, ctx)
+        let value = input.as_value()?;
+        self.inner.build(&value, stream, ctx)
     }
 
     fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
@@ -3973,8 +4129,41 @@ impl CompiledExec for CompiledDynamic {
 }
 
 // ===========================================================================
-// CompiledSchema
+// Functional CompiledExec implementation for CompiledExternal (Phase 13)
 // ===========================================================================
+
+impl CompiledExec for CompiledExternal {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let produced = self.inner.ext_parse(stream, ctx)?;
+        match produced {
+            ProducedOutput::Value(v) => sink.set_scalar(v),
+            // For Object output: the opaque boxed object cannot be deposited
+            // into a ValueSink (pure Rust path). In the PyDictSink path
+            // (construct-py), the parent's finish_field/finish_named_item
+            // calls into_produced which handles the Object variant. For the
+            // pure Rust path, we deposit Value::None as a placeholder.
+            ProducedOutput::Object(_) => sink.set_scalar(Value::None),
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &dyn Input,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        self.inner.ext_build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        self.inner.ext_sizeof()
+    }
+}
 
 /// The initial path string used for parse operations.
 const PARSE_PATH: &str = "(parsing)";
@@ -4095,8 +4284,9 @@ impl CompiledSchema {
     pub fn build_bytes(&self, data: &Value) -> Result<Vec<u8>> {
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
+        let input = ValueInput::new(data);
         self.tree
-            .exec_build(data, &mut stream, &mut ctx)
+            .exec_build(&input, &mut stream, &mut ctx)
             .map_err(|e| e.with_path_prefix(BUILD_PATH))?;
         match stream {
             CombinedStream::ByteStream(bs) => Ok(bs.into_bytes()),
@@ -4243,6 +4433,8 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
         }
         #[cfg(feature = "compression")]
         CompiledNode::Compressed(_) => None,
+        // External (Phase 13): size depends on the extension → unknown.
+        CompiledNode::External(_) => None,
         // Dynamic escape-hatch: unknown.
         _ => None,
     }
@@ -4347,7 +4539,7 @@ mod tests {
         });
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
-        node.exec_build(&Value::UInt(5), &mut stream, &mut ctx)
+        node.exec_build(&ValueInput::new(&Value::UInt(5)), &mut stream, &mut ctx)
             .unwrap();
         assert_eq!(stream.into_bytes(), vec![0x05]);
     }
@@ -4441,8 +4633,12 @@ mod tests {
         assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(42));
 
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
-        node.exec_build(&Value::UInt(42), &mut stream2, &mut Context::new())
-            .unwrap();
+        node.exec_build(
+            &ValueInput::new(&Value::UInt(42)),
+            &mut stream2,
+            &mut Context::new(),
+        )
+        .unwrap();
         assert_eq!(stream2.into_bytes(), vec![42]);
     }
 
@@ -4474,13 +4670,21 @@ mod tests {
         });
         // build with None: writes the constant value.
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
-        node.exec_build(&Value::None, &mut stream, &mut Context::new())
-            .unwrap();
+        node.exec_build(
+            &ValueInput::new(&Value::None),
+            &mut stream,
+            &mut Context::new(),
+        )
+        .unwrap();
         assert_eq!(stream.into_bytes(), vec![42]);
         // build with wrong value: error.
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let err = node
-            .exec_build(&Value::UInt(99), &mut stream2, &mut Context::new())
+            .exec_build(
+                &ValueInput::new(&Value::UInt(99)),
+                &mut stream2,
+                &mut Context::new(),
+            )
             .unwrap_err();
         assert!(matches!(err, ConstructError::Const { .. }));
     }
@@ -4510,8 +4714,12 @@ mod tests {
         assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(10));
         // Build 10 → encode → 5.
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
-        node.exec_build(&Value::UInt(10), &mut stream2, &mut Context::new())
-            .unwrap();
+        node.exec_build(
+            &ValueInput::new(&Value::UInt(10)),
+            &mut stream2,
+            &mut Context::new(),
+        )
+        .unwrap();
         assert_eq!(stream2.into_bytes(), vec![5]);
     }
 
@@ -4625,7 +4833,7 @@ mod tests {
         // Build "B" → writes 1.
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         node.exec_build(
-            &Value::String("B".to_string()),
+            &OwnedValueInput::new(Value::String("B".to_string())),
             &mut stream2,
             &mut Context::new(),
         )
@@ -4692,7 +4900,7 @@ mod tests {
         let node = CompiledNode::Dynamic(dynamic_pass());
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
-        node.exec_build(&Value::None, &mut stream, &mut ctx)
+        node.exec_build(&ValueInput::new(&Value::None), &mut stream, &mut ctx)
             .unwrap();
         assert!(stream.into_bytes().is_empty());
     }
@@ -4889,7 +5097,8 @@ mod tests {
         // Build back: { a: 1, b: 515 } → 0x01 0x02 0x03
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
-        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        node.exec_build(&ValueInput::new(&val), &mut stream2, &mut ctx2)
+            .unwrap();
         assert_eq!(stream2.into_bytes(), vec![0x01, 0x02, 0x03]);
     }
 
@@ -4950,7 +5159,8 @@ mod tests {
         // Build back
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
-        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        node.exec_build(&ValueInput::new(&val), &mut stream2, &mut ctx2)
+            .unwrap();
         assert_eq!(stream2.into_bytes(), vec![10, 20, 30]);
     }
 
@@ -4984,7 +5194,8 @@ mod tests {
         // Build back
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
-        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        node.exec_build(&ValueInput::new(&val), &mut stream2, &mut ctx2)
+            .unwrap();
         assert_eq!(stream2.into_bytes(), vec![1, 2, 3]);
     }
 
@@ -5037,7 +5248,8 @@ mod tests {
         let input = Value::List(vec![Value::UInt(10), Value::UInt(20), Value::UInt(30)]);
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
-        node.exec_build(&input, &mut stream, &mut ctx).unwrap();
+        node.exec_build(&ValueInput::new(&input), &mut stream, &mut ctx)
+            .unwrap();
         assert_eq!(stream.into_bytes(), vec![10, 20, 30]);
     }
 
@@ -5161,7 +5373,8 @@ mod tests {
         // Build back
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
-        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        node.exec_build(&ValueInput::new(&val), &mut stream2, &mut ctx2)
+            .unwrap();
         assert_eq!(stream2.into_bytes(), vec![1, 2]);
     }
 
@@ -5186,7 +5399,8 @@ mod tests {
         // Build back
         let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx2 = Context::new();
-        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        node.exec_build(&ValueInput::new(&val), &mut stream2, &mut ctx2)
+            .unwrap();
         assert_eq!(stream2.into_bytes(), vec![10, 20]);
     }
 
@@ -5230,7 +5444,118 @@ mod tests {
         let input = Value::Container(IndexMap::new());
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
-        let err = node.exec_build(&input, &mut stream, &mut ctx).unwrap_err();
+        let err = node
+            .exec_build(&ValueInput::new(&input), &mut stream, &mut ctx)
+            .unwrap_err();
         assert!(matches!(err, ConstructError::FieldMissing { .. }));
+    }
+
+    // -- Phase 13: CompiledExternal + CompiledExtension ----------------------
+
+    /// Test CompiledExtension implementation that always produces a fixed
+    /// Value on parse, writes a fixed byte on build, and has size 1.
+    #[derive(Debug)]
+    struct TestExtension {
+        parse_value: Value,
+        build_byte: u8,
+        size: usize,
+    }
+
+    impl CompiledExtension for TestExtension {
+        fn ext_parse(
+            &self,
+            _stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<ProducedOutput> {
+            Ok(ProducedOutput::Value(self.parse_value.clone()))
+        }
+
+        fn ext_build(
+            &self,
+            _input: &dyn Input,
+            stream: &mut CombinedStream,
+            _ctx: &mut Context,
+        ) -> Result<()> {
+            stream.write_bytes(&[self.build_byte])
+        }
+
+        fn ext_sizeof(&self) -> Result<usize> {
+            Ok(self.size)
+        }
+    }
+
+    #[test]
+    fn external_variant_exec_parse_delegates_to_extension() {
+        let ext = TestExtension {
+            parse_value: Value::UInt(42),
+            build_byte: 0,
+            size: 1,
+        };
+        let node = CompiledNode::External(CompiledExternal {
+            inner: Box::new(ext),
+        });
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        assert_eq!(val, Value::UInt(42));
+    }
+
+    #[test]
+    fn external_variant_exec_build_delegates_to_extension() {
+        let ext = TestExtension {
+            parse_value: Value::None,
+            build_byte: 0xAB,
+            size: 1,
+        };
+        let node = CompiledNode::External(CompiledExternal {
+            inner: Box::new(ext),
+        });
+        let input = ValueInput::new(&Value::None);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx = Context::new();
+        node.exec_build(&input, &mut stream, &mut ctx).unwrap();
+        assert_eq!(stream.into_bytes(), vec![0xAB]);
+    }
+
+    #[test]
+    fn external_variant_exec_sizeof_delegates_to_extension() {
+        let ext = TestExtension {
+            parse_value: Value::None,
+            build_byte: 0,
+            size: 7,
+        };
+        let node = CompiledNode::External(CompiledExternal {
+            inner: Box::new(ext),
+        });
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 7);
+    }
+
+    #[test]
+    fn external_variant_debug_formats() {
+        let ext = TestExtension {
+            parse_value: Value::None,
+            build_byte: 0,
+            size: 0,
+        };
+        let node = CompiledNode::External(CompiledExternal {
+            inner: Box::new(ext),
+        });
+        let _ = format!("{node:?}");
+    }
+
+    #[test]
+    fn external_variant_is_constructible_in_enum() {
+        let ext = TestExtension {
+            parse_value: Value::None,
+            build_byte: 0,
+            size: 0,
+        };
+        let node = CompiledNode::External(CompiledExternal {
+            inner: Box::new(ext),
+        });
+        assert!(matches!(node, CompiledNode::External(_)));
     }
 }
