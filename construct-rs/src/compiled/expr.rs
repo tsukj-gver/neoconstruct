@@ -108,7 +108,9 @@ impl CompiledExpr {
     /// evaluation site, prefixed by the caller as appropriate.
     ///
     /// [`CombinedExpr::evaluate`]: crate::expr::CombinedExpr::evaluate
-    #[must_use]
+    //
+    // Note: no `#[must_use]` here — `Result<Value>` is already `#[must_use]`,
+    // so an explicit attribute would trip `clippy::double_must_use`.
     pub fn eval(&self, ctx: &Context, obj: Option<&Value>) -> Result<Value> {
         match self {
             CompiledExpr::Native(e) => e.evaluate(ctx, obj),

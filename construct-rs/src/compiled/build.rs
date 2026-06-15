@@ -149,39 +149,39 @@ impl_build_construct_stub! {
 impl_build_construct_stub!(Compressed,);
 
 // ===========================================================================
-// BuildConstruct for Box<dyn Construct> (Dynamic variant support)
+// BuildConstruct for Arc<dyn Construct> (Dynamic variant support, I3 correction)
 // ===========================================================================
 //
-// CombinedConstruct::Dynamic holds a Box<dyn Construct>. For enum_dispatch
-// to generate a match arm for the Dynamic variant, Box<dyn Construct>
-// must implement BuildConstruct. This stub returns Err — real impl
-// (producing CompiledDynamic with Arc<dyn Construct>) is added in
-// Phase 12.4 after the Box→Arc migration (design doc §5.5, I3 correction).
+// After the I3 correction (Phase 12.3), `CombinedConstruct::Dynamic` holds an
+// `Arc<dyn Construct>` instead of a `Box<dyn Construct>`. The hand-written
+// match dispatch below forwards the Dynamic arm to `inner.compile()`, so
+// `Arc<dyn Construct>` must implement `BuildConstruct`.
+//
+// The Dynamic variant is the escape-hatch: compilation does not recurse into
+// the wrapped construct (it is opaque behind a trait object). Instead, we
+// hand the `Arc` clone directly to `CompiledDynamic`, which falls back to
+// the declaration-tree old path at runtime.
 
-impl BuildConstruct for Box<dyn crate::core::Construct> {
+impl BuildConstruct for std::sync::Arc<dyn crate::core::Construct> {
     fn compile(&self) -> Result<CompiledNode> {
-        Err(ConstructError::Generic {
-            path: String::new(),
-            message: "Dynamic construct compilation not yet implemented \
-                      (Phase 12.1 stub — real impl in 12.4 after Box→Arc migration)"
-                .to_string(),
-        })
+        // Arc::clone is a cheap atomic refcount bump; the inner construct is
+        // preserved verbatim for runtime old-path execution.
+        Ok(CompiledNode::Dynamic(crate::compiled::CompiledDynamic {
+            inner: std::sync::Arc::clone(self),
+        }))
     }
 }
 
 // ===========================================================================
-// enum_dispatch: extend CombinedConstruct with BuildConstruct
+// BuildConstruct dispatch on CombinedConstruct
 // ===========================================================================
 //
 // NOTE: enum_dispatch cannot generate the dispatch for CombinedConstruct
-// because the Dynamic variant holds `Box<dyn Construct>` (a trait object),
-// which causes the enum_dispatch macro to panic. Instead, we hand-write
-// the match dispatch here. Each arm forwards to the inner type's
-// BuildConstruct::compile impl.
-//
-// In Phase 12.4, after the Box→Arc migration (design §5.5, I3 correction),
-// this can potentially be switched to enum_dispatch. For now, the hand-
-// written match is correct and functionally equivalent.
+// because the Dynamic variant holds `Arc<dyn Construct>` (a trait object),
+// which causes the enum_dispatch macro to panic ("does not support unsized
+// types"). Instead, we hand-write the match dispatch here. Each arm forwards
+// to the inner type's BuildConstruct::compile impl. This is functionally
+// equivalent to enum_dispatch's generated match.
 
 impl BuildConstruct for CombinedConstruct {
     fn compile(&self) -> Result<CompiledNode> {
@@ -346,34 +346,44 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // -- Dynamic variant dispatch -------------------------------------------
+    // -- Dynamic variant dispatch (I3 correction: Box → Arc) ----------------
 
     #[test]
-    fn dynamic_variant_compile_returns_error() {
-        // Dynamic variant holds Box<dyn Construct>. enum_dispatch should
-        // dispatch to Box<dyn Construct>::compile (our stub).
+    fn dynamic_variant_compile_produces_compiled_dynamic() {
+        // After the I3 correction, Dynamic holds Arc<dyn Construct> and its
+        // compile produces a functional CompiledDynamic node (escape-hatch),
+        // NOT an error.
         let cc = crate::combined::dynamic(Pass::new());
         let result = cc.compile();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        match err {
-            ConstructError::Generic { message, .. } => {
-                assert!(message.contains("Dynamic"));
-            }
-            _ => unreachable!(),
+        assert!(result.is_ok(), "Dynamic compile should succeed");
+        match result.unwrap() {
+            CompiledNode::Dynamic(_) => { /* expected */ }
+            other => panic!("expected CompiledDynamic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn dynamic_variant_compile_preserves_inner_via_arc_clone() {
+        // The inner Arc<dyn Construct> is shared (Arc::clone), so both the
+        // declaration tree and the compiled node reference the same construct.
+        let cc = crate::combined::dynamic(Pass::new());
+        let node = cc.compile().unwrap();
+        let inner = match node {
+            CompiledNode::Dynamic(d) => d.inner,
+            _ => unreachable!(),
+        };
+        // The inner construct is still callable (sizeof == 0 for Pass).
+        let ctx = crate::core::context::Context::new();
+        assert_eq!(inner.sizeof(&ctx).unwrap(), 0);
     }
 
     // -- All major construct categories dispatch ----------------------------
 
     #[test]
     fn all_construct_categories_dispatch_compile() {
-        let constructs: Vec<CombinedConstruct> = vec![
-            Pass::new().into(),
-            Struct::new().into(),
-            INT8UB.into(),
-            crate::combined::dynamic(Pass::new()),
-        ];
+        // Non-Dynamic variants are still stubs (return Err).
+        let constructs: Vec<CombinedConstruct> =
+            vec![Pass::new().into(), Struct::new().into(), INT8UB.into()];
         for cc in &constructs {
             assert!(cc.compile().is_err(), "expected compile to return Err");
         }

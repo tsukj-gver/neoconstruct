@@ -8,6 +8,7 @@
 pub mod binary;
 pub mod combined;
 pub mod compiled;
+pub mod compiler;
 pub mod constructs;
 pub mod containers;
 pub mod core;

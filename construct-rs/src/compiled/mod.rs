@@ -24,6 +24,7 @@ pub mod build;
 pub mod expr;
 pub mod sink;
 
+pub use build::BuildConstruct;
 pub use expr::{compile_expr, CompiledExpr};
 pub use sink::{OutputSink, ValueSink};
 
@@ -346,8 +347,31 @@ pub struct CompiledStopIf;
 /// user-defined constructs, Python callables in Phase 13). The inner
 /// `Arc<dyn Construct>` is called directly at runtime, bypassing the
 /// compiled tree.
-#[derive(Debug)]
-pub struct CompiledDynamic;
+///
+/// # I3 correction
+///
+/// The inner field is `Arc<dyn Construct>` (not `Box`), mirroring the
+/// [`CombinedConstruct::Dynamic`](crate::combined::CombinedConstruct::Dynamic)
+/// variant after the I3 Box→Arc migration. `BuildConstruct::compile` takes
+/// `&self`, so it uses `Arc::clone` to hand the inner construct to this
+/// node without moving.
+pub struct CompiledDynamic {
+    /// The declaration-tree construct wrapped behind an `Arc<dyn Construct>`.
+    /// `exec_parse` / `exec_build` / `exec_sizeof` delegate directly to it
+    /// (old-path fallback).
+    pub inner: Arc<dyn crate::core::Construct>,
+}
+
+impl std::fmt::Debug for CompiledDynamic {
+    // `dyn Construct` is not `Debug`, so a manual impl is required. We report
+    // the type name opaquely — the inner construct's internals are not
+    // introspectable behind the trait object.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledDynamic")
+            .field("inner", &"<dyn Construct>")
+            .finish()
+    }
+}
 
 // ===========================================================================
 // CompiledNode enum
@@ -613,13 +637,51 @@ impl_compiled_exec_stub! {
     CompiledIfThenElse, CompiledSwitch, CompiledCheck, CompiledStopIf,
     // formatting
     CompiledHex, CompiledHexDump,
-    // escape-hatch
-    CompiledDynamic,
 }
 
 // Feature-gated stub for CompiledCompressed.
 #[cfg(feature = "compression")]
 impl_compiled_exec_stub!(CompiledCompressed,);
+
+// ===========================================================================
+// Functional CompiledExec implementation for CompiledDynamic (escape-hatch)
+// ===========================================================================
+//
+// CompiledDynamic is the escape-hatch: it wraps a declaration-tree
+// `Arc<dyn Construct>` and delegates every operation to it (old-path
+// fallback). Unlike the stub impls above, this is fully functional — it is
+// the only compiled node with a real runtime implementation in Phase 12.3.
+// This makes the Dynamic escape-hatch end-to-end usable: compile a Dynamic
+// node, then parse/build/sizeof through CompiledSchema.
+
+impl CompiledExec for CompiledDynamic {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        // Delegate to the wrapped construct's old-path parse, then deposit
+        // the resulting scalar into the sink (uniform leaf protocol, I1).
+        let value = self.inner.parse(stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        // Delegate to the wrapped construct's old-path build.
+        self.inner.build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        // Delegate to the wrapped construct's old-path sizeof.
+        self.inner.sizeof(ctx)
+    }
+}
 
 // ===========================================================================
 // CompiledSchema
@@ -667,7 +729,18 @@ impl CompiledSchema {
     ///
     /// This is called by the compiler after compilation. Users typically do
     /// not call this directly.
+    ///
+    /// # Why `Arc` (not `Rc`)
+    ///
+    /// The tree is stored behind an `Arc` rather than an `Rc` even though
+    /// `CompiledNode` is not currently `Send + Sync` (the `Dynamic`
+    /// escape-hatch holds an `Arc<dyn Construct>` without `Send + Sync`
+    /// bounds, per the I3 design decision). `Arc` is used deliberately for
+    /// forward compatibility: future phases that make `dyn Construct` thread-
+    /// safe will not require changing this storage, and `Arc::clone` is cheap
+    /// enough for the parse/build hot path. See design doc §5.5 (I3).
     #[must_use]
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new(tree: CompiledNode) -> Self {
         let static_size = try_fold_static_size(&tree);
         CompiledSchema {
@@ -783,6 +856,15 @@ fn try_fold_static_size(_node: &CompiledNode) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constructs::meta::Pass;
+
+    /// Helper: builds a `CompiledDynamic` wrapping a `Pass` construct, used
+    /// wherever a `CompiledDynamic` value is needed in tests.
+    fn dynamic_pass() -> CompiledDynamic {
+        CompiledDynamic {
+            inner: Arc::new(Pass::new()),
+        }
+    }
 
     // -- CompiledNode construction (unit struct variants) -------------------
 
@@ -794,7 +876,7 @@ mod tests {
 
     #[test]
     fn compiled_node_dynamic_variant_constructible() {
-        let node = CompiledNode::Dynamic(CompiledDynamic);
+        let node = CompiledNode::Dynamic(dynamic_pass());
         assert!(matches!(node, CompiledNode::Dynamic(_)));
     }
 
@@ -847,10 +929,10 @@ mod tests {
     #[test]
     fn exec_dispatches_to_correct_variant() {
         // Each variant should return the stub error — verifying dispatch works.
+        // (Dynamic is excluded: it is the functional escape-hatch, see below.)
         let variants: Vec<CompiledNode> = vec![
             CompiledNode::Pass(CompiledPass),
             CompiledNode::Struct(CompiledStruct),
-            CompiledNode::Dynamic(CompiledDynamic),
             CompiledNode::Tell(CompiledTell),
             CompiledNode::FormatField(CompiledFormatField),
         ];
@@ -859,6 +941,38 @@ mod tests {
             let err = node.exec_sizeof(&ctx).unwrap_err();
             assert!(matches!(err, ConstructError::Generic { .. }));
         }
+    }
+
+    #[test]
+    fn exec_dynamic_delegates_to_inner() {
+        // CompiledDynamic is the functional escape-hatch (Phase 12.3):
+        // exec_sizeof delegates to the wrapped construct. Pass has size 0.
+        let node = CompiledNode::Dynamic(dynamic_pass());
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn exec_dynamic_parse_delegates_to_inner() {
+        // Wrapped Pass parses nothing (empty input), deposits None scalar.
+        let node = CompiledNode::Dynamic(dynamic_pass());
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let value = Box::new(sink).into_value().unwrap();
+        assert_eq!(value, Value::None);
+    }
+
+    #[test]
+    fn exec_dynamic_build_delegates_to_inner() {
+        // Wrapped Pass builds nothing (empty output).
+        let node = CompiledNode::Dynamic(dynamic_pass());
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx = Context::new();
+        node.exec_build(&Value::None, &mut stream, &mut ctx)
+            .unwrap();
+        assert!(stream.into_bytes().is_empty());
     }
 
     // -- CompiledSchema -----------------------------------------------------
@@ -952,6 +1066,6 @@ mod tests {
         let _ = CompiledNode::Bitwise(CompiledBitwise);
         let _ = CompiledNode::IfThenElse(CompiledIfThenElse);
         let _ = CompiledNode::Hex(CompiledHex);
-        let _ = CompiledNode::Dynamic(CompiledDynamic);
+        let _ = CompiledNode::Dynamic(dynamic_pass());
     }
 }

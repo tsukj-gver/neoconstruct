@@ -177,9 +177,12 @@ pub enum CombinedConstruct {
     HexDump(crate::constructs::hex::HexDump),
     /// Catch-all for user-defined or test constructs that are not enum variants.
     ///
-    /// Uses dynamic dispatch (`Box<dyn Construct>`), so prefer adding a named
+    /// Uses dynamic dispatch via `Arc<dyn Construct>` (I3 correction: migrated
+    /// from `Box<dyn Construct>` so the variant is cloneable at compile time —
+    /// `BuildConstruct::compile` takes `&self` and needs `Arc::clone` to hand
+    /// the inner construct to `CompiledDynamic`). Prefer adding a named
     /// variant for performance-critical constructs.
-    Dynamic(Box<dyn crate::core::Construct>),
+    Dynamic(std::sync::Arc<dyn crate::core::Construct>),
 }
 
 /// Unboxes a [`Box<CombinedConstruct>`] into a [`CombinedConstruct`].
@@ -196,7 +199,10 @@ impl From<Box<CombinedConstruct>> for CombinedConstruct {
 ///
 /// Use this for user-defined or test constructs that are not enum variants.
 /// For built-in constructs, prefer `.into()` which uses static dispatch.
+///
+/// The construct is stored behind an `Arc<dyn Construct>` (I3 correction),
+/// enabling compile-time cloning during schema compilation.
 #[must_use]
 pub fn dynamic<C: crate::core::Construct + 'static>(c: C) -> CombinedConstruct {
-    CombinedConstruct::Dynamic(Box::new(c))
+    CombinedConstruct::Dynamic(std::sync::Arc::new(c))
 }

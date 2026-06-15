@@ -85,8 +85,40 @@ pub trait Construct {
 }
 
 /// Blanket forwarding impl so that `Box<dyn Construct>` can be used where
-/// `impl Construct` is expected (e.g. inside [`CombinedConstruct::Dynamic`]).
+/// `impl Construct` is expected.
+///
+/// Historically this backed [`CombinedConstruct::Dynamic`](crate::combined::CombinedConstruct::Dynamic);
+/// after the I3 correction (Phase 12.3) that variant holds an
+/// `Arc<dyn Construct>` instead (see the [`Arc`](std::sync::Arc) impl below).
+/// This `Box` forwarding impl is retained for general ergonomics and any
+/// external code that may still work with boxed trait objects.
 impl Construct for Box<dyn Construct> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
+        (**self).parse(stream, ctx)
+    }
+
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
+        (**self).build(data, stream, ctx)
+    }
+
+    fn sizeof(&self, ctx: &Context) -> Result<usize> {
+        (**self).sizeof(ctx)
+    }
+
+    fn flagbuildnone(&self) -> bool {
+        (**self).flagbuildnone()
+    }
+}
+
+/// Blanket forwarding impl so that `Arc<dyn Construct>` can be used where
+/// `impl Construct` is expected.
+///
+/// This is required after the I3 correction (Phase 12.3): the
+/// [`CombinedConstruct::Dynamic`](crate::combined::CombinedConstruct::Dynamic)
+/// variant now holds an `Arc<dyn Construct>` instead of a `Box<dyn Construct>`.
+/// `enum_dispatch` generates match arms that call the trait methods on the
+/// inner value, so `Arc<dyn Construct>` itself must implement [`Construct`].
+impl Construct for std::sync::Arc<dyn Construct> {
     fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         (**self).parse(stream, ctx)
     }
