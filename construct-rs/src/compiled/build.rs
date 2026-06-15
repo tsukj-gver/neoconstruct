@@ -15,13 +15,15 @@ use std::sync::Arc;
 
 use crate::combined::CombinedConstruct;
 use crate::compiled::{
-    CompiledAdapter, CompiledBitsInteger, CompiledBytes, CompiledBytesExpr, CompiledBytesInteger,
-    CompiledCString, CompiledConst, CompiledEnum, CompiledError, CompiledExprAdapter,
-    CompiledExprValidator, CompiledFlag, CompiledFlagsEnum, CompiledFormatField,
-    CompiledGreedyBytes, CompiledHex, CompiledHexDump, CompiledMapping, CompiledNode,
-    CompiledPaddedString, CompiledPass, CompiledRenamed, CompiledSeek, CompiledSeekExpr,
-    CompiledSubconstruct, CompiledSymmetricAdapter, CompiledTell, CompiledTerminated,
-    CompiledValidator, CompiledVarInt, CompiledZigZag,
+    compile_expr, CompiledAdapter, CompiledArray, CompiledArrayExpr, CompiledBitsInteger,
+    CompiledBytes, CompiledBytesExpr, CompiledBytesInteger, CompiledCString, CompiledConst,
+    CompiledEntry, CompiledEnum, CompiledError, CompiledExprAdapter, CompiledExprValidator,
+    CompiledField, CompiledFlag, CompiledFlagsEnum, CompiledFocusedSeq, CompiledFormatField,
+    CompiledGreedyBytes, CompiledGreedyRange, CompiledHex, CompiledHexDump, CompiledMapping,
+    CompiledNode, CompiledPaddedString, CompiledPass, CompiledRenamed, CompiledSeek,
+    CompiledSeekExpr, CompiledSelect, CompiledSequence, CompiledStruct, CompiledSubconstruct,
+    CompiledSymmetricAdapter, CompiledTell, CompiledTerminated, CompiledUnion, CompiledValidator,
+    CompiledVarInt, CompiledZigZag,
 };
 use crate::constructs::{
     adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator},
@@ -53,7 +55,7 @@ use crate::constructs::{
     varint::{VarInt, ZigZag},
 };
 use crate::core::error::{ConstructError, Result};
-use crate::core::{Renamed, Subconstruct};
+use crate::core::{Construct, Renamed, Subconstruct};
 
 #[cfg(feature = "compression")]
 use crate::constructs::stream_ops::Compressed;
@@ -125,13 +127,11 @@ macro_rules! impl_build_construct_stub {
 }
 
 impl_build_construct_stub! {
-    // composite
-    Struct, Sequence, Union, Select, FocusedSeq,
+    // composite (Struct, Sequence, Union, Select, FocusedSeq implemented in 12.6)
     // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
     Computed, Rebuild, Default, Index, Padded, Aligned,
     FixedSized, NamedTuple, TimestampAdapter,
-    // repetition
-    Array, ArrayExpr, GreedyRange, RepeatUntil,
+    // repetition (Array, ArrayExpr, GreedyRange, RepeatUntil implemented in 12.6)
     // lazy
     Lazy, LazyStruct, LazyArray, Rebuffered,
     // stream ops / tunneling
@@ -337,6 +337,177 @@ impl BuildConstruct for Mapping {
             mapping: self.mapping.clone(),
             decmapping: self.decmapping.clone(),
         }))
+    }
+}
+
+// ===========================================================================
+// Composite BuildConstruct implementations (Phase 12.6)
+// ===========================================================================
+//
+// Composite constructs recursively compile their children, producing a
+// `CompiledField` / `CompiledEntry` per child plus the construct's compile-
+// time parameters (focus name, parsefrom, count, etc.). Each child is
+// compiled via `child.compile()`, and `flagbuildnone` is pre-computed from
+// the declaration-tree subcon.
+
+// -- Struct ----------------------------------------------------------------
+
+impl BuildConstruct for Struct {
+    fn compile(&self) -> Result<CompiledNode> {
+        let fields: Result<Vec<CompiledField>> = self
+            .fields()
+            .iter()
+            .map(|field| {
+                let subcon = field.subcon.compile()?;
+                let flagbuildnone = field.subcon.flagbuildnone();
+                Ok(CompiledField {
+                    name: field.name.clone(),
+                    subcon: Box::new(subcon),
+                    flagbuildnone,
+                })
+            })
+            .collect();
+        Ok(CompiledNode::Struct(CompiledStruct { fields: fields? }))
+    }
+}
+
+// -- Sequence --------------------------------------------------------------
+
+impl BuildConstruct for Sequence {
+    fn compile(&self) -> Result<CompiledNode> {
+        let entries: Result<Vec<CompiledEntry>> = self
+            .entries()
+            .iter()
+            .map(|entry| {
+                let subcon = entry.subcon.compile()?;
+                Ok(CompiledEntry {
+                    name: entry.name.clone(),
+                    subcon: Box::new(subcon),
+                })
+            })
+            .collect();
+        Ok(CompiledNode::Sequence(CompiledSequence {
+            entries: entries?,
+        }))
+    }
+}
+
+// -- Select ----------------------------------------------------------------
+
+impl BuildConstruct for Select {
+    fn compile(&self) -> Result<CompiledNode> {
+        let subcons: Result<Vec<CompiledNode>> =
+            self.subcons().iter().map(|sc| sc.compile()).collect();
+        Ok(CompiledNode::Select(CompiledSelect { subcons: subcons? }))
+    }
+}
+
+// -- Union -----------------------------------------------------------------
+
+impl BuildConstruct for Union {
+    fn compile(&self) -> Result<CompiledNode> {
+        let fields: Result<Vec<CompiledField>> = self
+            .subcons()
+            .iter()
+            .map(|field| {
+                let subcon = field.subcon.compile()?;
+                let flagbuildnone = field.subcon.flagbuildnone();
+                Ok(CompiledField {
+                    name: field.name.clone(),
+                    subcon: Box::new(subcon),
+                    flagbuildnone,
+                })
+            })
+            .collect();
+        Ok(CompiledNode::Union(CompiledUnion {
+            parsefrom: self.parsefrom().cloned(),
+            fields: fields?,
+        }))
+    }
+}
+
+// -- FocusedSeq ------------------------------------------------------------
+
+impl BuildConstruct for FocusedSeq {
+    fn compile(&self) -> Result<CompiledNode> {
+        let fields: Result<Vec<CompiledField>> = self
+            .subcons()
+            .iter()
+            .map(|field| {
+                let subcon = field.subcon.compile()?;
+                let flagbuildnone = field.subcon.flagbuildnone();
+                Ok(CompiledField {
+                    name: field.name.clone(),
+                    subcon: Box::new(subcon),
+                    flagbuildnone,
+                })
+            })
+            .collect();
+        Ok(CompiledNode::FocusedSeq(CompiledFocusedSeq {
+            parsebuildfrom: self.parsebuildfrom().to_string(),
+            fields: fields?,
+        }))
+    }
+}
+
+// -- Array -----------------------------------------------------------------
+
+impl BuildConstruct for Array {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Array(CompiledArray {
+            count: self.count,
+            subcon: Box::new(self.subcon.compile()?),
+            discard: self.discard,
+        }))
+    }
+}
+
+// -- ArrayExpr -------------------------------------------------------------
+
+impl BuildConstruct for ArrayExpr {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::ArrayExpr(CompiledArrayExpr {
+            compiled_count: compile_expr(&self.count_expr)?,
+            subcon: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+// -- GreedyRange -----------------------------------------------------------
+
+impl BuildConstruct for GreedyRange {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::GreedyRange(CompiledGreedyRange {
+            subcon: Box::new(self.subcon.compile()?),
+            discard: self.discard,
+        }))
+    }
+}
+
+// -- RepeatUntil (not compilable in Phase 12) ------------------------------
+//
+// RepeatUntil's `RepeatPredicate` is a `Box<dyn Fn>` that cannot be cloned
+// from `&self` during compilation. Unlike Adapter closures (which were
+// migrated to `Arc<dyn Fn + Send + Sync>` in B4), `RepeatPredicate` is not
+// yet migrated. Additionally, `RepeatUntil.subcon` is `Box<CombinedConstruct>`
+// which is not `Clone`, so the entire `RepeatUntil` cannot be cloned into an
+// `Arc<dyn Construct>` for the Dynamic escape-hatch.
+//
+// DESIGN DECISION: RepeatUntil's `compile` returns an error directing users
+// to the declaration-tree old path (`CombinedConstruct::parse_bytes`). This
+// is a known limitation of Phase 12. A future phase could migrate
+// `RepeatPredicate` to `Arc<dyn Fn + Send + Sync>` (B4-style) and
+// `CombinedConstruct` to `Clone` to enable compilation.
+
+impl BuildConstruct for RepeatUntil {
+    fn compile(&self) -> Result<CompiledNode> {
+        Err(ConstructError::Generic {
+            path: String::new(),
+            message: "RepeatUntil cannot be compiled to the execution tree in Phase 12 \
+                      (predicate closure is not cloneable); use the declaration-tree old path \
+                      (CombinedConstruct::parse_bytes / build_bytes) instead"
+                .to_string(),
+        })
     }
 }
 
@@ -597,29 +768,87 @@ mod tests {
         }
     }
 
-    // -- Stub compile for not-yet-implemented nodes -------------------------
+    // -- Composite compile succeeds (Phase 12.6) ---------------------------
 
     #[test]
-    fn stub_compile_returns_error_for_struct() {
-        let s = Struct::new();
-        let result = s.compile();
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConstructError::Generic { .. }
-        ));
+    fn composite_compile_struct_produces_compiled_struct() {
+        let s = Struct::new().field("a", Box::new(INT8UB.into()));
+        let node = s.compile().unwrap();
+        match node {
+            CompiledNode::Struct(cs) => {
+                assert_eq!(cs.fields.len(), 1);
+                assert_eq!(cs.fields[0].name.as_deref(), Some("a"));
+                assert!(!cs.fields[0].flagbuildnone);
+            }
+            other => panic!("expected CompiledStruct, got {other:?}"),
+        }
     }
 
     #[test]
-    fn stub_compile_message_contains_not_yet() {
-        // Struct (composite) is still a stub.
-        let s = Struct::new();
-        let err = s.compile().unwrap_err();
-        match err {
-            ConstructError::Generic { message, .. } => {
-                assert!(message.contains("not yet implemented"));
+    fn composite_compile_sequence_produces_compiled_sequence() {
+        let s = Sequence::new().push(Box::new(INT8UB.into()));
+        let node = s.compile().unwrap();
+        match node {
+            CompiledNode::Sequence(cs) => assert_eq!(cs.entries.len(), 1),
+            other => panic!("expected CompiledSequence, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_compile_array_produces_compiled_array() {
+        let a = crate::constructs::repetition::Array::new(3, Box::new(INT8UB.into()));
+        let node = a.compile().unwrap();
+        match node {
+            CompiledNode::Array(ca) => {
+                assert_eq!(ca.count, 3);
+                assert!(!ca.discard);
             }
-            _ => unreachable!(),
+            other => panic!("expected CompiledArray, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_compile_greedy_range_produces_compiled_greedy_range() {
+        let gr = crate::constructs::repetition::GreedyRange::new(Box::new(INT8UB.into()));
+        let node = gr.compile().unwrap();
+        match node {
+            CompiledNode::GreedyRange(_) => { /* expected */ }
+            other => panic!("expected CompiledGreedyRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_compile_select_produces_compiled_select() {
+        let s = Select::new(vec![INT8UB.into()]);
+        let node = s.compile().unwrap();
+        match node {
+            CompiledNode::Select(cs) => assert_eq!(cs.subcons.len(), 1),
+            other => panic!("expected CompiledSelect, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn composite_compile_repeat_until_returns_error() {
+        // RepeatUntil cannot be compiled (predicate closure is not cloneable).
+        let ru = crate::constructs::repetition::RepeatUntil::new(
+            Box::new(|_obj, _list, _ctx| true),
+            Box::new(INT8UB.into()),
+        );
+        let result = ru.compile();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn composite_compile_nested_struct_recursively_compiles() {
+        // Inner struct compiled into outer struct's field.
+        let inner = Struct::new().field("x", Box::new(INT8UB.into()));
+        let outer = Struct::new().field("inner", Box::new(inner.into()));
+        let node = outer.compile().unwrap();
+        match node {
+            CompiledNode::Struct(cs) => {
+                assert!(matches!(&*cs.fields[0].subcon, CompiledNode::Struct(_)));
+            }
+            other => panic!("expected CompiledStruct, got {other:?}"),
         }
     }
 
@@ -633,9 +862,10 @@ mod tests {
     }
 
     #[test]
-    fn combined_construct_compile_on_struct_is_error() {
+    fn combined_construct_compile_on_struct_succeeds() {
+        // Struct is now compilable (Phase 12.6).
         let cc: CombinedConstruct = Struct::new().into();
-        assert!(cc.compile().is_err());
+        assert!(cc.compile().is_ok());
     }
 
     #[test]
@@ -680,9 +910,9 @@ mod tests {
 
     #[test]
     fn all_construct_categories_dispatch_compile() {
-        // Leaves compile OK; Struct (composite) is still a stub.
+        // Leaves and composites compile OK; RepeatUntil returns an error.
         assert!(Pass::new().compile().is_ok());
-        assert!(Struct::new().compile().is_err());
+        assert!(Struct::new().compile().is_ok());
         let cc: CombinedConstruct = INT8UB.into();
         assert!(cc.compile().is_ok());
     }

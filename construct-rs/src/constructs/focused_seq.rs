@@ -108,6 +108,18 @@ impl FocusedSeq {
         self.subcons.push(StructField::anonymous(subcon));
         self
     }
+
+    /// Returns the name of the focused field.
+    #[must_use]
+    pub fn parsebuildfrom(&self) -> &str {
+        &self.parsebuildfrom
+    }
+
+    /// Returns the ordered list of sub-construct fields (read-only access).
+    #[must_use]
+    pub fn subcons(&self) -> &[StructField] {
+        &self.subcons
+    }
 }
 
 impl Construct for FocusedSeq {

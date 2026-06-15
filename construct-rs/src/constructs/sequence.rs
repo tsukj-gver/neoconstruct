@@ -195,6 +195,16 @@ impl Sequence {
         }
         self
     }
+
+    /// Returns the ordered list of entries in this sequence (read-only
+    /// access).
+    ///
+    /// Used by the compiler to access entry definitions for compilation into
+    /// the execution tree.
+    #[must_use]
+    pub fn entries(&self) -> &[SeqEntry] {
+        &self.entries
+    }
 }
 
 impl Default for Sequence {

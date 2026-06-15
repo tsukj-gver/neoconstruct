@@ -42,7 +42,7 @@ use crate::constructs::strings::{CString, PaddedString};
 use crate::constructs::varint::{VarInt, ZigZag};
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
-use crate::core::stream::{ByteStream, CombinedStream};
+use crate::core::stream::{ByteStream, CombinedStream, Stream};
 use crate::core::Construct;
 use crate::value::Value;
 
@@ -352,22 +352,76 @@ pub struct CompiledError {
     pub inner: Error,
 }
 
-// -- Composite constructors (hold Vec<CompiledField> in 12.7) --
+// -- Composite constructors (Phase 12.6: real fields with sub-sink recursion) --
+//
+// Composite compiled nodes hold a `Vec<CompiledField>` (or equivalent) plus
+// an optional focus target. At runtime, `exec_parse` creates a sub-sink for
+// each field, delegates to the child's `exec_parse`, then integrates the
+// child's result via `set_field` (for named fields) or discards it (for
+// anonymous fields).
+
+/// A single compiled field within a composite node (Struct / Union /
+/// FocusedSeq).
+///
+/// Each field holds a recursively-compiled subcon and the field's name (if
+/// any). `flagbuildnone` is pre-computed at compile time from the
+/// declaration-tree subcon, avoiding a runtime virtual dispatch.
+#[derive(Debug)]
+pub struct CompiledField {
+    /// The field name, or `None` for anonymous fields.
+    pub name: Option<String>,
+    /// The recursively compiled subcon.
+    pub subcon: Box<CompiledNode>,
+    /// Pre-computed `flagbuildnone` from the declaration-tree subcon.
+    pub flagbuildnone: bool,
+}
+
+/// A single compiled entry within a `CompiledSequence`.
+///
+/// Entries are similar to [`CompiledField`] but do not track `flagbuildnone`
+/// (Sequence's build always consumes list elements positionally).
+#[derive(Debug)]
+pub struct CompiledEntry {
+    /// The entry name, or `None` for anonymous entries.
+    pub name: Option<String>,
+    /// The recursively compiled subcon.
+    pub subcon: Box<CompiledNode>,
+}
+
 /// Compiled node for `Struct`.
 #[derive(Debug)]
-pub struct CompiledStruct;
+pub struct CompiledStruct {
+    /// The ordered list of compiled fields.
+    pub fields: Vec<CompiledField>,
+}
 /// Compiled node for `Sequence`.
 #[derive(Debug)]
-pub struct CompiledSequence;
+pub struct CompiledSequence {
+    /// The ordered list of compiled entries.
+    pub entries: Vec<CompiledEntry>,
+}
 /// Compiled node for `Union`.
 #[derive(Debug)]
-pub struct CompiledUnion;
+pub struct CompiledUnion {
+    /// Which sub-construct determines the final stream position after parsing.
+    pub parsefrom: Option<crate::constructs::union::UnionTarget>,
+    /// The ordered list of compiled fields.
+    pub fields: Vec<CompiledField>,
+}
 /// Compiled node for `Select`.
 #[derive(Debug)]
-pub struct CompiledSelect;
+pub struct CompiledSelect {
+    /// The list of compiled subcons to try in order.
+    pub subcons: Vec<CompiledNode>,
+}
 /// Compiled node for `FocusedSeq`.
 #[derive(Debug)]
-pub struct CompiledFocusedSeq;
+pub struct CompiledFocusedSeq {
+    /// The name of the field to focus on (return from parse, use for build).
+    pub parsebuildfrom: String,
+    /// The ordered list of compiled fields.
+    pub fields: Vec<CompiledField>,
+}
 
 // -- Enum / computed constructors (mapping tables in 12.8) --
 // Enum, FlagsEnum, and Mapping are implemented in Phase 12.5; the rest
@@ -428,17 +482,42 @@ pub struct CompiledNamedTuple;
 #[derive(Debug)]
 pub struct CompiledTimestampAdapter;
 
-// -- Repetition constructors --
+// -- Repetition constructors (Phase 12.6) --
 /// Compiled node for `Array`.
 #[derive(Debug)]
-pub struct CompiledArray;
+pub struct CompiledArray {
+    /// The exact number of elements to parse / build.
+    pub count: usize,
+    /// The recursively compiled subcon for each element.
+    pub subcon: Box<CompiledNode>,
+    /// If `true`, parse returns an empty list (elements are consumed but
+    /// discarded).
+    pub discard: bool,
+}
 /// Compiled node for `ArrayExpr`.
 #[derive(Debug)]
-pub struct CompiledArrayExpr;
+pub struct CompiledArrayExpr {
+    /// Pre-compiled count expression.
+    pub compiled_count: CompiledExpr,
+    /// The recursively compiled subcon for each element.
+    pub subcon: Box<CompiledNode>,
+}
 /// Compiled node for `GreedyRange`.
 #[derive(Debug)]
-pub struct CompiledGreedyRange;
+pub struct CompiledGreedyRange {
+    /// The recursively compiled subcon for each element.
+    pub subcon: Box<CompiledNode>,
+    /// If `true`, parse returns an empty list.
+    pub discard: bool,
+}
 /// Compiled node for `RepeatUntil`.
+///
+/// This remains a unit struct because `RepeatUntil` compiles to
+/// [`CompiledDynamic`](super::CompiledDynamic) — the predicate closure
+/// (`RepeatPredicate`) is a `Box<dyn Fn>` that cannot be cloned from `&self`
+/// during compilation. This variant is reserved for future use if
+/// `RepeatPredicate` is migrated to `Arc<dyn Fn + Send + Sync>` (similar to
+/// the B4 Adapter closure migration).
 #[derive(Debug)]
 pub struct CompiledRepeatUntil;
 
@@ -779,15 +858,14 @@ macro_rules! impl_compiled_exec_stub {
 }
 
 impl_compiled_exec_stub! {
-    // composite
-    CompiledStruct, CompiledSequence, CompiledUnion, CompiledSelect,
-    CompiledFocusedSeq,
+    // composite (Struct, Sequence, Union, Select, FocusedSeq implemented in 12.6)
     // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
     CompiledComputed, CompiledRebuild,
     CompiledDefault, CompiledIndex, CompiledPadded, CompiledAligned,
     CompiledFixedSized, CompiledNamedTuple, CompiledTimestampAdapter,
-    // repetition
-    CompiledArray, CompiledArrayExpr, CompiledGreedyRange, CompiledRepeatUntil,
+    // repetition (Array, ArrayExpr, GreedyRange implemented in 12.6;
+    //   RepeatUntil compiles to CompiledDynamic, so its stub is never hit)
+    CompiledRepeatUntil,
     // lazy
     CompiledLazy, CompiledLazyStruct, CompiledLazyArray, CompiledRebuffered,
     // stream ops / tunneling
@@ -1234,6 +1312,888 @@ impl CompiledExec for CompiledMapping {
 }
 
 // ===========================================================================
+// Functional CompiledExec for composite constructors (Phase 12.6)
+// ===========================================================================
+//
+// Composite compiled nodes (Struct, Sequence, Union, Select, FocusedSeq,
+// Array, ArrayExpr, GreedyRange) hold a `Vec` of compiled children. At
+// runtime, `exec_parse` coordinates the `OutputSink` sub-sink protocol:
+// a sub-sink is created for each child, the child's `exec_parse` writes
+// into it, and the parent integrates the result (`set_field` for named
+// fields, `push_item` for list entries, discard for anonymous). `exec_build`
+// reads from the input `Value` tree and delegates to each child's
+// `exec_build`.
+//
+// RepeatUntil compiles to `CompiledDynamic` (its `RepeatPredicate` closure
+// cannot be cloned from `&self`); see `build.rs`.
+
+/// Context key for the current loop index during repetition constructs.
+///
+/// Mirrors `constructs::repetition::CONTEXT_INDEX_KEY`.
+const REPETITION_INDEX_KEY: &str = "_index";
+
+/// Helper: parses a single child node into a named sub-sink, returning the
+/// child's parsed [`Value`].
+///
+/// Creates a sub-sink via `parent_sink.sub_sink_for_field(name)`, delegates
+/// `exec_parse` to `node` with the sub-sink, then extracts the result via
+/// `into_value`. The parent sink is **not** updated by this helper — the
+/// caller is responsible for `set_field` / `push_item` if needed.
+fn exec_parse_named_child(
+    node: &CompiledNode,
+    stream: &mut CombinedStream,
+    ctx: &mut Context,
+    parent_sink: &mut dyn OutputSink,
+    name: &str,
+) -> Result<Value> {
+    let mut sub_sink = parent_sink.sub_sink_for_field(name)?;
+    node.exec_parse(stream, ctx, sub_sink.as_mut())?;
+    sub_sink.into_value()
+}
+
+// -- CompiledStruct -------------------------------------------------------
+
+impl CompiledExec for CompiledStruct {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut child_ctx = ctx.subcontext();
+
+        for field in &self.fields {
+            match &field.name {
+                Some(name) => {
+                    let value = match exec_parse_named_child(
+                        &field.subcon,
+                        stream,
+                        &mut child_ctx,
+                        sink,
+                        name,
+                    ) {
+                        Ok(v) => v,
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => return Err(e.with_path_prefix(name)),
+                    };
+                    // Dual write: sink (output) + context (for this.field refs).
+                    sink.set_field(name, value.clone())?;
+                    child_ctx.insert(name.clone(), value);
+                }
+                None => {
+                    // Anonymous field: parse into a discard sub-sink.
+                    let mut sub_sink = sink.sub_sink_for_item()?;
+                    match field
+                        .subcon
+                        .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                    {
+                        Ok(()) => {}
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => return Err(e.with_path_prefix("(anonymous)")),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let container = match input {
+            Value::None => IndexMap::new(),
+            Value::Container(map) => map.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "Container".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        let mut child_ctx = ctx.subcontext();
+        for (key, value) in &container {
+            child_ctx.insert(key.clone(), value.clone());
+        }
+
+        for field in &self.fields {
+            let name_ref = field.name.as_deref();
+
+            let build_value =
+                if field.flagbuildnone {
+                    name_ref
+                        .and_then(|n| container.get(n))
+                        .cloned()
+                        .unwrap_or(Value::None)
+                } else {
+                    match name_ref {
+                        Some(n) => container.get(n).cloned().ok_or_else(|| {
+                            ConstructError::FieldMissing {
+                                path: String::new(),
+                                field: n.to_string(),
+                            }
+                        })?,
+                        None => Value::None,
+                    }
+                };
+
+            if let Some(ref name) = field.name {
+                child_ctx.insert(name.clone(), build_value.clone());
+            }
+
+            match field
+                .subcon
+                .exec_build(&build_value, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let child_ctx = ctx.subcontext();
+        let mut total: usize = 0;
+        for field in &self.fields {
+            let size = match field.subcon.exec_sizeof(&child_ctx) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            };
+            total = total.saturating_add(size);
+        }
+        Ok(total)
+    }
+}
+
+// -- CompiledSequence -----------------------------------------------------
+
+impl CompiledExec for CompiledSequence {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut child_ctx = ctx.subcontext();
+
+        for (idx, entry) in self.entries.iter().enumerate() {
+            match &entry.name {
+                Some(name) => {
+                    let value = match exec_parse_named_child(
+                        &entry.subcon,
+                        stream,
+                        &mut child_ctx,
+                        sink,
+                        name,
+                    ) {
+                        Ok(v) => v,
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => return Err(e.with_path_prefix(name)),
+                    };
+                    // Sequence always appends to the output list.
+                    sink.push_item(value.clone())?;
+                    child_ctx.insert(name.clone(), value);
+                }
+                None => {
+                    let mut sub_sink = sink.sub_sink_for_item()?;
+                    let value =
+                        match entry
+                            .subcon
+                            .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                        {
+                            Ok(()) => sub_sink.into_value()?,
+                            Err(ConstructError::StopField { .. }) => break,
+                            Err(e) => {
+                                return Err(e.with_path_prefix(&format!("[{idx}]")));
+                            }
+                        };
+                    sink.push_item(value)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let list = match input {
+            Value::None => vec![Value::None; self.entries.len()],
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        if list.len() < self.entries.len() {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected: self.entries.len(),
+                actual: list.len(),
+            });
+        }
+
+        let mut child_ctx = ctx.subcontext();
+
+        for (i, entry) in self.entries.iter().enumerate() {
+            let build_value = list[i].clone();
+
+            if let Some(ref name) = entry.name {
+                child_ctx.insert(name.clone(), build_value.clone());
+            }
+
+            match entry
+                .subcon
+                .exec_build(&build_value, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(ref name) = entry.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix(&format!("[{i}]"))
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let child_ctx = ctx.subcontext();
+        let mut total: usize = 0;
+        for entry in &self.entries {
+            let size = match entry.subcon.exec_sizeof(&child_ctx) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(if let Some(ref name) = entry.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            };
+            total = total.saturating_add(size);
+        }
+        Ok(total)
+    }
+}
+
+// -- CompiledArray --------------------------------------------------------
+
+impl CompiledExec for CompiledArray {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        for i in 0..self.count {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            let value = match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => sub_sink.into_value()?,
+                Err(e) => return Err(e.with_path_prefix(&format!("[{i}]"))),
+            };
+            if !self.discard {
+                sink.push_item(value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let list = match input {
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        if list.len() != self.count {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected: self.count,
+                actual: list.len(),
+            });
+        }
+
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+                return Err(e.with_path_prefix(&format!("[{i}]")));
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let sub_size = self.subcon.exec_sizeof(ctx)?;
+        Ok(self.count.saturating_mul(sub_size))
+    }
+}
+
+// -- CompiledArrayExpr ----------------------------------------------------
+
+impl CompiledExec for CompiledArrayExpr {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let count_val = self
+            .compiled_count
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("ArrayExpr"))?;
+        let count = count_val.to_u64().map_err(|e| {
+            ConstructError::Expr {
+                path: String::new(),
+                message: format!("ArrayExpr count must be a non-negative integer: {e}"),
+            }
+            .with_path_prefix("ArrayExpr")
+        })? as usize;
+
+        for i in 0..count {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            let value = match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => sub_sink.into_value()?,
+                Err(e) => return Err(e.with_path_prefix(&format!("[{i}]"))),
+            };
+            sink.push_item(value)?;
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let expected_val = self
+            .compiled_count
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("ArrayExpr"))?;
+        let expected = expected_val.to_u64().map_err(|e| {
+            ConstructError::Expr {
+                path: String::new(),
+                message: format!("ArrayExpr count must be a non-negative integer: {e}"),
+            }
+            .with_path_prefix("ArrayExpr")
+        })? as usize;
+
+        let list = match input {
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        if list.len() != expected {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected,
+                actual: list.len(),
+            });
+        }
+
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+                return Err(e.with_path_prefix(&format!("[{i}]")));
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "ArrayExpr has variable size (count is runtime-dependent)".to_string(),
+        })
+    }
+}
+
+// -- CompiledGreedyRange --------------------------------------------------
+
+impl CompiledExec for CompiledGreedyRange {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut i: u64 = 0;
+        loop {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i));
+            let fallback = stream.tell()?;
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => {
+                    let value = sub_sink.into_value()?;
+                    if !self.discard {
+                        sink.push_item(value)?;
+                    }
+                    i = i.saturating_add(1);
+                }
+                Err(ConstructError::StopField { .. }) => break,
+                Err(_) => {
+                    // Any other error: seek back and stop.
+                    stream.seek(fallback)?;
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let list = match input {
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+                return Err(e.with_path_prefix(&format!("[{i}]")));
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "GreedyRange has undefined size".to_string(),
+        })
+    }
+}
+
+// -- CompiledSelect -------------------------------------------------------
+
+impl CompiledExec for CompiledSelect {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let fallback = stream.tell()?;
+        for sc in &self.subcons {
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            match sc.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => {
+                    let value = sub_sink.into_value()?;
+                    sink.set_scalar(value)?;
+                    return Ok(());
+                }
+                Err(ConstructError::StopField { .. }) => {
+                    return Err(ConstructError::StopField {
+                        path: String::new(),
+                    });
+                }
+                Err(_) => {
+                    stream.seek(fallback)?;
+                }
+            }
+        }
+        Err(ConstructError::Select {
+            path: String::new(),
+            message: format!(
+                "no subconstruct matched after trying {} candidates",
+                self.subcons.len()
+            ),
+        })
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        for sc in &self.subcons {
+            let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
+            match sc.exec_build(input, &mut build_stream, ctx) {
+                Ok(()) => {
+                    let bytes = build_stream.into_bytes();
+                    stream.write_bytes(&bytes)?;
+                    return Ok(());
+                }
+                Err(ConstructError::StopField { .. }) => {
+                    return Err(ConstructError::StopField {
+                        path: String::new(),
+                    });
+                }
+                Err(_) => {
+                    // Try next subconstruct.
+                }
+            }
+        }
+        Err(ConstructError::Select {
+            path: String::new(),
+            message: format!("no subconstruct matched for building: {:?}", input),
+        })
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "Select size depends on runtime data".to_string(),
+        })
+    }
+}
+
+// -- CompiledUnion --------------------------------------------------------
+
+impl CompiledExec for CompiledUnion {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut child_ctx = ctx.subcontext();
+        let fallback = stream.tell()?;
+
+        let mut forward_by_index: Vec<u64> = Vec::with_capacity(self.fields.len());
+        let mut forward_by_name: IndexMap<String, u64> = IndexMap::with_capacity(self.fields.len());
+
+        for (i, field) in self.fields.iter().enumerate() {
+            match &field.name {
+                Some(name) => {
+                    let value = match exec_parse_named_child(
+                        &field.subcon,
+                        stream,
+                        &mut child_ctx,
+                        sink,
+                        name,
+                    ) {
+                        Ok(v) => v,
+                        Err(e) => return Err(e.with_path_prefix(name)),
+                    };
+                    let forward_pos = stream.tell()?;
+                    forward_by_index.push(forward_pos);
+                    forward_by_name.insert(name.clone(), forward_pos);
+                    sink.set_field(name, value.clone())?;
+                    child_ctx.insert(name.clone(), value);
+                }
+                None => {
+                    let mut sub_sink = sink.sub_sink_for_item()?;
+                    if let Err(e) =
+                        field
+                            .subcon
+                            .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                    {
+                        return Err(e.with_path_prefix(&format!("[{i}]")));
+                    }
+                    let forward_pos = stream.tell()?;
+                    forward_by_index.push(forward_pos);
+                }
+            }
+            stream.seek(fallback)?;
+        }
+
+        // Advance the stream to the selected sub-construct's forward position.
+        if let Some(ref target) = self.parsefrom {
+            let pos = match target {
+                crate::constructs::union::UnionTarget::Index(idx) => forward_by_index
+                    .get(*idx)
+                    .copied()
+                    .ok_or_else(|| ConstructError::Index {
+                        path: String::new(),
+                        index: *idx,
+                        length: forward_by_index.len(),
+                    }),
+                crate::constructs::union::UnionTarget::Name(name) => forward_by_name
+                    .get(name)
+                    .copied()
+                    .ok_or_else(|| ConstructError::FieldMissing {
+                        path: String::new(),
+                        field: name.clone(),
+                    }),
+            }?;
+            stream.seek(pos)?;
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let container = match input {
+            Value::None => IndexMap::new(),
+            Value::Container(map) => map.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "Container".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        let mut child_ctx = ctx.subcontext();
+        for (key, value) in &container {
+            child_ctx.insert(key.clone(), value.clone());
+        }
+
+        // Find the first subcon whose name matches a key in the container.
+        for field in &self.fields {
+            let name_ref = field.name.as_deref();
+
+            let should_build = if field.flagbuildnone {
+                name_ref.map(|n| container.contains_key(n)).unwrap_or(false)
+            } else if let Some(n) = name_ref {
+                container.contains_key(n)
+            } else {
+                false
+            };
+
+            if !should_build {
+                continue;
+            }
+
+            let build_value =
+                if field.flagbuildnone {
+                    name_ref
+                        .and_then(|n| container.get(n))
+                        .cloned()
+                        .unwrap_or(Value::None)
+                } else {
+                    match name_ref {
+                        Some(n) => container.get(n).cloned().ok_or_else(|| {
+                            ConstructError::FieldMissing {
+                                path: String::new(),
+                                field: n.to_string(),
+                            }
+                        })?,
+                        None => Value::None,
+                    }
+                };
+
+            if let Some(ref name) = field.name {
+                child_ctx.insert(name.clone(), build_value.clone());
+            }
+
+            return field
+                .subcon
+                .exec_build(&build_value, stream, &mut child_ctx)
+                .map_err(|e| {
+                    if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    }
+                });
+        }
+
+        Err(ConstructError::Union {
+            path: String::new(),
+            message: format!(
+                "cannot build, none of the subcons were found in the dictionary: {:?}",
+                container.keys().collect::<Vec<_>>()
+            ),
+        })
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        // Union sizeof returns the max of all subcons (matches declaration
+        // tree behavior).
+        let child_ctx = ctx.subcontext();
+        let mut max_size: usize = 0;
+        for field in &self.fields {
+            let size = match field.subcon.exec_sizeof(&child_ctx) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            };
+            if size > max_size {
+                max_size = size;
+            }
+        }
+        Ok(max_size)
+    }
+}
+
+// -- CompiledFocusedSeq ---------------------------------------------------
+
+impl CompiledExec for CompiledFocusedSeq {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut child_ctx = ctx.subcontext();
+        let mut focused_value: Option<Value> = None;
+
+        for field in &self.fields {
+            match &field.name {
+                Some(name) => {
+                    let value = match exec_parse_named_child(
+                        &field.subcon,
+                        stream,
+                        &mut child_ctx,
+                        sink,
+                        name,
+                    ) {
+                        Ok(v) => v,
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => return Err(e.with_path_prefix(name)),
+                    };
+                    child_ctx.insert(name.clone(), value.clone());
+
+                    if name == &self.parsebuildfrom {
+                        focused_value = Some(value);
+                    }
+                }
+                None => {
+                    let mut sub_sink = sink.sub_sink_for_item()?;
+                    match field
+                        .subcon
+                        .exec_parse(stream, &mut child_ctx, sub_sink.as_mut())
+                    {
+                        Ok(()) => {}
+                        Err(ConstructError::StopField { .. }) => break,
+                        Err(e) => return Err(e.with_path_prefix("(anonymous)")),
+                    }
+                }
+            }
+        }
+
+        match focused_value {
+            Some(v) => sink.set_scalar(v),
+            None => Err(ConstructError::FieldMissing {
+                path: String::new(),
+                field: self.parsebuildfrom.clone(),
+            }),
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut child_ctx = ctx.subcontext();
+        child_ctx.insert(self.parsebuildfrom.clone(), input.clone());
+
+        for field in &self.fields {
+            let name_ref = field.name.as_deref();
+
+            // The focused field gets the actual data; others get None.
+            let build_value = if name_ref == Some(self.parsebuildfrom.as_str()) {
+                input.clone()
+            } else {
+                Value::None
+            };
+
+            if let Some(ref name) = field.name {
+                child_ctx.insert(name.clone(), build_value.clone());
+            }
+
+            match field
+                .subcon
+                .exec_build(&build_value, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let child_ctx = ctx.subcontext();
+        let mut total: usize = 0;
+        for field in &self.fields {
+            let size = match field.subcon.exec_sizeof(&child_ctx) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Err(if let Some(ref name) = field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            };
+            total = total.saturating_add(size);
+        }
+        Ok(total)
+    }
+}
+
+// ===========================================================================
 // Functional CompiledExec implementation for CompiledDynamic (escape-hatch)
 // ===========================================================================
 //
@@ -1470,6 +2430,29 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
         CompiledNode::Enum(w) => try_fold_static_size(&w.inner),
         CompiledNode::FlagsEnum(w) => try_fold_static_size(&w.inner),
         CompiledNode::Mapping(w) => try_fold_static_size(&w.inner),
+        // Composites (Phase 12.6): sum of all child sizes.
+        CompiledNode::Struct(s) => s
+            .fields
+            .iter()
+            .map(|f| try_fold_static_size(&f.subcon))
+            .sum(),
+        CompiledNode::Sequence(s) => s
+            .entries
+            .iter()
+            .map(|e| try_fold_static_size(&e.subcon))
+            .sum(),
+        CompiledNode::FocusedSeq(s) => s
+            .fields
+            .iter()
+            .map(|f| try_fold_static_size(&f.subcon))
+            .sum(),
+        // Array: count × element size (if element is fixed-length).
+        CompiledNode::Array(a) => try_fold_static_size(&a.subcon).map(|elem| elem * a.count),
+        // GreedyRange, ArrayExpr: variable count → unknown.
+        CompiledNode::GreedyRange(_) | CompiledNode::ArrayExpr(_) => None,
+        // Select, Union: size depends on runtime data → unknown.
+        CompiledNode::Select(_) | CompiledNode::Union(_) => None,
+        // RepeatUntil: compiles to Dynamic (never a CompiledRepeatUntil node).
         // Dynamic escape-hatch and all not-yet-implemented nodes: unknown.
         _ => None,
     }
@@ -1482,10 +2465,17 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::combined::CombinedConstruct;
     use crate::constructs::bytes::Bytes;
     use crate::constructs::flag::Flag;
-    use crate::constructs::format_field::{Endianness, FormatField, FormatKind};
+    use crate::constructs::focused_seq::FocusedSeq;
+    use crate::constructs::format_field::{Endianness, FormatField, FormatKind, INT16UB, INT8UB};
     use crate::constructs::meta::Pass;
+    use crate::constructs::repetition::{Array, GreedyRange};
+    use crate::constructs::select::Select;
+    use crate::constructs::sequence::Sequence;
+    use crate::constructs::struct_::{Struct, StructField};
+    use crate::constructs::union::Union;
     use crate::constructs::varint::VarInt;
 
     /// Helper: builds a `CompiledNode::Pass` embedding a default `Pass`.
@@ -1517,8 +2507,8 @@ mod tests {
 
     #[test]
     fn compiled_node_struct_variant_constructible() {
-        // Struct is still a unit struct (composites implemented later).
-        let node = CompiledNode::Struct(CompiledStruct);
+        // Struct now holds compiled fields (Phase 12.6).
+        let node = CompiledNode::Struct(CompiledStruct { fields: vec![] });
         assert!(matches!(node, CompiledNode::Struct(_)));
     }
 
@@ -1604,9 +2594,9 @@ mod tests {
     // -- Stub CompiledExec for not-yet-implemented nodes --------------------
 
     #[test]
-    fn stub_exec_for_struct_returns_error() {
-        // Struct is not yet implemented (composites later) — still a stub.
-        let node = CompiledNode::Struct(CompiledStruct);
+    fn stub_exec_for_lazy_returns_error() {
+        // Lazy is not yet implemented — still a stub.
+        let node = CompiledNode::Lazy(CompiledLazy);
         let ctx = Context::new();
         let err = node.exec_sizeof(&ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -1868,7 +2858,15 @@ mod tests {
         // Verifies dispatch routes to the right variant.
         let ctx = Context::new();
         assert_eq!(compiled_pass().exec_sizeof(&ctx).unwrap(), 0);
-        let err = CompiledNode::Struct(CompiledStruct)
+        // Struct is now functional (Phase 12.6): empty Struct has size 0.
+        assert_eq!(
+            CompiledNode::Struct(CompiledStruct { fields: vec![] })
+                .exec_sizeof(&ctx)
+                .unwrap(),
+            0
+        );
+        // Lazy is still a stub.
+        let err = CompiledNode::Lazy(CompiledLazy)
             .exec_sizeof(&ctx)
             .unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
@@ -1960,13 +2958,12 @@ mod tests {
     }
 
     #[test]
-    fn compiled_schema_sizeof_struct_still_stub_error() {
-        // Struct is not yet implemented → sizeof returns the stub error.
-        let schema = CompiledSchema::new(CompiledNode::Struct(CompiledStruct));
+    fn compiled_schema_sizeof_struct_folds_fields() {
+        // Struct is now functional (Phase 12.6): empty Struct has static size 0.
+        let schema = CompiledSchema::new(CompiledNode::Struct(CompiledStruct { fields: vec![] }));
+        assert_eq!(schema.static_size(), Some(0));
         let ctx = Context::new();
-        let err = schema.sizeof(&ctx).unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
-        assert_eq!(err.path(), SIZEOF_PATH);
+        assert_eq!(schema.sizeof(&ctx).unwrap(), 0);
     }
 
     #[test]
@@ -2006,10 +3003,15 @@ mod tests {
             })),
             None
         );
-        // Struct is still a stub (no real fields yet).
+        // Lazy is still a stub (unknown size).
         assert_eq!(
-            try_fold_static_size(&CompiledNode::Struct(CompiledStruct)),
+            try_fold_static_size(&CompiledNode::Lazy(CompiledLazy)),
             None
+        );
+        // Empty Struct folds to 0 (Phase 12.6).
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::Struct(CompiledStruct { fields: vec![] })),
+            Some(0)
         );
     }
 
@@ -2033,13 +3035,17 @@ mod tests {
             encode: Arc::from(encode),
         });
         let _ = compiled_pass();
-        let _ = CompiledNode::Struct(CompiledStruct);
+        let _ = CompiledNode::Struct(CompiledStruct { fields: vec![] });
         let _ = CompiledNode::Enum(CompiledEnum {
             inner: Box::new(compiled_pass()),
             mapping: IndexMap::new(),
             decmap: IndexMap::new(),
         });
-        let _ = CompiledNode::Array(CompiledArray);
+        let _ = CompiledNode::Array(CompiledArray {
+            count: 0,
+            subcon: Box::new(compiled_pass()),
+            discard: false,
+        });
         let _ = CompiledNode::Lazy(CompiledLazy);
         let _ = CompiledNode::Bitwise(CompiledBitwise);
         let _ = CompiledNode::IfThenElse(CompiledIfThenElse);
@@ -2047,5 +3053,381 @@ mod tests {
             inner: Box::new(compiled_pass()),
         });
         let _ = CompiledNode::Dynamic(dynamic_pass());
+    }
+
+    // -- Composite exec tests (Phase 12.6) ---------------------------------
+
+    /// Helper: compile a declaration construct into a CompiledNode.
+    fn compile_cc(cc: CombinedConstruct) -> CompiledNode {
+        cc.compile().expect("compile should succeed")
+    }
+
+    #[test]
+    fn composite_struct_exec_parse_and_build_roundtrip() {
+        // Struct { a: u8, b: u16<BE> }
+        let st = Struct::new()
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
+        let node = compile_cc(st.into());
+
+        // Parse 0x01 0x02 0x03 → { a: 1, b: 515 }
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x01, 0x02, 0x03]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let container = match &val {
+            Value::Container(c) => c,
+            other => panic!("expected Container, got {other:?}"),
+        };
+        assert_eq!(container.get("a").unwrap(), &Value::UInt(1));
+        assert_eq!(container.get("b").unwrap(), &Value::UInt(0x0203));
+
+        // Build back: { a: 1, b: 515 } → 0x01 0x02 0x03
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx2 = Context::new();
+        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        assert_eq!(stream2.into_bytes(), vec![0x01, 0x02, 0x03]);
+    }
+
+    #[test]
+    fn composite_struct_exec_sizeof_sums_fields() {
+        let st = Struct::new()
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT16UB.into()));
+        let node = compile_cc(st.into());
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 3);
+    }
+
+    #[test]
+    fn composite_struct_anonymous_field_exec_parse() {
+        // Anonymous field (name=None) is parsed but not stored.
+        let st = Struct::new()
+            .anonymous(Box::new(INT8UB.into()))
+            .field("x", Box::new(INT8UB.into()));
+        let node = compile_cc(st.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xFF, 0x42]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let container = match val {
+            Value::Container(c) => c,
+            other => panic!("expected Container, got {other:?}"),
+        };
+        assert_eq!(container.len(), 1); // only "x"
+        assert_eq!(container.get("x").unwrap(), &Value::UInt(0x42));
+    }
+
+    #[test]
+    fn composite_sequence_exec_parse_and_build_roundtrip() {
+        // Sequence of (u8, u8, u8)
+        let seq = Sequence::new()
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT8UB.into()));
+        let node = compile_cc(seq.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[10, 20, 30]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let list = match &val {
+            Value::List(l) => l,
+            other => panic!("expected List, got {other:?}"),
+        };
+        assert_eq!(list.len(), 3);
+        assert_eq!(list[0], Value::UInt(10));
+        assert_eq!(list[1], Value::UInt(20));
+        assert_eq!(list[2], Value::UInt(30));
+
+        // Build back
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx2 = Context::new();
+        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        assert_eq!(stream2.into_bytes(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn composite_sequence_exec_sizeof_sums_entries() {
+        let seq = Sequence::new()
+            .push(Box::new(INT8UB.into()))
+            .push(Box::new(INT16UB.into()));
+        let node = compile_cc(seq.into());
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 3);
+    }
+
+    #[test]
+    fn composite_array_exec_parse_and_build_roundtrip() {
+        // Array of 3 × u8
+        let arr = Array::new(3, Box::new(INT8UB.into()));
+        let node = compile_cc(arr.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1, 2, 3]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let list = match &val {
+            Value::List(l) => l,
+            other => panic!("expected List, got {other:?}"),
+        };
+        assert_eq!(*list, vec![Value::UInt(1), Value::UInt(2), Value::UInt(3)]);
+
+        // Build back
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx2 = Context::new();
+        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        assert_eq!(stream2.into_bytes(), vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn composite_array_exec_sizeof() {
+        let arr = Array::new(4, Box::new(INT8UB.into()));
+        let node = compile_cc(arr.into());
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 4);
+    }
+
+    #[test]
+    fn composite_array_discard_exec_parse_returns_empty_list() {
+        // Discard array: parsed items are thrown away; result is empty list.
+        let arr = Array::new_discard(2, Box::new(INT8UB.into()));
+        let node = compile_cc(arr.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xAA, 0xBB]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        assert_eq!(val, Value::List(vec![]));
+    }
+
+    #[test]
+    fn composite_greedy_range_exec_parse_reads_until_eof() {
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
+        let node = compile_cc(gr.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1, 2, 3, 4]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let list = match val {
+            Value::List(l) => l,
+            other => panic!("expected List, got {other:?}"),
+        };
+        assert_eq!(list.len(), 4);
+        assert_eq!(list[0], Value::UInt(1));
+        assert_eq!(list[3], Value::UInt(4));
+    }
+
+    #[test]
+    fn composite_greedy_range_exec_build_writes_all_items() {
+        let gr = GreedyRange::new(Box::new(INT8UB.into()));
+        let node = compile_cc(gr.into());
+
+        let input = Value::List(vec![Value::UInt(10), Value::UInt(20), Value::UInt(30)]);
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx = Context::new();
+        node.exec_build(&input, &mut stream, &mut ctx).unwrap();
+        assert_eq!(stream.into_bytes(), vec![10, 20, 30]);
+    }
+
+    #[test]
+    fn composite_select_exec_parse_matches_first_subcon() {
+        // Select with two subcons; INT8UB matches first.
+        let sel = Select::new(vec![INT8UB.into(), INT16UB.into()]);
+        let node = compile_cc(sel.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x07]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        assert_eq!(val, Value::UInt(7));
+    }
+
+    #[test]
+    fn composite_select_exec_parse_falls_through_to_second() {
+        // First subcon fails (not enough bytes), second succeeds.
+        let sel = Select::new(vec![INT16UB.into(), INT8UB.into()]);
+        let node = compile_cc(sel.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x07]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        assert_eq!(val, Value::UInt(7));
+    }
+
+    #[test]
+    fn composite_select_exec_parse_all_fail_returns_error() {
+        let sel = Select::new(vec![INT16UB.into()]);
+        let node = compile_cc(sel.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        let err = node
+            .exec_parse(&mut stream, &mut ctx, &mut sink)
+            .unwrap_err();
+        assert!(matches!(err, ConstructError::Select { .. }));
+    }
+
+    #[test]
+    fn composite_union_exec_parse_reads_selected_field() {
+        // Union with parsefrom = index 1; input has 2 bytes for both fields.
+        // Field 0 (INT16UB, big-endian) reads [0xAA, 0xBB] = 0xAABB.
+        // Field 1 (INT8UB) reads [0xAA] = 0xAA = 170.
+        let uni = Union::new(
+            Some(crate::constructs::union::UnionTarget::Index(1)),
+            vec![],
+        )
+        .field("a", Box::new(INT16UB.into()))
+        .field("b", Box::new(INT8UB.into()));
+        let node = compile_cc(uni.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xAA, 0xBB]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let container = match &val {
+            Value::Container(c) => c,
+            other => panic!("expected Container, got {other:?}"),
+        };
+        // Both fields are parsed and stored; stream advances to field 1's position.
+        assert_eq!(container.get("a").unwrap(), &Value::UInt(0xAABB));
+        assert_eq!(container.get("b").unwrap(), &Value::UInt(0xAA));
+        // Stream should be at position 1 (field 1's forward position).
+        assert_eq!(stream.tell().unwrap(), 1);
+    }
+
+    #[test]
+    fn composite_focused_seq_exec_parse_returns_focused_value() {
+        // FocusedSeq on field "x": Struct { dummy: u8, x: u8 }
+        let fs = FocusedSeq::new(
+            "x",
+            vec![
+                StructField::new("dummy", Box::new(INT8UB.into())),
+                StructField::new("x", Box::new(INT8UB.into())),
+            ],
+        );
+        let node = compile_cc(fs.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0xFF, 0x42]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        assert_eq!(val, Value::UInt(0x42));
+    }
+
+    #[test]
+    fn composite_nested_struct_exec_parse_roundtrip() {
+        // Outer { a: u8, inner: Struct { b: u8 } }
+        let inner = Struct::new().field("b", Box::new(INT8UB.into()));
+        let outer = Struct::new()
+            .field("a", Box::new(INT8UB.into()))
+            .field("inner", Box::new(inner.into()));
+        let node = compile_cc(outer.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1, 2]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let container = match &val {
+            Value::Container(c) => c,
+            other => panic!("expected Container, got {other:?}"),
+        };
+        assert_eq!(container.get("a").unwrap(), &Value::UInt(1));
+        let inner_val = container.get("inner").unwrap();
+        let inner_container = match inner_val {
+            Value::Container(c) => c,
+            other => panic!("expected inner Container, got {other:?}"),
+        };
+        assert_eq!(inner_container.get("b").unwrap(), &Value::UInt(2));
+
+        // Build back
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx2 = Context::new();
+        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        assert_eq!(stream2.into_bytes(), vec![1, 2]);
+    }
+
+    #[test]
+    fn composite_array_of_structs_exec_parse_roundtrip() {
+        // Array(2, Struct { x: u8 })
+        let elem = Struct::new().field("x", Box::new(INT8UB.into()));
+        let arr = Array::new(2, Box::new(elem.into()));
+        let node = compile_cc(arr.into());
+
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[10, 20]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let list = match &val {
+            Value::List(l) => l,
+            other => panic!("expected List, got {other:?}"),
+        };
+        assert_eq!(list.len(), 2);
+
+        // Build back
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx2 = Context::new();
+        node.exec_build(&val, &mut stream2, &mut ctx2).unwrap();
+        assert_eq!(stream2.into_bytes(), vec![10, 20]);
+    }
+
+    #[test]
+    fn composite_struct_with_buildnone_field_exec_parse() {
+        // Struct { a: u8, "skip" / Pass } — Pass has flagbuildnone=true
+        let st = Struct::new()
+            .field("a", Box::new(INT8UB.into()))
+            .field("skip", Box::new(Pass::new().into()));
+        let node = compile_cc(st.into());
+
+        // The compiled Struct should have 2 fields, second with flagbuildnone=true
+        match &node {
+            CompiledNode::Struct(cs) => {
+                assert_eq!(cs.fields.len(), 2);
+                assert!(cs.fields[1].flagbuildnone);
+            }
+            other => panic!("expected CompiledStruct, got {other:?}"),
+        }
+
+        // Parse reads only "a"; "skip" gets Value::None
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x05]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let val = Box::new(sink).into_value().unwrap();
+        let container = match val {
+            Value::Container(c) => c,
+            other => panic!("expected Container, got {other:?}"),
+        };
+        assert_eq!(container.get("a").unwrap(), &Value::UInt(5));
+    }
+
+    #[test]
+    fn composite_struct_exec_build_missing_field_returns_error() {
+        // Struct with a required field; building with missing field → error.
+        let st = Struct::new().field("a", Box::new(INT8UB.into()));
+        let node = compile_cc(st.into());
+
+        // Build with empty container → should error (FieldMissing)
+        let input = Value::Container(IndexMap::new());
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+        let mut ctx = Context::new();
+        let err = node.exec_build(&input, &mut stream, &mut ctx).unwrap_err();
+        assert!(matches!(err, ConstructError::FieldMissing { .. }));
     }
 }

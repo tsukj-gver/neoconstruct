@@ -206,6 +206,15 @@ impl Struct {
         }
         self
     }
+
+    /// Returns the ordered list of fields in this struct (read-only access).
+    ///
+    /// Used by the compiler to access field definitions for compilation into
+    /// the execution tree.
+    #[must_use]
+    pub fn fields(&self) -> &[StructField] {
+        &self.fields
+    }
 }
 
 impl Default for Struct {

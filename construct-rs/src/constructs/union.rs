@@ -138,6 +138,18 @@ impl Union {
         self.subcons.push(StructField::anonymous(subcon));
         self
     }
+
+    /// Returns the `parsefrom` target (read-only access).
+    #[must_use]
+    pub fn parsefrom(&self) -> Option<&UnionTarget> {
+        self.parsefrom.as_ref()
+    }
+
+    /// Returns the ordered list of sub-construct fields (read-only access).
+    #[must_use]
+    pub fn subcons(&self) -> &[StructField] {
+        &self.subcons
+    }
 }
 
 impl Construct for Union {

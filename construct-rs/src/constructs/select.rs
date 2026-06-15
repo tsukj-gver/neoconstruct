@@ -96,6 +96,12 @@ impl Select {
         self.subcons.push(subcon.into());
         self
     }
+
+    /// Returns the list of sub-constructs to try in order (read-only access).
+    #[must_use]
+    pub fn subcons(&self) -> &[CombinedConstruct] {
+        &self.subcons
+    }
 }
 
 impl Construct for Select {

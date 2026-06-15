@@ -163,11 +163,15 @@ mod tests {
     }
 
     #[test]
-    fn compile_struct_returns_stub_error() {
-        // Struct (composite) is still a stub in Phase 12.4.
+    fn compile_struct_succeeds_with_fields() {
+        // Struct is now compilable (Phase 12.6).
         let compiler = SchemaCompiler::new();
-        let cc: CombinedConstruct = Struct::new().into();
-        assert!(compiler.compile(&cc).is_err());
+        let cc: CombinedConstruct = Struct::new().field("a", Box::new(INT8UB.into())).into();
+        let schema = compiler.compile(&cc).expect("Struct should compile");
+        match schema.tree() {
+            CompiledNode::Struct(cs) => assert_eq!(cs.fields.len(), 1),
+            other => panic!("expected CompiledStruct, got {other:?}"),
+        }
     }
 
     #[test]
@@ -181,10 +185,11 @@ mod tests {
     }
 
     #[test]
-    fn compile_stub_error_message_mentions_not_yet_implemented() {
-        // Struct (composite) is still a stub in Phase 12.4.
+    fn compile_lazy_returns_stub_error() {
+        // Lazy (stream ops) is still a stub in Phase 12.6.
         let compiler = SchemaCompiler::new();
-        let cc: CombinedConstruct = Struct::new().into();
+        let cc: CombinedConstruct =
+            crate::constructs::lazy::Lazy::new(Box::new(INT8UB.into())).into();
         let err = compiler.compile(&cc).unwrap_err();
         match err {
             ConstructError::Generic { message, .. } => {
