@@ -21,8 +21,10 @@
 //! across sub-tasks 12.4-12.9.
 
 pub mod build;
+pub mod expr;
 pub mod sink;
 
+pub use expr::{compile_expr, CompiledExpr};
 pub use sink::{OutputSink, ValueSink};
 
 use std::sync::Arc;
