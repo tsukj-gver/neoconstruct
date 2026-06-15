@@ -31,32 +31,60 @@ use crate::core::error::Result;
 use crate::core::stream::CombinedStream;
 use crate::core::Construct;
 use crate::value::Value;
+use std::sync::Arc;
 
 // ===========================================================================
 // Type aliases for closure-based decode / encode / check functions
 // ===========================================================================
+//
+// These aliases use `Arc<dyn Fn ... + Send + Sync>` so that adapter/validator
+// instances (and compiled execution trees that embed them) are `Send + Sync`
+// and can be shared across threads. Construct APIs still accept `Box<dyn Fn
+// ... + Send + Sync>` and convert internally via `Arc::from`, keeping call
+// sites as `Box::new(closure)`.
 
 /// Function signature for decoding (parsing) a value.
 ///
 /// Receives the raw [`Value`] produced by the inner construct and the current
 /// [`Context`], and returns the transformed value.
 ///
+/// This is the canonical (stored) form using [`Arc`]. Constructors accept the
+/// boxed form [`DecodeFuncBox`] and convert internally.
+///
 /// Corresponds to the Python `Adapter._decode(obj, context, path)` method.
-pub type DecodeFunc = Box<dyn Fn(&Value, &Context) -> Result<Value>>;
+pub type DecodeFunc = Arc<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
+
+/// Boxed decode function accepted by constructors; converted to
+/// [`DecodeFunc`] internally. Call sites pass `Box::new(closure)`.
+pub type DecodeFuncBox = Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
 
 /// Function signature for encoding (building) a value.
 ///
 /// Receives the user-supplied [`Value`] and the current [`Context`], and
 /// returns the encoded value that the inner construct will consume.
 ///
+/// This is the canonical (stored) form using [`Arc`]. Constructors accept the
+/// boxed form [`EncodeFuncBox`] and convert internally.
+///
 /// Corresponds to the Python `Adapter._encode(obj, context, path)` method.
-pub type EncodeFunc = Box<dyn Fn(&Value, &Context) -> Result<Value>>;
+pub type EncodeFunc = Arc<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
+
+/// Boxed encode function accepted by constructors; converted to
+/// [`EncodeFunc`] internally. Call sites pass `Box::new(closure)`.
+pub type EncodeFuncBox = Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
 
 /// Function signature for a symmetric value transformation.
 ///
 /// Used by [`SymmetricAdapter`] where the same function is applied during
 /// both parse and build.
-pub type SymmetricFunc = Box<dyn Fn(&Value, &Context) -> Result<Value>>;
+///
+/// This is the canonical (stored) form using [`Arc`]. Constructors accept the
+/// boxed form [`SymmetricFuncBox`] and convert internally.
+pub type SymmetricFunc = Arc<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
+
+/// Boxed symmetric function accepted by constructors; converted to
+/// [`SymmetricFunc`] internally. Call sites pass `Box::new(closure)`.
+pub type SymmetricFuncBox = Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync>;
 
 /// Function signature for validating a value.
 ///
@@ -64,8 +92,15 @@ pub type SymmetricFunc = Box<dyn Fn(&Value, &Context) -> Result<Value>>;
 /// the value is valid, or `Err` with a [`ConstructError::Validation`] error
 /// on failure.
 ///
+/// This is the canonical (stored) form using [`Arc`]. Constructors accept the
+/// boxed form [`CheckFuncBox`] and convert internally.
+///
 /// Corresponds to the Python `Validator._validate(obj, context, path)` method.
-pub type CheckFunc = Box<dyn Fn(&Value, &Context) -> Result<()>>;
+pub type CheckFunc = Arc<dyn Fn(&Value, &Context) -> Result<()> + Send + Sync>;
+
+/// Boxed check function accepted by constructors; converted to
+/// [`CheckFunc`] internally. Call sites pass `Box::new(closure)`.
+pub type CheckFuncBox = Box<dyn Fn(&Value, &Context) -> Result<()> + Send + Sync>;
 
 // ===========================================================================
 // Adapter
@@ -127,11 +162,20 @@ impl Adapter {
     /// - `subcon` — the inner construct
     /// - `decode` — function applied to the value produced by `subcon.parse()`
     /// - `encode` — function applied to the user value before `subcon.build()`
-    pub fn new(subcon: Box<CombinedConstruct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
+    ///
+    /// The closures must be `Send + Sync`. They are stored internally as
+    /// [`DecodeFunc`] / [`EncodeFunc`] (`Arc<dyn Fn + Send + Sync>`). Call
+    /// sites typically pass `Box::new(closure)`, which is accepted as
+    /// [`DecodeFuncBox`] / [`EncodeFuncBox`] and converted via [`Arc::from`].
+    pub fn new(
+        subcon: Box<CombinedConstruct>,
+        decode: DecodeFuncBox,
+        encode: EncodeFuncBox,
+    ) -> Self {
         Adapter {
             subcon,
-            decode,
-            encode,
+            decode: Arc::from(decode),
+            encode: Arc::from(encode),
         }
     }
 }
@@ -207,8 +251,16 @@ impl SymmetricAdapter {
     ///
     /// - `subcon` — the inner construct
     /// - `func` — the function applied to values in both directions
-    pub fn new(subcon: Box<CombinedConstruct>, func: SymmetricFunc) -> Self {
-        SymmetricAdapter { subcon, func }
+    ///
+    /// The closure must be `Send + Sync`. It is stored internally as
+    /// [`SymmetricFunc`] (`Arc<dyn Fn + Send + Sync>`). Call sites typically
+    /// pass `Box::new(closure)`, which is accepted as [`SymmetricFuncBox`]
+    /// and converted via [`Arc::from`].
+    pub fn new(subcon: Box<CombinedConstruct>, func: SymmetricFuncBox) -> Self {
+        SymmetricAdapter {
+            subcon,
+            func: Arc::from(func),
+        }
     }
 }
 
@@ -259,11 +311,20 @@ impl ExprAdapter {
     /// - `subcon` — the inner construct
     /// - `decode` — function applied to the value produced by `subcon.parse()`
     /// - `encode` — function applied to the user value before `subcon.build()`
-    pub fn new(subcon: Box<CombinedConstruct>, decode: DecodeFunc, encode: EncodeFunc) -> Self {
+    ///
+    /// The closures must be `Send + Sync`. They are stored internally as
+    /// [`DecodeFunc`] / [`EncodeFunc`] (`Arc<dyn Fn + Send + Sync>`). Call
+    /// sites typically pass `Box::new(closure)`, which is accepted as
+    /// [`DecodeFuncBox`] / [`EncodeFuncBox`] and converted via [`Arc::from`].
+    pub fn new(
+        subcon: Box<CombinedConstruct>,
+        decode: DecodeFuncBox,
+        encode: EncodeFuncBox,
+    ) -> Self {
         ExprAdapter {
             subcon,
-            decode,
-            encode,
+            decode: Arc::from(decode),
+            encode: Arc::from(encode),
         }
     }
 }
@@ -348,8 +409,16 @@ impl Validator {
     /// - `subcon` — the inner construct
     /// - `check` — function that validates the value; returns `Ok(())` on
     ///   success or `Err(ConstructError::Validation)` on failure
-    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFunc) -> Self {
-        Validator { subcon, check }
+    ///
+    /// The closure must be `Send + Sync`. It is stored internally as
+    /// [`CheckFunc`] (`Arc<dyn Fn + Send + Sync>`). Call sites typically
+    /// pass `Box::new(closure)`, which is accepted as [`CheckFuncBox`] and
+    /// converted via [`Arc::from`].
+    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFuncBox) -> Self {
+        Validator {
+            subcon,
+            check: Arc::from(check),
+        }
     }
 }
 
@@ -394,8 +463,16 @@ impl ExprValidator {
     /// - `subcon` — the inner construct
     /// - `check` — function that validates the value; returns `Ok(())` on
     ///   success or `Err(ConstructError::Validation)` on failure
-    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFunc) -> Self {
-        ExprValidator { subcon, check }
+    ///
+    /// The closure must be `Send + Sync`. It is stored internally as
+    /// [`CheckFunc`] (`Arc<dyn Fn + Send + Sync>`). Call sites typically
+    /// pass `Box::new(closure)`, which is accepted as [`CheckFuncBox`] and
+    /// converted via [`Arc::from`].
+    pub fn new(subcon: Box<CombinedConstruct>, check: CheckFuncBox) -> Self {
+        ExprValidator {
+            subcon,
+            check: Arc::from(check),
+        }
     }
 }
 
