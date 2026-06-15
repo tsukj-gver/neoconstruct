@@ -87,6 +87,9 @@ pub fn py_parse(
 ) -> PyResult<PyObject> {
     let mut stream = ByteStream::new_read(data);
     let mut ctx = Context::new();
+    ctx.insert("_parsing".to_string(), Value::Bool(true));
+    ctx.insert("_building".to_string(), Value::Bool(false));
+    ctx.insert("_sizing".to_string(), Value::Bool(false));
     for (key, value) in kw {
         ctx.insert(key, value);
     }
@@ -111,6 +114,9 @@ pub fn py_parse_stream(
 ) -> PyResult<PyObject> {
     let mut stream = PyStream::new(stream_obj);
     let mut ctx = Context::new();
+    ctx.insert("_parsing".to_string(), Value::Bool(true));
+    ctx.insert("_building".to_string(), Value::Bool(false));
+    ctx.insert("_sizing".to_string(), Value::Bool(false));
     for (key, value) in kw {
         ctx.insert(key, value);
     }
@@ -166,6 +172,9 @@ pub fn py_build(
     let value = py_to_value(py, data)?;
     let mut stream = ByteStream::new_write();
     let mut ctx = Context::new();
+    ctx.insert("_parsing".to_string(), Value::Bool(false));
+    ctx.insert("_building".to_string(), Value::Bool(true));
+    ctx.insert("_sizing".to_string(), Value::Bool(false));
     // Set the embedding value in context, matching construct Python's
     // behavior where `context._ = obj` is set before _build is called.
     // This allows condition-based constructs (Optional, IfThenElse) to
@@ -200,18 +209,83 @@ pub fn py_build_stream(
     let value = py_to_value(py, data)?;
     let mut byte_stream = ByteStream::new_write();
     let mut ctx = Context::new();
+    ctx.insert("_parsing".to_string(), Value::Bool(false));
+    ctx.insert("_building".to_string(), Value::Bool(true));
+    ctx.insert("_sizing".to_string(), Value::Bool(false));
     for (key, val) in kw {
         ctx.insert(key, val);
     }
-    constr
-        .build(&value, &mut byte_stream, &mut ctx)
-        .map_err(|e| rust_err_to_py(py, e.with_path_prefix(BUILD_PATH)))?;
+    let build_result = constr.build(&value, &mut byte_stream, &mut ctx);
+
+    // Even on error, we must flush bytes written before the failure.
+    // This is critical for StopField: bytes written before the signal
+    // must reach the Python stream so the parent construct (e.g. GreedyRange)
+    // can use them.
+    let final_pos = byte_stream.tell().unwrap_or(0) as usize;
     let bytes = byte_stream.into_bytes();
+    let bytes = if final_pos > bytes.len() {
+        let mut padded = bytes;
+        padded.resize(final_pos, 0);
+        padded
+    } else {
+        bytes
+    };
     let mut py_stream = PyStream::new(stream_obj);
     py_stream
         .write_bytes(&bytes)
         .map_err(|e| rust_err_to_py(py, e))?;
+    // If the Rust stream's final position was less than the bytes written
+    // (e.g. a Seek back), sync the Python stream's position accordingly.
+    if final_pos < bytes.len() {
+        let _ = py_stream.seek(final_pos as u64);
+    }
+
+    // Now propagate the build error (if any).
+    build_result.map_err(|e| rust_err_to_py(py, e.with_path_prefix(BUILD_PATH)))?;
     Ok(())
+}
+
+/// Builds binary data using `build_effective` and writes to a stream,
+/// returning the effective value as a Python object.
+///
+/// Used by [`PyConstructAdapter::build_effective`] to propagate the
+/// effective value (e.g. a Container from a Struct) through the FFI boundary.
+pub fn py_build_effective_stream(
+    constr: &dyn Construct,
+    py: Python<'_>,
+    data: &Bound<'_, PyAny>,
+    stream_obj: Py<PyAny>,
+    kw: IndexMap<String, Value>,
+) -> PyResult<PyObject> {
+    let value = py_to_value(py, data)?;
+    let mut byte_stream = ByteStream::new_write();
+    let mut ctx = Context::new();
+    ctx.insert("_parsing".to_string(), Value::Bool(false));
+    ctx.insert("_building".to_string(), Value::Bool(true));
+    ctx.insert("_sizing".to_string(), Value::Bool(false));
+    for (key, val) in kw {
+        ctx.insert(key, val);
+    }
+    let effective = constr
+        .build_effective(&value, &mut byte_stream, &mut ctx)
+        .map_err(|e| rust_err_to_py(py, e.with_path_prefix(BUILD_PATH)))?;
+    let final_pos = byte_stream.tell().unwrap_or(0) as usize;
+    let bytes = byte_stream.into_bytes();
+    let bytes = if final_pos > bytes.len() {
+        let mut padded = bytes;
+        padded.resize(final_pos, 0);
+        padded
+    } else {
+        bytes
+    };
+    let mut py_stream = PyStream::new(stream_obj);
+    py_stream
+        .write_bytes(&bytes)
+        .map_err(|e| rust_err_to_py(py, e))?;
+    if final_pos < bytes.len() {
+        let _ = py_stream.seek(final_pos as u64);
+    }
+    value_to_py(py, &effective)
 }
 
 /// Builds binary data and writes it to a file.

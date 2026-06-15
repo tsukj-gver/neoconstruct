@@ -985,10 +985,7 @@ mod tests {
 
     #[test]
     fn repeat_until_parse_first_element_matches() {
-        let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| true.into()),
-            Box::new(INT8UB.into()),
-        );
+        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB.into()));
         let result = as_dyn!(ru).parse_bytes(b"\x42").unwrap();
         assert_eq!(result, Value::List(vec![Value::UInt(0x42)]));
     }
@@ -1009,11 +1006,8 @@ mod tests {
         // Stop when the last two elements are [0, 0]
         let ru = RepeatUntil::new(
             Box::new(|_obj, list, _ctx| {
-                {
-                    let len = list.len();
-                    len >= 2 && list[len - 2] == Value::UInt(0) && list[len - 1] == Value::UInt(0)
-                }
-                .into()
+                let len = list.len();
+                len >= 2 && list[len - 2] == Value::UInt(0) && list[len - 1] == Value::UInt(0)
             }),
             Box::new(INT8UB.into()),
         );
@@ -1050,7 +1044,7 @@ mod tests {
         }
 
         let ru = RepeatUntil::new(
-            Box::new(|obj, _list, _ctx| obj == &Value::UInt(2).into()),
+            Box::new(|obj, _list, _ctx| obj == &Value::UInt(2)),
             Box::new(crate::combined::dynamic(IndexCapture)),
         );
         let result = as_dyn!(ru).parse_bytes(b"").unwrap();
@@ -1063,7 +1057,7 @@ mod tests {
     #[test]
     fn repeat_until_parse_insufficient_data_returns_error() {
         let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| false.into()), // never satisfied
+            Box::new(|_obj, _list, _ctx| false), // never satisfied
             Box::new(INT8UB.into()),
         );
         let err = as_dyn!(ru).parse_bytes(b"\x01").unwrap_err();
@@ -1093,7 +1087,7 @@ mod tests {
     #[test]
     fn repeat_until_build_no_match_returns_error() {
         let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| false.into()), // never satisfied
+            Box::new(|_obj, _list, _ctx| false), // never satisfied
             Box::new(INT8UB.into()),
         );
         let err = as_dyn!(ru)
@@ -1104,10 +1098,7 @@ mod tests {
 
     #[test]
     fn repeat_until_build_non_list_returns_type_mismatch() {
-        let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| true.into()),
-            Box::new(INT8UB.into()),
-        );
+        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB.into()));
         let err = as_dyn!(ru)
             .build_bytes(&Value::String("nope".to_string()))
             .unwrap_err();
@@ -1120,10 +1111,7 @@ mod tests {
 
     #[test]
     fn repeat_until_sizeof_returns_error() {
-        let ru = RepeatUntil::new(
-            Box::new(|_obj, _list, _ctx| true.into()),
-            Box::new(INT8UB.into()),
-        );
+        let ru = RepeatUntil::new(Box::new(|_obj, _list, _ctx| true), Box::new(INT8UB.into()));
         let err = ru.sizeof(&Context::new()).unwrap_err();
         assert!(matches!(err, ConstructError::Sizeof { .. }));
     }
@@ -1209,7 +1197,6 @@ mod tests {
                         .map(|b| !b.is_empty() && b[0] == 0xFF)
                         .unwrap_or(false)
                 }
-                .into()
             }),
             Box::new(Bytes::new(2).into()),
         );

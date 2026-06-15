@@ -229,7 +229,7 @@ mod tests {
             Value::Int(-7),
             Value::UInt(7),
             Value::Bool(true),
-            Value::Float(3.14),
+            Value::Float(2.5),
             Value::String("hello".to_string()),
             Value::Bytes(b"\x01\x02".to_vec()),
             Value::None,

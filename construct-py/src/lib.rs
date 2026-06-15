@@ -234,7 +234,11 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(py_bits_integer, m)?)?;
     m.add_function(wrap_pyfunction!(py_const, m)?)?;
     m.add_function(wrap_pyfunction!(py_seek, m)?)?;
-    m.add_function(wrap_pyfunction!(py_error, m)?)?;
+    // Error is a singleton instance (not a factory), matching Python's SingletonError
+    {
+        let error_inst = constructs_atomic::py_error();
+        m.add("Error", Py::new(py, error_inst)?)?;
+    }
     m.add_function(wrap_pyfunction!(py_computed, m)?)?;
     m.add_function(wrap_pyfunction!(py_rebuild, m)?)?;
     m.add_function(wrap_pyfunction!(py_default, m)?)?;

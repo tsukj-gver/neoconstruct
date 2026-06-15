@@ -141,15 +141,13 @@ class TestGreedyString:
 class TestGallery:
     def test_elf_factory(self):
         from construct_rust.gallery import elf
-        d = elf()
         with pytest.raises(Exception):
-            d.parse(b"NOT-ELF")
+            elf.parse(b"NOT-ELF")
 
     def test_pe32file_factory(self):
         from construct_rust.gallery import pe32file
-        d = pe32file()
         with pytest.raises(Exception):
-            d.parse(b"XXXX")
+            pe32file.parse(b"XXXX")
 
     def test_ut_index_factory(self):
         from construct_rust.gallery import UTIndex

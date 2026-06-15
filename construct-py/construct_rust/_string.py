@@ -114,9 +114,14 @@ class _CallableFixedSized(Subconstruct):
         return ret
 
     def _sizeof(self, context, path):
-        from . import SizeofError
+        from .expr import evaluate
 
-        raise SizeofError(path=path)
+        try:
+            return evaluate(self.length, context)
+        except Exception:
+            from . import SizeofError
+
+            raise SizeofError("variable size: %s" % path)
 
 
 def _padded_string_fallback(length, encoding):

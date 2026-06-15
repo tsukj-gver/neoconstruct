@@ -23,6 +23,7 @@ use crate::core::stream::CombinedStream;
 use crate::core::stream::{ByteStream, Stream};
 use crate::core::Construct;
 use crate::value::Value;
+use std::sync::Arc;
 
 // ===========================================================================
 // Type aliases
@@ -31,7 +32,13 @@ use crate::value::Value;
 /// Function signature for computing a [`Value`] from the context.
 ///
 /// Used by [`Computed`] and [`Rebuild`] to derive values during parse/build.
-pub type ComputeFunc = Box<dyn Fn(&Context) -> Result<Value>>;
+///
+/// Canonical (stored) form using [`Arc`]. Constructors accept
+/// [`ComputeFuncBox`].
+pub type ComputeFunc = Arc<dyn Fn(&Context) -> Result<Value> + Send + Sync>;
+
+/// Boxed compute function accepted by constructors.
+pub type ComputeFuncBox = Box<dyn Fn(&Context) -> Result<Value> + Send + Sync>;
 
 // ===========================================================================
 // Computed
@@ -66,8 +73,10 @@ pub struct Computed {
 
 impl Computed {
     /// Creates a new `Computed` with the given context function.
-    pub fn new(func: ComputeFunc) -> Self {
-        Computed { func }
+    pub fn new(func: ComputeFuncBox) -> Self {
+        Computed {
+            func: Arc::from(func),
+        }
     }
 }
 
@@ -138,8 +147,11 @@ pub struct Rebuild {
 impl Rebuild {
     /// Creates a new `Rebuild` with the given inner construct and context
     /// function.
-    pub fn new(subcon: Box<CombinedConstruct>, func: ComputeFunc) -> Self {
-        Rebuild { subcon, func }
+    pub fn new(subcon: Box<CombinedConstruct>, func: ComputeFuncBox) -> Self {
+        Rebuild {
+            subcon,
+            func: Arc::from(func),
+        }
     }
 }
 
@@ -1027,7 +1039,7 @@ mod tests {
 
     #[test]
     fn computed_parse_returns_func_result() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42)).into()));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(42))));
         let c: &dyn Construct = &c;
         let result = c.parse_bytes(b"").unwrap();
         assert_eq!(result, Value::Int(42));
@@ -1035,7 +1047,7 @@ mod tests {
 
     #[test]
     fn computed_parse_does_not_consume_stream() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
         let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x01\x02\x03"));
         let mut ctx = Context::new();
         let _ = c.parse(&mut stream, &mut ctx).unwrap();
@@ -1044,7 +1056,7 @@ mod tests {
 
     #[test]
     fn computed_build_does_not_write() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
         let c: &dyn Construct = &c;
         let bytes = c.build_bytes(&Value::None).unwrap();
         assert!(bytes.is_empty());
@@ -1052,22 +1064,19 @@ mod tests {
 
     #[test]
     fn computed_sizeof_returns_zero() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1)).into()));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::Int(1))));
         assert_eq!(c.sizeof(&Context::new()).unwrap(), 0);
     }
 
     #[test]
     fn computed_uses_context() {
         let c = Computed::new(Box::new(|ctx| {
-            {
-                let val = ctx
-                    .get_recursive("multiplier")
-                    .cloned()
-                    .unwrap_or(Value::UInt(1));
-                let m = val.to_u64()?;
-                Ok(Value::UInt(10 * m))
-            }
-            .into()
+            let val = ctx
+                .get_recursive("multiplier")
+                .cloned()
+                .unwrap_or(Value::UInt(1));
+            let m = val.to_u64()?;
+            Ok(Value::UInt(10 * m))
         }));
         let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b""));
         let mut ctx = Context::new();
@@ -1078,7 +1087,7 @@ mod tests {
 
     #[test]
     fn computed_flagbuildnone_is_true() {
-        let c = Computed::new(Box::new(|_ctx| Ok(Value::None).into()));
+        let c = Computed::new(Box::new(|_ctx| Ok(Value::None)));
         assert!(c.flagbuildnone());
     }
 
@@ -1091,7 +1100,6 @@ mod tests {
                     message: "computed failed".to_string(),
                 })
             }
-            .into()
         }));
         let c: &dyn Construct = &c;
         let err = c.parse_bytes(b"").unwrap_err();
@@ -1104,7 +1112,7 @@ mod tests {
 
     #[test]
     fn rebuild_parse_delegates_to_subcon() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(99)).into()));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(99))));
         let c: &dyn Construct = &r;
         let parsed = c.parse_bytes(b"\x07").unwrap();
         assert_eq!(parsed, Value::UInt(7));
@@ -1112,7 +1120,7 @@ mod tests {
 
     #[test]
     fn rebuild_build_ignores_input_uses_func() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(42)).into()));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(42))));
         let c: &dyn Construct = &r;
         let bytes = c.build_bytes(&Value::None).unwrap();
         assert_eq!(bytes, vec![42]);
@@ -1120,7 +1128,7 @@ mod tests {
 
     #[test]
     fn rebuild_build_ignores_non_none_input() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(10)).into()));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(10))));
         let c: &dyn Construct = &r;
         // Even with a non-None value, rebuild uses the func
         let bytes = c.build_bytes(&Value::UInt(99)).unwrap();
@@ -1129,13 +1137,13 @@ mod tests {
 
     #[test]
     fn rebuild_sizeof_delegates() {
-        let r = Rebuild::new(u16be(), Box::new(|_ctx| Ok(Value::UInt(0)).into()));
+        let r = Rebuild::new(u16be(), Box::new(|_ctx| Ok(Value::UInt(0))));
         assert_eq!(r.sizeof(&Context::new()).unwrap(), 2);
     }
 
     #[test]
     fn rebuild_flagbuildnone_is_true() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(0)).into()));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(0))));
         assert!(r.flagbuildnone());
     }
 
@@ -1144,14 +1152,11 @@ mod tests {
         let r = Rebuild::new(
             u8be(),
             Box::new(|ctx| {
-                {
-                    let count = ctx
-                        .get_recursive("count")
-                        .cloned()
-                        .unwrap_or(Value::UInt(0));
-                    Ok(count)
-                }
-                .into()
+                let count = ctx
+                    .get_recursive("count")
+                    .cloned()
+                    .unwrap_or(Value::UInt(0));
+                Ok(count)
             }),
         );
         let mut ctx = Context::new();
@@ -1163,7 +1168,7 @@ mod tests {
 
     #[test]
     fn rebuild_roundtrip() {
-        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(77)).into()));
+        let r = Rebuild::new(u8be(), Box::new(|_ctx| Ok(Value::UInt(77))));
         let c: &dyn Construct = &r;
         let bytes = c.build_bytes(&Value::None).unwrap();
         let parsed = c.parse_bytes(&bytes).unwrap();

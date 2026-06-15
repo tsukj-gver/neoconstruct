@@ -69,7 +69,7 @@ class NullTerminated(Subconstruct):
             from . import PaddingError
 
             raise PaddingError(
-                "NullTerminated term must be at least 1 byte", path=path
+                "NullTerminated term must be at least 1 byte in path %s" % (path,)
             )
         data = b""
         while True:
@@ -82,7 +82,7 @@ class NullTerminated(Subconstruct):
                     from . import StreamError
 
                     raise StreamError(
-                        "stream read less than specified amount", path=path
+                        "stream read less than specified amount in path %s" % (path,)
                     )
                 break
             if b == term:
@@ -104,7 +104,7 @@ class NullTerminated(Subconstruct):
     def _sizeof(self, context, path):
         from . import SizeofError
 
-        raise SizeofError(path=path)
+        raise SizeofError("variable size: %s" % path)
 
 
 class NullStripped(Subconstruct):
@@ -121,7 +121,7 @@ class NullStripped(Subconstruct):
             from . import PaddingError
 
             raise PaddingError(
-                "NullStripped pad must be at least 1 byte", path=path
+                "NullStripped pad must be at least 1 byte in path %s" % (path,)
             )
         data = stream.read()
         if unit == 1:
@@ -144,7 +144,7 @@ class NullStripped(Subconstruct):
     def _sizeof(self, context, path):
         from . import SizeofError
 
-        raise SizeofError(path=path)
+        raise SizeofError("variable size: %s" % path)
 
 
 class RestreamData(Subconstruct):
@@ -173,7 +173,7 @@ class RestreamData(Subconstruct):
             from . import StreamError
 
             raise StreamError(
-                "RestreamData datafunc returned unsupported type", path=path
+                "RestreamData datafunc returned unsupported type in path %s" % (path,)
             )
         return _sub_parse(self.subcon, stream2, context, path)
 
@@ -200,7 +200,7 @@ class ProcessXor(Subconstruct):
         if not isinstance(pad, (int, bytes)):
             from . import StringError
 
-            raise StringError("ProcessXor needs integer or bytes pad", path=path)
+            raise StringError("ProcessXor needs integer or bytes pad in path " + str(path))
         if isinstance(pad, bytes) and len(pad) == 1:
             pad = byte2int(pad)
         data = stream.read()
@@ -228,7 +228,7 @@ class ProcessXor(Subconstruct):
         if not isinstance(pad, (int, bytes)):
             from . import StringError
 
-            raise StringError("ProcessXor needs integer or bytes pad", path=path)
+            raise StringError("ProcessXor needs integer or bytes pad in path " + str(path))
         if isinstance(pad, bytes) and len(pad) == 1:
             pad = byte2int(pad)
         stream2 = BytesIO()
@@ -246,7 +246,9 @@ class ProcessXor(Subconstruct):
         return buildret
 
     def _sizeof(self, context, path):
-        return self.subcon._sizeof(context, path)
+        if hasattr(self.subcon, '_sizeof'):
+            return self.subcon._sizeof(context, path)
+        return self.subcon.sizeof()
 
 
 class ProcessRotateLeft(Subconstruct):
@@ -267,7 +269,7 @@ class ProcessRotateLeft(Subconstruct):
             from . import RotationError
 
             raise RotationError(
-                "group size must be at least 1 to be valid", path=path
+                "group size must be at least 1 to be valid in path %s" % (path,)
             )
         amount = amount % (group * 8)
         amount_bytes = amount // 8
@@ -275,7 +277,7 @@ class ProcessRotateLeft(Subconstruct):
             from . import RotationError
 
             raise RotationError(
-                "data length must be a multiple of group size", path=path
+                "data length must be a multiple of group size in path %s" % (path,)
             )
         if amount == 0:
             return data
@@ -330,7 +332,9 @@ class ProcessRotateLeft(Subconstruct):
         return buildret
 
     def _sizeof(self, context, path):
-        return self.subcon._sizeof(context, path)
+        if hasattr(self.subcon, '_sizeof'):
+            return self.subcon._sizeof(context, path)
+        return self.subcon.sizeof()
 
 
 class OffsettedEnd(Subconstruct):
@@ -360,4 +364,4 @@ class OffsettedEnd(Subconstruct):
     def _sizeof(self, context, path):
         from . import SizeofError
 
-        raise SizeofError(path=path)
+        raise SizeofError("variable size: %s" % path)

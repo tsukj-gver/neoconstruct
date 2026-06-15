@@ -179,7 +179,7 @@ impl Construct for Lazy {
 pub struct LazyStruct {
     /// The inner eager `Struct` that provides the field storage and
     /// parse/build/sizeof logic.
-    inner: Struct,
+    pub inner: Struct,
 }
 
 impl LazyStruct {
@@ -280,7 +280,7 @@ impl Construct for LazyStruct {
 pub struct LazyArray {
     /// The inner eager `Array` that provides element storage and
     /// parse/build/sizeof logic.
-    inner: Array,
+    pub inner: Array,
 }
 
 impl LazyArray {

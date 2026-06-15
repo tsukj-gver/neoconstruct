@@ -11,6 +11,7 @@
 //! [`extract_subcon`] needs an owned `Box<dyn Construct>`, the wrapper's
 //! `make_owned` method re-bridges the closures from the stored PyObjects.
 
+use construct::core::error::Result;
 use construct::core::Construct;
 use construct::value::Value;
 use indexmap::IndexMap;
@@ -22,8 +23,8 @@ use pyo3::types::{PyDict, PyTuple};
 use crate::construct_macros::PyConstructWrapper;
 use crate::conversions::py_to_value;
 use crate::expr_bridge::{
-    py_param_to_cond_func, py_to_adapter_check_func, py_to_check_func, py_to_decode_func,
-    py_to_encode_func, py_to_key_func, py_to_symmetric_func,
+    py_param_to_cond_func, py_param_to_stop_cond_func, py_to_adapter_check_func, py_to_check_func,
+    py_to_decode_func, py_to_encode_func, py_to_key_func, py_to_symmetric_func,
 };
 use crate::py_adapter::extract_subcon;
 
@@ -149,10 +150,7 @@ pub fn py_if(
         inner: construct::constructs::control_flow::IfThenElse::new(cond, sc, pass),
         cond_obj: condfunc.clone().unbind(),
         then_obj: subcon.clone().unbind(),
-        else_obj: py
-            .get_type_bound::<crate::constructs_atomic::PyPass>()
-            .into_any()
-            .unbind(),
+        else_obj: Py::new(py, crate::constructs_atomic::py_pass())?.into_any(),
     })
 }
 
@@ -166,17 +164,17 @@ pub fn py_optional(py: Python<'_>, subcon: &Bound<PyAny>) -> PyResult<PyIfThenEl
     use construct::core::context::Context;
     let sc = extract_subcon(subcon)?;
     let pass = Box::new(construct::constructs::meta::Pass::new());
-    let cond: Box<dyn Fn(&Context) -> bool> = Box::new(|ctx: &Context| {
+    let cond: Box<dyn Fn(&Context) -> Result<bool>> = Box::new(|ctx: &Context| {
         // During build, the value being built is stored as "_" in context.
         // During parse, "_" is the parsed value from the preceding field.
         // Optional should activate (use subcon) when the value is not None.
-        match ctx.get("_") {
+        Ok(match ctx.get("_") {
             Some(v) => !matches!(v, Value::None),
             None => match ctx.get("_embedding") {
                 Some(v) => v.as_bool().unwrap_or(false),
                 None => false,
             },
-        }
+        })
     });
     Ok(PyIfThenElse {
         inner: construct::constructs::control_flow::IfThenElse::new(cond, sc, pass),
@@ -184,10 +182,7 @@ pub fn py_optional(py: Python<'_>, subcon: &Bound<PyAny>) -> PyResult<PyIfThenEl
             .eval_bound("lambda ctx: ctx.get('_') is not None", None, None)?
             .unbind(),
         then_obj: subcon.clone().unbind(),
-        else_obj: py
-            .get_type_bound::<crate::constructs_atomic::PyPass>()
-            .into_any()
-            .unbind(),
+        else_obj: Py::new(py, crate::constructs_atomic::py_pass())?.into_any(),
     })
 }
 
@@ -339,7 +334,7 @@ impl PyStopIf {
     /// Reconstructs an owned `Box<dyn Construct>` from stored Python objects.
     pub(crate) fn make_owned(&self) -> PyResult<Box<dyn Construct>> {
         Python::with_gil(|py| {
-            let cond = py_param_to_cond_func(py, self.cond_obj.bind(py))?;
+            let cond = py_param_to_stop_cond_func(py, self.cond_obj.bind(py))?;
             let con: Box<dyn Construct> =
                 Box::new(construct::constructs::control_flow::StopIf::new(cond));
             Ok(con)
@@ -352,7 +347,7 @@ impl PyStopIf {
 #[pyo3(name = "StopIf")]
 pub fn py_stop_if(condfunc: &Bound<PyAny>) -> PyResult<PyStopIf> {
     let py = condfunc.py();
-    let cond = py_param_to_cond_func(py, condfunc)?;
+    let cond = py_param_to_stop_cond_func(py, condfunc)?;
     Ok(PyStopIf {
         inner: construct::constructs::control_flow::StopIf::new(cond),
         cond_obj: condfunc.clone().unbind(),
@@ -428,7 +423,22 @@ pub fn py_enum(
 crate::impl_api_methods!(PyEnum);
 crate::impl_construct_operators!(PyEnum);
 
-/// PyO3 wrapper: bit-flag enum.
+#[pymethods]
+impl PyEnum {
+    /// Exposes enum label names as attributes, returning the string label.
+    ///
+    /// Matches Python's `Enum.__getattr__`: `d.one` returns `"one"`.
+    #[pyo3(name = "__getattr__")]
+    fn py_getattr(&self, name: &str) -> PyResult<PyObject> {
+        if self.inner.mapping.contains_key(name) {
+            Python::with_gil(|py| Ok(name.into_py(py)))
+        } else {
+            Err(pyo3::exceptions::PyAttributeError::new_err(format!(
+                "'Enum' object has no attribute '{name}'"
+            )))
+        }
+    }
+}
 ///
 /// Corresponds to Python `FlagsEnum(subcon, **flags)`.
 #[pyclass(name = "FlagsEnum", unsendable)]
@@ -530,26 +540,48 @@ impl PyMapping {
 /// The Rust `Mapping::new` expects `(build_key, build_value)` pairs where
 /// `build_key` is the decoded value and `build_value` is the raw value, so
 /// the pairs map directly without swapping.
+/// Factory: `Mapping(subcon, mapping)`.
+///
+/// Tries to build a Rust-backed [`PyMapping`] when every key/value in
+/// `mapping` can be converted to a Rust [`Value`]. If any conversion fails
+/// (for example, `Mapping(Byte, {object: 0})` uses a Python type as a key),
+/// falls back to a pure-Python `MappingAdapter` that keeps the dict as-is.
 #[pyfunction]
 #[pyo3(name = "Mapping")]
 pub fn py_mapping(
     py: Python<'_>,
     subcon: &Bound<PyAny>,
     mapping: &Bound<PyDict>,
-) -> PyResult<PyMapping> {
-    let sc = extract_subcon(subcon)?;
+) -> PyResult<PyObject> {
+    let sc = extract_subcon(subcon);
     let mut pairs = Vec::new();
+    let mut all_convertible = sc.is_ok();
     for (key, val) in mapping.iter() {
-        // Python dict: {decoded_value: raw_value} (encmapping in Python source)
-        // Rust Mapping: (build_key=decoded, build_value=raw)
-        let decoded = py_to_value(py, &key)?;
-        let raw = py_to_value(py, &val)?;
-        pairs.push((decoded, raw));
+        match (sc.as_ref(), py_to_value(py, &key), py_to_value(py, &val)) {
+            (Ok(_), Ok(decoded), Ok(raw)) => pairs.push((decoded, raw)),
+            _ => {
+                all_convertible = false;
+                break;
+            }
+        }
     }
-    Ok(PyMapping {
-        inner: construct::constructs::enum_::Mapping::new(sc, pairs),
-        subcon_obj: subcon.clone().unbind(),
-    })
+    if all_convertible {
+        if let Ok(sc) = sc {
+            let py_mapping_obj = PyMapping {
+                inner: construct::constructs::enum_::Mapping::new(sc, pairs),
+                subcon_obj: subcon.clone().unbind(),
+            };
+            let py_obj: Py<PyMapping> = Py::new(py, py_mapping_obj)?;
+            return Ok(py_obj.into_any());
+        }
+    }
+
+    // Fallback: pure-Python MappingAdapter that stores the dict as-is.
+    let adapter_mod = py.import_bound("construct_rust._adapter")?;
+    let cls = adapter_mod.getattr("MappingAdapter")?;
+    let mapping_obj = mapping.into_py(py);
+    let result = cls.call1((subcon.clone(), mapping_obj))?;
+    Ok(result.unbind())
 }
 
 crate::impl_api_methods!(PyMapping);
@@ -592,12 +624,11 @@ impl PyHex {
 /// Factory: `Hex(subcon)`.
 #[pyfunction]
 #[pyo3(name = "Hex")]
-pub fn py_hex(subcon: &Bound<PyAny>) -> PyResult<PyHex> {
-    let sc = extract_subcon(subcon)?;
-    Ok(PyHex {
-        inner: construct::constructs::hex::Hex::new(sc),
-        subcon_obj: subcon.clone().unbind(),
-    })
+pub fn py_hex(py: Python<'_>, subcon: &Bound<PyAny>) -> PyResult<PyObject> {
+    let adapter_mod = py.import_bound("construct_rust._adapter")?;
+    let cls = adapter_mod.getattr("HexAdapter")?;
+    let result = cls.call1((subcon.clone(),))?;
+    Ok(result.unbind())
 }
 
 crate::impl_api_methods!(PyHex);
@@ -634,12 +665,11 @@ impl PyHexDump {
 /// Factory: `HexDump(subcon)`.
 #[pyfunction]
 #[pyo3(name = "HexDump")]
-pub fn py_hex_dump(subcon: &Bound<PyAny>) -> PyResult<PyHexDump> {
-    let sc = extract_subcon(subcon)?;
-    Ok(PyHexDump {
-        inner: construct::constructs::hex::HexDump::new(sc),
-        subcon_obj: subcon.clone().unbind(),
-    })
+pub fn py_hex_dump(py: Python<'_>, subcon: &Bound<PyAny>) -> PyResult<PyObject> {
+    let adapter_mod = py.import_bound("construct_rust._adapter")?;
+    let cls = adapter_mod.getattr("HexDumpAdapter")?;
+    let result = cls.call1((subcon.clone(),))?;
+    Ok(result.unbind())
 }
 
 crate::impl_api_methods!(PyHexDump);
@@ -1306,6 +1336,10 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
     try_type!(obj, PySlicing);
     try_type!(obj, PyIndexing);
 
+    // Padded / Aligned (need reconstruction for flagbuildnone delegation)
+    try_type!(obj, crate::constructs_composite::PyPadded);
+    try_type!(obj, crate::constructs_composite::PyAligned);
+
     // Stream operations / tunnel / lazy (10.8)
     use crate::constructs_stream::*;
     try_type!(obj, PyBitwise);
@@ -1335,6 +1369,61 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
     // Gallery (10.9)
     use crate::gallery::PyGalleryParser;
     try_type!(obj, PyGalleryParser);
+
+    // Atomic types (10.5) — concrete inner constructs that are Clone.
+    // These avoid the PyConstructAdapter round-trip, preserving error types
+    // and correct stream-position reporting (critical for Tell/Seek).
+    use crate::constructs_atomic as atom;
+    if let Ok(w) = obj.extract::<PyRef<atom::PyFormatField>>() {
+        return Ok(Some(Box::new(w.inner)));
+    }
+    if let Ok(w) = obj.extract::<PyRef<atom::PyVarInt>>() {
+        return Ok(Some(Box::new(w.inner)));
+    }
+    if let Ok(w) = obj.extract::<PyRef<atom::PyZigZag>>() {
+        return Ok(Some(Box::new(w.inner)));
+    }
+
+    // Unit-struct wrappers (Copy types) — direct extraction avoids stream
+    // position issues when used inside Struct/Sequence via PyConstructAdapter.
+    if obj.extract::<PyRef<atom::PyTell>>().is_ok() {
+        return Ok(Some(Box::new(construct::constructs::Tell::new())));
+    }
+    if obj.extract::<PyRef<atom::PyPass>>().is_ok() {
+        return Ok(Some(Box::new(construct::constructs::Pass::new())));
+    }
+    if obj.extract::<PyRef<atom::PyTerminated>>().is_ok() {
+        return Ok(Some(Box::new(construct::constructs::Terminated::new())));
+    }
+    if obj.extract::<PyRef<atom::PyError>>().is_ok() {
+        return Ok(Some(Box::new(construct::constructs::Error::new())));
+    }
+
+    // Computed/Rebuild (10.5) — must be reconstructed to preserve build_effective
+    if let Ok(w) = obj.extract::<PyRef<atom::PyRebuild>>() {
+        return Ok(Some(w.make_owned()?));
+    }
+    if let Ok(w) = obj.extract::<PyRef<atom::PyComputed>>() {
+        return Ok(Some(w.make_owned()?));
+    }
+
+    // PyBytes — must be reconstructed to preserve build_effective (returns bytes)
+    if let Ok(w) = obj.extract::<PyRef<atom::PyBytes>>() {
+        if let Some(owned) = w.make_owned()? {
+            return Ok(Some(owned));
+        }
+    }
+
+    // PySeek — must be reconstructed to preserve stream-position semantics
+    // (avoid PyConstructAdapter's BytesIO round-trip which breaks Seek).
+    if let Ok(w) = obj.extract::<PyRef<atom::PySeek>>() {
+        return Ok(Some(w.make_owned()?));
+    }
+
+    // Note: PyRenamed is NOT registered here. It is handled specially by
+    // add_struct_subcon/add_sequence_subcon which extract the inner subcon
+    // separately and use the name from get_subcon_name. Registering it would
+    // cause double-naming (Renamed wrapping a field that is already named).
 
     Ok(None)
 }
@@ -1398,11 +1487,20 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let byte = get_byte(py);
-            let h = py_hex(byte.bind(py)).unwrap();
+            // `Hex` is a display-only pass-through at the Rust level: it
+            // delegates to the inner construct and returns the raw value
+            // unchanged. Here we extract the subcon from the Python-backed
+            // Byte, wrap it in the Rust `Hex`, and verify the pass-through.
+            // (We avoid the `py_hex` factory because it returns a Python
+            // `HexAdapter` PyObject — not a Rust struct exposing `.inner`.)
+            let sc = extract_subcon(byte.bind(py)).unwrap();
+            let hex = construct::constructs::hex::Hex::new(sc);
             let mut stream = ByteStream::new_read(&[42]);
             let mut ctx = Context::new();
-            let result = h.inner.parse(&mut stream, &mut ctx).unwrap();
-            assert_eq!(result, Value::Int(42));
+            let result = hex.parse(&mut stream, &mut ctx).unwrap();
+            // FormatField "B" (unsigned byte) parses to Value::UInt; since Hex
+            // is a pure pass-through, the value is returned unchanged.
+            assert_eq!(result, Value::UInt(42));
         });
     }
 
@@ -1462,7 +1560,7 @@ mod tests {
             let byte = get_byte(py);
             let kw = make_py_dict(py, &[("one", 1), ("two", 2)]);
             // Positional args tuple containing the subcon.
-            let args = PyTuple::new_bound(py, [byte.bind(py).as_ref()]);
+            let args = PyTuple::new_bound(py, [byte.bind(py)]);
             let e = py_enum(py, &args, Some(&kw)).unwrap();
 
             // Parse raw 1 → "one"
@@ -1500,32 +1598,36 @@ mod tests {
             // Python dict: {"A": 0, "B": 1}  →  decoded "A" maps to raw 0
             let dict = make_py_dict(py, &[("A", 0), ("B", 1)]);
             let m = py_mapping(py, byte.bind(py), &dict).unwrap();
+            let m_ref = m.bind(py).downcast::<PyMapping>().unwrap();
+            let m_ref = m_ref.borrow();
 
             // Parse raw 0 → decoded "A"
             let mut stream = ByteStream::new_read(&[0]);
             let mut ctx = Context::new();
             assert_eq!(
-                m.inner.parse(&mut stream, &mut ctx).unwrap(),
+                m_ref.inner.parse(&mut stream, &mut ctx).unwrap(),
                 Value::String("A".to_string())
             );
 
             // Parse raw 1 → decoded "B"
             let mut stream2 = ByteStream::new_read(&[1]);
             assert_eq!(
-                m.inner.parse(&mut stream2, &mut ctx).unwrap(),
+                m_ref.inner.parse(&mut stream2, &mut ctx).unwrap(),
                 Value::String("B".to_string())
             );
 
             // Build "B" → raw 1
             let mut out = ByteStream::new_write();
-            m.inner
+            m_ref
+                .inner
                 .build(&Value::String("B".to_string()), &mut out, &mut ctx)
                 .unwrap();
             assert_eq!(out.into_bytes(), vec![1]);
 
             // Build "A" → raw 0
             let mut out2 = ByteStream::new_write();
-            m.inner
+            m_ref
+                .inner
                 .build(&Value::String("A".to_string()), &mut out2, &mut ctx)
                 .unwrap();
             assert_eq!(out2.into_bytes(), vec![0]);
@@ -1540,17 +1642,20 @@ mod tests {
             let byte = get_byte(py);
             let dict = make_py_dict(py, &[("A", 0), ("B", 1)]);
             let m = py_mapping(py, byte.bind(py), &dict).unwrap();
+            let m_ref = m.bind(py).downcast::<PyMapping>().unwrap();
+            let m_ref = m_ref.borrow();
 
             let mut out = ByteStream::new_write();
             let mut ctx = Context::new();
-            m.inner
+            m_ref
+                .inner
                 .build(&Value::String("B".to_string()), &mut out, &mut ctx)
                 .unwrap();
             let bytes = out.into_bytes();
 
             let mut stream = ByteStream::new_read(&bytes);
             assert_eq!(
-                m.inner.parse(&mut stream, &mut ctx).unwrap(),
+                m_ref.inner.parse(&mut stream, &mut ctx).unwrap(),
                 Value::String("B".to_string())
             );
         });

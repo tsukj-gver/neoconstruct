@@ -12,7 +12,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDict, PyFloat, PyList, PyString};
+use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyList, PyString};
 
 use construct::core::context::Context;
 use construct::value::Value;
@@ -56,22 +56,42 @@ pub fn value_to_py(py: Python<'_>, v: &Value) -> PyResult<PyObject> {
         Value::Bytes(b) => Ok(PyBytes::new_bound(py, b).into_any().unbind()),
         Value::String(s) => Ok(PyString::new_bound(py, s).into_any().unbind()),
         Value::List(list) => {
-            // TODO(10.3): Construct a ListContainer from construct_rust.lib.containers
-            // instead of a plain list once the Container module is implemented.
-            let py_list = PyList::empty_bound(py);
+            // Use ListContainer from construct_rust.lib.containers for repr/eq
+            // compatibility with the Python original. Falls back to plain list
+            // if the pure-Python package is not importable (e.g. cargo test).
+            let listcontainer = py
+                .import_bound("construct_rust.lib.containers")
+                .and_then(|m| m.getattr("ListContainer"));
+
+            let py_obj: PyObject = match listcontainer {
+                Ok(cls) => cls.call0()?.unbind(),
+                Err(_) => PyList::empty_bound(py).into_any().unbind(),
+            };
+            let bound = py_obj.bind(py);
             for item in list {
-                py_list.append(value_to_py(py, item)?)?;
+                bound.call_method1("append", (value_to_py(py, item)?,))?;
             }
-            Ok(py_list.into_any().unbind())
+            Ok(py_obj)
         }
         Value::Container(map) => {
-            // TODO(10.3): Construct a Container from construct_rust.lib.containers
-            // instead of a plain dict once the Container module is implemented.
-            let py_dict = PyDict::new_bound(py);
+            // Use Container from construct_rust.lib.containers for attribute
+            // access (.field) and search/search_all compatibility with the
+            // Python original. Falls back to plain dict if the pure-Python
+            // package is not importable (e.g. cargo test).
+            let container = py
+                .import_bound("construct_rust.lib.containers")
+                .and_then(|m| m.getattr("Container"))
+                .and_then(|cls| cls.call0());
+
+            let py_obj: PyObject = match container {
+                Ok(c) => c.unbind(),
+                Err(_) => PyDict::new_bound(py).into_any().unbind(),
+            };
+            let bound = py_obj.bind(py);
             for (key, value) in map {
-                py_dict.set_item(key, value_to_py(py, value)?)?;
+                bound.set_item(key, value_to_py(py, value)?)?;
             }
-            Ok(py_dict.into_any().unbind())
+            Ok(py_obj)
         }
     }
 }
@@ -111,10 +131,14 @@ pub fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
         return Ok(Value::Float(f));
     }
 
-    // 5. Bytes
+    // 5. Bytes or bytearray
     if obj.is_instance_of::<PyBytes>() {
         let bytes_obj = obj.downcast::<PyBytes>()?;
         return Ok(Value::Bytes(bytes_obj.as_bytes().to_vec()));
+    }
+    if obj.is_instance_of::<PyByteArray>() {
+        let bytes_obj = obj.downcast::<PyByteArray>()?;
+        return Ok(Value::Bytes(bytes_obj.to_vec()));
     }
 
     // 6. String
@@ -181,6 +205,18 @@ fn bigint_to_value(bigint: &BigInt) -> PyResult<Value> {
 /// has a parent, it is recursively converted and stored under the `"_"` key,
 /// mirroring the Python `context._` convention.
 ///
+/// In addition, two special keys are injected at the topmost call level (not
+/// recursively) to match the Python construct context model:
+///
+/// - `"_root"` — a snapshot Container of the root struct's context (the context
+///   whose parent is the entry/params context). Mirrors Python's
+///   `context._root = context._.get("_root", context)`.
+/// - `"_params"` — a snapshot Container of the entry (params) context (the
+///   topmost context with no parent). Mirrors Python's `context._params`.
+///
+/// These are only injected at the entry point of conversion to avoid infinite
+/// recursion (`_root._root` would otherwise point to itself).
+///
 /// # Container vs dict
 ///
 /// The function tries to import `construct_rust.lib.containers.Container`
@@ -196,6 +232,18 @@ fn bigint_to_value(bigint: &BigInt) -> PyResult<Value> {
 ///
 /// Returns `PyErr` if any value conversion fails.
 pub fn context_to_py_container(py: Python<'_>, ctx: &Context) -> PyResult<PyObject> {
+    context_to_py_container_impl(py, ctx, true)
+}
+
+/// Internal implementation that accepts an `inject_special` flag.
+///
+/// When `true`, `_root` and `_params` are injected. Recursive calls for parent
+/// levels pass `false` to avoid infinite recursion.
+fn context_to_py_container_impl(
+    py: Python<'_>,
+    ctx: &Context,
+    inject_special: bool,
+) -> PyResult<PyObject> {
     // Attempt to use Container for attribute access compatibility.
     let container = py
         .import_bound("construct_rust.lib.containers")
@@ -214,11 +262,58 @@ pub fn context_to_py_container(py: Python<'_>, ctx: &Context) -> PyResult<PyObje
 
     // Recursively convert parent context under the "_" key.
     if let Some(parent) = ctx.parent() {
-        let parent_container = context_to_py_container(py, parent)?;
+        let parent_container = context_to_py_container_impl(py, parent, false)?;
         bound.set_item("_", parent_container)?;
     }
 
+    // Inject `_root` and `_params` only at the entry point of conversion.
+    // This matches Python's Struct._parse which sets:
+    //   context._root = context._.get("_root", context)
+    //   context._params = context._params   (inherited from entry)
+    if inject_special {
+        // `_params` points to the topmost context (entry/params context).
+        let params_ctx = find_topmost(ctx);
+        let params_container = context_to_py_container_impl(py, params_ctx, false)?;
+        bound.set_item("_params", params_container)?;
+
+        // `_root` points to the root struct's context: the context whose
+        // parent is the entry (params) context. If no struct wraps the data
+        // (ctx is the entry context itself), skip `_root`.
+        if let Some(root_ctx) = find_root(ctx) {
+            let root_container = context_to_py_container_impl(py, root_ctx, false)?;
+            bound.set_item("_root", root_container)?;
+        }
+    }
+
     Ok(py_obj)
+}
+
+/// Walks the parent chain to find the topmost context (the one with no parent).
+///
+/// This corresponds to the entry/params context created by `parse`/`build`.
+fn find_topmost(ctx: &Context) -> &Context {
+    let mut current = ctx;
+    while let Some(parent) = current.parent() {
+        current = parent;
+    }
+    current
+}
+
+/// Finds the root struct context: the context whose parent is the entry
+/// (params) context (i.e., the parent has no grandparent).
+///
+/// Returns `None` if `ctx` is the entry context itself or the chain is too
+/// shallow to have a distinct root struct context.
+fn find_root(ctx: &Context) -> Option<&Context> {
+    let mut current = ctx;
+    while let Some(parent) = current.parent() {
+        if parent.parent().is_none() {
+            // `current`'s parent is the entry context — `current` is the root.
+            return Some(current);
+        }
+        current = parent;
+    }
+    None
 }
 
 #[cfg(test)]
@@ -294,9 +389,9 @@ mod tests {
     fn value_to_py_float() {
         crate::ensure_python();
         Python::with_gil(|py| {
-            let result = value_to_py(py, &Value::Float(3.14)).unwrap();
+            let result = value_to_py(py, &Value::Float(1.5)).unwrap();
             let f: f64 = result.extract(py).unwrap();
-            assert!((f - 3.14).abs() < 1e-10);
+            assert!((f - 1.5).abs() < 1e-10);
         });
     }
 
@@ -484,11 +579,11 @@ mod tests {
     fn py_to_value_float() {
         crate::ensure_python();
         Python::with_gil(|py| {
-            let obj = 3.14f64.to_object(py);
+            let obj = 1.5f64.to_object(py);
             let bound = obj.into_bound(py);
             let result = py_to_value(py, &bound).unwrap();
             match result {
-                Value::Float(f) => assert!((f - 3.14).abs() < 1e-10),
+                Value::Float(f) => assert!((f - 1.5).abs() < 1e-10),
                 other => panic!("expected Float, got {other:?}"),
             }
         });
@@ -538,7 +633,7 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let list = PyList::new_bound(py, [1i32, 2, 3]);
-            let result = py_to_value(py, &list.as_any()).unwrap();
+            let result = py_to_value(py, list.as_any()).unwrap();
             match result {
                 Value::List(items) => {
                     assert_eq!(items.len(), 3);
@@ -558,7 +653,7 @@ mod tests {
             let dict = PyDict::new_bound(py);
             dict.set_item("a", 1i32).unwrap();
             dict.set_item("b", "hello").unwrap();
-            let result = py_to_value(py, &dict.as_any()).unwrap();
+            let result = py_to_value(py, dict.as_any()).unwrap();
             match result {
                 Value::Container(map) => {
                     assert_eq!(map.len(), 2);
@@ -576,7 +671,7 @@ mod tests {
         Python::with_gil(|py| {
             let dict = PyDict::new_bound(py);
             dict.set_item(42i32, "value").unwrap();
-            let err = py_to_value(py, &dict.as_any()).unwrap_err();
+            let err = py_to_value(py, dict.as_any()).unwrap_err();
             assert!(err.is_instance_of::<PyTypeError>(py));
         });
     }

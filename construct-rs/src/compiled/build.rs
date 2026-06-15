@@ -15,15 +15,20 @@ use std::sync::Arc;
 
 use crate::combined::CombinedConstruct;
 use crate::compiled::{
-    compile_expr, CompiledAdapter, CompiledArray, CompiledArrayExpr, CompiledBitsInteger,
-    CompiledBytes, CompiledBytesExpr, CompiledBytesInteger, CompiledCString, CompiledConst,
-    CompiledEntry, CompiledEnum, CompiledError, CompiledExprAdapter, CompiledExprValidator,
-    CompiledField, CompiledFlag, CompiledFlagsEnum, CompiledFocusedSeq, CompiledFormatField,
-    CompiledGreedyBytes, CompiledGreedyRange, CompiledHex, CompiledHexDump, CompiledMapping,
-    CompiledNode, CompiledPaddedString, CompiledPass, CompiledRenamed, CompiledSeek,
-    CompiledSeekExpr, CompiledSelect, CompiledSequence, CompiledStruct, CompiledSubconstruct,
-    CompiledSymmetricAdapter, CompiledTell, CompiledTerminated, CompiledUnion, CompiledValidator,
-    CompiledVarInt, CompiledZigZag,
+    compile_expr, CompiledAdapter, CompiledAligned, CompiledArray, CompiledArrayExpr,
+    CompiledBitsInteger, CompiledBitsSwapped, CompiledBitwise, CompiledByteSwapped, CompiledBytes,
+    CompiledBytesExpr, CompiledBytesInteger, CompiledBytewise, CompiledCString, CompiledChecksum,
+    CompiledComputed, CompiledConst, CompiledDefault, CompiledEntry, CompiledEnum, CompiledError,
+    CompiledExprAdapter, CompiledExprValidator, CompiledField, CompiledFixedSized, CompiledFlag,
+    CompiledFlagsEnum, CompiledFocusedSeq, CompiledFormatField, CompiledGreedyBytes,
+    CompiledGreedyRange, CompiledHex, CompiledHexDump, CompiledIfThenElse, CompiledIndex,
+    CompiledLazyArray, CompiledLazyStruct, CompiledMapping, CompiledNamedTuple, CompiledNode,
+    CompiledPadded, CompiledPaddedString, CompiledPass, CompiledPeek, CompiledPointer,
+    CompiledPointerExpr, CompiledPrefixed, CompiledRawCopy, CompiledRebuffered, CompiledRebuild,
+    CompiledRenamed, CompiledRestreamed, CompiledSeek, CompiledSeekExpr, CompiledSelect,
+    CompiledSequence, CompiledStopIf, CompiledStruct, CompiledSubconstruct, CompiledSwitch,
+    CompiledSymmetricAdapter, CompiledTell, CompiledTerminated, CompiledTimestampAdapter,
+    CompiledTransformed, CompiledUnion, CompiledValidator, CompiledVarInt, CompiledZigZag,
 };
 use crate::constructs::{
     adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator},
@@ -56,6 +61,7 @@ use crate::constructs::{
 };
 use crate::core::error::{ConstructError, Result};
 use crate::core::{Construct, Renamed, Subconstruct};
+use crate::value::Value;
 
 #[cfg(feature = "compression")]
 use crate::constructs::stream_ops::Compressed;
@@ -102,10 +108,12 @@ pub trait BuildConstruct {
 // sub-tasks 12.4-12.9.
 
 /// Error message for stub BuildConstruct implementations.
+#[allow(dead_code)]
 const STUB_COMPILE_MESSAGE: &str =
     "compile not yet implemented (Phase 12.1 stub — real impl in 12.4-12.9)";
 
 /// Builds a stub error for BuildConstruct::compile.
+#[allow(dead_code)]
 fn stub_compile_error() -> ConstructError {
     ConstructError::Generic {
         path: String::new(),
@@ -127,23 +135,8 @@ macro_rules! impl_build_construct_stub {
 }
 
 impl_build_construct_stub! {
-    // composite (Struct, Sequence, Union, Select, FocusedSeq implemented in 12.6)
-    // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
-    Computed, Rebuild, Default, Index, Padded, Aligned,
-    FixedSized, NamedTuple, TimestampAdapter,
     // repetition (Array, ArrayExpr, GreedyRange, RepeatUntil implemented in 12.6)
-    // lazy
-    Lazy, LazyStruct, LazyArray, Rebuffered,
-    // stream ops / tunneling
-    Bitwise, Bytewise, Pointer, PointerExpr, Peek, RawCopy, Prefixed,
-    Transformed, Restreamed, Checksum, ByteSwapped, BitsSwapped, LazyBound,
-    // control flow
-    IfThenElse, Switch, Check, StopIf,
 }
-
-// Feature-gated stub for Compressed.
-#[cfg(feature = "compression")]
-impl_build_construct_stub!(Compressed,);
 
 // ===========================================================================
 // Leaf BuildConstruct implementations (Phase 12.4)
@@ -532,6 +525,320 @@ impl BuildConstruct for std::sync::Arc<dyn crate::core::Construct> {
         Ok(CompiledNode::Dynamic(crate::compiled::CompiledDynamic {
             inner: std::sync::Arc::clone(self),
         }))
+    }
+}
+
+// ===========================================================================
+// Control flow BuildConstruct implementations (Phase 12.7)
+// ===========================================================================
+
+impl BuildConstruct for IfThenElse {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::IfThenElse(CompiledIfThenElse {
+            cond: Arc::clone(&self.cond),
+            then_constr: Box::new(self.then_constr.compile()?),
+            else_constr: Box::new(self.else_constr.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Switch {
+    fn compile(&self) -> Result<CompiledNode> {
+        let cases: Result<Vec<(Value, Box<CompiledNode>)>> = self
+            .cases
+            .iter()
+            .map(|(k, sc)| Ok((k.clone(), Box::new(sc.compile()?))))
+            .collect();
+        let default = match &self.default {
+            Some(d) => Some(Box::new(d.compile()?)),
+            None => None,
+        };
+        Ok(CompiledNode::Switch(CompiledSwitch {
+            keyfunc: Arc::clone(&self.keyfunc),
+            cases: cases?,
+            default,
+        }))
+    }
+}
+
+impl BuildConstruct for Check {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Check(crate::compiled::CompiledCheck {
+            check: Arc::clone(&self.check),
+        }))
+    }
+}
+
+impl BuildConstruct for StopIf {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::StopIf(CompiledStopIf {
+            cond: Arc::clone(&self.cond),
+        }))
+    }
+}
+
+// ===========================================================================
+// Computed / Meta BuildConstruct implementations (Phase 12.8)
+// ===========================================================================
+
+impl BuildConstruct for Computed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Computed(CompiledComputed {
+            func: Arc::clone(&self.func),
+        }))
+    }
+}
+
+impl BuildConstruct for Rebuild {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Rebuild(CompiledRebuild {
+            inner: Box::new(self.subcon.compile()?),
+            func: Arc::clone(&self.func),
+        }))
+    }
+}
+
+impl BuildConstruct for Default {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Default(CompiledDefault {
+            inner: Box::new(self.subcon.compile()?),
+            value: self.value.clone(),
+        }))
+    }
+}
+
+impl BuildConstruct for Index {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Index(CompiledIndex))
+    }
+}
+
+impl BuildConstruct for Padded {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Padded(CompiledPadded {
+            inner: Box::new(self.subcon.compile()?),
+            length: self.length,
+            pattern: self.pattern,
+            strict: self.strict,
+        }))
+    }
+}
+
+impl BuildConstruct for Aligned {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Aligned(CompiledAligned {
+            inner: Box::new(self.subcon.compile()?),
+            modulus: self.modulus,
+            pattern: self.pattern,
+        }))
+    }
+}
+
+impl BuildConstruct for FixedSized {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::FixedSized(CompiledFixedSized {
+            inner: Box::new(self.subcon.compile()?),
+            length: self.length,
+        }))
+    }
+}
+
+impl BuildConstruct for NamedTuple {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::NamedTuple(CompiledNamedTuple {
+            inner: Box::new(self.inner.compile()?),
+            field_names: self.field_names.clone(),
+            tuple_name: self.tuple_name.clone(),
+        }))
+    }
+}
+
+impl BuildConstruct for TimestampAdapter {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::TimestampAdapter(CompiledTimestampAdapter {
+            inner: Box::new(self.subcon.compile()?),
+            unit: self.unit,
+            epoch: self.epoch,
+        }))
+    }
+}
+
+// ===========================================================================
+// Lazy BuildConstruct implementations (Phase 12.8)
+// ===========================================================================
+
+impl BuildConstruct for Lazy {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Lazy(crate::compiled::CompiledLazy {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for LazyStruct {
+    fn compile(&self) -> Result<CompiledNode> {
+        // LazyStruct delegates to its inner Struct — compile as Struct.
+        Ok(CompiledNode::LazyStruct(CompiledLazyStruct {
+            inner: Box::new(self.inner.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for LazyArray {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::LazyArray(CompiledLazyArray {
+            count: self.inner.count,
+            subcon: Box::new(self.inner.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Rebuffered {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Rebuffered(CompiledRebuffered {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+// ===========================================================================
+// Stream ops BuildConstruct implementations (Phase 12.7)
+// ===========================================================================
+
+impl BuildConstruct for Bitwise {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Bitwise(CompiledBitwise {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Bytewise {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Bytewise(CompiledBytewise {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Pointer {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Pointer(CompiledPointer {
+            offset: self.offset,
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for PointerExpr {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::PointerExpr(CompiledPointerExpr {
+            compiled_offset: compile_expr(&self.offset_expr)?,
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Peek {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Peek(CompiledPeek {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for RawCopy {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::RawCopy(CompiledRawCopy {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for Prefixed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Prefixed(CompiledPrefixed {
+            length_field: Box::new(self.length_field.compile()?),
+            subcon: Box::new(self.subcon.compile()?),
+            include_length: self.include_length,
+        }))
+    }
+}
+
+impl BuildConstruct for Transformed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Transformed(CompiledTransformed {
+            inner: Box::new(self.subcon.compile()?),
+            decode: Arc::clone(&self.decode),
+            decode_amount: self.decode_amount,
+            encode: Arc::clone(&self.encode),
+            encode_amount: self.encode_amount,
+        }))
+    }
+}
+
+impl BuildConstruct for Restreamed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Restreamed(CompiledRestreamed {
+            inner: Box::new(self.subcon.compile()?),
+            decoder: Arc::clone(&self.decoder),
+            decoder_unit: self.decoder_unit,
+            encoder: Arc::clone(&self.encoder),
+            encoder_unit: self.encoder_unit,
+            size_computer: self.size_computer.clone(),
+        }))
+    }
+}
+
+#[cfg(feature = "compression")]
+impl BuildConstruct for Compressed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Compressed(
+            crate::compiled::CompiledCompressed {
+                inner: Box::new(self.subcon.compile()?),
+                algorithm: self.algorithm,
+            },
+        ))
+    }
+}
+
+impl BuildConstruct for Checksum {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Checksum(CompiledChecksum {
+            checksum_field: Box::new(self.checksum_field.compile()?),
+            hash_func: Arc::clone(&self.hash_func),
+            bytes_func: Arc::clone(&self.bytes_func),
+        }))
+    }
+}
+
+impl BuildConstruct for ByteSwapped {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::ByteSwapped(CompiledByteSwapped {
+            inner: Box::new(self.subcon.compile()?),
+        }))
+    }
+}
+
+impl BuildConstruct for BitsSwapped {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::BitsSwapped(CompiledBitsSwapped {
+            inner: Box::new(self.subcon.compile()?),
+            fixed_size: self.fixed_size,
+        }))
+    }
+}
+
+impl BuildConstruct for LazyBound {
+    fn compile(&self) -> Result<CompiledNode> {
+        // I4: degrade to CompiledLazyBound — hold Arc<dyn Construct> wrapping
+        // a clone of this LazyBound. Runtime delegates to LazyBound's own
+        // Construct impl (old path), which resolves the subcon lazily.
+        Ok(CompiledNode::LazyBound(
+            crate::compiled::CompiledLazyBound {
+                inner: Arc::new(self.clone()),
+            },
+        ))
     }
 }
 

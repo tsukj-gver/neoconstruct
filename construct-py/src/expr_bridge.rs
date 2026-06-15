@@ -66,13 +66,12 @@ impl Evaluate for PyClosure {
                 message: format!("Context conversion failed: {e}"),
             })?;
 
-            // 2. Call Python callable (single-arg convention)
-            let result =
-                self.call_single(py, py_ctx.bind(py))
-                    .map_err(|e| ConstructError::Expr {
-                        path: String::new(),
-                        message: format!("Python expression error: {e}"),
-                    })?;
+            // 2. Call Python callable (single-arg convention). Preserve
+            //    KeyError so the upstream-facing FFI can re-raise it as Python
+            //    KeyError (matches `Computed(this.missing).parse(b"")`).
+            let result = self
+                .call_single(py, py_ctx.bind(py))
+                .map_err(|e| pyerr_to_expr_or_keyerr("Python expression error", e))?;
 
             // 3. Return value → Value
             py_to_value(py, result.bind(py)).map_err(|e| ConstructError::Expr {
@@ -96,15 +95,67 @@ fn err_to_expr(prefix: &str, e: impl std::fmt::Display) -> ConstructError {
     }
 }
 
-/// Adapts a Python callable into a `CondFunc` (`Fn(&Context) -> bool`).
+/// Converts a [`PyErr`] into the most appropriate [`ConstructError`].
+///
+/// If the Python error is a `KeyError`, returns `FieldMissing` so that
+/// `rust_err_to_py` can re-raise it as Python `KeyError`. Otherwise
+/// wraps the error in an `Expr` variant.
+fn pyerr_to_expr_or_keyerr(prefix: &str, e: PyErr) -> ConstructError {
+    Python::with_gil(|py| {
+        if e.is_instance_of::<pyo3::exceptions::PyKeyError>(py) {
+            // Extract the key from the KeyError for the field name.
+            let key_str = format!("{}", e.value_bound(py));
+            ConstructError::FieldMissing {
+                path: String::new(),
+                field: key_str,
+            }
+        } else {
+            ConstructError::Expr {
+                path: String::new(),
+                message: format!("{prefix}: {e}"),
+            }
+        }
+    })
+}
+
+/// Adapts a Python callable into a `CondFunc` (`Fn(&Context) -> Result<bool>`).
 ///
 /// The callable is invoked as `callable(context)`. The return value is
-/// interpreted using Python truthiness. On conversion errors, `false` is
-/// returned (fail-safe).
+/// interpreted using Python truthiness. Errors from the callable (e.g.,
+/// `KeyError` from accessing a missing context field) are propagated as
+/// `Err` so that callers like `IfThenElse.sizeof` can convert them to
+/// `SizeofError`, matching the upstream Python behaviour.
 ///
-/// Used by `IfThenElse` and `StopIf`.
+/// Used by `IfThenElse`. Note: `StopIf` uses the separate
+/// [`py_to_stop_cond_func`] which keeps the bool signature because
+/// `StopIf` does not propagate errors during `sizeof`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool> {
+pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<bool>> {
+    Box::new(move |ctx| {
+        Python::with_gil(|py| {
+            let py_ctx = context_to_py_container(py, ctx).map_err(|e| ConstructError::Generic {
+                path: String::new(),
+                message: format!("cond: cannot convert context: {e}"),
+            })?;
+            match callable.call1(py, (py_ctx.bind(py),)) {
+                Ok(result) => Ok(result.is_truthy(py).unwrap_or(false)),
+                Err(e) => Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: format!("cond evaluation failed: {e}"),
+                }),
+            }
+        })
+    })
+}
+
+/// Adapts a Python callable into a `StopCondFunc` (`Fn(&Context) -> bool`).
+///
+/// Variant of [`py_to_cond_func`] that keeps the infallible `bool` return
+/// signature expected by [`construct::constructs::control_flow::StopIf`].
+/// Errors are swallowed and treated as `false` (do not stop), matching the
+/// upstream behaviour where `StopIf` only triggers on a truthy return.
+#[allow(clippy::type_complexity)]
+pub fn py_to_stop_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = match context_to_py_container(py, ctx) {
@@ -127,16 +178,15 @@ pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool> {
 /// Used by `Switch`.
 #[allow(clippy::type_complexity)]
 pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value>> {
-    Box::new(move |ctx| {
-        Python::with_gil(|py| {
-            let py_ctx = context_to_py_container(py, ctx)
-                .map_err(|e| err_to_expr("Context conversion", e))?;
-            let result = callable
-                .call1(py, (py_ctx.bind(py),))
-                .map_err(|e| err_to_expr("Switch keyfunc error", e))?;
-            py_to_value(py, result.bind(py)).map_err(|e| err_to_expr("Key conversion", e))
-        })
-    })
+    // Python's Switch accepts non-callable keyfuncs: Switch(5, ...) always uses 5 as key.
+    // Only call if the object is actually callable; otherwise evaluate as a constant.
+    let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
+    if !is_callable {
+        let val = Python::with_gil(|py| py_to_value(py, callable.bind(py)).unwrap_or(Value::None));
+        return Box::new(move |_ctx| Ok(val.clone()));
+    }
+    let closure = PyClosure::new(callable);
+    Box::new(move |ctx| closure.evaluate(ctx, None))
 }
 
 /// Adapts a Python callable into a `CheckFunc` (`Fn(&Context) -> Result<()>`).
@@ -148,6 +198,24 @@ pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Valu
 /// Used by `Check`.
 #[allow(clippy::type_complexity)]
 pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()>> {
+    // Python's Check accepts non-callable values: Check(True) always passes,
+    // Check(False) always fails. Only call if the object is actually callable.
+    let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
+    if !is_callable {
+        let val = callable;
+        return Box::new(move |_ctx| {
+            Python::with_gil(|py| {
+                if val.is_truthy(py).unwrap_or(false) {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Check {
+                        path: String::new(),
+                        message: "Check failed".to_string(),
+                    })
+                }
+            })
+        });
+    }
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = context_to_py_container(py, ctx)
@@ -191,6 +259,14 @@ pub fn py_to_compute_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<
 pub fn py_to_repeat_predicate(
     callable: PyObject,
 ) -> Box<dyn Fn(&Value, &[Value], &Context) -> bool> {
+    // Handle non-callable values: RepeatUntil(True, ...) always returns True.
+    let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
+    if !is_callable {
+        let val = callable;
+        return Box::new(move |_element, _list, _ctx| {
+            Python::with_gil(|py| val.is_truthy(py).unwrap_or(false))
+        });
+    }
     Box::new(move |element, list, ctx| {
         Python::with_gil(|py| {
             let py_element = match value_to_py(py, element) {
@@ -452,16 +528,40 @@ pub fn py_param_to_evaluate(
 /// Converts a Python parameter into a `CondFunc`.
 ///
 /// - **Callable** → [`py_to_cond_func`].
-/// - **Non-callable truthy** → constant function always returning `true`.
-/// - **Non-callable falsy** → constant function always returning `false`.
+/// - **Non-callable truthy** → constant function always returning `Ok(true)`.
+/// - **Non-callable falsy** → constant function always returning `Ok(false)`.
 #[allow(clippy::type_complexity)]
 pub fn py_param_to_cond_func(
+    py: Python<'_>,
+    param: &Bound<'_, PyAny>,
+) -> PyResult<Box<dyn Fn(&Context) -> Result<bool>>> {
+    if param.is_callable() {
+        let callable: PyObject = param.into_py(py);
+        Ok(py_to_cond_func(callable))
+    } else {
+        let truthy = param.is_truthy()?;
+        Ok(Box::new(move |_| Ok(truthy)))
+    }
+}
+
+/// Converts a Python parameter into a `StopCondFunc` (infallible bool).
+///
+/// Variant of [`py_param_to_cond_func`] for [`StopIf`]. Returns the
+/// bool-signature closure expected by `StopCondFunc`.
+///
+/// - **Callable** → [`py_to_stop_cond_func`].
+/// - **Non-callable truthy** → constant `true`.
+/// - **Non-callable falsy** → constant `false`.
+///
+/// [`StopIf`]: construct::constructs::control_flow::StopIf
+#[allow(clippy::type_complexity)]
+pub fn py_param_to_stop_cond_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
 ) -> PyResult<Box<dyn Fn(&Context) -> bool>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
-        Ok(py_to_cond_func(callable))
+        Ok(py_to_stop_cond_func(callable))
     } else {
         let truthy = param.is_truthy()?;
         Ok(Box::new(move |_| truthy))
@@ -553,7 +653,7 @@ mod tests {
             let cond = py_to_cond_func(callable);
             let mut ctx = Context::new();
             ctx.insert("flag", Value::Bool(true));
-            assert!(cond(&ctx));
+            assert!(cond(&ctx).unwrap());
         });
     }
 
@@ -568,7 +668,7 @@ mod tests {
             let cond = py_to_cond_func(callable);
             let mut ctx = Context::new();
             ctx.insert("flag", Value::Bool(false));
-            assert!(!cond(&ctx));
+            assert!(!cond(&ctx).unwrap());
         });
     }
 
@@ -677,11 +777,11 @@ mod tests {
         Python::with_gil(|py| {
             let true_obj = true.into_py(py);
             let cond = py_param_to_cond_func(py, true_obj.bind(py)).unwrap();
-            assert!(cond(&Context::new()));
+            assert!(cond(&Context::new()).unwrap());
 
             let false_obj = false.into_py(py);
             let cond2 = py_param_to_cond_func(py, false_obj.bind(py)).unwrap();
-            assert!(!cond2(&Context::new()));
+            assert!(!cond2(&Context::new()).unwrap());
         });
     }
 

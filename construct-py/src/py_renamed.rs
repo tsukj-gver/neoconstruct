@@ -56,6 +56,17 @@ impl PyRenamed {
             },
         )
     }
+
+    /// Extracts the inner subcon (without the Renamed wrapper) as an owned
+    /// `Box<dyn Construct>`.
+    ///
+    /// Used by `add_struct_subcon` when a PyRenamed is encountered as a struct
+    /// field — the name is handled separately by `get_subcon_name`, so only the
+    /// inner construct is needed. This preserves `build_effective` delegation
+    /// for constructs like `Rebuild`.
+    pub(crate) fn make_owned_inner(&self) -> PyResult<Box<dyn Construct>> {
+        Python::with_gil(|py| extract_subcon(self.py_subcon.bind(py)))
+    }
 }
 
 // ===========================================================================
@@ -227,13 +238,24 @@ impl PyRenamed {
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
-        let class = self
+        // Mirror Python construct: "<Renamed name <SubconRepr>>"
+        let sub_repr = self
             .py_subcon
-            .getattr(py, "__class__")
-            .and_then(|c| c.getattr(py, "__name__"))
-            .and_then(|n| n.extract::<String>(py))
-            .unwrap_or_else(|_| "Unknown".to_string());
-        format!("Renamed({}, {:?})", class, self.inner.name)
+            .call_method0(py, "__repr__")
+            .and_then(|r| r.extract::<String>(py))
+            .unwrap_or_else(|_| {
+                self.py_subcon
+                    .getattr(py, "__class__")
+                    .and_then(|c| c.getattr(py, "__name__"))
+                    .and_then(|n| n.extract::<String>(py))
+                    .map(|name| format!("<{name}>"))
+                    .unwrap_or_else(|_| "<Unknown>".to_string())
+            });
+        if self.inner.name.is_empty() {
+            format!("<Renamed {sub_repr}>")
+        } else {
+            format!("<Renamed {} {sub_repr}>", self.inner.name)
+        }
     }
 }
 

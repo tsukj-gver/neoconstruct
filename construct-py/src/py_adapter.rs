@@ -32,6 +32,16 @@ use pyo3::types::{PyBytes, PyDict};
 
 use crate::conversions::{context_to_py_container, py_to_value, value_to_py};
 
+/// Strips a leading `Error in path ...\n` prefix from an error message.
+fn strip_path_prefix(msg: &str) -> String {
+    if msg.starts_with("Error in path ") {
+        if let Some(pos) = msg.find('\n') {
+            return msg[pos + 1..].to_string();
+        }
+    }
+    msg.to_string()
+}
+
 /// Wraps an arbitrary Python construct object as a Rust [`Construct`].
 ///
 /// The Python object must expose `parse_stream(stream, **kw)` and
@@ -53,6 +63,92 @@ impl PyConstructAdapter {
         ConstructError::Generic {
             path: String::new(),
             message: msg.to_string(),
+        }
+    }
+
+    /// Converts a Python `PyErr` back into a Rust [`ConstructError`],
+    /// preserving the exception subclass when possible.
+    ///
+    /// When a Python construct (wrapped by `PyConstructAdapter`) raises one of
+    /// our own exception subclasses (e.g. `StreamError`, `SizeofError`), the
+    /// type information is recovered here so that the outer Rust-to-Python
+    /// error mapping produces the same subclass.
+    fn pyerr_to_construct_err(py: Python<'_>, e: PyErr, context: &str) -> ConstructError {
+        let type_name = e
+            .value_bound(py)
+            .get_type()
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "Unknown".to_string());
+
+        let msg = e
+            .value_bound(py)
+            .str()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| e.to_string());
+
+        // Strip leading "Error in path ...\n" to avoid double-nesting.
+        let stripped = strip_path_prefix(&msg);
+
+        match type_name.as_str() {
+            "StreamError" => ConstructError::Stream {
+                path: String::new(),
+                source: std::io::Error::new(std::io::ErrorKind::Other, stripped),
+            },
+            "SizeofError" => ConstructError::Sizeof {
+                path: String::new(),
+                reason: stripped,
+            },
+            "CheckError" => ConstructError::Check {
+                path: String::new(),
+                message: stripped,
+            },
+            "PaddingError" => ConstructError::Padding {
+                path: String::new(),
+                message: stripped,
+            },
+            "ChecksumError" => ConstructError::Check {
+                path: String::new(),
+                message: stripped,
+            },
+            "ChecksumBytesError" => ConstructError::Check {
+                path: String::new(),
+                message: stripped,
+            },
+            "ValidationError" => ConstructError::Validation {
+                path: String::new(),
+                message: stripped,
+            },
+            "TerminatedError" => ConstructError::Terminated {
+                path: String::new(),
+                remaining: 0,
+            },
+            "ConstError" => ConstructError::Const {
+                path: String::new(),
+                expected: String::new(),
+                actual: stripped,
+            },
+            "IndexFieldError" => ConstructError::Index {
+                path: String::new(),
+                index: 0,
+                length: 0,
+            },
+            "RangeError" => ConstructError::Array {
+                path: String::new(),
+                expected: 0,
+                actual: 0,
+            },
+            // All other types fall back to Generic with the original text,
+            // unless it's a StopField that escaped (should be mapped back).
+            _ => {
+                if stripped.contains("stop field signal escaped") {
+                    ConstructError::StopField {
+                        path: String::new(),
+                    }
+                } else {
+                    Self::generic_err(format!("Python construct {context} error: {e}"))
+                }
+            }
         }
     }
 
@@ -98,6 +194,17 @@ impl std::fmt::Debug for PyConstructAdapter {
 impl Construct for PyConstructAdapter {
     fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
         Python::with_gil(|py| {
+            // Fast path: delegate to Rust inner construct for known types.
+            // This preserves the Context parent chain (critical for _root,
+            // _params, Tell position tracking).
+            let bound = self.py_obj.bind(py);
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PyStruct>>() {
+                return s.inner.parse(stream, ctx);
+            }
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PySequence>>() {
+                return s.inner.parse(stream, ctx);
+            }
+
             // 1. Record the current stream position (before read_remaining
             //    consumes all remaining bytes).
             let start_pos = stream.tell().map_err(|e| ConstructError::Stream {
@@ -131,7 +238,7 @@ impl Construct for PyConstructAdapter {
                     (py_stream.bind(py),),
                     kwargs.as_ref().map(|d| d as &Bound<PyDict>),
                 )
-                .map_err(|e| Self::generic_err(format!("Python construct parse error: {e}")))?;
+                .map_err(|e| Self::pyerr_to_construct_err(py, e, "parse"))?;
 
             // 6. Sync stream position: BytesIO tell() gives the number of
             //    bytes consumed within the Python BytesIO (relative to 0).
@@ -154,6 +261,15 @@ impl Construct for PyConstructAdapter {
 
     fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
         Python::with_gil(|py| {
+            // Fast path: delegate to Rust inner construct for known types.
+            let bound = self.py_obj.bind(py);
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PyStruct>>() {
+                return s.inner.build(data, stream, ctx);
+            }
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PySequence>>() {
+                return s.inner.build(data, stream, ctx);
+            }
+
             // 1. Value → Python object.
             let py_data = value_to_py(py, data).map_err(Self::generic_err)?;
 
@@ -167,36 +283,164 @@ impl Construct for PyConstructAdapter {
             let kwargs = Self::context_to_kwargs(py, ctx).map_err(Self::generic_err)?;
 
             // 4. Call build_stream(obj, stream, **kwargs).
-            self.py_obj
-                .bind(py)
-                .call_method(
-                    "build_stream",
-                    (py_data.bind(py), py_stream.bind(py)),
-                    kwargs.as_ref().map(|d| d as &Bound<PyDict>),
-                )
-                .map_err(|e| Self::generic_err(format!("Python construct build error: {e}")))?;
+            //    If build_stream raises StopField, we still need to flush
+            //    any bytes written before the signal, then propagate.
+            let build_result = self.py_obj.bind(py).call_method(
+                "build_stream",
+                (py_data.bind(py), py_stream.bind(py)),
+                kwargs.as_ref().map(|d| d as &Bound<PyDict>),
+            );
 
-            // 5. Read bytes from BytesIO and write to Rust stream.
-            let built: PyObject = py_stream
-                .call_method0(py, "getvalue")
-                .map_err(|e| Self::generic_err(format!("Failed to get built bytes: {e}")))?;
-            let bytes_obj = built
-                .bind(py)
-                .downcast::<PyBytes>()
-                .map_err(|_| Self::generic_err("Python build_stream did not produce bytes"))?;
-            stream
-                .write_bytes(bytes_obj.as_bytes())
-                .map_err(|e| ConstructError::Stream {
-                    path: String::new(),
-                    source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                })?;
+            // Helper closure: read built bytes from BytesIO and write to Rust stream.
+            let flush_bytes = |stream: &mut dyn Stream| -> Result<()> {
+                let built: PyObject = py_stream
+                    .call_method0(py, "getvalue")
+                    .map_err(|e| Self::generic_err(format!("Failed to get built bytes: {e}")))?;
+                let bytes_obj = built
+                    .bind(py)
+                    .downcast::<PyBytes>()
+                    .map_err(|_| Self::generic_err("Python build_stream did not produce bytes"))?;
+                let written = bytes_obj.as_bytes();
+                if !written.is_empty() {
+                    stream
+                        .write_bytes(written)
+                        .map_err(|e| ConstructError::Stream {
+                            path: String::new(),
+                            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        })?;
+                }
+                Ok(())
+            };
 
-            Ok(())
+            match build_result {
+                Ok(_) => {
+                    // 5. Read bytes from BytesIO and write to Rust stream.
+                    flush_bytes(stream)?;
+
+                    // 6. Sync stream position if Seek was used inside build.
+                    let bio_tell: u64 = py_stream
+                        .call_method0(py, "tell")
+                        .and_then(|v| v.extract(py))
+                        .map_err(|e| Self::generic_err(format!("Invalid stream position: {e}")))?;
+                    // Get bio_len from BytesIO content.
+                    let bio_val = py_stream
+                        .call_method0(py, "getvalue")
+                        .map_err(|e| Self::generic_err(format!("getvalue: {e}")))?;
+                    let bio_len: u64 = bio_val
+                        .bind(py)
+                        .extract::<Vec<u8>>()
+                        .map(|v| v.len() as u64)
+                        .unwrap_or(0);
+                    if bio_tell != bio_len {
+                        let rust_pos = stream.tell().map_err(|e| ConstructError::Stream {
+                            path: String::new(),
+                            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        })?;
+                        let rust_start = rust_pos.saturating_sub(bio_len);
+                        let target = rust_start + bio_tell;
+                        stream.seek(target).map_err(|e| ConstructError::Stream {
+                            path: String::new(),
+                            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        })?;
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    let err = Self::pyerr_to_construct_err(py, e, "build");
+                    // If this is a StopField, flush bytes written before the signal.
+                    if matches!(err, ConstructError::StopField { .. }) {
+                        let _ = flush_bytes(stream);
+                    }
+                    Err(err)
+                }
+            }
+        })
+    }
+
+    fn build_effective(
+        &self,
+        data: &Value,
+        stream: &mut dyn Stream,
+        ctx: &mut Context,
+    ) -> Result<Value> {
+        Python::with_gil(|py| {
+            // Fast path: delegate to Rust inner construct for known types.
+            let bound = self.py_obj.bind(py);
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PyStruct>>() {
+                return s.inner.build_effective(data, stream, ctx);
+            }
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PySequence>>() {
+                return s.inner.build_effective(data, stream, ctx);
+            }
+
+            // 1. Value → Python object.
+            let py_data = value_to_py(py, data).map_err(Self::generic_err)?;
+
+            // 2. Create empty Python BytesIO for writing.
+            let bytesio_class = Self::get_bytesio(py)?;
+            let py_stream = bytesio_class
+                .call0(py)
+                .map_err(|e| Self::generic_err(format!("Failed to create BytesIO: {e}")))?;
+
+            // 3. Prepare kwargs from context.
+            let kwargs = Self::context_to_kwargs(py, ctx).map_err(Self::generic_err)?;
+
+            // 4. Try build_effective_stream first; fall back to build_stream.
+            let has_method = self
+                .py_obj
+                .bind(py)
+                .hasattr("build_effective_stream")
+                .unwrap_or(false);
+
+            if has_method {
+                let result = self
+                    .py_obj
+                    .bind(py)
+                    .call_method(
+                        "build_effective_stream",
+                        (py_data.bind(py), py_stream.bind(py)),
+                        kwargs.as_ref().map(|d| d as &Bound<PyDict>),
+                    )
+                    .map_err(|e| Self::pyerr_to_construct_err(py, e, "build_effective"))?;
+
+                // 5. Read bytes from BytesIO and write to Rust stream.
+                let built: PyObject = py_stream
+                    .call_method0(py, "getvalue")
+                    .map_err(|e| Self::generic_err(format!("Failed to get built bytes: {e}")))?;
+                let bytes_obj: Vec<u8> = built
+                    .bind(py)
+                    .extract()
+                    .map_err(|_| Self::generic_err("Python build did not produce bytes"))?;
+                if !bytes_obj.is_empty() {
+                    stream
+                        .write_bytes(&bytes_obj)
+                        .map_err(|e| ConstructError::Stream {
+                            path: String::new(),
+                            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
+                        })?;
+                }
+
+                // 6. Convert effective value → Value.
+                py_to_value(py, &result).map_err(Self::generic_err)
+            } else {
+                // Fallback: use regular build_stream and return data.clone().
+                self.build(data, stream, ctx)?;
+                Ok(data.clone())
+            }
         })
     }
 
     fn sizeof(&self, ctx: &Context) -> Result<usize> {
         Python::with_gil(|py| {
+            // Fast path: delegate to Rust inner construct for known types.
+            let bound = self.py_obj.bind(py);
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PyStruct>>() {
+                return s.inner.sizeof(ctx);
+            }
+            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PySequence>>() {
+                return s.inner.sizeof(ctx);
+            }
+
             let kwargs = Self::context_to_kwargs(py, ctx).map_err(Self::generic_err)?;
 
             let result = self.py_obj.bind(py).call_method(
@@ -218,10 +462,7 @@ impl Construct for PyConstructAdapter {
                         )))
                     }
                 }
-                Err(_) => Err(ConstructError::Sizeof {
-                    path: String::new(),
-                    reason: "Python construct sizeof failed".to_string(),
-                }),
+                Err(e) => Err(Self::pyerr_to_construct_err(py, e, "sizeof")),
             }
         })
     }

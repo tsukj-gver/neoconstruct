@@ -684,23 +684,21 @@ impl PyChecksum {
 }
 
 /// Factory: `Checksum(checksumfield, hashfunc, bytesfunc)`.
+/// Always uses the Python-side implementation for full flexibility
+/// (bytesfunc can return non-bytes values).
 #[pyfunction]
 #[pyo3(name = "Checksum", signature = (checksumfield, hashfunc, bytesfunc))]
 pub fn py_checksum(
-    _py: Python<'_>,
+    py: Python<'_>,
     checksumfield: &Bound<PyAny>,
     hashfunc: &Bound<PyAny>,
     bytesfunc: &Bound<PyAny>,
-) -> PyResult<PyChecksum> {
-    let cf = extract_subcon(checksumfield)?;
-    let hf = py_to_checksum_func(hashfunc.clone().unbind());
-    let bf = py_to_checksum_bytes_func(bytesfunc.clone().unbind());
-    Ok(PyChecksum {
-        inner: construct::constructs::stream_ops::Checksum::new(cf, hf, bf),
-        checksumfield_obj: checksumfield.clone().unbind(),
-        hashfunc_obj: hashfunc.clone().unbind(),
-        bytesfunc_obj: bytesfunc.clone().unbind(),
-    })
+) -> PyResult<PyObject> {
+    // Use Python-side Checksum for full flexibility
+    let module = py.import_bound("construct_rust._checksum")?;
+    let cls = module.getattr("_Checksum")?;
+    let result = cls.call1((checksumfield.clone(), hashfunc.clone(), bytesfunc.clone()))?;
+    Ok(result.unbind())
 }
 
 crate::impl_api_methods!(PyChecksum);
@@ -845,19 +843,27 @@ pub fn py_fixed_sized(
     _py: Python<'_>,
     length: &Bound<PyAny>,
     subcon: &Bound<PyAny>,
-) -> PyResult<PyFixedSized> {
+) -> PyResult<PyObject> {
     if length.is_callable() {
         return Err(PyNotImplementedError::new_err(
             "FixedSized with context lambda length is not supported",
         ));
     }
-    let len: usize = length.extract()?;
+    let len: i64 = length.extract()?;
+    if len < 0 {
+        let adapter_mod = _py.import_bound("construct_rust._adapter")?;
+        let cls = adapter_mod.getattr("_NegativeFixedSized")?;
+        let result = cls.call1((len,))?;
+        return Ok(result.unbind());
+    }
+    let len = len as usize;
     let sc = extract_subcon(subcon)?;
-    Ok(PyFixedSized {
+    let result = PyFixedSized {
         inner: construct::constructs::FixedSized::new(len, sc),
         subcon_obj: subcon.clone().unbind(),
         length: len,
-    })
+    };
+    Ok(Bound::new(_py, result)?.into_any().unbind())
 }
 
 crate::impl_api_methods!(PyFixedSized);
@@ -1458,14 +1464,7 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let byte = get_byte(py);
-            let p = py_pointer(
-                py,
-                &8i64.into_py(py).bind(py).as_ref(),
-                byte.bind(py),
-                None,
-                false,
-            )
-            .unwrap();
+            let p = py_pointer(py, 8i64.into_py(py).bind(py), byte.bind(py), None, false).unwrap();
             // Pointer sizeof is 0
             let ctx = Context::new();
             assert_eq!(p.inner.sizeof(&ctx).unwrap(), 0);
@@ -1480,7 +1479,7 @@ mod tests {
             let stream = py.eval_bound("lambda: None", None, None).unwrap();
             let result = py_pointer(
                 py,
-                &8i64.into_py(py).bind(py).as_ref(),
+                8i64.into_py(py).bind(py),
                 byte.bind(py),
                 Some(&stream),
                 false,
@@ -1508,7 +1507,7 @@ mod tests {
             let gb = crate::constructs_atomic::py_greedy_bytes();
             let c = py_compressed(
                 py,
-                &Py::new(py, gb).unwrap().into_any().bind(py),
+                Py::new(py, gb).unwrap().into_any().bind(py),
                 "zlib",
                 None,
             );
@@ -1563,7 +1562,7 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let byte = get_byte(py);
-            let tup = PyTuple::new_bound(py, [byte.bind(py).as_ref()]);
+            let tup = PyTuple::new_bound(py, [byte.bind(py)]);
             let ls = py_lazy_struct(py, &tup, None).unwrap();
             let ctx = Context::new();
             assert_eq!(ls.inner.sizeof(&ctx).unwrap(), 1);
@@ -1600,7 +1599,7 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let byte = get_byte(py);
-            let byte_obj = byte.bind(py).as_ref();
+            let byte_obj = byte.bind(py);
             let pa = py_prefixed_array(py, byte_obj, byte_obj).unwrap();
             // Just ensure the factory succeeds
             let _ = pa.inner;
@@ -1612,7 +1611,7 @@ mod tests {
         crate::ensure_python();
         Python::with_gil(|py| {
             let byte = get_byte(py);
-            let tup = PyTuple::new_bound(py, [byte.bind(py).as_ref()]);
+            let tup = PyTuple::new_bound(py, [byte.bind(py)]);
             let bs = py_bit_struct(py, &tup, None).unwrap();
             // BitStruct with 1 byte → Bitwise wraps a Struct of 1 byte
             let ctx = Context::new();

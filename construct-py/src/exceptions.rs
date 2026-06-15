@@ -33,7 +33,7 @@ create_exception!(construct_rust, RepeatError, ConstructError);
 create_exception!(construct_rust, ConstError, ConstructError);
 create_exception!(construct_rust, IndexFieldError, ConstructError);
 create_exception!(construct_rust, CheckError, ConstructError);
-create_exception!(construct_rust, ExplicitError, ConstructError);
+create_exception!(construct_rust, ExplicitError, CheckError);
 create_exception!(construct_rust, NamedTupleError, ConstructError);
 create_exception!(construct_rust, TimestampError, ConstructError);
 create_exception!(construct_rust, UnionError, ConstructError);
@@ -84,6 +84,9 @@ pub fn rust_err_to_py(_py: Python<'_>, e: RustConstructError) -> PyErr {
             &path,
             &format!("expected {expected} bytes but got {actual}"),
         )),
+        RustConstructError::Integer { path, message } => {
+            IntegerError::new_err(format_with_path(&path, &message))
+        }
         RustConstructError::Sizeof { path, reason } => {
             SizeofError::new_err(format_with_path(&path, &reason))
         }
@@ -102,10 +105,20 @@ pub fn rust_err_to_py(_py: Python<'_>, e: RustConstructError) -> PyErr {
             path,
             expected,
             actual,
-        } => RangeError::new_err(format_with_path(
-            &path,
-            &format!("expected {expected} elements but got {actual}"),
-        )),
+        } => {
+            // RepeatUntil uses expected=0, actual=0 as sentinel for "no match".
+            if expected == 0 && actual == 0 {
+                crate::exceptions::RepeatError::new_err(format_with_path(
+                    &path,
+                    "no element satisfied the repeat predicate",
+                ))
+            } else {
+                RangeError::new_err(format_with_path(
+                    &path,
+                    &format!("expected {expected} elements but got {actual}"),
+                ))
+            }
+        }
         RustConstructError::Index {
             path,
             index,
@@ -118,7 +131,14 @@ pub fn rust_err_to_py(_py: Python<'_>, e: RustConstructError) -> PyErr {
             PaddingError::new_err(format_with_path(&path, &message))
         }
         RustConstructError::Check { path, message } => {
-            CheckError::new_err(format_with_path(&path, &message))
+            // Error construct raises ExplicitError (subclass of CheckError).
+            if message.contains("Error field was activated") {
+                ExplicitError::new_err(format_with_path(&path, &message))
+            } else if message.contains("checksum") || message.contains("Checksum") {
+                ChecksumError::new_err(format_with_path(&path, &message))
+            } else {
+                CheckError::new_err(format_with_path(&path, &message))
+            }
         }
         RustConstructError::Terminated { path, remaining } => TerminatedError::new_err(
             format_with_path(&path, &format!("{remaining} bytes remaining")),
@@ -141,11 +161,8 @@ pub fn rust_err_to_py(_py: Python<'_>, e: RustConstructError) -> PyErr {
             &format!("no branch for key {key:?}"),
         )),
         RustConstructError::FieldMissing { path, field } => {
-            // No dedicated Python subclass; use the base class.
-            ConstructError::new_err(format_with_path(
-                &path,
-                &format!("field {field:?} not found in container"),
-            ))
+            // Python's construct raises KeyError for missing dict/container keys.
+            pyo3::exceptions::PyKeyError::new_err(format_with_path(&path, &format!("{field:?}")))
         }
         RustConstructError::TypeMismatch {
             path,

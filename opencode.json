@@ -1,12 +1,5 @@
 ﻿{
   "$schema": "https://opencode.ai/config.json",
   "instructions": ["AGENTS.md"],
-  "default_agent": "pm",
-  "plugin": [
-    ["opencode-auto-resume", {
-      "chunkTimeoutMs": 120000,
-      "gracePeriodMs": 3000,
-      "maxRetries": 3
-    }]
-  ]
+  "default_agent": "pm"
 }

@@ -71,4 +71,4 @@ class NamedTuple(Adapter):
             return obj
         from . import NamedTupleError
 
-        raise NamedTupleError("cannot encode", path=path)
+        raise NamedTupleError("cannot encode in path " + str(path))

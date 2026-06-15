@@ -23,6 +23,7 @@
 //! | [`LazyBound`] | Binds to a subcon at runtime (for recursive structures) |
 
 use std::io::SeekFrom;
+use std::sync::Arc;
 
 use indexmap::IndexMap;
 
@@ -599,7 +600,15 @@ impl Construct for Prefixed {
 ///
 /// Corresponds to Python `Transformed(subcon, decodefunc, decodeamount,
 /// encodefunc, encodeamount)`.
-pub type TransformFunc = Box<dyn Fn(&[u8]) -> Result<Vec<u8>>>;
+/// Function signature for a byte-to-byte transformation (decode or encode).
+///
+/// This is the canonical (stored) form using [`Arc`]. Constructors accept the
+/// boxed form [`TransformFuncBox`] and convert internally.
+pub type TransformFunc = Arc<dyn Fn(&[u8]) -> Result<Vec<u8>> + Send + Sync>;
+
+/// Boxed transform function accepted by constructors; converted to
+/// [`TransformFunc`] internally. Call sites pass `Box::new(closure)`.
+pub type TransformFuncBox = Box<dyn Fn(&[u8]) -> Result<Vec<u8>> + Send + Sync>;
 
 /// A construct that transforms bytes between the underlying stream and the
 /// (fixed-sized) subcon.
@@ -626,16 +635,16 @@ impl Transformed {
     /// Creates a new `Transformed` construct.
     pub fn new(
         subcon: Box<CombinedConstruct>,
-        decode: TransformFunc,
+        decode: TransformFuncBox,
         decode_amount: Option<usize>,
-        encode: TransformFunc,
+        encode: TransformFuncBox,
         encode_amount: Option<usize>,
     ) -> Self {
         Transformed {
             subcon,
-            decode,
+            decode: Arc::from(decode),
             decode_amount,
-            encode,
+            encode: Arc::from(encode),
             encode_amount,
         }
     }
@@ -719,26 +728,26 @@ pub struct Restreamed {
     /// Size of chunks fed to the encoder.
     pub encoder_unit: usize,
     /// Function to compute the outer size from the inner size.
-    pub size_computer: Option<Box<dyn Fn(usize) -> usize>>,
+    pub size_computer: Option<Arc<dyn Fn(usize) -> usize + Send + Sync>>,
 }
 
 impl Restreamed {
     /// Creates a new `Restreamed` construct.
     pub fn new(
         subcon: Box<CombinedConstruct>,
-        decoder: TransformFunc,
+        decoder: TransformFuncBox,
         decoder_unit: usize,
-        encoder: TransformFunc,
+        encoder: TransformFuncBox,
         encoder_unit: usize,
-        size_computer: Option<Box<dyn Fn(usize) -> usize>>,
+        size_computer: Option<Box<dyn Fn(usize) -> usize + Send + Sync>>,
     ) -> Self {
         Restreamed {
             subcon,
-            decoder,
+            decoder: Arc::from(decoder),
             decoder_unit,
-            encoder,
+            encoder: Arc::from(encoder),
             encoder_unit,
-            size_computer,
+            size_computer: size_computer.map(Arc::from),
         }
     }
 }
@@ -932,10 +941,22 @@ impl Construct for Compressed {
 // ===========================================================================
 
 /// Function type for computing a checksum from raw bytes.
-pub type ChecksumFunc = Box<dyn Fn(&[u8]) -> Vec<u8>>;
+///
+/// Canonical (stored) form using [`Arc`]. Constructors accept
+/// [`ChecksumFuncBox`].
+pub type ChecksumFunc = Arc<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
+
+/// Boxed checksum function accepted by constructors.
+pub type ChecksumFuncBox = Box<dyn Fn(&[u8]) -> Vec<u8> + Send + Sync>;
 
 /// Function type for obtaining the bytes to checksum from the context.
-pub type ChecksumBytesFunc = Box<dyn Fn(&Context) -> Result<Vec<u8>>>;
+///
+/// Canonical (stored) form using [`Arc`]. Constructors accept
+/// [`ChecksumBytesFuncBox`].
+pub type ChecksumBytesFunc = Arc<dyn Fn(&Context) -> Result<Vec<u8>> + Send + Sync>;
+
+/// Boxed checksum-bytes function accepted by constructors.
+pub type ChecksumBytesFuncBox = Box<dyn Fn(&Context) -> Result<Vec<u8>> + Send + Sync>;
 
 /// Validates or computes a checksum field.
 ///
@@ -984,13 +1005,13 @@ impl Checksum {
     /// Creates a new `Checksum` construct.
     pub fn new(
         checksum_field: Box<CombinedConstruct>,
-        hash_func: ChecksumFunc,
-        bytes_func: ChecksumBytesFunc,
+        hash_func: ChecksumFuncBox,
+        bytes_func: ChecksumBytesFuncBox,
     ) -> Self {
         Checksum {
             checksum_field,
-            hash_func,
-            bytes_func,
+            hash_func: Arc::from(hash_func),
+            bytes_func: Arc::from(bytes_func),
         }
     }
 }
@@ -1211,15 +1232,22 @@ impl Construct for BitsSwapped {
 /// - **sizeof**: calls `subcon_func()`, delegates sizeof
 ///
 /// Corresponds to Python `LazyBound(subconfunc)`.
+///
+/// `subcon_func` is stored as `Arc<dyn Fn + Send + Sync>` (N1 correction)
+/// so that `LazyBound` is [`Clone`] and can be wrapped in `Arc<dyn Construct>`
+/// during schema compilation.
+#[derive(Clone)]
 pub struct LazyBound {
     /// Function that returns the construct to use.
-    pub subcon_func: Box<dyn Fn() -> Box<CombinedConstruct>>,
+    pub subcon_func: Arc<dyn Fn() -> Box<CombinedConstruct> + Send + Sync>,
 }
 
 impl LazyBound {
     /// Creates a new `LazyBound` with the given subcon factory function.
-    pub fn new(subcon_func: Box<dyn Fn() -> Box<CombinedConstruct>>) -> Self {
-        LazyBound { subcon_func }
+    pub fn new(subcon_func: Box<dyn Fn() -> Box<CombinedConstruct> + Send + Sync>) -> Self {
+        LazyBound {
+            subcon_func: Arc::from(subcon_func),
+        }
     }
 }
 
@@ -1574,9 +1602,9 @@ mod tests {
     fn transformed_parse_basic() {
         let d = Transformed::new(
             Box::new(Bytes::new(2).into()),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(2),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(2),
         );
         let c: &dyn Construct = &d;
@@ -1589,9 +1617,9 @@ mod tests {
     fn transformed_build_basic() {
         let d = Transformed::new(
             Box::new(Bytes::new(2).into()),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(2),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(2),
         );
         let c: &dyn Construct = &d;
@@ -1604,9 +1632,9 @@ mod tests {
     fn transformed_roundtrip() {
         let d = Transformed::new(
             Box::new(Bytes::new(4).into()),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(4),
-            Box::new(|data: &[u8]| Ok(binary::swapbytes(data)).into()),
+            Box::new(|data: &[u8]| Ok(binary::swapbytes(data))),
             Some(4),
         );
         let c: &dyn Construct = &d;
@@ -1620,9 +1648,9 @@ mod tests {
     fn transformed_sizeof_equal_amounts() {
         let d = Transformed::new(
             Box::new(Bytes::new(2).into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             Some(2),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             Some(2),
         );
         let ctx = Context::new();
@@ -1633,9 +1661,9 @@ mod tests {
     fn transformed_sizeof_unequal_amounts_errors() {
         let d = Transformed::new(
             Box::new(Bytes::new(2).into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             Some(2),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             Some(3),
         );
         let ctx = Context::new();
@@ -1646,9 +1674,9 @@ mod tests {
     fn transformed_read_all_when_amount_is_none() {
         let d = Transformed::new(
             Box::new(GreedyBytes.into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             None,
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             None,
         );
         let c: &dyn Construct = &d;
@@ -1660,10 +1688,10 @@ mod tests {
     fn transformed_encode_amount_mismatch_errors() {
         let d = Transformed::new(
             Box::new(Bytes::new(2).into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             Some(2),
-            Box::new(|_data: &[u8]| Ok(vec![0u8; 5]).into()), // produces 5 bytes
-            Some(2),                                          // but expects 2
+            Box::new(|_data: &[u8]| Ok(vec![0u8; 5])), // produces 5 bytes
+            Some(2),                                   // but expects 2
         );
         let c: &dyn Construct = &d;
         let result = c.build_bytes(&Value::Bytes(vec![0x01, 0x02]));
@@ -1679,9 +1707,9 @@ mod tests {
         // Decode each byte by XORing with 0xFF
         let d = Restreamed::new(
             Box::new(GreedyBytes.into()),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
             1,
             None,
         );
@@ -1695,9 +1723,9 @@ mod tests {
     fn restreamed_build_chunk_encode() {
         let d = Restreamed::new(
             Box::new(GreedyBytes.into()),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| b ^ 0xFF).collect())),
             1,
             None,
         );
@@ -1710,11 +1738,11 @@ mod tests {
     fn restreamed_sizeof_with_computer() {
         let d = Restreamed::new(
             Box::new(Bytes::new(4).into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             1,
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             1,
-            Some(Box::new(|n: usize| n.into())), // identity
+            Some(Box::new(|n: usize| n)), // identity
         );
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 4);
@@ -1724,9 +1752,9 @@ mod tests {
     fn restreamed_sizeof_without_computer_errors() {
         let d = Restreamed::new(
             Box::new(Bytes::new(4).into()),
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             1,
-            Box::new(|data: &[u8]| Ok(data.to_vec()).into()),
+            Box::new(|data: &[u8]| Ok(data.to_vec())),
             1,
             None,
         );
@@ -1738,11 +1766,11 @@ mod tests {
     fn restreamed_roundtrip() {
         let d = Restreamed::new(
             Box::new(Bytes::new(3).into()),
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect())),
             1,
-            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect()).into()),
+            Box::new(|chunk: &[u8]| Ok(chunk.iter().map(|&b| !b).collect())),
             1,
-            Some(Box::new(|n: usize| n.into())),
+            Some(Box::new(|n: usize| n)),
         );
         let c: &dyn Construct = &d;
         let original = Value::Bytes(vec![0x01, 0x02, 0x03]);
@@ -1809,8 +1837,8 @@ mod tests {
     fn checksum_build_computes_and_writes() {
         let d = Checksum::new(
             Box::new(Bytes::new(1).into()),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
         );
         let c: &dyn Construct = &d;
         let built = c.build_bytes(&Value::None).unwrap();
@@ -1822,8 +1850,8 @@ mod tests {
     fn checksum_parse_validates() {
         let d = Checksum::new(
             Box::new(Bytes::new(1).into()),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
         );
 
         // Valid checksum: 1+2+3=6
@@ -1837,8 +1865,8 @@ mod tests {
     fn checksum_parse_rejects_invalid() {
         let d = Checksum::new(
             Box::new(Bytes::new(1).into()),
-            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))].into()),
-            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03]).into()),
+            Box::new(|data: &[u8]| vec![data.iter().fold(0u8, |a, &b| a.wrapping_add(b))]),
+            Box::new(|_ctx: &Context| Ok(vec![0x01, 0x02, 0x03])),
         );
 
         // Invalid checksum: should be 6, not 99
@@ -1853,8 +1881,8 @@ mod tests {
     fn checksum_sizeof() {
         let d = Checksum::new(
             Box::new(Bytes::new(4).into()),
-            Box::new(|data: &[u8]| data.to_vec().into()),
-            Box::new(|_ctx: &Context| Ok(vec![]).into()),
+            Box::new(|data: &[u8]| data.to_vec()),
+            Box::new(|_ctx: &Context| Ok(vec![])),
         );
         let ctx = Context::new();
         assert_eq!(d.sizeof(&ctx).unwrap(), 4);
@@ -1864,8 +1892,8 @@ mod tests {
     fn checksum_flagbuildnone() {
         let d = Checksum::new(
             Box::new(Bytes::new(1).into()),
-            Box::new(|data: &[u8]| data.to_vec().into()),
-            Box::new(|_ctx: &Context| Ok(vec![]).into()),
+            Box::new(|data: &[u8]| data.to_vec()),
+            Box::new(|_ctx: &Context| Ok(vec![])),
         );
         assert!(d.flagbuildnone());
     }

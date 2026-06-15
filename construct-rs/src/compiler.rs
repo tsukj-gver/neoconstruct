@@ -132,7 +132,6 @@ mod tests {
     use crate::constructs::meta::Pass;
     use crate::constructs::struct_::Struct;
     use crate::core::context::Context;
-    use crate::core::error::ConstructError;
     use crate::core::Construct;
     use crate::expr::{this_, ConstExpr};
     use crate::value::Value;
@@ -145,8 +144,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::default_constructed_unit_structs)]
     fn schema_compiler_default_matches_new() {
-        let _ = SchemaCompiler::default();
+        // Both Default and new produce the same unit struct value.
+        let _: SchemaCompiler = SchemaCompiler::default();
     }
 
     // -- compile: leaf variants succeed (Phase 12.4) ------------------------
@@ -185,18 +186,16 @@ mod tests {
     }
 
     #[test]
-    fn compile_lazy_returns_stub_error() {
-        // Lazy (stream ops) is still a stub in Phase 12.6.
+    fn compile_lazy_produces_compiled_schema() {
+        // Lazy (Phase 12.8) now compiles its inner subcon eagerly.
         let compiler = SchemaCompiler::new();
         let cc: CombinedConstruct =
             crate::constructs::lazy::Lazy::new(Box::new(INT8UB.into())).into();
-        let err = compiler.compile(&cc).unwrap_err();
-        match err {
-            ConstructError::Generic { message, .. } => {
-                assert!(message.contains("not yet implemented"));
-            }
-            _ => unreachable!(),
-        }
+        let schema = compiler.compile(&cc).expect("Lazy should compile");
+        assert!(matches!(
+            schema.tree(),
+            crate::compiled::CompiledNode::Lazy(_)
+        ));
     }
 
     // -- compile: Dynamic variant succeeds (I3 escape-hatch) ----------------

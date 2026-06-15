@@ -52,6 +52,12 @@ from .debug import (
 # 10.7 pure-Python constructs: NamedTuple (depends on collections.namedtuple)
 from ._namedtuple import NamedTuple
 
+# Enum helper classes and wrappers (pure Python, mirrors construct.core)
+from ._enum import EnumIntegerString, EnumInteger, Enum, FlagsEnum
+
+# Optional wrapper (pure Python, mirrors construct.core.Optional)
+from ._optional import Optional
+
 # 10.7 Timestamp stub: requires 'arrow' library (not installed in Phase 10).
 # Import does not fail; calling Timestamp/TimestampAdapter raises ImportError.
 try:

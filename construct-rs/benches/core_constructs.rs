@@ -92,7 +92,7 @@ fn bench_varint(c: &mut Criterion) {
 fn make_struct_10fields() -> Struct {
     let mut s = Struct::new();
     for i in 0..10 {
-        s = s.field(format!("f{i}"), Box::new(INT8UB));
+        s = s.field(format!("f{i}"), Box::new(INT8UB.into()));
     }
     s
 }
@@ -126,7 +126,7 @@ fn bench_struct(c: &mut Criterion) {
 fn bench_array(c: &mut Criterion) {
     let mut group = c.benchmark_group("array");
     let count = 100;
-    let construct: &dyn Construct = &Array::new(count, Box::new(INT8UB));
+    let construct: &dyn Construct = &Array::new(count, Box::new(INT8UB.into()));
     let data: Vec<u8> = (0..count as u8).collect();
     let value = Value::List((0..count).map(|i| Value::UInt(i as u64)).collect());
 
@@ -150,7 +150,7 @@ fn bench_enum(c: &mut Criterion) {
     mapping.insert("a".to_string(), 0);
     mapping.insert("b".to_string(), 1);
     mapping.insert("c".to_string(), 2);
-    let construct: &dyn Construct = &Enum::new(Box::new(INT8UB), mapping);
+    let construct: &dyn Construct = &Enum::new(Box::new(INT8UB.into()), mapping);
     let data: [u8; 1] = [0x01];
     let value = Value::String("b".to_string());
 

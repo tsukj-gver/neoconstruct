@@ -155,7 +155,7 @@ fn bench_struct_composite(c: &mut Criterion) {
     let mut group = c.benchmark_group("struct_composite");
     let mut s = Struct::new();
     for i in 0..10 {
-        s = s.field(format!("f{i}"), Box::new(INT8UB));
+        s = s.field(format!("f{i}"), Box::new(INT8UB.into()));
     }
     let construct: &dyn Construct = &s;
     let data: Vec<u8> = (0..10).collect();

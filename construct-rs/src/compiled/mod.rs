@@ -35,9 +35,15 @@ use indexmap::IndexMap;
 use crate::constructs::adapters::{CheckFunc, DecodeFunc, EncodeFunc, SymmetricFunc};
 use crate::constructs::bytes::{Bytes, BytesExpr, GreedyBytes};
 use crate::constructs::bytes_integer::{BitsInteger, BytesInteger};
+use crate::constructs::computed::ComputeFunc;
+use crate::constructs::computed::{TimestampEpoch, TimestampUnit};
+use crate::constructs::control_flow::{
+    CheckFunc as ControlCheckFunc, CondFunc, KeyFunc, StopCondFunc,
+};
 use crate::constructs::flag::Flag;
 use crate::constructs::format_field::FormatField;
 use crate::constructs::meta::{Error, Pass, Seek, SeekExpr, Tell, Terminated};
+use crate::constructs::stream_ops::{ChecksumBytesFunc, ChecksumFunc, TransformFunc};
 use crate::constructs::strings::{CString, PaddedString};
 use crate::constructs::varint::{VarInt, ZigZag};
 use crate::core::context::Context;
@@ -455,32 +461,93 @@ pub struct CompiledMapping {
     pub decmapping: Vec<(Value, Value)>,
 }
 /// Compiled node for `Computed`.
-#[derive(Debug)]
-pub struct CompiledComputed;
+pub struct CompiledComputed {
+    /// The compute function: produces a value from context.
+    pub func: ComputeFunc,
+}
+impl std::fmt::Debug for CompiledComputed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledComputed")
+            .field("func", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `Rebuild`.
-#[derive(Debug)]
-pub struct CompiledRebuild;
+pub struct CompiledRebuild {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The compute function: produces the build value from context.
+    pub func: ComputeFunc,
+}
+impl std::fmt::Debug for CompiledRebuild {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledRebuild")
+            .field("inner", &self.inner)
+            .field("func", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `Default`.
 #[derive(Debug)]
-pub struct CompiledDefault;
+pub struct CompiledDefault {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The default value used when the build input is `None`.
+    pub value: Value,
+}
 /// Compiled node for `Index`.
 #[derive(Debug)]
 pub struct CompiledIndex;
 /// Compiled node for `Padded`.
 #[derive(Debug)]
-pub struct CompiledPadded;
+pub struct CompiledPadded {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Total length in bytes (data + padding).
+    pub length: usize,
+    /// Padding pattern byte.
+    pub pattern: u8,
+    /// If `true`, padding bytes are validated during parse.
+    pub strict: bool,
+}
 /// Compiled node for `Aligned`.
 #[derive(Debug)]
-pub struct CompiledAligned;
+pub struct CompiledAligned {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Alignment modulus.
+    pub modulus: usize,
+    /// Padding pattern byte.
+    pub pattern: u8,
+}
 /// Compiled node for `FixedSized`.
 #[derive(Debug)]
-pub struct CompiledFixedSized;
+pub struct CompiledFixedSized {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Total size in bytes.
+    pub length: usize,
+}
 /// Compiled node for `NamedTuple`.
 #[derive(Debug)]
-pub struct CompiledNamedTuple;
+pub struct CompiledNamedTuple {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The field names.
+    pub field_names: Vec<String>,
+    /// The tuple type name (for display).
+    pub tuple_name: String,
+}
 /// Compiled node for `TimestampAdapter`.
 #[derive(Debug)]
-pub struct CompiledTimestampAdapter;
+pub struct CompiledTimestampAdapter {
+    /// The recursively compiled inner integer subcon.
+    pub inner: Box<CompiledNode>,
+    /// The time unit of the integer value.
+    pub unit: TimestampUnit,
+    /// The epoch reference.
+    pub epoch: TimestampEpoch,
+}
 
 // -- Repetition constructors (Phase 12.6) --
 /// Compiled node for `Array`.
@@ -521,78 +588,253 @@ pub struct CompiledGreedyRange {
 #[derive(Debug)]
 pub struct CompiledRepeatUntil;
 
-// -- Lazy constructors --
+// -- Lazy constructors (Phase 12.8: eager delegation) --
 /// Compiled node for `Lazy`.
 #[derive(Debug)]
-pub struct CompiledLazy;
+pub struct CompiledLazy {
+    /// The recursively compiled inner subcon (eager delegation).
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `LazyStruct`.
 #[derive(Debug)]
-pub struct CompiledLazyStruct;
+pub struct CompiledLazyStruct {
+    /// The recursively compiled inner (compiled as Struct).
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `LazyArray`.
 #[derive(Debug)]
-pub struct CompiledLazyArray;
+pub struct CompiledLazyArray {
+    /// The exact number of elements.
+    pub count: usize,
+    /// The recursively compiled subcon for each element.
+    pub subcon: Box<CompiledNode>,
+}
 /// Compiled node for `Rebuffered`.
 #[derive(Debug)]
-pub struct CompiledRebuffered;
+pub struct CompiledRebuffered {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 
-// -- Stream ops / tunneling constructors --
+// -- Stream ops / tunneling constructors (Phase 12.7) --
 /// Compiled node for `Bitwise`.
 #[derive(Debug)]
-pub struct CompiledBitwise;
+pub struct CompiledBitwise {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Bytewise`.
 #[derive(Debug)]
-pub struct CompiledBytewise;
+pub struct CompiledBytewise {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Pointer`.
 #[derive(Debug)]
-pub struct CompiledPointer;
+pub struct CompiledPointer {
+    /// The absolute position to seek to.
+    pub offset: i64,
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `PointerExpr`.
 #[derive(Debug)]
-pub struct CompiledPointerExpr;
+pub struct CompiledPointerExpr {
+    /// Pre-compiled offset expression.
+    pub compiled_offset: CompiledExpr,
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Peek`.
 #[derive(Debug)]
-pub struct CompiledPeek;
+pub struct CompiledPeek {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `RawCopy`.
 #[derive(Debug)]
-pub struct CompiledRawCopy;
+pub struct CompiledRawCopy {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Prefixed`.
 #[derive(Debug)]
-pub struct CompiledPrefixed;
+pub struct CompiledPrefixed {
+    /// The recursively compiled length-field subcon.
+    pub length_field: Box<CompiledNode>,
+    /// The recursively compiled data subcon.
+    pub subcon: Box<CompiledNode>,
+    /// Whether the length field includes its own size.
+    pub include_length: bool,
+}
 /// Compiled node for `Transformed`.
-#[derive(Debug)]
-pub struct CompiledTransformed;
+pub struct CompiledTransformed {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Decoding function applied before parsing subcon.
+    pub decode: TransformFunc,
+    /// Number of bytes to read before decoding, or `None` to read all.
+    pub decode_amount: Option<usize>,
+    /// Encoding function applied after building subcon.
+    pub encode: TransformFunc,
+    /// Expected number of bytes after encoding, or `None` to skip validation.
+    pub encode_amount: Option<usize>,
+}
+impl std::fmt::Debug for CompiledTransformed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledTransformed")
+            .field("inner", &self.inner)
+            .field("decode", &"<closure>")
+            .field("decode_amount", &self.decode_amount)
+            .field("encode", &"<closure>")
+            .field("encode_amount", &self.encode_amount)
+            .finish()
+    }
+}
 /// Compiled node for `Restreamed`.
-#[derive(Debug)]
-pub struct CompiledRestreamed;
+pub struct CompiledRestreamed {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Chunk decoder function.
+    pub decoder: TransformFunc,
+    /// Size of chunks fed to the decoder.
+    pub decoder_unit: usize,
+    /// Chunk encoder function.
+    pub encoder: TransformFunc,
+    /// Size of chunks fed to the encoder.
+    pub encoder_unit: usize,
+    /// Function to compute the outer size from the inner size.
+    pub size_computer: Option<Arc<dyn Fn(usize) -> usize + Send + Sync>>,
+}
+impl std::fmt::Debug for CompiledRestreamed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledRestreamed")
+            .field("inner", &self.inner)
+            .field("decoder", &"<closure>")
+            .field("decoder_unit", &self.decoder_unit)
+            .field("encoder", &"<closure>")
+            .field("encoder_unit", &self.encoder_unit)
+            .field("size_computer", &self.size_computer.is_some())
+            .finish()
+    }
+}
 /// Compiled node for `Compressed` (feature-gated).
 #[cfg(feature = "compression")]
 #[derive(Debug)]
-pub struct CompiledCompressed;
+pub struct CompiledCompressed {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The compression algorithm to use.
+    pub algorithm: crate::constructs::stream_ops::CompressionAlgorithm,
+}
 /// Compiled node for `Checksum`.
-#[derive(Debug)]
-pub struct CompiledChecksum;
+pub struct CompiledChecksum {
+    /// The recursively compiled checksum-field subcon.
+    pub checksum_field: Box<CompiledNode>,
+    /// Function that computes the checksum from raw bytes.
+    pub hash_func: ChecksumFunc,
+    /// Function that extracts the bytes to be checksummed from the context.
+    pub bytes_func: ChecksumBytesFunc,
+}
+impl std::fmt::Debug for CompiledChecksum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledChecksum")
+            .field("checksum_field", &self.checksum_field)
+            .field("hash_func", &"<closure>")
+            .field("bytes_func", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `ByteSwapped`.
 #[derive(Debug)]
-pub struct CompiledByteSwapped;
+pub struct CompiledByteSwapped {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `BitsSwapped`.
 #[derive(Debug)]
-pub struct CompiledBitsSwapped;
-/// Compiled node for `LazyBound`.
-#[derive(Debug)]
-pub struct CompiledLazyBound;
+pub struct CompiledBitsSwapped {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Whether the subcon has a fixed known size.
+    pub fixed_size: bool,
+}
+/// Compiled node for `LazyBound` (I4: holds `Arc<dyn Construct>` for
+/// runtime degradation to the old path).
+pub struct CompiledLazyBound {
+    /// The declaration-tree `LazyBound` wrapped behind an `Arc<dyn Construct>`.
+    /// `exec_parse` / `exec_build` / `exec_sizeof` delegate directly to it.
+    pub inner: Arc<dyn crate::core::Construct>,
+}
+impl std::fmt::Debug for CompiledLazyBound {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledLazyBound")
+            .field("inner", &"<LazyBound>")
+            .finish()
+    }
+}
 
-// -- Control flow constructors --
+// -- Control flow constructors (Phase 12.7) --
 /// Compiled node for `IfThenElse`.
-#[derive(Debug)]
-pub struct CompiledIfThenElse;
+pub struct CompiledIfThenElse {
+    /// The condition function (shared via [`Arc`]).
+    pub cond: CondFunc,
+    /// The recursively compiled true-branch subcon.
+    pub then_constr: Box<CompiledNode>,
+    /// The recursively compiled false-branch subcon.
+    pub else_constr: Box<CompiledNode>,
+}
+impl std::fmt::Debug for CompiledIfThenElse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledIfThenElse")
+            .field("cond", &"<closure>")
+            .field("then_constr", &self.then_constr)
+            .field("else_constr", &self.else_constr)
+            .finish()
+    }
+}
 /// Compiled node for `Switch`.
-#[derive(Debug)]
-pub struct CompiledSwitch;
+pub struct CompiledSwitch {
+    /// The key function (shared via [`Arc`]).
+    pub keyfunc: KeyFunc,
+    /// Ordered list of (key value, compiled subcon) pairs.
+    pub cases: Vec<(Value, Box<CompiledNode>)>,
+    /// Optional default compiled subcon.
+    pub default: Option<Box<CompiledNode>>,
+}
+impl std::fmt::Debug for CompiledSwitch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledSwitch")
+            .field("keyfunc", &"<closure>")
+            .field("cases", &self.cases.len())
+            .field("default", &self.default.is_some())
+            .finish()
+    }
+}
 /// Compiled node for `Check`.
-#[derive(Debug)]
-pub struct CompiledCheck;
+pub struct CompiledCheck {
+    /// The check function (shared via [`Arc`]).
+    pub check: ControlCheckFunc,
+}
+impl std::fmt::Debug for CompiledCheck {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledCheck")
+            .field("check", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `StopIf`.
-#[derive(Debug)]
-pub struct CompiledStopIf;
+pub struct CompiledStopIf {
+    /// The condition function (shared via [`Arc`]).
+    pub cond: StopCondFunc,
+}
+impl std::fmt::Debug for CompiledStopIf {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledStopIf")
+            .field("cond", &"<closure>")
+            .finish()
+    }
+}
 
 // -- Escape-hatch --
 /// Compiled node for `Dynamic` — holds an `Arc<dyn Construct>` that falls
@@ -858,28 +1100,10 @@ macro_rules! impl_compiled_exec_stub {
 }
 
 impl_compiled_exec_stub! {
-    // composite (Struct, Sequence, Union, Select, FocusedSeq implemented in 12.6)
-    // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
-    CompiledComputed, CompiledRebuild,
-    CompiledDefault, CompiledIndex, CompiledPadded, CompiledAligned,
-    CompiledFixedSized, CompiledNamedTuple, CompiledTimestampAdapter,
     // repetition (Array, ArrayExpr, GreedyRange implemented in 12.6;
     //   RepeatUntil compiles to CompiledDynamic, so its stub is never hit)
     CompiledRepeatUntil,
-    // lazy
-    CompiledLazy, CompiledLazyStruct, CompiledLazyArray, CompiledRebuffered,
-    // stream ops / tunneling
-    CompiledBitwise, CompiledBytewise, CompiledPointer, CompiledPointerExpr,
-    CompiledPeek, CompiledRawCopy, CompiledPrefixed, CompiledTransformed,
-    CompiledRestreamed, CompiledChecksum, CompiledByteSwapped, CompiledBitsSwapped,
-    CompiledLazyBound,
-    // control flow
-    CompiledIfThenElse, CompiledSwitch, CompiledCheck, CompiledStopIf,
 }
-
-// Feature-gated stub for CompiledCompressed.
-#[cfg(feature = "compression")]
-impl_compiled_exec_stub!(CompiledCompressed,);
 
 // ===========================================================================
 // Functional CompiledExec for leaf nodes (Phase 12.4)
@@ -2194,6 +2418,1425 @@ impl CompiledExec for CompiledFocusedSeq {
 }
 
 // ===========================================================================
+// Functional CompiledExec for control flow (Phase 12.7)
+// ===========================================================================
+
+impl CompiledExec for CompiledIfThenElse {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        if (self.cond)(ctx) {
+            self.then_constr.exec_parse(stream, ctx, sink)
+        } else {
+            self.else_constr.exec_parse(stream, ctx, sink)
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        if (self.cond)(ctx) {
+            self.then_constr.exec_build(input, stream, ctx)
+        } else {
+            self.else_constr.exec_build(input, stream, ctx)
+        }
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        if (self.cond)(ctx) {
+            self.then_constr.exec_sizeof(ctx)
+        } else {
+            self.else_constr.exec_sizeof(ctx)
+        }
+    }
+}
+
+impl CompiledExec for CompiledSwitch {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let key = (self.keyfunc)(ctx)?;
+        let node = self
+            .cases
+            .iter()
+            .find(|(k, _)| k == &key)
+            .map(|(_, n)| n.as_ref())
+            .or(self.default.as_deref());
+        // If no case and no default: use Pass semantics (no-op, None).
+        match node {
+            Some(n) => n.exec_parse(stream, ctx, sink),
+            None => {
+                // No default — deposit None.
+                sink.set_scalar(Value::None)
+            }
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let key = (self.keyfunc)(ctx)?;
+        let node = self
+            .cases
+            .iter()
+            .find(|(k, _)| k == &key)
+            .map(|(_, n)| n.as_ref())
+            .or(self.default.as_deref());
+        match node {
+            Some(n) => n.exec_build(input, stream, ctx),
+            None => Ok(()), // Pass: no-op
+        }
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let key = (self.keyfunc)(ctx)?;
+        let node = self
+            .cases
+            .iter()
+            .find(|(k, _)| k == &key)
+            .map(|(_, n)| n.as_ref())
+            .or(self.default.as_deref());
+        match node {
+            Some(n) => n.exec_sizeof(ctx),
+            None => Ok(0), // Pass: size 0
+        }
+    }
+}
+
+impl CompiledExec for CompiledCheck {
+    fn exec_parse(
+        &self,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        (self.check)(ctx)?;
+        sink.set_scalar(Value::None)
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        (self.check)(ctx)
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+impl CompiledExec for CompiledStopIf {
+    fn exec_parse(
+        &self,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        if (self.cond)(ctx) {
+            Err(ConstructError::StopField {
+                path: String::new(),
+            })
+        } else {
+            sink.set_scalar(Value::None)
+        }
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        if (self.cond)(ctx) {
+            Err(ConstructError::StopField {
+                path: String::new(),
+            })
+        } else {
+            Ok(())
+        }
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "StopIf size depends on runtime context".to_string(),
+        })
+    }
+}
+
+// ===========================================================================
+// Functional CompiledExec for computed/meta (Phase 12.8)
+// ===========================================================================
+
+impl CompiledExec for CompiledComputed {
+    fn exec_parse(
+        &self,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let value = (self.func)(ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        // Evaluate and discard; the stream is unaffected.
+        let _ = (self.func)(ctx)?;
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+impl CompiledExec for CompiledRebuild {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        self.inner.exec_parse(stream, ctx, sink)
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let value = (self.func)(ctx)?;
+        self.inner.exec_build(&value, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledDefault {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        self.inner.exec_parse(stream, ctx, sink)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let effective = if input.is_none() { &self.value } else { input };
+        self.inner.exec_build(effective, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledIndex {
+    fn exec_parse(
+        &self,
+        _stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let value = ctx
+            .get(REPETITION_INDEX_KEY)
+            .cloned()
+            .unwrap_or(Value::None);
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        _stream: &mut CombinedStream,
+        _ctx: &mut Context,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+/// Minimum valid modulus for Aligned.
+const ALIGNED_MIN_MODULUS: usize = 2;
+
+impl CompiledExec for CompiledPadded {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let pos_before = stream.tell()?;
+        let value = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let consumed = (pos_after - pos_before) as usize;
+
+        if consumed > self.length {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "subcon parsed {} bytes but was allowed only {}",
+                    consumed, self.length
+                ),
+            });
+        }
+
+        let pad = self.length - consumed;
+        if pad > 0 {
+            let padding_bytes = stream.read_bytes(pad)?;
+            if self.strict {
+                for &b in &padding_bytes {
+                    if b != self.pattern {
+                        return Err(ConstructError::Padding {
+                            path: String::new(),
+                            message: format!(
+                                "expected padding byte 0x{:02X} but got 0x{:02X}",
+                                self.pattern, b
+                            ),
+                        });
+                    }
+                }
+            }
+        }
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let pos_before = stream.tell()?;
+        self.inner.exec_build(input, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let written = (pos_after - pos_before) as usize;
+
+        if written > self.length {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "subcon build {} bytes but was allowed only {}",
+                    written, self.length
+                ),
+            });
+        }
+
+        let pad = self.length - written;
+        if pad > 0 {
+            let padding = vec![self.pattern; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(self.length)
+    }
+}
+
+impl CompiledExec for CompiledAligned {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        if self.modulus < ALIGNED_MIN_MODULUS {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "expected modulus {} or greater, got {}",
+                    ALIGNED_MIN_MODULUS, self.modulus
+                ),
+            });
+        }
+        let pos_before = stream.tell()?;
+        let value = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let consumed = (pos_after - pos_before) as usize;
+        let pad = (self.modulus - (consumed % self.modulus)) % self.modulus;
+        if pad > 0 {
+            let _ = stream.read_bytes(pad)?;
+        }
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        if self.modulus < ALIGNED_MIN_MODULUS {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "expected modulus {} or greater, got {}",
+                    ALIGNED_MIN_MODULUS, self.modulus
+                ),
+            });
+        }
+        let pos_before = stream.tell()?;
+        self.inner.exec_build(input, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let written = (pos_after - pos_before) as usize;
+        let pad = (self.modulus - (written % self.modulus)) % self.modulus;
+        if pad > 0 {
+            let padding = vec![self.pattern; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        if self.modulus < ALIGNED_MIN_MODULUS {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "expected modulus {} or greater, got {}",
+                    ALIGNED_MIN_MODULUS, self.modulus
+                ),
+            });
+        }
+        let inner_size = self.inner.exec_sizeof(ctx)?;
+        let pad = (self.modulus - (inner_size % self.modulus)) % self.modulus;
+        Ok(inner_size + pad)
+    }
+}
+
+/// Default null-byte padding.
+const DEFAULT_PAD_BYTE: u8 = 0x00;
+
+impl CompiledExec for CompiledFixedSized {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let data = stream.read_bytes(self.length)?;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+
+        if built.len() > self.length {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "subcon build {} bytes but was allowed only {}",
+                    built.len(),
+                    self.length
+                ),
+            });
+        }
+
+        stream.write_bytes(&built)?;
+        let pad = self.length - built.len();
+        if pad > 0 {
+            let padding = vec![DEFAULT_PAD_BYTE; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(self.length)
+    }
+}
+
+impl CompiledExec for CompiledNamedTuple {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let raw = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let named = Self::decode_value(&raw, &self.field_names)?;
+        sink.set_scalar(named)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let encoded = Self::encode_value(input, &self.field_names)?;
+        self.inner.exec_build(&encoded, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledNamedTuple {
+    /// Decodes a raw value (List or Container from subcon) into a named
+    /// list representation.
+    fn decode_value(raw: &Value, field_names: &[String]) -> Result<Value> {
+        match raw {
+            Value::List(items) => {
+                if items.len() != field_names.len() {
+                    return Err(ConstructError::Array {
+                        path: String::new(),
+                        expected: field_names.len(),
+                        actual: items.len(),
+                    });
+                }
+                let named: Vec<Value> = items
+                    .iter()
+                    .zip(field_names.iter())
+                    .map(|(val, name)| {
+                        let mut entry = IndexMap::new();
+                        entry.insert("name".to_string(), Value::String(name.clone()));
+                        entry.insert("value".to_string(), val.clone());
+                        Value::Container(entry)
+                    })
+                    .collect();
+                Ok(Value::List(named))
+            }
+            Value::Container(map) => {
+                let named: Vec<Value> = field_names
+                    .iter()
+                    .map(|name| {
+                        let val = map.get(name).cloned().unwrap_or(Value::None);
+                        let mut entry = IndexMap::new();
+                        entry.insert("name".to_string(), Value::String(name.clone()));
+                        entry.insert("value".to_string(), val);
+                        Value::Container(entry)
+                    })
+                    .collect();
+                Ok(Value::List(named))
+            }
+            other => Err(ConstructError::TypeMismatch {
+                path: String::new(),
+                expected: "List or Container".to_string(),
+                actual: other.type_name().to_string(),
+            }),
+        }
+    }
+
+    /// Encodes a named list back into a value suitable for the inner construct.
+    fn encode_value(data: &Value, field_names: &[String]) -> Result<Value> {
+        match data {
+            Value::List(items) => {
+                let plain: Vec<Value> = items
+                    .iter()
+                    .zip(field_names.iter())
+                    .map(|(item, _name)| match item {
+                        Value::Container(entry) => {
+                            entry.get("value").cloned().unwrap_or(Value::None)
+                        }
+                        other => other.clone(),
+                    })
+                    .collect();
+                Ok(Value::List(plain))
+            }
+            Value::Container(map) => Ok(Value::Container(map.clone())),
+            other => Err(ConstructError::TypeMismatch {
+                path: String::new(),
+                expected: "List or Container".to_string(),
+                actual: other.type_name().to_string(),
+            }),
+        }
+    }
+}
+
+impl CompiledExec for CompiledTimestampAdapter {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let raw_val = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let raw_i64 = raw_val.to_i64()?;
+        let (secs, nanos) = timestamp_to_secs_nanos(raw_i64, self.unit);
+        let mut map = IndexMap::new();
+        map.insert("secs".to_string(), Value::Int(secs));
+        map.insert("nanos".to_string(), Value::UInt(u64::from(nanos)));
+        sink.set_scalar(Value::Container(map))
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let container = input.as_container()?;
+        let secs = container
+            .get("secs")
+            .ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: "secs".to_string(),
+            })?
+            .to_i64()?;
+        let nanos = container
+            .get("nanos")
+            .ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: "nanos".to_string(),
+            })?
+            .to_u64()? as u32;
+        let raw_i64 = secs_nanos_to_timestamp(secs, nanos, self.unit);
+        self.inner.exec_build(&Value::Int(raw_i64), stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+/// Converts a raw integer (in the given unit) to seconds and nanoseconds.
+fn timestamp_to_secs_nanos(raw: i64, unit: TimestampUnit) -> (i64, u32) {
+    match unit {
+        TimestampUnit::Seconds => (raw, 0u32),
+        TimestampUnit::Milliseconds => (raw / 1000, ((raw % 1000) * 1_000_000) as u32),
+        TimestampUnit::Microseconds => (raw / 1_000_000, ((raw % 1_000_000) * 1000) as u32),
+        TimestampUnit::Nanoseconds => (raw / 1_000_000_000, (raw % 1_000_000_000) as u32),
+    }
+}
+
+/// Converts seconds and nanoseconds back to a raw integer in the given unit.
+fn secs_nanos_to_timestamp(secs: i64, nanos: u32, unit: TimestampUnit) -> i64 {
+    match unit {
+        TimestampUnit::Seconds => secs,
+        TimestampUnit::Milliseconds => secs * 1000 + (i64::from(nanos) / 1_000_000),
+        TimestampUnit::Microseconds => secs * 1_000_000 + (i64::from(nanos) / 1000),
+        TimestampUnit::Nanoseconds => secs * 1_000_000_000 + i64::from(nanos),
+    }
+}
+
+// ===========================================================================
+// Functional CompiledExec for lazy (Phase 12.8: eager delegation)
+// ===========================================================================
+
+impl CompiledExec for CompiledLazy {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let _ = stream.tell()?;
+        self.inner.exec_parse(stream, ctx, sink)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        self.inner.exec_build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledLazyStruct {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        self.inner.exec_parse(stream, ctx, sink)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        self.inner.exec_build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledLazyArray {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        for i in 0..self.count {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            let value = match self.subcon.exec_parse(stream, ctx, sub_sink.as_mut()) {
+                Ok(()) => sub_sink.into_value()?,
+                Err(e) => return Err(e.with_path_prefix(&format!("[{i}]"))),
+            };
+            sink.push_item(value)?;
+        }
+        Ok(())
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let list = match input {
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+        if list.len() != self.count {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected: self.count,
+                actual: list.len(),
+            });
+        }
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            if let Err(e) = self.subcon.exec_build(element, stream, ctx) {
+                return Err(e.with_path_prefix(&format!("[{i}]")));
+            }
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let sub_size = self.subcon.exec_sizeof(ctx)?;
+        Ok(self.count.saturating_mul(sub_size))
+    }
+}
+
+impl CompiledExec for CompiledRebuffered {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let start = stream.tell()?;
+        let data = stream.read_remaining()?;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        let consumed = sub_stream.tell()?;
+        stream.seek(start + consumed)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        self.inner.exec_build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+// ===========================================================================
+// Functional CompiledExec for stream ops (Phase 12.7)
+// ===========================================================================
+
+impl CompiledExec for CompiledBitwise {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let data = stream.read_remaining()?;
+        let bits = crate::binary::bytes2bits(&data);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&bits));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let bits = sub_stream.into_bytes();
+        let bytes = crate::binary::bits2bytes(&bits)?;
+        stream.write_bytes(&bytes)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let bits_size = self.inner.exec_sizeof(ctx)?;
+        Ok((bits_size + 7) / 8)
+    }
+}
+
+impl CompiledExec for CompiledBytewise {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let bits = stream.read_remaining()?;
+        let bytes = crate::binary::bits2bytes(&bits)?;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let bytes = sub_stream.into_bytes();
+        let bits = crate::binary::bytes2bits(&bytes);
+        stream.write_bytes(&bits)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let byte_size = self.inner.exec_sizeof(ctx)?;
+        Ok(byte_size * 8)
+    }
+}
+
+impl CompiledExec for CompiledPointer {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, self.offset)?;
+        let result = self.inner.exec_parse(stream, ctx, sink);
+        let _ = stream.seek(fallback);
+        result
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, self.offset)?;
+        let result = self.inner.exec_build(input, stream, ctx);
+        let _ = stream.seek(fallback);
+        result
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+impl CompiledExec for CompiledPointerExpr {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let offset_val = self
+            .compiled_offset
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("PointerExpr"))?;
+        let offset = offset_val.to_i64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("PointerExpr offset must be an integer: {e}"),
+        })?;
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, offset)?;
+        let result = self.inner.exec_parse(stream, ctx, sink);
+        let _ = stream.seek(fallback);
+        result
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let offset_val = self
+            .compiled_offset
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("PointerExpr"))?;
+        let offset = offset_val.to_i64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("PointerExpr offset must be an integer: {e}"),
+        })?;
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, offset)?;
+        let result = self.inner.exec_build(input, stream, ctx);
+        let _ = stream.seek(fallback);
+        result
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+/// Seeks the stream to the given offset (positive = absolute, negative =
+/// from end).
+fn seek_to_offset(stream: &mut CombinedStream, offset: i64) -> Result<()> {
+    use std::io::SeekFrom;
+    if offset >= 0 {
+        stream.seek(offset as u64)?;
+        Ok(())
+    } else {
+        stream.seek_from(SeekFrom::End(offset))?;
+        Ok(())
+    }
+}
+
+impl CompiledExec for CompiledPeek {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let fallback = stream.tell()?;
+        let result = self.inner.exec_parse(stream, ctx, sink);
+        let _ = stream.seek(fallback);
+        match result {
+            Ok(()) => Ok(()),
+            Err(e @ ConstructError::Check { .. }) | Err(e @ ConstructError::StopField { .. }) => {
+                Err(e)
+            }
+            Err(_) => sink.set_scalar(Value::None),
+        }
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        _stream: &mut CombinedStream,
+        _ctx: &mut Context,
+    ) -> Result<()> {
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Ok(0)
+    }
+}
+
+impl CompiledExec for CompiledRawCopy {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let offset1 = stream.tell()?;
+        let value = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let offset2 = stream.tell()?;
+        let length = offset2.saturating_sub(offset1) as usize;
+        stream.seek(offset1)?;
+        let data = stream.read_bytes(length)?;
+        let mut map = IndexMap::new();
+        map.insert("data".to_string(), Value::Bytes(data));
+        map.insert("value".to_string(), value);
+        map.insert("offset1".to_string(), Value::UInt(offset1));
+        map.insert("offset2".to_string(), Value::UInt(offset2));
+        map.insert("length".to_string(), Value::UInt(length as u64));
+        sink.set_scalar(Value::Container(map))
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let container = input.as_container()?;
+        if let Some(Value::Bytes(raw_data)) = container.get("data") {
+            stream.write_bytes(raw_data)?;
+            return Ok(());
+        }
+        if let Some(value) = container.get("value") {
+            self.inner.exec_build(value, stream, ctx)?;
+            return Ok(());
+        }
+        Err(ConstructError::Generic {
+            path: String::new(),
+            message: "RawCopy cannot build: both data and value keys are missing".to_string(),
+        })
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledPrefixed {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let length_val = exec_parse_inner_value(&self.length_field, stream, ctx)?;
+        let mut length = length_val.to_u64()? as usize;
+        if self.include_length {
+            let lf_size = self.length_field.exec_sizeof(ctx)?;
+            length = length.saturating_sub(lf_size);
+        }
+        let data = stream.read_bytes(length)?;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
+        let value = exec_parse_inner_value(&self.subcon, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.subcon.exec_build(input, &mut sub_stream, ctx)?;
+        let built_data = sub_stream.into_bytes();
+
+        let mut length = built_data.len() as u64;
+        if self.include_length {
+            let lf_size = self.length_field.exec_sizeof(ctx)?;
+            length += lf_size as u64;
+        }
+        self.length_field
+            .exec_build(&Value::UInt(length), stream, ctx)?;
+        stream.write_bytes(&built_data)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        let length_size = self.length_field.exec_sizeof(ctx)?;
+        let subcon_size = self.subcon.exec_sizeof(ctx)?;
+        Ok(length_size + subcon_size)
+    }
+}
+
+impl CompiledExec for CompiledTransformed {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let data = match self.decode_amount {
+            Some(amount) => stream.read_bytes(amount)?,
+            None => stream.read_remaining()?,
+        };
+        let decoded = (self.decode)(&data)?;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let encoded = (self.encode)(&built)?;
+        if let Some(expected) = self.encode_amount {
+            if encoded.len() != expected {
+                return Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: format!(
+                        "encoding transformation produced {} bytes instead of expected {}",
+                        encoded.len(),
+                        expected
+                    ),
+                });
+            }
+        }
+        stream.write_bytes(&encoded)
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        match (self.decode_amount, self.encode_amount) {
+            (Some(da), Some(ea)) if da == ea => Ok(ea),
+            _ => Err(ConstructError::Sizeof {
+                path: String::new(),
+                reason: "Transformed size undefined".to_string(),
+            }),
+        }
+    }
+}
+
+impl CompiledExec for CompiledRestreamed {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        if self.decoder_unit == 0 {
+            return Err(ConstructError::Generic {
+                path: String::new(),
+                message: "Restreamed decoder_unit must be positive".to_string(),
+            });
+        }
+        let raw = stream.read_remaining()?;
+        let mut decoded = Vec::new();
+        for chunk in raw.chunks(self.decoder_unit) {
+            let decoded_chunk = (self.decoder)(chunk)?;
+            decoded.extend_from_slice(&decoded_chunk);
+        }
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        if self.encoder_unit == 0 {
+            return Err(ConstructError::Generic {
+                path: String::new(),
+                message: "Restreamed encoder_unit must be positive".to_string(),
+            });
+        }
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        for chunk in built.chunks(self.encoder_unit) {
+            let encoded_chunk = (self.encoder)(chunk)?;
+            stream.write_bytes(&encoded_chunk)?;
+        }
+        Ok(())
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        match &self.size_computer {
+            Some(computer) => {
+                let inner_size = self.inner.exec_sizeof(ctx)?;
+                Ok(computer(inner_size))
+            }
+            None => Err(ConstructError::Sizeof {
+                path: String::new(),
+                reason: "Restreamed cannot calculate size without size_computer".to_string(),
+            }),
+        }
+    }
+}
+
+#[cfg(feature = "compression")]
+impl CompiledExec for CompiledCompressed {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        use crate::constructs::stream_ops::CompressionAlgorithm;
+        let data = stream.read_remaining()?;
+        let decoded = match self.algorithm {
+            CompressionAlgorithm::Zlib => {
+                use std::io::Read;
+                let mut decoder = flate2::read::ZlibDecoder::new(&data[..]);
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("zlib decompression failed: {e}"),
+                    })?;
+                out
+            }
+            CompressionAlgorithm::Deflate => {
+                use std::io::Read;
+                let mut decoder = flate2::read::DeflateDecoder::new(&data[..]);
+                let mut out = Vec::new();
+                decoder
+                    .read_to_end(&mut out)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("deflate decompression failed: {e}"),
+                    })?;
+                out
+            }
+        };
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&decoded));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        use crate::constructs::stream_ops::CompressionAlgorithm;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let encoded = match self.algorithm {
+            CompressionAlgorithm::Zlib => {
+                use std::io::Read;
+                let mut encoder =
+                    flate2::read::ZlibEncoder::new(&built[..], flate2::Compression::default());
+                let mut out = Vec::new();
+                encoder
+                    .read_to_end(&mut out)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("zlib compression failed: {e}"),
+                    })?;
+                out
+            }
+            CompressionAlgorithm::Deflate => {
+                use std::io::Read;
+                let mut encoder =
+                    flate2::read::DeflateEncoder::new(&built[..], flate2::Compression::default());
+                let mut out = Vec::new();
+                encoder
+                    .read_to_end(&mut out)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("deflate compression failed: {e}"),
+                    })?;
+                out
+            }
+        };
+        stream.write_bytes(&encoded)
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "Compressed has undefined size".to_string(),
+        })
+    }
+}
+
+impl CompiledExec for CompiledChecksum {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let parsed = exec_parse_inner_value(&self.checksum_field, stream, ctx)?;
+        let raw_bytes = (self.bytes_func)(ctx)?;
+        let expected = (self.hash_func)(&raw_bytes);
+        let parsed_bytes = parsed.as_bytes().unwrap_or(&[]).to_vec();
+        if parsed_bytes != expected {
+            return Err(ConstructError::Check {
+                path: String::new(),
+                message: format!(
+                    "wrong checksum: read {:02x?}, computed {:02x?}",
+                    parsed_bytes, expected
+                ),
+            });
+        }
+        sink.set_scalar(parsed)
+    }
+
+    fn exec_build(
+        &self,
+        _input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let raw_bytes = (self.bytes_func)(ctx)?;
+        let checksum = (self.hash_func)(&raw_bytes);
+        self.checksum_field
+            .exec_build(&Value::Bytes(checksum), stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.checksum_field.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledByteSwapped {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let size = self.inner.exec_sizeof(ctx)?;
+        let data = stream.read_bytes(size)?;
+        let swapped = crate::binary::swapbytes(&data);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&swapped));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let swapped = crate::binary::swapbytes(&built);
+        stream.write_bytes(&swapped)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+/// Reverses the bit order within each byte of `data`.
+fn swap_bits_in_bytes(data: &[u8]) -> Vec<u8> {
+    data.iter()
+        .map(|&b| {
+            let mut result = 0u8;
+            for i in 0..8 {
+                if b & (1 << i) != 0 {
+                    result |= 1 << (7 - i);
+                }
+            }
+            result
+        })
+        .collect()
+}
+
+impl CompiledExec for CompiledBitsSwapped {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let data = if self.fixed_size {
+            let size = self.inner.exec_sizeof(ctx)?;
+            stream.read_bytes(size)?
+        } else {
+            stream.read_remaining()?
+        };
+        let swapped = swap_bits_in_bytes(&data);
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_read(&swapped));
+        let value = exec_parse_inner_value(&self.inner, &mut sub_stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build(input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let swapped = swap_bits_in_bytes(&built);
+        stream.write_bytes(&swapped)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+impl CompiledExec for CompiledLazyBound {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let value = self.inner.parse(stream, ctx)?;
+        sink.set_scalar(value)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        self.inner.build(input, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.sizeof(ctx)
+    }
+}
+
+// ===========================================================================
 // Functional CompiledExec implementation for CompiledDynamic (escape-hatch)
 // ===========================================================================
 //
@@ -2454,6 +4097,55 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
         CompiledNode::Select(_) | CompiledNode::Union(_) => None,
         // RepeatUntil: compiles to Dynamic (never a CompiledRepeatUntil node).
         // Dynamic escape-hatch and all not-yet-implemented nodes: unknown.
+        // Computed/meta/padding (Phase 12.8):
+        CompiledNode::Computed(_) | CompiledNode::Index(_) | CompiledNode::Check(_) => Some(0),
+        CompiledNode::Padded(p) => Some(p.length),
+        CompiledNode::FixedSized(f) => Some(f.length),
+        CompiledNode::Default(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Rebuild(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Aligned(a) => try_fold_static_size(&a.inner).map(|s| {
+            let pad = (a.modulus - (s % a.modulus)) % a.modulus;
+            s + pad
+        }),
+        CompiledNode::NamedTuple(w) => try_fold_static_size(&w.inner),
+        CompiledNode::TimestampAdapter(w) => try_fold_static_size(&w.inner),
+        // Lazy (Phase 12.8): folds to inner.
+        CompiledNode::Lazy(w) => try_fold_static_size(&w.inner),
+        CompiledNode::LazyStruct(w) => try_fold_static_size(&w.inner),
+        CompiledNode::LazyArray(a) => try_fold_static_size(&a.subcon).map(|e| e * a.count),
+        CompiledNode::Rebuffered(w) => try_fold_static_size(&w.inner),
+        // Stream ops (Phase 12.7):
+        CompiledNode::Pointer(_) | CompiledNode::PointerExpr(_) | CompiledNode::Peek(_) => Some(0),
+        CompiledNode::RawCopy(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Prefixed(p) => {
+            let lf = try_fold_static_size(&p.length_field);
+            let sc = try_fold_static_size(&p.subcon);
+            match (lf, sc) {
+                (Some(a), Some(b)) => Some(a + b),
+                _ => None,
+            }
+        }
+        CompiledNode::ByteSwapped(w) => try_fold_static_size(&w.inner),
+        CompiledNode::BitsSwapped(w) => try_fold_static_size(&w.inner),
+        // Bitwise: (bits_size + 7) / 8.
+        CompiledNode::Bitwise(b) => try_fold_static_size(&b.inner).map(|s| (s + 7) / 8),
+        // Bytewise: byte_size * 8.
+        CompiledNode::Bytewise(b) => try_fold_static_size(&b.inner).map(|s| s * 8),
+        // Transformed: known only if decode_amount == encode_amount.
+        CompiledNode::Transformed(t) => match (t.decode_amount, t.encode_amount) {
+            (Some(da), Some(ea)) if da == ea => Some(ea),
+            _ => None,
+        },
+        // Control flow: depends on runtime → unknown, except Check/StopIf.
+        CompiledNode::IfThenElse(_) | CompiledNode::Switch(_) => None,
+        CompiledNode::StopIf(_) => None,
+        // Checksum, Restreamed, LazyBound, Compressed: variable → unknown.
+        CompiledNode::Checksum(_) | CompiledNode::Restreamed(_) | CompiledNode::LazyBound(_) => {
+            None
+        }
+        #[cfg(feature = "compression")]
+        CompiledNode::Compressed(_) => None,
+        // Dynamic escape-hatch: unknown.
         _ => None,
     }
 }
@@ -2591,15 +4283,18 @@ mod tests {
         assert!(matches!(err, ConstructError::Sizeof { .. }));
     }
 
-    // -- Stub CompiledExec for not-yet-implemented nodes --------------------
+    // -- Lazy CompiledExec delegation (Phase 12.8) -------------------------
 
     #[test]
-    fn stub_exec_for_lazy_returns_error() {
-        // Lazy is not yet implemented — still a stub.
-        let node = CompiledNode::Lazy(CompiledLazy);
+    fn lazy_exec_delegates_to_inner() {
+        // Lazy (Phase 12.8): delegates to compiled inner.
+        let node = CompiledNode::Lazy(crate::compiled::CompiledLazy {
+            inner: Box::new(CompiledNode::FormatField(CompiledFormatField {
+                inner: FormatField::new(Endianness::Big, FormatKind::U8),
+            })),
+        });
         let ctx = Context::new();
-        let err = node.exec_sizeof(&ctx).unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 1);
     }
 
     #[test]
@@ -2865,11 +4560,11 @@ mod tests {
                 .unwrap(),
             0
         );
-        // Lazy is still a stub.
-        let err = CompiledNode::Lazy(CompiledLazy)
-            .exec_sizeof(&ctx)
-            .unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
+        // Lazy is now functional (Phase 12.8): delegates to inner.
+        let lazy_node = CompiledNode::Lazy(crate::compiled::CompiledLazy {
+            inner: Box::new(compiled_pass()),
+        });
+        assert_eq!(lazy_node.exec_sizeof(&ctx).unwrap(), 0);
     }
 
     #[test]
@@ -3003,10 +4698,12 @@ mod tests {
             })),
             None
         );
-        // Lazy is still a stub (unknown size).
+        // Lazy folds to inner size (Phase 12.8). Wrapping Pass (size 0).
         assert_eq!(
-            try_fold_static_size(&CompiledNode::Lazy(CompiledLazy)),
-            None
+            try_fold_static_size(&CompiledNode::Lazy(crate::compiled::CompiledLazy {
+                inner: Box::new(compiled_pass()),
+            })),
+            Some(0)
         );
         // Empty Struct folds to 0 (Phase 12.6).
         assert_eq!(
@@ -3046,9 +4743,17 @@ mod tests {
             subcon: Box::new(compiled_pass()),
             discard: false,
         });
-        let _ = CompiledNode::Lazy(CompiledLazy);
-        let _ = CompiledNode::Bitwise(CompiledBitwise);
-        let _ = CompiledNode::IfThenElse(CompiledIfThenElse);
+        let _ = CompiledNode::Lazy(crate::compiled::CompiledLazy {
+            inner: Box::new(compiled_pass()),
+        });
+        let _ = CompiledNode::Bitwise(CompiledBitwise {
+            inner: Box::new(compiled_pass()),
+        });
+        let _ = CompiledNode::IfThenElse(CompiledIfThenElse {
+            cond: Arc::new(|_ctx| false),
+            then_constr: Box::new(compiled_pass()),
+            else_constr: Box::new(compiled_pass()),
+        });
         let _ = CompiledNode::Hex(CompiledHex {
             inner: Box::new(compiled_pass()),
         });

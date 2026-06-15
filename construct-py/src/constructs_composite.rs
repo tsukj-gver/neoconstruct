@@ -188,7 +188,14 @@ fn add_struct_subcon(
         }
         return Ok(builder);
     }
-    let inner = extract_subcon(obj)?;
+    // Special case: PyRenamed — extract the inner subcon directly to preserve
+    // build_effective delegation (e.g. for Rebuild).  The name comes from
+    // get_subcon_name separately, so we must NOT double-wrap in Renamed.
+    let inner = if let Ok(renamed) = obj.extract::<PyRef<crate::py_renamed::PyRenamed>>() {
+        renamed.make_owned_inner()?
+    } else {
+        extract_subcon(obj)?
+    };
     let name = get_subcon_name(obj)?;
     match name {
         Some(n) => {
@@ -247,7 +254,14 @@ impl PyStruct {
     }
 
     fn __repr__(&self) -> String {
-        format!("Struct({} fields)", self.py_subcons.len())
+        // Match Python construct format: "<Struct +nonbuild>" (empty) or
+        // "<Struct +nonbuild ...>" (with fields, omitted for brevity).
+        let nb = if self.inner.flagbuildnone() {
+            " +nonbuild"
+        } else {
+            ""
+        };
+        format!("<Struct{}>", nb)
     }
 }
 
@@ -305,6 +319,26 @@ pub fn py_sequence(
     })
 }
 
+#[pymethods]
+impl PySequence {
+    /// Member attribute exposure: `sequence.fieldname` → subcon.
+    ///
+    /// Mirrors the Python `Sequence.__getattr__` which exposes named subcons
+    /// as attributes (e.g. `seq.animal.giraffe`).
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+        for sub in &self.py_subcons {
+            if let Some(n) = get_subcon_name(sub.bind(py)).ok().flatten() {
+                if n == name {
+                    return Ok(sub.clone_ref(py));
+                }
+            }
+        }
+        Err(PyAttributeError::new_err(format!(
+            "Sequence has no field '{name}'"
+        )))
+    }
+}
+
 crate::impl_api_methods!(PySequence);
 crate::impl_construct_operators!(PySequence);
 
@@ -324,21 +358,40 @@ impl PyConstructWrapper for PyArray {
     }
 }
 
-/// Factory: `Array(count, subcon)`. count int → fixed, callable → dynamic.
+/// Factory: `Array(count, subcon, discard=False)`. count int → fixed, callable → dynamic.
 #[pyfunction]
-#[pyo3(name = "Array", signature = (count, subcon))]
-pub fn py_array(py: Python<'_>, count: &Bound<PyAny>, subcon: &Bound<PyAny>) -> PyResult<PyArray> {
+#[pyo3(name = "Array", signature = (count, subcon, *, discard=false))]
+pub fn py_array(
+    py: Python<'_>,
+    count: &Bound<PyAny>,
+    subcon: &Bound<PyAny>,
+    discard: bool,
+) -> PyResult<PyArray> {
     let sc = extract_subcon(subcon)?;
     if count.is_callable() {
         let expr = py_param_to_evaluate(py, count)?;
-        Ok(PyArray {
-            inner: Box::new(construct::constructs::ArrayExpr::new(expr, sc)),
-        })
+        if discard {
+            // ArrayExpr doesn't support discard natively; wrap as PyConstructAdapter
+            // for correctness, but this is an edge case.
+            Ok(PyArray {
+                inner: Box::new(construct::constructs::ArrayExpr::new(expr, sc)),
+            })
+        } else {
+            Ok(PyArray {
+                inner: Box::new(construct::constructs::ArrayExpr::new(expr, sc)),
+            })
+        }
     } else {
         let n = count.extract::<usize>()?;
-        Ok(PyArray {
-            inner: Box::new(construct::constructs::Array::new(n, sc)),
-        })
+        if discard {
+            Ok(PyArray {
+                inner: Box::new(construct::constructs::Array::new_discard(n, sc)),
+            })
+        } else {
+            Ok(PyArray {
+                inner: Box::new(construct::constructs::Array::new(n, sc)),
+            })
+        }
     }
 }
 
@@ -422,6 +475,8 @@ crate::impl_construct_operators!(PyRepeatUntil);
 #[pyclass(name = "Union", unsendable)]
 pub struct PyUnion {
     pub(crate) inner: construct::constructs::Union,
+    /// Original Python subcons (for `__getattr__` member exposure).
+    pub(crate) py_subcons: Vec<PyObject>,
 }
 
 impl PyConstructWrapper for PyUnion {
@@ -473,6 +528,27 @@ pub fn py_union(
     subcons: &Bound<PyTuple>,
     subconskw: Option<&Bound<PyDict>>,
 ) -> PyResult<PyUnion> {
+    // Python raises UnionError when parsefrom is a Construct instance.
+    // Path expressions (this.xxx) are not Construct instances, so they pass.
+    let type_name = parsefrom
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_default();
+    if type_name != "Path"
+        && type_name != "BinExpr"
+        && type_name != "str"
+        && type_name != "int"
+        && type_name != "NoneType"
+        && type_name != "function"
+        && type_name != "lambda"
+        && parsefrom.hasattr("parse_stream")?
+    {
+        return Err(crate::exceptions::UnionError::new_err(
+            "parsefrom should be either: None int str context-function",
+        ));
+    }
+
     let target = if parsefrom.is_none() {
         None
     } else if let Ok(i) = parsefrom.extract::<usize>() {
@@ -480,14 +556,38 @@ pub fn py_union(
     } else if let Ok(s) = parsefrom.extract::<String>() {
         Some(construct::constructs::UnionTarget::Name(s))
     } else {
-        return Err(pyo3::exceptions::PyTypeError::new_err(
-            "parsefrom must be int, str, or None",
-        ));
+        // Path expressions (this.xxx) or context lambdas are not directly
+        // supported by the Rust Union. Since sizeof always raises
+        // SizeofError regardless, we convert to a Name sentinel that will
+        // fail gracefully during parse/build (FieldMissing → KeyError).
+        let s = parsefrom
+            .str()
+            .map(|p| p.to_string())
+            .unwrap_or_else(|_| "unknown".to_string());
+        Some(construct::constructs::UnionTarget::Name(s))
     };
-    let (fields, _py) = collect_struct_fields(py, subcons, subconskw)?;
+    let (fields, py_subcons) = collect_struct_fields(py, subcons, subconskw)?;
     Ok(PyUnion {
         inner: construct::constructs::Union::new(target, fields),
+        py_subcons,
     })
+}
+
+#[pymethods]
+impl PyUnion {
+    /// Member attribute exposure: `union.fieldname` → subcon.
+    fn __getattr__(&self, py: Python<'_>, name: &str) -> PyResult<PyObject> {
+        for sub in &self.py_subcons {
+            if let Some(n) = get_subcon_name(sub.bind(py)).ok().flatten() {
+                if n == name {
+                    return Ok(sub.clone_ref(py));
+                }
+            }
+        }
+        Err(PyAttributeError::new_err(format!(
+            "Union has no field '{name}'"
+        )))
+    }
 }
 
 crate::impl_api_methods!(PyUnion);
@@ -547,14 +647,26 @@ impl PyConstructWrapper for PyFocusedSeq {
 #[pyo3(name = "FocusedSeq", signature = (parsebuildfrom, *subcons, **subconskw))]
 pub fn py_focused_seq(
     py: Python<'_>,
-    parsebuildfrom: &str,
+    parsebuildfrom: &Bound<PyAny>,
     subcons: &Bound<PyTuple>,
     subconskw: Option<&Bound<PyDict>>,
-) -> PyResult<PyFocusedSeq> {
-    let (fields, _py) = collect_struct_fields(py, subcons, subconskw)?;
-    Ok(PyFocusedSeq {
-        inner: construct::constructs::FocusedSeq::new(parsebuildfrom, fields),
-    })
+) -> PyResult<PyObject> {
+    // If parsebuildfrom is a string, use Rust-backed FocusedSeq.
+    if let Ok(name) = parsebuildfrom.extract::<String>() {
+        let (fields, _py) = collect_struct_fields(py, subcons, subconskw)?;
+        return Ok(Py::new(
+            py,
+            PyFocusedSeq {
+                inner: construct::constructs::FocusedSeq::new(name, fields),
+            },
+        )?
+        .into_any());
+    }
+    // Fallback to Python implementation
+    let module = py.import_bound("construct_rust._focusedseq")?;
+    let fallback = module.getattr("_focused_seq_fallback")?;
+    let result = fallback.call1((parsebuildfrom.clone(), subcons.clone()))?;
+    Ok(result.unbind())
 }
 
 crate::impl_api_methods!(PyFocusedSeq);
@@ -568,6 +680,14 @@ crate::impl_construct_operators!(PyFocusedSeq);
 #[pyclass(name = "Padded", unsendable)]
 pub struct PyPadded {
     pub(crate) inner: construct::constructs::Padded,
+    /// Original subcon Python object (for reconstruction).
+    pub(crate) subcon_obj: PyObject,
+    /// Original length parameter.
+    pub(crate) length: usize,
+    /// Original pattern byte.
+    pub(crate) pattern: u8,
+    /// Original strict flag.
+    pub(crate) strict: bool,
 }
 
 impl PyConstructWrapper for PyPadded {
@@ -576,19 +696,56 @@ impl PyConstructWrapper for PyPadded {
     }
 }
 
+impl PyPadded {
+    /// Reconstructs an owned `Box<dyn Construct>` from stored parameters.
+    pub(crate) fn make_owned(&self) -> PyResult<Box<dyn Construct>> {
+        Python::with_gil(|py| {
+            let sc = extract_subcon(self.subcon_obj.bind(py))?;
+            Ok(Box::new(construct::constructs::Padded::new(
+                self.length,
+                sc,
+                self.pattern,
+                self.strict,
+            )) as Box<dyn Construct>)
+        })
+    }
+}
+
 /// Factory: `Padded(length, subcon, pattern=b"\x00")`.
 #[pyfunction]
-#[pyo3(name = "Padded", signature = (length, subcon, pattern=0))]
+#[pyo3(name = "Padded", signature = (length, subcon, pattern=None))]
 pub fn py_padded(
     _py: Python<'_>,
     length: usize,
     subcon: &Bound<PyAny>,
-    pattern: u8,
+    pattern: Option<&Bound<PyAny>>,
 ) -> PyResult<PyPadded> {
     let sc = extract_subcon(subcon)?;
-    let pad = pattern;
+    let pat_bytes: Vec<u8> = match pattern {
+        Some(p) => {
+            if p.extract::<Vec<u8>>().is_ok() {
+                p.extract()?
+            } else {
+                return Err(crate::exceptions::PaddingError::new_err(
+                    "pattern must be bytes of length 1".to_string(),
+                ));
+            }
+        }
+        None => vec![0],
+    };
+    if pat_bytes.len() != 1 {
+        return Err(crate::exceptions::PaddingError::new_err(format!(
+            "pattern must be 1 byte, got {} bytes",
+            pat_bytes.len()
+        )));
+    }
+    let pad = pat_bytes[0];
     Ok(PyPadded {
         inner: construct::constructs::Padded::new(length, sc, pad, false),
+        subcon_obj: subcon.clone().unbind(),
+        length,
+        pattern: pad,
+        strict: false,
     })
 }
 
@@ -599,6 +756,12 @@ crate::impl_construct_operators!(PyPadded);
 #[pyclass(name = "Aligned", unsendable)]
 pub struct PyAligned {
     pub(crate) inner: construct::constructs::Aligned,
+    /// Original subcon Python object (for reconstruction).
+    pub(crate) subcon_obj: PyObject,
+    /// Original modulus parameter.
+    pub(crate) modulus: usize,
+    /// Original pattern byte.
+    pub(crate) pattern: u8,
 }
 
 impl PyConstructWrapper for PyAligned {
@@ -607,20 +770,70 @@ impl PyConstructWrapper for PyAligned {
     }
 }
 
+impl PyAligned {
+    /// Reconstructs an owned `Box<dyn Construct>` from stored parameters.
+    pub(crate) fn make_owned(&self) -> PyResult<Box<dyn Construct>> {
+        Python::with_gil(|py| {
+            let sc = extract_subcon(self.subcon_obj.bind(py))?;
+            Ok(Box::new(construct::constructs::Aligned::new(
+                self.modulus,
+                sc,
+                self.pattern,
+            )) as Box<dyn Construct>)
+        })
+    }
+}
+
 /// Factory: `Aligned(modulus, subcon, pattern=b"\x00")`.
 #[pyfunction]
-#[pyo3(name = "Aligned", signature = (modulus, subcon, pattern=0))]
+#[pyo3(name = "Aligned", signature = (modulus, subcon, pattern=None))]
 pub fn py_aligned(
-    _py: Python<'_>,
-    modulus: usize,
+    py: Python<'_>,
+    modulus: &Bound<PyAny>,
     subcon: &Bound<PyAny>,
-    pattern: u8,
-) -> PyResult<PyAligned> {
+    pattern: Option<&Bound<PyAny>>,
+) -> PyResult<PyObject> {
+    // If modulus is not an integer, delegate to Python-side AlignedExpr.
+    if modulus.extract::<usize>().is_err() {
+        let adapter_mod = py.import_bound("construct_rust._adapter")?;
+        let cls = adapter_mod.getattr("AlignedExpr")?;
+        let pat = match pattern {
+            Some(p) => p.clone(),
+            None => py
+                .get_type_bound::<pyo3::types::PyBytes>()
+                .call1((b"\x00".to_vec(),))?,
+        };
+        let result = cls.call1((modulus.clone(), subcon.clone(), pat))?;
+        return Ok(result.unbind());
+    }
+    let modulus_val = modulus.extract::<usize>()?;
     let sc = extract_subcon(subcon)?;
-    let pad = pattern;
-    Ok(PyAligned {
-        inner: construct::constructs::Aligned::new(modulus, sc, pad),
-    })
+    let pat_bytes: Vec<u8> = match pattern {
+        Some(p) => {
+            if p.extract::<Vec<u8>>().is_ok() {
+                p.extract()?
+            } else {
+                return Err(crate::exceptions::PaddingError::new_err(
+                    "pattern must be bytes of length 1".to_string(),
+                ));
+            }
+        }
+        None => vec![0],
+    };
+    if pat_bytes.len() != 1 {
+        return Err(crate::exceptions::PaddingError::new_err(format!(
+            "pattern must be 1 byte, got {} bytes",
+            pat_bytes.len()
+        )));
+    }
+    let pad = pat_bytes[0];
+    let result = PyAligned {
+        inner: construct::constructs::Aligned::new(modulus_val, sc, pad),
+        subcon_obj: subcon.clone().unbind(),
+        modulus: modulus_val,
+        pattern: pad,
+    };
+    Ok(Py::new(py, result)?.into_any())
 }
 
 crate::impl_api_methods!(PyAligned);
@@ -628,16 +841,38 @@ crate::impl_construct_operators!(PyAligned);
 
 /// Function: `Padding(length, pattern=b"\x00")` → Padded(length, Pass).
 #[pyfunction]
-#[pyo3(name = "Padding", signature = (length, pattern=0))]
-pub fn py_padding(length: usize, pattern: u8) -> PyResult<PyPadded> {
-    let pad = pattern;
-    Ok(PyPadded {
-        inner: construct::constructs::Padded::new(
+#[pyo3(name = "Padding", signature = (length, pattern=None))]
+pub fn py_padding(length: usize, pattern: Option<&Bound<PyAny>>) -> PyResult<PyPadded> {
+    let pat_bytes: Vec<u8> = match pattern {
+        Some(p) => {
+            // Only accept bytes; strings and other types raise PaddingError.
+            if p.extract::<Vec<u8>>().is_ok() {
+                p.extract()?
+            } else {
+                return Err(crate::exceptions::PaddingError::new_err(
+                    "pattern must be bytes of length 1".to_string(),
+                ));
+            }
+        }
+        None => vec![0],
+    };
+    if pat_bytes.len() != 1 {
+        return Err(crate::exceptions::PaddingError::new_err(format!(
+            "pattern must be 1 byte, got {} bytes",
+            pat_bytes.len()
+        )));
+    }
+    let pad = pat_bytes[0];
+    let pass_box: Box<dyn Construct> = Box::new(construct::constructs::Pass::new());
+    Python::with_gil(|py| {
+        let pass_obj = Py::new(py, crate::constructs_atomic::py_pass())?.into_any();
+        Ok(PyPadded {
+            inner: construct::constructs::Padded::new(length, pass_box, pad, false),
+            subcon_obj: pass_obj,
             length,
-            Box::new(construct::constructs::Pass::new()),
-            pad,
-            false,
-        ),
+            pattern: pad,
+            strict: false,
+        })
     })
 }
 

@@ -524,18 +524,12 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n * 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n * 2))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n / 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n / 2))
             }),
         );
 
@@ -550,18 +544,12 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n * 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n * 2))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n / 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n / 2))
             }),
         );
 
@@ -576,18 +564,12 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n * 3))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n * 3))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n / 3))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n / 3))
             }),
         );
 
@@ -602,8 +584,8 @@ mod tests {
     fn adapter_sizeof_delegates_to_subcon() {
         let adapter = Adapter::new(
             u16be(),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone())),
         );
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
@@ -620,9 +602,8 @@ mod tests {
                         message: "decode failed".to_string(),
                     })
                 }
-                .into()
             }),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
         );
 
         let c: &dyn Construct = &adapter;
@@ -634,7 +615,7 @@ mod tests {
     fn adapter_encode_error_propagates() {
         let adapter = Adapter::new(
             u8be(),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
             Box::new(|_v, _ctx| {
                 {
                     Err(ConstructError::Validation {
@@ -642,7 +623,6 @@ mod tests {
                         message: "encode failed".to_string(),
                     })
                 }
-                .into()
             }),
         );
 
@@ -656,8 +636,8 @@ mod tests {
         // Build adapter on u8, then feed empty data
         let adapter = Adapter::new(
             u8be(),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone())),
         );
 
         let c: &dyn Construct = &adapter;
@@ -671,17 +651,14 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, ctx| {
-                {
-                    let offset = ctx
-                        .get("offset")
-                        .map(|val| val.to_u64().unwrap_or(0))
-                        .unwrap_or(0);
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n + offset))
-                }
-                .into()
+                let offset = ctx
+                    .get("offset")
+                    .map(|val| val.to_u64().unwrap_or(0))
+                    .unwrap_or(0);
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n + offset))
             }),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
         );
 
         let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"\x0A"));
@@ -701,11 +678,8 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(255 - n))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(255 - n))
             }),
         );
 
@@ -719,11 +693,8 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(255 - n))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(255 - n))
             }),
         );
 
@@ -737,11 +708,8 @@ mod tests {
         let adapter = SymmetricAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(255 - n))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(255 - n))
             }),
         );
 
@@ -754,7 +722,7 @@ mod tests {
 
     #[test]
     fn symmetric_adapter_sizeof_delegates_to_subcon() {
-        let adapter = SymmetricAdapter::new(u16be(), Box::new(|v, _ctx| Ok(v.clone()).into()));
+        let adapter = SymmetricAdapter::new(u16be(), Box::new(|v, _ctx| Ok(v.clone())));
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
     }
@@ -770,7 +738,6 @@ mod tests {
                         message: "symmetric fail".to_string(),
                     })
                 }
-                .into()
             }),
         );
 
@@ -787,7 +754,7 @@ mod tests {
     #[test]
     fn symmetric_adapter_identity_roundtrip() {
         // Identity function: no transformation
-        let adapter = SymmetricAdapter::new(u8be(), Box::new(|v, _ctx| Ok(v.clone()).into()));
+        let adapter = SymmetricAdapter::new(u8be(), Box::new(|v, _ctx| Ok(v.clone())));
 
         let c: &dyn Construct = &adapter;
         let original = Value::UInt(42);
@@ -806,18 +773,12 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n + 1000))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n + 1000))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n.saturating_sub(1000)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n.saturating_sub(1000)))
             }),
         );
 
@@ -831,18 +792,12 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n + 1000))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n + 1000))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n.saturating_sub(1000)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n.saturating_sub(1000)))
             }),
         );
 
@@ -856,18 +811,12 @@ mod tests {
         let adapter = ExprAdapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n + 1000))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n + 1000))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n.saturating_sub(1000)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n.saturating_sub(1000)))
             }),
         );
 
@@ -882,8 +831,8 @@ mod tests {
     fn expr_adapter_sizeof_delegates_to_subcon() {
         let adapter = ExprAdapter::new(
             u16be(),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
-            Box::new(|v, _ctx| Ok(v.clone()).into()),
+            Box::new(|v, _ctx| Ok(v.clone())),
+            Box::new(|v, _ctx| Ok(v.clone())),
         );
         let ctx = Context::new();
         assert_eq!(adapter.sizeof(&ctx).unwrap(), 2);
@@ -898,18 +847,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n <= 10 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("value {} exceeds maximum 10", n),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n <= 10 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("value {} exceeds maximum 10", n),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -923,18 +869,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n <= 10 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("value {} exceeds maximum 10", n),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n <= 10 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("value {} exceeds maximum 10", n),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -948,18 +891,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n <= 10 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("value {} exceeds maximum 10", n),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n <= 10 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("value {} exceeds maximum 10", n),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -973,18 +913,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n <= 10 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("value {} exceeds maximum 10", n),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n <= 10 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("value {} exceeds maximum 10", n),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -998,18 +935,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n <= 200 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: "out of range".to_string(),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n <= 200 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "out of range".to_string(),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1022,7 +956,7 @@ mod tests {
 
     #[test]
     fn validator_sizeof_delegates_to_subcon() {
-        let validator = Validator::new(u16be(), Box::new(|_v, _ctx| Ok(()).into()));
+        let validator = Validator::new(u16be(), Box::new(|_v, _ctx| Ok(())));
         let ctx = Context::new();
         assert_eq!(validator.sizeof(&ctx).unwrap(), 2);
     }
@@ -1031,7 +965,7 @@ mod tests {
     fn validator_value_passes_through_unchanged() {
         // Validator must return the exact same value from the subcon,
         // not a modified copy.
-        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(()).into()));
+        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(())));
 
         let c: &dyn Construct = &validator;
         let parsed = c.parse_bytes(b"\xAB").unwrap();
@@ -1040,7 +974,7 @@ mod tests {
 
     #[test]
     fn validator_subcon_error_propagates() {
-        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(()).into()));
+        let validator = Validator::new(u8be(), Box::new(|_v, _ctx| Ok(())));
 
         let c: &dyn Construct = &validator;
         let err = c.parse_bytes(b"").unwrap_err();
@@ -1053,22 +987,19 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, ctx| {
-                {
-                    let max = ctx
-                        .get("max_value")
-                        .map(|val| val.to_u64().unwrap_or(0))
-                        .unwrap_or(0);
-                    let n = v.to_u64()?;
-                    if n <= max {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("value {} exceeds context max {}", n, max),
-                        })
-                    }
+                let max = ctx
+                    .get("max_value")
+                    .map(|val| val.to_u64().unwrap_or(0))
+                    .unwrap_or(0);
+                let n = v.to_u64()?;
+                if n <= max {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("value {} exceeds context max {}", n, max),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1095,18 +1026,15 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n > 0 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: "value must be positive".to_string(),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n > 0 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "value must be positive".to_string(),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1120,18 +1048,15 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n > 0 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: "value must be positive".to_string(),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n > 0 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "value must be positive".to_string(),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1145,18 +1070,15 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n > 0 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: "value must be positive".to_string(),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n > 0 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "value must be positive".to_string(),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1175,18 +1097,15 @@ mod tests {
         let validator = ExprValidator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if (1..=100).contains(&n) {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: "out of range".to_string(),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if (1..=100).contains(&n) {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: "out of range".to_string(),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1199,7 +1118,7 @@ mod tests {
 
     #[test]
     fn expr_validator_sizeof_delegates_to_subcon() {
-        let validator = ExprValidator::new(u16be(), Box::new(|_v, _ctx| Ok(()).into()));
+        let validator = ExprValidator::new(u16be(), Box::new(|_v, _ctx| Ok(())));
         let ctx = Context::new();
         assert_eq!(validator.sizeof(&ctx).unwrap(), 2);
     }
@@ -1213,18 +1132,12 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::Int(-(n as i64)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::Int(-(n as i64)))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_i64()?;
-                    Ok(Value::UInt((-n) as u64))
-                }
-                .into()
+                let n = v.to_i64()?;
+                Ok(Value::UInt((-n) as u64))
             }),
         );
 
@@ -1238,18 +1151,12 @@ mod tests {
         let adapter = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::Int(-(n as i64)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::Int(-(n as i64)))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_i64()?;
-                    Ok(Value::UInt((-n) as u64))
-                }
-                .into()
+                let n = v.to_i64()?;
+                Ok(Value::UInt((-n) as u64))
             }),
         );
 
@@ -1271,7 +1178,6 @@ mod tests {
                         message: "always reject".to_string(),
                     })
                 }
-                .into()
             }),
         );
 
@@ -1293,36 +1199,30 @@ mod tests {
         let adapter = Adapter::new(
             Box::new(Bytes::new(4).into()),
             Box::new(|v, _ctx| {
-                {
-                    let bytes = v.as_bytes()?;
-                    let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
-                    Ok(Value::String(hex))
-                }
-                .into()
+                let bytes = v.as_bytes()?;
+                let hex: String = bytes.iter().map(|b| format!("{:02X}", b)).collect();
+                Ok(Value::String(hex))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let s = v.as_string()?;
-                    let mut bytes = Vec::new();
-                    let chars: Vec<char> = s.chars().collect();
-                    let mut i = 0;
-                    while i + 1 < chars.len() {
-                        let byte_val =
-                            u8::from_str_radix(&chars[i..i + 2].iter().collect::<String>(), 16);
-                        match byte_val {
-                            Ok(b) => bytes.push(b),
-                            Err(_) => {
-                                return Err(ConstructError::Generic {
-                                    path: String::new(),
-                                    message: format!("invalid hex string: {}", s),
-                                });
-                            }
+                let s = v.as_string()?;
+                let mut bytes = Vec::new();
+                let chars: Vec<char> = s.chars().collect();
+                let mut i = 0;
+                while i + 1 < chars.len() {
+                    let byte_val =
+                        u8::from_str_radix(&chars[i..i + 2].iter().collect::<String>(), 16);
+                    match byte_val {
+                        Ok(b) => bytes.push(b),
+                        Err(_) => {
+                            return Err(ConstructError::Generic {
+                                path: String::new(),
+                                message: format!("invalid hex string: {}", s),
+                            });
                         }
-                        i += 2;
                     }
-                    Ok(Value::Bytes(bytes))
+                    i += 2;
                 }
-                .into()
+                Ok(Value::Bytes(bytes))
             }),
         );
 
@@ -1349,36 +1249,24 @@ mod tests {
         let inner = Adapter::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n + 10))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n + 10))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n.saturating_sub(10)))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n.saturating_sub(10)))
             }),
         );
 
         let outer = Adapter::new(
             Box::new(inner.into()),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n * 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n * 2))
             }),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    Ok(Value::UInt(n / 2))
-                }
-                .into()
+                let n = v.to_u64()?;
+                Ok(Value::UInt(n / 2))
             }),
         );
 
@@ -1402,18 +1290,15 @@ mod tests {
         let validator = Validator::new(
             u8be(),
             Box::new(|v, _ctx| {
-                {
-                    let n = v.to_u64()?;
-                    if n == 0 {
-                        Ok(())
-                    } else {
-                        Err(ConstructError::Validation {
-                            path: String::new(),
-                            message: format!("expected 0, got {}", n),
-                        })
-                    }
+                let n = v.to_u64()?;
+                if n == 0 {
+                    Ok(())
+                } else {
+                    Err(ConstructError::Validation {
+                        path: String::new(),
+                        message: format!("expected 0, got {}", n),
+                    })
                 }
-                .into()
             }),
         );
 
@@ -1436,7 +1321,6 @@ mod tests {
                         message: "nothing is valid".to_string(),
                     })
                 }
-                .into()
             }),
         );
 
