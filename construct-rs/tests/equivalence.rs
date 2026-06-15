@@ -18,7 +18,7 @@ use construct::constructs::control_flow::{IfThenElse, Switch};
 use construct::constructs::enum_::Enum;
 use construct::constructs::format_field::{INT16UB, INT32UB, INT8SB, INT8UB};
 use construct::constructs::meta::Pass;
-use construct::constructs::repetition::{Array, ArrayExpr, GreedyRange};
+use construct::constructs::repetition::{Array, ArrayExpr, GreedyRange, RepeatUntil};
 use construct::constructs::sequence::Sequence;
 use construct::constructs::stream_ops::{Bitwise, Pointer, Prefixed};
 use construct::constructs::struct_::Struct;
@@ -556,4 +556,24 @@ fn eq_struct_with_pass_field() {
     container.insert("a".to_string(), Value::UInt(0x33));
     container.insert("meta".to_string(), Value::None);
     assert_build_eq(&cc, &Value::Container(container));
+}
+
+// ===========================================================================
+// 23. RepeatUntil (migrated in 12.9)
+// ===========================================================================
+
+#[test]
+fn eq_repeat_until() {
+    // RepeatUntil: stop when value > 7
+    let schema = RepeatUntil::new(
+        Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7),
+        Box::new(INT8UB.into()),
+    );
+    let cc: CombinedConstruct = schema.into();
+    let data = &[0x01, 0x02, 0x08];
+    assert_parse_eq(&cc, data);
+    assert_build_eq(
+        &cc,
+        &Value::List(vec![Value::UInt(1), Value::UInt(2), Value::UInt(8)]),
+    );
 }

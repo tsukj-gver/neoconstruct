@@ -582,11 +582,26 @@ pub struct CompiledGreedyRange {
 /// This remains a unit struct because `RepeatUntil` compiles to
 /// [`CompiledDynamic`](super::CompiledDynamic) — the predicate closure
 /// (`RepeatPredicate`) is a `Box<dyn Fn>` that cannot be cloned from `&self`
-/// during compilation. This variant is reserved for future use if
-/// `RepeatPredicate` is migrated to `Arc<dyn Fn + Send + Sync>` (similar to
-/// the B4 Adapter closure migration).
-#[derive(Debug)]
-pub struct CompiledRepeatUntil;
+/// during compilation. After the `RepeatPredicate` Arc migration (B4-style),
+/// this struct now holds the compiled predicate and recursively compiled
+/// subcon.
+pub struct CompiledRepeatUntil {
+    /// The predicate that determines when to stop iterating.
+    pub predicate: crate::constructs::repetition::RepeatPredicate,
+    /// The recursively compiled subcon for each element.
+    pub subcon: Box<CompiledNode>,
+    /// If `true`, parse returns an empty list (elements consumed but discarded).
+    pub discard: bool,
+}
+impl std::fmt::Debug for CompiledRepeatUntil {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledRepeatUntil")
+            .field("predicate", &"<closure>")
+            .field("subcon", &self.subcon)
+            .field("discard", &self.discard)
+            .finish()
+    }
+}
 
 // -- Lazy constructors (Phase 12.8: eager delegation) --
 /// Compiled node for `Lazy`.
@@ -1057,10 +1072,12 @@ pub enum CompiledNode {
 // sub-tasks 12.4-12.9.
 
 /// Error message for stub CompiledExec implementations.
+#[allow(dead_code)]
 const STUB_EXEC_MESSAGE: &str =
     "CompiledExec not yet implemented (Phase 12.1 stub — real impl in 12.4-12.9)";
 
 /// Builds a stub error for CompiledExec methods.
+#[allow(dead_code)]
 fn stub_exec_error() -> ConstructError {
     ConstructError::Generic {
         path: String::new(),
@@ -1100,9 +1117,7 @@ macro_rules! impl_compiled_exec_stub {
 }
 
 impl_compiled_exec_stub! {
-    // repetition (Array, ArrayExpr, GreedyRange implemented in 12.6;
-    //   RepeatUntil compiles to CompiledDynamic, so its stub is never hit)
-    CompiledRepeatUntil,
+    // All types now have real implementations (RepeatUntil migrated in 12.9).
 }
 
 // ===========================================================================
@@ -2042,6 +2057,87 @@ impl CompiledExec for CompiledGreedyRange {
         Err(ConstructError::Sizeof {
             path: String::new(),
             reason: "GreedyRange has undefined size".to_string(),
+        })
+    }
+}
+
+// -- CompiledRepeatUntil (Phase 12.9: migrated from stub) --------------------
+
+impl CompiledExec for CompiledRepeatUntil {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let mut i: u64 = 0;
+        // Local list for predicate evaluation (mirrors declaration-tree behavior).
+        let mut local_list: Vec<Value> = Vec::new();
+        loop {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i));
+            let mut sub_sink = sink.sub_sink_for_item()?;
+            self.subcon
+                .exec_parse(stream, ctx, sub_sink.as_mut())
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            let element = sub_sink.into_value()?;
+
+            if !self.discard {
+                local_list.push(element.clone());
+                sink.push_item(element.clone())?;
+            }
+
+            if (self.predicate)(&element, &local_list, ctx) {
+                return Ok(());
+            }
+            i = i.saturating_add(1);
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let list = match input {
+            Value::List(items) => items.clone(),
+            other => {
+                return Err(ConstructError::TypeMismatch {
+                    path: String::new(),
+                    expected: "List".to_string(),
+                    actual: other.type_name().to_string(),
+                });
+            }
+        };
+
+        let mut built: Vec<Value> = Vec::new();
+        for (i, element) in list.iter().enumerate() {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            self.subcon
+                .exec_build(element, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+
+            if !self.discard {
+                built.push(element.clone());
+            }
+
+            if (self.predicate)(element, &built, ctx) {
+                return Ok(());
+            }
+        }
+
+        // No element matched the predicate.
+        Err(ConstructError::Array {
+            path: String::new(),
+            expected: 0,
+            actual: 0,
+        })
+    }
+
+    fn exec_sizeof(&self, _ctx: &Context) -> Result<usize> {
+        Err(ConstructError::Sizeof {
+            path: String::new(),
+            reason: "RepeatUntil has undefined size, amount depends on actual data".to_string(),
         })
     }
 }
@@ -4091,8 +4187,10 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
             .sum(),
         // Array: count × element size (if element is fixed-length).
         CompiledNode::Array(a) => try_fold_static_size(&a.subcon).map(|elem| elem * a.count),
-        // GreedyRange, ArrayExpr: variable count → unknown.
-        CompiledNode::GreedyRange(_) | CompiledNode::ArrayExpr(_) => None,
+        // GreedyRange, ArrayExpr, RepeatUntil: variable count → unknown.
+        CompiledNode::GreedyRange(_)
+        | CompiledNode::ArrayExpr(_)
+        | CompiledNode::RepeatUntil(_) => None,
         // Select, Union: size depends on runtime data → unknown.
         CompiledNode::Select(_) | CompiledNode::Union(_) => None,
         // RepeatUntil: compiles to Dynamic (never a CompiledRepeatUntil node).

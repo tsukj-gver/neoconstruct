@@ -20,6 +20,7 @@ use crate::core::Construct;
 use crate::expr::CombinedExpr;
 use crate::expr::Evaluate;
 use crate::value::Value;
+use std::sync::Arc;
 
 // ===========================================================================
 // Context key for the current loop index
@@ -445,7 +446,18 @@ impl Construct for GreedyRange {
 /// the result).
 ///
 /// Corresponds to the Python `predicate` lambda `(obj, list, context) -> bool`.
-pub type RepeatPredicate = Box<dyn Fn(&Value, &[Value], &Context) -> bool>;
+///
+/// This is the **storage** form ([`Arc`]-based, `Send + Sync`). For
+/// constructing a [`RepeatUntil`], use [`RepeatPredicateBox`] — the
+/// `Box`-based constructor parameter form that is converted to `Arc`
+/// internally.
+pub type RepeatPredicate = Arc<dyn Fn(&Value, &[Value], &Context) -> bool + Send + Sync>;
+
+/// The constructor-parameter form of [`RepeatPredicate`].
+///
+/// Users pass `Box::new(closure)` which is converted to `Arc` internally
+/// by [`RepeatUntil::new`] / [`RepeatUntil::new_discard`].
+pub type RepeatPredicateBox = Box<dyn Fn(&Value, &[Value], &Context) -> bool + Send + Sync>;
 
 // ===========================================================================
 // RepeatUntil
@@ -474,9 +486,7 @@ pub type RepeatPredicate = Box<dyn Fn(&Value, &[Value], &Context) -> bool>;
 ///
 /// // Stop when we encounter a value greater than 7
 /// let ru = RepeatUntil::new(
-///     Box::new(|obj, _list, _ctx| {
-///         obj.to_u64().unwrap_or(0) > 7
-///     }.into()),
+///     Box::new(|obj, _list, _ctx| obj.to_u64().unwrap_or(0) > 7),
 ///     Box::new(INT8UB.into()),
 /// );
 /// let c: &dyn Construct = &ru;
@@ -511,9 +521,9 @@ impl RepeatUntil {
     ///     Box::new(INT8UB.into()),
     /// );
     /// ```
-    pub fn new(predicate: RepeatPredicate, subcon: Box<CombinedConstruct>) -> Self {
+    pub fn new(predicate: RepeatPredicateBox, subcon: Box<CombinedConstruct>) -> Self {
         RepeatUntil {
-            predicate,
+            predicate: Arc::from(predicate),
             subcon,
             discard: false,
         }
@@ -522,9 +532,9 @@ impl RepeatUntil {
     /// Creates a new `RepeatUntil` with `discard = true`.
     ///
     /// Parsed elements are consumed from the stream but not collected.
-    pub fn new_discard(predicate: RepeatPredicate, subcon: Box<CombinedConstruct>) -> Self {
+    pub fn new_discard(predicate: RepeatPredicateBox, subcon: Box<CombinedConstruct>) -> Self {
         RepeatUntil {
-            predicate,
+            predicate: Arc::from(predicate),
             subcon,
             discard: true,
         }

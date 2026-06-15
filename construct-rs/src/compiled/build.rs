@@ -25,10 +25,11 @@ use crate::compiled::{
     CompiledLazyArray, CompiledLazyStruct, CompiledMapping, CompiledNamedTuple, CompiledNode,
     CompiledPadded, CompiledPaddedString, CompiledPass, CompiledPeek, CompiledPointer,
     CompiledPointerExpr, CompiledPrefixed, CompiledRawCopy, CompiledRebuffered, CompiledRebuild,
-    CompiledRenamed, CompiledRestreamed, CompiledSeek, CompiledSeekExpr, CompiledSelect,
-    CompiledSequence, CompiledStopIf, CompiledStruct, CompiledSubconstruct, CompiledSwitch,
-    CompiledSymmetricAdapter, CompiledTell, CompiledTerminated, CompiledTimestampAdapter,
-    CompiledTransformed, CompiledUnion, CompiledValidator, CompiledVarInt, CompiledZigZag,
+    CompiledRenamed, CompiledRepeatUntil, CompiledRestreamed, CompiledSeek, CompiledSeekExpr,
+    CompiledSelect, CompiledSequence, CompiledStopIf, CompiledStruct, CompiledSubconstruct,
+    CompiledSwitch, CompiledSymmetricAdapter, CompiledTell, CompiledTerminated,
+    CompiledTimestampAdapter, CompiledTransformed, CompiledUnion, CompiledValidator,
+    CompiledVarInt, CompiledZigZag,
 };
 use crate::constructs::{
     adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator},
@@ -477,30 +478,19 @@ impl BuildConstruct for GreedyRange {
     }
 }
 
-// -- RepeatUntil (not compilable in Phase 12) ------------------------------
+// -- RepeatUntil (Phase 12.9: migrated from stub) --------------------------
 //
-// RepeatUntil's `RepeatPredicate` is a `Box<dyn Fn>` that cannot be cloned
-// from `&self` during compilation. Unlike Adapter closures (which were
-// migrated to `Arc<dyn Fn + Send + Sync>` in B4), `RepeatPredicate` is not
-// yet migrated. Additionally, `RepeatUntil.subcon` is `Box<CombinedConstruct>`
-// which is not `Clone`, so the entire `RepeatUntil` cannot be cloned into an
-// `Arc<dyn Construct>` for the Dynamic escape-hatch.
-//
-// DESIGN DECISION: RepeatUntil's `compile` returns an error directing users
-// to the declaration-tree old path (`CombinedConstruct::parse_bytes`). This
-// is a known limitation of Phase 12. A future phase could migrate
-// `RepeatPredicate` to `Arc<dyn Fn + Send + Sync>` (B4-style) and
-// `CombinedConstruct` to `Clone` to enable compilation.
+// After the `RepeatPredicate` Arc migration (B4-style), `RepeatUntil` can now
+// be compiled: the predicate is `Arc::clone`d, the subcon is recursively
+// compiled, and the discard flag is copied.
 
 impl BuildConstruct for RepeatUntil {
     fn compile(&self) -> Result<CompiledNode> {
-        Err(ConstructError::Generic {
-            path: String::new(),
-            message: "RepeatUntil cannot be compiled to the execution tree in Phase 12 \
-                      (predicate closure is not cloneable); use the declaration-tree old path \
-                      (CombinedConstruct::parse_bytes / build_bytes) instead"
-                .to_string(),
-        })
+        Ok(CompiledNode::RepeatUntil(CompiledRepeatUntil {
+            predicate: Arc::clone(&self.predicate),
+            subcon: Box::new(self.subcon.compile()?),
+            discard: self.discard,
+        }))
     }
 }
 
@@ -1135,14 +1125,14 @@ mod tests {
     }
 
     #[test]
-    fn composite_compile_repeat_until_returns_error() {
-        // RepeatUntil cannot be compiled (predicate closure is not cloneable).
+    fn composite_compile_repeat_until_succeeds() {
+        // RepeatUntil is now compilable after the RepeatPredicate Arc migration.
         let ru = crate::constructs::repetition::RepeatUntil::new(
             Box::new(|_obj, _list, _ctx| true),
             Box::new(INT8UB.into()),
         );
-        let result = ru.compile();
-        assert!(result.is_err());
+        let node = ru.compile().unwrap();
+        assert!(matches!(node, CompiledNode::RepeatUntil(_)));
     }
 
     #[test]
