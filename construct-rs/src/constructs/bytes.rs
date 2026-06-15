@@ -39,6 +39,7 @@ use crate::value::Value;
 /// let built = b.build_bytes(&Value::Bytes(b"beef".to_vec())).unwrap();
 /// assert_eq!(built, b"beef");
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Bytes {
     /// The number of bytes to read/write.
     pub length: usize,
@@ -115,6 +116,7 @@ impl Construct for Bytes {
 /// let parsed = c.parse_bytes(b"asislight").unwrap();
 /// assert_eq!(parsed, Value::Bytes(b"asislight".to_vec()));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct GreedyBytes;
 
 impl GreedyBytes {
@@ -184,6 +186,7 @@ impl Construct for GreedyBytes {
 /// assert_eq!(container.get("len").unwrap(), &Value::UInt(3));
 /// assert_eq!(container.get("data").unwrap(), &Value::Bytes(b"ABC".to_vec()));
 /// ```
+#[derive(Clone, Debug)]
 pub struct BytesExpr {
     /// Expression that evaluates to the number of bytes to read/write.
     pub length_expr: Box<CombinedExpr>,

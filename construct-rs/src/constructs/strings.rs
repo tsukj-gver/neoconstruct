@@ -298,6 +298,7 @@ const CSTRING_SIZEOF_REASON: &str = "CString has variable size";
 /// let parsed = c.parse_bytes(b"hello\x00world").unwrap();
 /// assert_eq!(parsed, Value::String("hello".to_string()));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct CString {
     /// The character encoding.
     pub encoding: StringEncoding,
@@ -397,6 +398,7 @@ fn padded_sizeof_message(length: usize, unit: usize) -> String {
 /// let built = c.build_bytes(&Value::String("hello".to_string())).unwrap();
 /// assert_eq!(built, b"hello\0\0\0\0\0");
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct PaddedString {
     /// The fixed total length in bytes.
     pub length: usize,

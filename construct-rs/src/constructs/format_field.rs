@@ -133,6 +133,7 @@ impl FormatKind {
 /// let val = INT32UB.parse_bytes(b"\x00\x00\x01\x00").unwrap();
 /// assert_eq!(val, Value::UInt(256));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct FormatField {
     /// Byte order.
     pub endian: Endianness,

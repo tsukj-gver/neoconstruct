@@ -12,7 +12,12 @@
 //! are filled in across sub-tasks 12.4-12.9.
 
 use crate::combined::CombinedConstruct;
-use crate::compiled::CompiledNode;
+use crate::compiled::{
+    CompiledBitsInteger, CompiledBytes, CompiledBytesExpr, CompiledBytesInteger, CompiledCString,
+    CompiledError, CompiledFlag, CompiledFormatField, CompiledGreedyBytes, CompiledNode,
+    CompiledPaddedString, CompiledPass, CompiledSeek, CompiledSeekExpr, CompiledTell,
+    CompiledTerminated, CompiledVarInt, CompiledZigZag,
+};
 use crate::constructs::{
     adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator},
     bytes::{Bytes, BytesExpr, GreedyBytes},
@@ -117,15 +122,10 @@ macro_rules! impl_build_construct_stub {
 impl_build_construct_stub! {
     // core
     Subconstruct, Renamed,
-    // atomic
-    FormatField, Bytes, GreedyBytes, BytesExpr, BytesInteger, BitsInteger,
-    VarInt, ZigZag, Flag, CString, PaddedString,
     // const / mapping
     Const, Mapping,
     // adapters
     Adapter, SymmetricAdapter, ExprAdapter, Validator, ExprValidator,
-    // meta
-    Pass, Terminated, Tell, Seek, SeekExpr, Error,
     // composite
     Struct, Sequence, Union, Select, FocusedSeq,
     // enum / computed
@@ -147,6 +147,53 @@ impl_build_construct_stub! {
 // Feature-gated stub for Compressed.
 #[cfg(feature = "compression")]
 impl_build_construct_stub!(Compressed,);
+
+// ===========================================================================
+// Leaf BuildConstruct implementations (Phase 12.4)
+// ===========================================================================
+//
+// Leaf constructs have no children, so compilation simply clones the construct
+// into its compiled node (embed-and-delegate). The resulting CompiledXxx node
+// embeds the declaration-tree construct by value and delegates parse/build/
+// sizeof to it at runtime.
+
+/// Macro to generate [`BuildConstruct`] impls for leaf constructs: `compile`
+/// clones `self` into the corresponding `CompiledXxx { inner }` node.
+///
+/// `$compiled` must be a single identifier (the compiled struct name); the
+/// `:ident` matcher is used so it can be followed directly by `{` in a struct
+/// literal (unlike `:path`/`:ty`). `self` resolves to the impl's receiver.
+macro_rules! impl_leaf_build_construct {
+    ($($ty:ty => $variant:ident($compiled:ident)),* $(,)?) => {
+        $(
+            impl BuildConstruct for $ty {
+                fn compile(&self) -> Result<CompiledNode> {
+                    Ok(CompiledNode::$variant($compiled { inner: self.clone() }))
+                }
+            }
+        )*
+    };
+}
+
+impl_leaf_build_construct! {
+    FormatField => FormatField(CompiledFormatField),
+    Bytes => Bytes(CompiledBytes),
+    GreedyBytes => GreedyBytes(CompiledGreedyBytes),
+    BytesExpr => BytesExpr(CompiledBytesExpr),
+    BytesInteger => BytesInteger(CompiledBytesInteger),
+    BitsInteger => BitsInteger(CompiledBitsInteger),
+    VarInt => VarInt(CompiledVarInt),
+    ZigZag => ZigZag(CompiledZigZag),
+    Flag => Flag(CompiledFlag),
+    CString => CString(CompiledCString),
+    PaddedString => PaddedString(CompiledPaddedString),
+    Pass => Pass(CompiledPass),
+    Terminated => Terminated(CompiledTerminated),
+    Tell => Tell(CompiledTell),
+    Seek => Seek(CompiledSeek),
+    SeekExpr => SeekExpr(CompiledSeekExpr),
+    Error => Error(CompiledError),
+}
 
 // ===========================================================================
 // BuildConstruct for Arc<dyn Construct> (Dynamic variant support, I3 correction)
@@ -285,35 +332,55 @@ mod tests {
     use crate::constructs::format_field::INT8UB;
     use crate::constructs::meta::Pass;
 
-    // -- Stub implementations return errors ---------------------------------
+    // -- Leaf compile succeeds (Phase 12.4) ---------------------------------
 
     #[test]
-    fn stub_compile_returns_error_for_format_field() {
-        let ff: FormatField = INT8UB;
-        let result = ff.compile();
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
+    fn leaf_compile_pass_produces_compiled_pass() {
+        let node = Pass::new().compile().unwrap();
+        match node {
+            CompiledNode::Pass(_) => { /* expected */ }
+            other => panic!("expected CompiledPass, got {other:?}"),
+        }
     }
+
+    #[test]
+    fn leaf_compile_format_field_produces_compiled_format_field() {
+        let ff: FormatField = INT8UB;
+        let node = ff.compile().unwrap();
+        match node {
+            CompiledNode::FormatField(_) => { /* expected */ }
+            other => panic!("expected CompiledFormatField, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn leaf_compile_embeds_construct_value() {
+        // The compiled node embeds a clone of the original construct's params.
+        let node = crate::constructs::bytes::Bytes::new(9).compile().unwrap();
+        match node {
+            CompiledNode::Bytes(b) => assert_eq!(b.inner.length, 9),
+            other => panic!("expected CompiledBytes, got {other:?}"),
+        }
+    }
+
+    // -- Stub compile for not-yet-implemented nodes -------------------------
 
     #[test]
     fn stub_compile_returns_error_for_struct() {
         let s = Struct::new();
         let result = s.compile();
         assert!(result.is_err());
-    }
-
-    #[test]
-    fn stub_compile_returns_error_for_pass() {
-        let p = Pass::new();
-        let result = p.compile();
-        assert!(result.is_err());
+        assert!(matches!(
+            result.unwrap_err(),
+            ConstructError::Generic { .. }
+        ));
     }
 
     #[test]
     fn stub_compile_message_contains_not_yet() {
-        let p = Pass::new();
-        let err = p.compile().unwrap_err();
+        // Struct (composite) is still a stub.
+        let s = Struct::new();
+        let err = s.compile().unwrap_err();
         match err {
             ConstructError::Generic { message, .. } => {
                 assert!(message.contains("not yet implemented"));
@@ -325,25 +392,22 @@ mod tests {
     // -- enum_dispatch on CombinedConstruct ---------------------------------
 
     #[test]
-    fn combined_construct_dispatches_compile() {
-        // Create a CombinedConstruct and call compile via dispatch.
+    fn combined_construct_compile_pass_succeeds() {
+        // Pass is a leaf: compile now succeeds.
         let cc: CombinedConstruct = Pass::new().into();
-        let result = cc.compile();
-        assert!(result.is_err());
+        assert!(cc.compile().is_ok());
     }
 
     #[test]
-    fn combined_construct_compile_on_struct() {
+    fn combined_construct_compile_on_struct_is_error() {
         let cc: CombinedConstruct = Struct::new().into();
-        let result = cc.compile();
-        assert!(result.is_err());
+        assert!(cc.compile().is_err());
     }
 
     #[test]
-    fn combined_construct_compile_on_renamed() {
+    fn combined_construct_compile_on_renamed_is_error() {
         let cc: CombinedConstruct = Renamed::new(INT8UB, "test_field").into();
-        let result = cc.compile();
-        assert!(result.is_err());
+        assert!(cc.compile().is_err());
     }
 
     // -- Dynamic variant dispatch (I3 correction: Box → Arc) ----------------
@@ -377,24 +441,23 @@ mod tests {
         assert_eq!(inner.sizeof(&ctx).unwrap(), 0);
     }
 
-    // -- All major construct categories dispatch ----------------------------
+    // -- Mixed leaf / stub dispatch ----------------------------------------
 
     #[test]
     fn all_construct_categories_dispatch_compile() {
-        // Non-Dynamic variants are still stubs (return Err).
-        let constructs: Vec<CombinedConstruct> =
-            vec![Pass::new().into(), Struct::new().into(), INT8UB.into()];
-        for cc in &constructs {
-            assert!(cc.compile().is_err(), "expected compile to return Err");
-        }
+        // Leaves compile OK; Struct (composite) is still a stub.
+        assert!(Pass::new().compile().is_ok());
+        assert!(Struct::new().compile().is_err());
+        let cc: CombinedConstruct = INT8UB.into();
+        assert!(cc.compile().is_ok());
     }
 
     // -- BuildConstruct trait object ----------------------------------------
 
     #[test]
     fn build_construct_can_be_called_on_trait_object() {
+        // A leaf construct's compile succeeds through a trait object too.
         let pass: &dyn BuildConstruct = &Pass::new();
-        let result = pass.compile();
-        assert!(result.is_err());
+        assert!(pass.compile().is_ok());
     }
 }

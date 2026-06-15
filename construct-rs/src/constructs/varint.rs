@@ -34,6 +34,7 @@ use crate::value::Value;
 /// let parsed = c.parse_bytes(&bytes).unwrap();
 /// assert_eq!(parsed, Value::UInt(300));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct VarInt;
 
 /// LEB128 continuation bit mask.
@@ -157,6 +158,7 @@ impl Construct for VarInt {
 /// let parsed = c.parse_bytes(&bytes).unwrap();
 /// assert_eq!(parsed, Value::Int(-3));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct ZigZag;
 
 impl ZigZag {

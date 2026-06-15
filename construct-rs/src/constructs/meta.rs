@@ -49,6 +49,7 @@ use crate::value::Value;
 /// assert!(built.is_empty());
 /// assert_eq!(p.sizeof(&Default::default()).unwrap(), 0);
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Pass;
 
 impl Pass {
@@ -105,6 +106,7 @@ impl Construct for Pass {
 /// let t: &dyn Construct = &Terminated::new();
 /// assert_eq!(t.parse_bytes(b"").unwrap(), Value::None);
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Terminated;
 
 impl Terminated {
@@ -175,6 +177,7 @@ impl Construct for Terminated {
 /// let t: &dyn Construct = &Tell::new();
 /// assert_eq!(t.parse_bytes(b"").unwrap(), Value::UInt(0));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Tell;
 
 impl Tell {
@@ -264,6 +267,7 @@ impl SeekWhence {
 /// let parsed = s.parse_bytes(b"01234x").unwrap();
 /// assert_eq!(parsed, Value::UInt(5));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Seek {
     /// The offset to seek to.
     pub at: i64,
@@ -333,6 +337,7 @@ impl Construct for Seek {
 /// let e: &dyn Construct = &ErrorConstruct::new();
 /// assert!(matches!(e.parse_bytes(b"").unwrap_err(), ConstructError::Check { .. }));
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Error;
 
 impl Error {
@@ -409,6 +414,7 @@ impl Construct for Error {
 /// let parsed = c.parse(&mut stream, &mut ctx).unwrap();
 /// assert_eq!(parsed, Value::UInt(3));
 /// ```
+#[derive(Clone, Debug)]
 pub struct SeekExpr {
     /// Expression that evaluates to the seek offset.
     pub at_expr: Box<CombinedExpr>,

@@ -149,39 +149,42 @@ mod tests {
         let _ = SchemaCompiler::default();
     }
 
-    // -- compile: stub variants return Err ---------------------------------
+    // -- compile: leaf variants succeed (Phase 12.4) ------------------------
 
     #[test]
-    fn compile_pass_returns_stub_error() {
-        // Pass is a non-Dynamic variant; its compile impl is still a stub.
+    fn compile_pass_produces_compiled_schema() {
+        // Pass is a leaf: compile succeeds and yields a CompiledSchema.
         let compiler = SchemaCompiler::new();
         let cc: CombinedConstruct = Pass::new().into();
-        let result = compiler.compile(&cc);
-        assert!(result.is_err());
-        assert!(matches!(
-            result.unwrap_err(),
-            ConstructError::Generic { .. }
-        ));
+        let schema = compiler.compile(&cc).expect("Pass should compile");
+        assert!(matches!(schema.tree(), CompiledNode::Pass(_)));
+        // Pass has a static size of 0.
+        assert_eq!(schema.static_size(), Some(0));
     }
 
     #[test]
     fn compile_struct_returns_stub_error() {
+        // Struct (composite) is still a stub in Phase 12.4.
         let compiler = SchemaCompiler::new();
         let cc: CombinedConstruct = Struct::new().into();
         assert!(compiler.compile(&cc).is_err());
     }
 
     #[test]
-    fn compile_format_field_returns_stub_error() {
+    fn compile_format_field_produces_compiled_schema() {
         let compiler = SchemaCompiler::new();
         let cc: CombinedConstruct = INT8UB.into();
-        assert!(compiler.compile(&cc).is_err());
+        let schema = compiler.compile(&cc).expect("FormatField should compile");
+        assert!(matches!(schema.tree(), CompiledNode::FormatField(_)));
+        // INT8UB has a static size of 1 byte.
+        assert_eq!(schema.static_size(), Some(1));
     }
 
     #[test]
     fn compile_stub_error_message_mentions_not_yet_implemented() {
+        // Struct (composite) is still a stub in Phase 12.4.
         let compiler = SchemaCompiler::new();
-        let cc: CombinedConstruct = Pass::new().into();
+        let cc: CombinedConstruct = Struct::new().into();
         let err = compiler.compile(&cc).unwrap_err();
         match err {
             ConstructError::Generic { message, .. } => {

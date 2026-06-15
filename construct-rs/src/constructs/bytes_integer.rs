@@ -107,6 +107,7 @@ fn map_to_value(number: i128, length: usize, signed: bool) -> Value {
 /// let built = c.build_bytes(&Value::BigInt(0x010203)).unwrap();
 /// assert_eq!(built, vec![0x01, 0x02, 0x03]);
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct BytesInteger {
     /// Number of bytes to read/write.
     pub length: usize,
@@ -208,6 +209,7 @@ impl Construct for BytesInteger {
 /// let built = c.build_bytes(&Value::UInt(5)).unwrap();
 /// assert_eq!(built, vec![0, 1, 0, 1]);
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct BitsInteger {
     /// Number of bits to read/write.
     pub length: usize,

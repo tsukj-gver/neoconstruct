@@ -30,9 +30,17 @@ pub use sink::{OutputSink, ValueSink};
 
 use std::sync::Arc;
 
+use crate::constructs::bytes::{Bytes, BytesExpr, GreedyBytes};
+use crate::constructs::bytes_integer::{BitsInteger, BytesInteger};
+use crate::constructs::flag::Flag;
+use crate::constructs::format_field::FormatField;
+use crate::constructs::meta::{Error, Pass, Seek, SeekExpr, Tell, Terminated};
+use crate::constructs::strings::{CString, PaddedString};
+use crate::constructs::varint::{VarInt, ZigZag};
 use crate::core::context::Context;
 use crate::core::error::{ConstructError, Result};
 use crate::core::stream::{ByteStream, CombinedStream};
+use crate::core::Construct;
 use crate::value::Value;
 
 // ===========================================================================
@@ -110,40 +118,78 @@ pub trait CompiledExec {
 // 12.4-12.9. The enum and trait infrastructure is fully functional —
 // only the per-variant exec/compile implementations are stubs.
 
-// -- Leaf constructors (embed concrete construct in 12.5) --
+// -- Leaf constructors (embed concrete construct, Phase 12.4) --
+// Each compiled leaf embeds the declaration-tree construct by value. At
+// runtime, exec_parse / exec_build / exec_sizeof delegate directly to the
+// inner construct's `Construct` impl (the old path). This is the
+// embed-and-delegate pattern: zero per-call parameter extraction, but the
+// same parse/build logic as the declaration tree.
 /// Compiled node for `FormatField`.
 #[derive(Debug)]
-pub struct CompiledFormatField;
+pub struct CompiledFormatField {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: FormatField,
+}
 /// Compiled node for `VarInt`.
 #[derive(Debug)]
-pub struct CompiledVarInt;
+pub struct CompiledVarInt {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: VarInt,
+}
 /// Compiled node for `ZigZag`.
 #[derive(Debug)]
-pub struct CompiledZigZag;
+pub struct CompiledZigZag {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: ZigZag,
+}
 /// Compiled node for `Flag`.
 #[derive(Debug)]
-pub struct CompiledFlag;
+pub struct CompiledFlag {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Flag,
+}
 /// Compiled node for `Bytes`.
 #[derive(Debug)]
-pub struct CompiledBytes;
+pub struct CompiledBytes {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Bytes,
+}
 /// Compiled node for `GreedyBytes`.
 #[derive(Debug)]
-pub struct CompiledGreedyBytes;
+pub struct CompiledGreedyBytes {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: GreedyBytes,
+}
 /// Compiled node for `BytesExpr`.
 #[derive(Debug)]
-pub struct CompiledBytesExpr;
+pub struct CompiledBytesExpr {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: BytesExpr,
+}
 /// Compiled node for `BytesInteger`.
 #[derive(Debug)]
-pub struct CompiledBytesInteger;
+pub struct CompiledBytesInteger {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: BytesInteger,
+}
 /// Compiled node for `BitsInteger`.
 #[derive(Debug)]
-pub struct CompiledBitsInteger;
+pub struct CompiledBitsInteger {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: BitsInteger,
+}
 /// Compiled node for `CString`.
 #[derive(Debug)]
-pub struct CompiledCString;
+pub struct CompiledCString {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: CString,
+}
 /// Compiled node for `PaddedString`.
 #[derive(Debug)]
-pub struct CompiledPaddedString;
+pub struct CompiledPaddedString {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: PaddedString,
+}
 
 // -- Wrappers (hold compiled sub-node in 12.6) --
 /// Compiled node for `Const`.
@@ -177,25 +223,43 @@ pub struct CompiledHex;
 #[derive(Debug)]
 pub struct CompiledHexDump;
 
-// -- Meta constructors --
+// -- Meta constructors (leaf: embed concrete construct, Phase 12.4) --
 /// Compiled node for `Pass`.
 #[derive(Debug)]
-pub struct CompiledPass;
+pub struct CompiledPass {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Pass,
+}
 /// Compiled node for `Terminated`.
 #[derive(Debug)]
-pub struct CompiledTerminated;
+pub struct CompiledTerminated {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Terminated,
+}
 /// Compiled node for `Tell`.
 #[derive(Debug)]
-pub struct CompiledTell;
+pub struct CompiledTell {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Tell,
+}
 /// Compiled node for `Seek`.
 #[derive(Debug)]
-pub struct CompiledSeek;
+pub struct CompiledSeek {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Seek,
+}
 /// Compiled node for `SeekExpr`.
 #[derive(Debug)]
-pub struct CompiledSeekExpr;
+pub struct CompiledSeekExpr {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: SeekExpr,
+}
 /// Compiled node for `Error`.
 #[derive(Debug)]
-pub struct CompiledError;
+pub struct CompiledError {
+    /// The declaration-tree construct, embedded for direct delegation.
+    pub inner: Error,
+}
 
 // -- Composite constructors (hold Vec<CompiledField> in 12.7) --
 /// Compiled node for `Struct`.
@@ -605,18 +669,11 @@ macro_rules! impl_compiled_exec_stub {
 impl_compiled_exec_stub! {
     // core
     CompiledSubconstruct, CompiledRenamed,
-    // atomic
-    CompiledFormatField, CompiledBytes, CompiledGreedyBytes, CompiledBytesExpr,
-    CompiledBytesInteger, CompiledBitsInteger, CompiledVarInt, CompiledZigZag,
-    CompiledFlag, CompiledCString, CompiledPaddedString,
     // const / mapping
     CompiledConst, CompiledMapping,
     // adapters
     CompiledAdapter, CompiledSymmetricAdapter, CompiledExprAdapter,
     CompiledValidator, CompiledExprValidator,
-    // meta
-    CompiledPass, CompiledTerminated, CompiledTell, CompiledSeek,
-    CompiledSeekExpr, CompiledError,
     // composite
     CompiledStruct, CompiledSequence, CompiledUnion, CompiledSelect,
     CompiledFocusedSeq,
@@ -642,6 +699,60 @@ impl_compiled_exec_stub! {
 // Feature-gated stub for CompiledCompressed.
 #[cfg(feature = "compression")]
 impl_compiled_exec_stub!(CompiledCompressed,);
+
+// ===========================================================================
+// Functional CompiledExec for leaf nodes (Phase 12.4)
+// ===========================================================================
+//
+// Leaf compiled nodes embed their declaration-tree construct by value (the
+// embed-and-delegate pattern). At runtime, every operation delegates directly
+// to the inner construct's `Construct` impl — the same parse/build/sizeof
+// logic as the declaration tree (the "old path"), but with zero per-call
+// parameter extraction. exec_parse deposits the parsed scalar via
+// `set_scalar` (uniform leaf protocol, I1).
+
+/// Macro to generate functional [`CompiledExec`] impls for leaf compiled
+/// nodes that embed a concrete `Construct` in their `inner` field.
+macro_rules! impl_leaf_exec {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CompiledExec for $ty {
+                fn exec_parse(
+                    &self,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                    sink: &mut dyn OutputSink,
+                ) -> Result<()> {
+                    let value = self.inner.parse(stream, ctx)?;
+                    sink.set_scalar(value)
+                }
+
+                fn exec_build(
+                    &self,
+                    input: &Value,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                ) -> Result<()> {
+                    self.inner.build(input, stream, ctx)
+                }
+
+                fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+                    self.inner.sizeof(ctx)
+                }
+            }
+        )*
+    };
+}
+
+impl_leaf_exec! {
+    // atomic leaves
+    CompiledFormatField, CompiledBytes, CompiledGreedyBytes, CompiledBytesExpr,
+    CompiledBytesInteger, CompiledBitsInteger, CompiledVarInt, CompiledZigZag,
+    CompiledFlag, CompiledCString, CompiledPaddedString,
+    // meta leaves
+    CompiledPass, CompiledTerminated, CompiledTell, CompiledSeek,
+    CompiledSeekExpr, CompiledError,
+}
 
 // ===========================================================================
 // Functional CompiledExec implementation for CompiledDynamic (escape-hatch)
@@ -838,15 +949,36 @@ impl CompiledSchema {
 
 /// Attempts to compute the static byte size of a compiled tree.
 ///
-/// Returns `Some(size)` if all nodes are fixed-length, `None` otherwise.
+/// Returns `Some(size)` if the node is a fixed-length leaf, `None` otherwise.
 /// This enables [`CompiledSchema::sizeof`] to return a constant without
-/// runtime traversal for fully-static schemas.
+/// runtime traversal for fully-static leaf schemas.
 ///
-/// In Phase 12.1, this always returns `None` (conservative default). Real
-/// folding logic is implemented in sub-tasks 12.4-12.9 as compiled node
-/// structs gain their real fields.
-fn try_fold_static_size(_node: &CompiledNode) -> Option<usize> {
-    None
+/// Composite/repetition/wrapper folding (summing child sizes, etc.) is added
+/// in later sub-tasks (12.5-12.9) as those node structs gain real fields.
+fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
+    match node {
+        // Fixed-size leaves: size is a direct field of the embedded construct.
+        CompiledNode::FormatField(f) => Some(f.inner.byte_size()),
+        CompiledNode::Bytes(b) => Some(b.inner.length),
+        CompiledNode::BytesInteger(b) => Some(b.inner.length),
+        CompiledNode::PaddedString(p) => Some(p.inner.length),
+        // Flag is always exactly one byte.
+        CompiledNode::Flag(_) => Some(1),
+        // Zero-size leaves.
+        CompiledNode::Pass(_) | CompiledNode::Tell(_) | CompiledNode::Terminated(_) => Some(0),
+        // Variable / runtime-length / stream-position leaves: unknown statically.
+        CompiledNode::VarInt(_)
+        | CompiledNode::ZigZag(_)
+        | CompiledNode::GreedyBytes(_)
+        | CompiledNode::BytesExpr(_)
+        | CompiledNode::CString(_)
+        | CompiledNode::BitsInteger(_)
+        | CompiledNode::Seek(_)
+        | CompiledNode::SeekExpr(_)
+        | CompiledNode::Error(_) => None,
+        // Dynamic escape-hatch and all not-yet-implemented nodes: unknown.
+        _ => None,
+    }
 }
 
 // ===========================================================================
@@ -856,7 +988,16 @@ fn try_fold_static_size(_node: &CompiledNode) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::constructs::bytes::Bytes;
+    use crate::constructs::flag::Flag;
+    use crate::constructs::format_field::{Endianness, FormatField, FormatKind};
     use crate::constructs::meta::Pass;
+    use crate::constructs::varint::VarInt;
+
+    /// Helper: builds a `CompiledNode::Pass` embedding a default `Pass`.
+    fn compiled_pass() -> CompiledNode {
+        CompiledNode::Pass(CompiledPass { inner: Pass::new() })
+    }
 
     /// Helper: builds a `CompiledDynamic` wrapping a `Pass` construct, used
     /// wherever a `CompiledDynamic` value is needed in tests.
@@ -866,11 +1007,11 @@ mod tests {
         }
     }
 
-    // -- CompiledNode construction (unit struct variants) -------------------
+    // -- CompiledNode construction ------------------------------------------
 
     #[test]
     fn compiled_node_pass_variant_constructible() {
-        let node = CompiledNode::Pass(CompiledPass);
+        let node = compiled_pass();
         assert!(matches!(node, CompiledNode::Pass(_)));
     }
 
@@ -882,65 +1023,120 @@ mod tests {
 
     #[test]
     fn compiled_node_struct_variant_constructible() {
+        // Struct is still a unit struct (composites implemented later).
         let node = CompiledNode::Struct(CompiledStruct);
         assert!(matches!(node, CompiledNode::Struct(_)));
     }
 
-    // -- CompiledExec stubs return errors -----------------------------------
+    // -- Leaf CompiledExec delegation (Phase 12.4) --------------------------
+    //
+    // Leaf compiled nodes embed their declaration-tree construct and delegate
+    // every operation to it (the old path). exec_parse deposits the parsed
+    // scalar into the sink via set_scalar.
 
     #[test]
-    fn stub_exec_parse_returns_error() {
-        let node = CompiledNode::Pass(CompiledPass);
+    fn leaf_pass_exec_parse_delegates_to_inner() {
+        // Pass parses nothing from empty input, deposits Value::None.
+        let node = compiled_pass();
         let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[]));
         let mut ctx = Context::new();
         let mut sink = ValueSink::new();
-        let err = node
-            .exec_parse(&mut stream, &mut ctx, &mut sink)
-            .unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
-        let msg = match err {
-            ConstructError::Generic { message, .. } => message,
-            _ => unreachable!(),
-        };
-        assert!(msg.contains("not yet implemented"));
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let value = Box::new(sink).into_value().unwrap();
+        assert_eq!(value, Value::None);
     }
 
     #[test]
-    fn stub_exec_build_returns_error() {
-        let node = CompiledNode::FormatField(CompiledFormatField);
+    fn leaf_pass_exec_sizeof_is_zero() {
+        let node = compiled_pass();
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn leaf_format_field_exec_parse_reads_bytes() {
+        let node = CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U8),
+        });
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0x05]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let value = Box::new(sink).into_value().unwrap();
+        assert_eq!(value, Value::UInt(5));
+    }
+
+    #[test]
+    fn leaf_format_field_exec_build_writes_bytes() {
+        let node = CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U8),
+        });
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
-        let err = node
-            .exec_build(&Value::None, &mut stream, &mut ctx)
-            .unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
+        node.exec_build(&Value::UInt(5), &mut stream, &mut ctx)
+            .unwrap();
+        assert_eq!(stream.into_bytes(), vec![0x05]);
     }
 
     #[test]
-    fn stub_exec_sizeof_returns_error() {
-        let node = CompiledNode::Bytes(CompiledBytes);
+    fn leaf_format_field_exec_sizeof_returns_byte_size() {
+        let node = CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U32),
+        });
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 4);
+    }
+
+    #[test]
+    fn leaf_bytes_exec_sizeof_returns_length() {
+        let node = CompiledNode::Bytes(CompiledBytes {
+            inner: Bytes::new(7),
+        });
+        let ctx = Context::new();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 7);
+    }
+
+    #[test]
+    fn leaf_varint_exec_sizeof_is_sizeof_error() {
+        // VarInt has a variable size → exec_sizeof returns a Sizeof error.
+        let node = CompiledNode::VarInt(CompiledVarInt {
+            inner: VarInt::new(),
+        });
+        let ctx = Context::new();
+        let err = node.exec_sizeof(&ctx).unwrap_err();
+        assert!(matches!(err, ConstructError::Sizeof { .. }));
+    }
+
+    // -- Stub CompiledExec for not-yet-implemented nodes --------------------
+
+    #[test]
+    fn stub_exec_for_struct_returns_error() {
+        // Struct is not yet implemented (composites later) — still a stub.
+        let node = CompiledNode::Struct(CompiledStruct);
         let ctx = Context::new();
         let err = node.exec_sizeof(&ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
     }
 
-    // -- CompiledExec dispatches through enum_dispatch ----------------------
+    #[test]
+    fn stub_exec_for_adapter_returns_error() {
+        // Adapter (wrapper) is implemented in Phase 12.5 — still a stub here.
+        let node = CompiledNode::Adapter(CompiledAdapter);
+        let ctx = Context::new();
+        let err = node.exec_sizeof(&ctx).unwrap_err();
+        assert!(matches!(err, ConstructError::Generic { .. }));
+    }
 
     #[test]
     fn exec_dispatches_to_correct_variant() {
-        // Each variant should return the stub error — verifying dispatch works.
-        // (Dynamic is excluded: it is the functional escape-hatch, see below.)
-        let variants: Vec<CompiledNode> = vec![
-            CompiledNode::Pass(CompiledPass),
-            CompiledNode::Struct(CompiledStruct),
-            CompiledNode::Tell(CompiledTell),
-            CompiledNode::FormatField(CompiledFormatField),
-        ];
+        // Leaves are functional; non-leaf stubs return the Generic error.
+        // Verifies dispatch routes to the right variant.
         let ctx = Context::new();
-        for node in &variants {
-            let err = node.exec_sizeof(&ctx).unwrap_err();
-            assert!(matches!(err, ConstructError::Generic { .. }));
-        }
+        assert_eq!(compiled_pass().exec_sizeof(&ctx).unwrap(), 0);
+        let err = CompiledNode::Struct(CompiledStruct)
+            .exec_sizeof(&ctx)
+            .unwrap_err();
+        assert!(matches!(err, ConstructError::Generic { .. }));
     }
 
     #[test]
@@ -978,75 +1174,108 @@ mod tests {
     // -- CompiledSchema -----------------------------------------------------
 
     #[test]
-    fn compiled_schema_new_creates_schema() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
-        assert!(schema.static_size().is_none());
+    fn compiled_schema_new_with_pass_has_static_size_zero() {
+        let schema = CompiledSchema::new(compiled_pass());
+        assert_eq!(schema.static_size(), Some(0));
         assert!(schema.name().is_none());
     }
 
     #[test]
     fn compiled_schema_with_name_sets_name() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass)).with_name("my_schema");
+        let schema = CompiledSchema::new(compiled_pass()).with_name("my_schema");
         assert_eq!(schema.name(), Some("my_schema"));
     }
 
     #[test]
     fn compiled_schema_tree_returns_root() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
+        let schema = CompiledSchema::new(compiled_pass());
         assert!(matches!(schema.tree(), CompiledNode::Pass(_)));
     }
 
     #[test]
-    fn compiled_schema_parse_bytes_returns_stub_error() {
-        // Since all exec impls are stubs, parse_bytes should return Err.
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
-        let result = schema.parse_bytes(b"\x01\x02");
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
-        // Path should be set to PARSE_PATH.
-        assert_eq!(err.path(), PARSE_PATH);
+    fn compiled_schema_parse_bytes_pass_returns_none() {
+        // Pass is now functional: parse_bytes returns Value::None (no error).
+        let schema = CompiledSchema::new(compiled_pass());
+        let value = schema.parse_bytes(b"\x01\x02").unwrap();
+        assert_eq!(value, Value::None);
     }
 
     #[test]
-    fn compiled_schema_build_bytes_returns_stub_error() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
-        let result = schema.build_bytes(&Value::None);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConstructError::Generic { .. }));
-        assert_eq!(err.path(), BUILD_PATH);
+    fn compiled_schema_build_bytes_pass_returns_empty() {
+        let schema = CompiledSchema::new(compiled_pass());
+        let bytes = schema.build_bytes(&Value::None).unwrap();
+        assert!(bytes.is_empty());
     }
 
     #[test]
-    fn compiled_schema_sizeof_returns_stub_error() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
+    fn compiled_schema_sizeof_pass_is_zero() {
+        let schema = CompiledSchema::new(compiled_pass());
         let ctx = Context::new();
-        let result = schema.sizeof(&ctx);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
+        assert_eq!(schema.sizeof(&ctx).unwrap(), 0);
+    }
+
+    #[test]
+    fn compiled_schema_sizeof_format_field_uses_static_fold() {
+        // Static size is folded at compile time → sizeof returns it directly.
+        let schema = CompiledSchema::new(CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U16),
+        }));
+        let ctx = Context::new();
+        assert_eq!(schema.sizeof(&ctx).unwrap(), 2);
+    }
+
+    #[test]
+    fn compiled_schema_sizeof_struct_still_stub_error() {
+        // Struct is not yet implemented → sizeof returns the stub error.
+        let schema = CompiledSchema::new(CompiledNode::Struct(CompiledStruct));
+        let ctx = Context::new();
+        let err = schema.sizeof(&ctx).unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
         assert_eq!(err.path(), SIZEOF_PATH);
     }
 
     #[test]
     fn compiled_schema_debug_formats() {
-        let schema = CompiledSchema::new(CompiledNode::Pass(CompiledPass));
+        let schema = CompiledSchema::new(compiled_pass());
         let _ = format!("{schema:?}");
     }
 
-    // -- Static size folding (stub) -----------------------------------------
+    // -- Static size folding ------------------------------------------------
 
     #[test]
-    fn try_fold_static_size_returns_none_for_all_variants() {
-        let variants: Vec<CompiledNode> = vec![
-            CompiledNode::Pass(CompiledPass),
-            CompiledNode::Struct(CompiledStruct),
-            CompiledNode::Bytes(CompiledBytes),
-        ];
-        for node in &variants {
-            assert_eq!(try_fold_static_size(node), None);
-        }
+    fn try_fold_static_size_fixed_leaves() {
+        assert_eq!(try_fold_static_size(&compiled_pass()), Some(0));
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::Bytes(CompiledBytes {
+                inner: Bytes::new(5),
+            })),
+            Some(5)
+        );
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::FormatField(CompiledFormatField {
+                inner: FormatField::new(Endianness::Big, FormatKind::U32),
+            })),
+            Some(4)
+        );
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::Flag(CompiledFlag { inner: Flag::new() })),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn try_fold_static_size_variable_leaves_and_stubs_return_none() {
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::VarInt(CompiledVarInt {
+                inner: VarInt::new(),
+            })),
+            None
+        );
+        // Struct is still a stub (no real fields yet).
+        assert_eq!(
+            try_fold_static_size(&CompiledNode::Struct(CompiledStruct)),
+            None
+        );
     }
 
     // -- Variant count sanity check -----------------------------------------
@@ -1056,9 +1285,11 @@ mod tests {
         // Smoke test: construct one of each variant category to ensure
         // the enum compiles and enum_dispatch generates valid dispatch.
         let _ = CompiledNode::Subconstruct(CompiledSubconstruct);
-        let _ = CompiledNode::FormatField(CompiledFormatField);
+        let _ = CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U8),
+        });
         let _ = CompiledNode::Adapter(CompiledAdapter);
-        let _ = CompiledNode::Pass(CompiledPass);
+        let _ = compiled_pass();
         let _ = CompiledNode::Struct(CompiledStruct);
         let _ = CompiledNode::Enum(CompiledEnum);
         let _ = CompiledNode::Array(CompiledArray);

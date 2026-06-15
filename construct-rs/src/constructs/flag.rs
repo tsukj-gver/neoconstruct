@@ -41,6 +41,7 @@ const FLAG_FALSE: u8 = 0x00;
 /// let built = f.build_bytes(&Value::Bool(true)).unwrap();
 /// assert_eq!(built, vec![0x01]);
 /// ```
+#[derive(Clone, Copy, Debug)]
 pub struct Flag;
 
 impl Flag {
