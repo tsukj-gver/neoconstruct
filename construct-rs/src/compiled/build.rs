@@ -11,12 +11,17 @@
 //! implementations are **stubs** that return `Err` — real implementations
 //! are filled in across sub-tasks 12.4-12.9.
 
+use std::sync::Arc;
+
 use crate::combined::CombinedConstruct;
 use crate::compiled::{
-    CompiledBitsInteger, CompiledBytes, CompiledBytesExpr, CompiledBytesInteger, CompiledCString,
-    CompiledError, CompiledFlag, CompiledFormatField, CompiledGreedyBytes, CompiledNode,
-    CompiledPaddedString, CompiledPass, CompiledSeek, CompiledSeekExpr, CompiledTell,
-    CompiledTerminated, CompiledVarInt, CompiledZigZag,
+    CompiledAdapter, CompiledBitsInteger, CompiledBytes, CompiledBytesExpr, CompiledBytesInteger,
+    CompiledCString, CompiledConst, CompiledEnum, CompiledError, CompiledExprAdapter,
+    CompiledExprValidator, CompiledFlag, CompiledFlagsEnum, CompiledFormatField,
+    CompiledGreedyBytes, CompiledHex, CompiledHexDump, CompiledMapping, CompiledNode,
+    CompiledPaddedString, CompiledPass, CompiledRenamed, CompiledSeek, CompiledSeekExpr,
+    CompiledSubconstruct, CompiledSymmetricAdapter, CompiledTell, CompiledTerminated,
+    CompiledValidator, CompiledVarInt, CompiledZigZag,
 };
 use crate::constructs::{
     adapters::{Adapter, ExprAdapter, ExprValidator, SymmetricAdapter, Validator},
@@ -120,16 +125,10 @@ macro_rules! impl_build_construct_stub {
 }
 
 impl_build_construct_stub! {
-    // core
-    Subconstruct, Renamed,
-    // const / mapping
-    Const, Mapping,
-    // adapters
-    Adapter, SymmetricAdapter, ExprAdapter, Validator, ExprValidator,
     // composite
     Struct, Sequence, Union, Select, FocusedSeq,
-    // enum / computed
-    Enum, FlagsEnum, Computed, Rebuild, Default, Index, Padded, Aligned,
+    // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
+    Computed, Rebuild, Default, Index, Padded, Aligned,
     FixedSized, NamedTuple, TimestampAdapter,
     // repetition
     Array, ArrayExpr, GreedyRange, RepeatUntil,
@@ -140,8 +139,6 @@ impl_build_construct_stub! {
     Transformed, Restreamed, Checksum, ByteSwapped, BitsSwapped, LazyBound,
     // control flow
     IfThenElse, Switch, Check, StopIf,
-    // formatting
-    Hex, HexDump,
 }
 
 // Feature-gated stub for Compressed.
@@ -193,6 +190,154 @@ impl_leaf_build_construct! {
     Seek => Seek(CompiledSeek),
     SeekExpr => SeekExpr(CompiledSeekExpr),
     Error => Error(CompiledError),
+}
+
+// ===========================================================================
+// Wrapper BuildConstruct implementations (Phase 12.5)
+// ===========================================================================
+//
+// Wrapper constructs recursively compile their inner subcon via
+// `self.subcon.compile()` (producing a `CompiledNode`), then wrap it in the
+// corresponding `CompiledXxx` node along with wrapper-specific data extracted
+// from the declaration tree. Closures are shared via `Arc::clone`; mapping
+// tables and values are cloned.
+
+/// Macro to generate [`BuildConstruct`] impls for pure-forward wrappers that
+/// only need the compiled inner subcon (Hex, HexDump, Subconstruct).
+macro_rules! impl_wrapper_compile_forward {
+    ($($ty:ty => $variant:ident($compiled:ident)),* $(,)?) => {
+        $(
+            impl BuildConstruct for $ty {
+                fn compile(&self) -> Result<CompiledNode> {
+                    Ok(CompiledNode::$variant($compiled {
+                        inner: Box::new(self.subcon.compile()?),
+                    }))
+                }
+            }
+        )*
+    };
+}
+
+impl_wrapper_compile_forward! {
+    Hex => Hex(CompiledHex),
+    HexDump => HexDump(CompiledHexDump),
+    Subconstruct => Subconstruct(CompiledSubconstruct),
+}
+
+// -- Renamed: uses `inner` field (not `subcon`) ----------------------------
+
+impl BuildConstruct for Renamed {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Renamed(CompiledRenamed {
+            inner: Box::new(self.inner.compile()?),
+        }))
+    }
+}
+
+// -- Const: compiled inner + cloned value ----------------------------------
+
+impl BuildConstruct for Const {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Const(CompiledConst {
+            inner: Box::new(self.subcon.compile()?),
+            value: self.value.clone(),
+        }))
+    }
+}
+
+// -- Adapter / ExprAdapter: compiled inner + Arc-cloned closures ------------
+
+/// Macro to generate [`BuildConstruct`] impls for adapter-style wrappers with
+/// `subcon`, `decode`, `encode` fields (Adapter, ExprAdapter).
+macro_rules! impl_wrapper_compile_adapter {
+    ($($ty:ty => $variant:ident($compiled:ident)),* $(,)?) => {
+        $(
+            impl BuildConstruct for $ty {
+                fn compile(&self) -> Result<CompiledNode> {
+                    Ok(CompiledNode::$variant($compiled {
+                        inner: Box::new(self.subcon.compile()?),
+                        decode: Arc::clone(&self.decode),
+                        encode: Arc::clone(&self.encode),
+                    }))
+                }
+            }
+        )*
+    };
+}
+
+impl_wrapper_compile_adapter! {
+    Adapter => Adapter(CompiledAdapter),
+    ExprAdapter => ExprAdapter(CompiledExprAdapter),
+}
+
+// -- SymmetricAdapter: compiled inner + Arc-cloned func ---------------------
+
+impl BuildConstruct for SymmetricAdapter {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::SymmetricAdapter(CompiledSymmetricAdapter {
+            inner: Box::new(self.subcon.compile()?),
+            func: Arc::clone(&self.func),
+        }))
+    }
+}
+
+// -- Validator / ExprValidator: compiled inner + Arc-cloned check -----------
+
+/// Macro to generate [`BuildConstruct`] impls for validator-style wrappers
+/// with `subcon`, `check` fields (Validator, ExprValidator).
+macro_rules! impl_wrapper_compile_validator {
+    ($($ty:ty => $variant:ident($compiled:ident)),* $(,)?) => {
+        $(
+            impl BuildConstruct for $ty {
+                fn compile(&self) -> Result<CompiledNode> {
+                    Ok(CompiledNode::$variant($compiled {
+                        inner: Box::new(self.subcon.compile()?),
+                        check: Arc::clone(&self.check),
+                    }))
+                }
+            }
+        )*
+    };
+}
+
+impl_wrapper_compile_validator! {
+    Validator => Validator(CompiledValidator),
+    ExprValidator => ExprValidator(CompiledExprValidator),
+}
+
+// -- Enum: compiled inner + cloned mapping tables --------------------------
+
+impl BuildConstruct for Enum {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Enum(CompiledEnum {
+            inner: Box::new(self.subcon.compile()?),
+            mapping: self.mapping.clone(),
+            decmap: self.decmap.clone(),
+        }))
+    }
+}
+
+// -- FlagsEnum: compiled inner + cloned flags ------------------------------
+
+impl BuildConstruct for FlagsEnum {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::FlagsEnum(CompiledFlagsEnum {
+            inner: Box::new(self.subcon.compile()?),
+            flags: self.flags.clone(),
+        }))
+    }
+}
+
+// -- Mapping: compiled inner + cloned mapping pairs ------------------------
+
+impl BuildConstruct for Mapping {
+    fn compile(&self) -> Result<CompiledNode> {
+        Ok(CompiledNode::Mapping(CompiledMapping {
+            inner: Box::new(self.subcon.compile()?),
+            mapping: self.mapping.clone(),
+            decmapping: self.decmapping.clone(),
+        }))
+    }
 }
 
 // ===========================================================================
@@ -363,6 +508,95 @@ mod tests {
         }
     }
 
+    // -- Wrapper compile succeeds (Phase 12.5) -------------------------------
+
+    #[test]
+    fn wrapper_compile_hex_produces_compiled_hex() {
+        let h = Hex::new(Box::new(INT8UB.into()));
+        let node = h.compile().unwrap();
+        match node {
+            CompiledNode::Hex(_) => { /* expected */ }
+            other => panic!("expected CompiledHex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_compile_renamed_produces_compiled_renamed() {
+        let r = Renamed::new(INT8UB, "field");
+        let node = r.compile().unwrap();
+        match node {
+            CompiledNode::Renamed(_) => { /* expected */ }
+            other => panic!("expected CompiledRenamed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_compile_const_produces_compiled_const() {
+        let c = Const::new_value(crate::value::Value::UInt(42), Box::new(INT8UB.into()));
+        let node = c.compile().unwrap();
+        match node {
+            CompiledNode::Const(cc) => assert_eq!(cc.value, crate::value::Value::UInt(42)),
+            other => panic!("expected CompiledConst, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_compile_recursively_compiles_inner() {
+        // Hex wrapping INT8UB: the compiled Hex's inner should be a
+        // CompiledNode::FormatField (recursively compiled).
+        let h = Hex::new(Box::new(INT8UB.into()));
+        let node = h.compile().unwrap();
+        match node {
+            CompiledNode::Hex(compiled_hex) => {
+                assert!(matches!(
+                    compiled_hex.inner.as_ref(),
+                    CompiledNode::FormatField(_)
+                ));
+            }
+            other => panic!("expected CompiledHex, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_compile_enum_produces_compiled_enum() {
+        use indexmap::IndexMap;
+        let mut mapping = IndexMap::new();
+        mapping.insert("yes".to_string(), 1u64);
+        mapping.insert("no".to_string(), 0u64);
+        let e = Enum::new(Box::new(INT8UB.into()), mapping);
+        let node = e.compile().unwrap();
+        match node {
+            CompiledNode::Enum(ce) => {
+                assert_eq!(ce.mapping.len(), 2);
+                assert_eq!(ce.decmap.len(), 2);
+            }
+            other => panic!("expected CompiledEnum, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wrapper_compile_mapping_produces_compiled_mapping() {
+        let mapping = vec![
+            (
+                crate::value::Value::String("A".to_string()),
+                crate::value::Value::UInt(0),
+            ),
+            (
+                crate::value::Value::String("B".to_string()),
+                crate::value::Value::UInt(1),
+            ),
+        ];
+        let m = Mapping::new(Box::new(INT8UB.into()), mapping);
+        let node = m.compile().unwrap();
+        match node {
+            CompiledNode::Mapping(cm) => {
+                assert_eq!(cm.mapping.len(), 2);
+                assert_eq!(cm.decmapping.len(), 2);
+            }
+            other => panic!("expected CompiledMapping, got {other:?}"),
+        }
+    }
+
     // -- Stub compile for not-yet-implemented nodes -------------------------
 
     #[test]
@@ -405,9 +639,10 @@ mod tests {
     }
 
     #[test]
-    fn combined_construct_compile_on_renamed_is_error() {
+    fn combined_construct_compile_on_renamed_succeeds() {
+        // Renamed (wrapper) is implemented in Phase 12.5 — compile now succeeds.
         let cc: CombinedConstruct = Renamed::new(INT8UB, "test_field").into();
-        assert!(cc.compile().is_err());
+        assert!(cc.compile().is_ok());
     }
 
     // -- Dynamic variant dispatch (I3 correction: Box → Arc) ----------------

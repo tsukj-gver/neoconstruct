@@ -30,6 +30,9 @@ pub use sink::{OutputSink, ValueSink};
 
 use std::sync::Arc;
 
+use indexmap::IndexMap;
+
+use crate::constructs::adapters::{CheckFunc, DecodeFunc, EncodeFunc, SymmetricFunc};
 use crate::constructs::bytes::{Bytes, BytesExpr, GreedyBytes};
 use crate::constructs::bytes_integer::{BitsInteger, BytesInteger};
 use crate::constructs::flag::Flag;
@@ -191,37 +194,125 @@ pub struct CompiledPaddedString {
     pub inner: PaddedString,
 }
 
-// -- Wrappers (hold compiled sub-node in 12.6) --
+// -- Wrappers (hold compiled sub-node + wrapper data, Phase 12.5) --
+// Each compiled wrapper recursively compiles its inner subcon into a
+// Box<CompiledNode>, then stores wrapper-specific data (closures via Arc
+// clone, mapping tables via clone). At runtime, exec delegates to the
+// compiled inner node and applies the wrapper's transform/check/mapping logic.
+
 /// Compiled node for `Const`.
 #[derive(Debug)]
-pub struct CompiledConst;
+pub struct CompiledConst {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The expected constant value.
+    pub value: Value,
+}
 /// Compiled node for `Renamed`.
 #[derive(Debug)]
-pub struct CompiledRenamed;
+pub struct CompiledRenamed {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Subconstruct`.
 #[derive(Debug)]
-pub struct CompiledSubconstruct;
+pub struct CompiledSubconstruct {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `Adapter`.
-#[derive(Debug)]
-pub struct CompiledAdapter;
+pub struct CompiledAdapter {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Decode function applied after parsing the inner node.
+    pub decode: DecodeFunc,
+    /// Encode function applied before building the inner node.
+    pub encode: EncodeFunc,
+}
+impl std::fmt::Debug for CompiledAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledAdapter")
+            .field("inner", &self.inner)
+            .field("decode", &"<closure>")
+            .field("encode", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `SymmetricAdapter`.
-#[derive(Debug)]
-pub struct CompiledSymmetricAdapter;
+pub struct CompiledSymmetricAdapter {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The symmetric function applied during both parse and build.
+    pub func: SymmetricFunc,
+}
+impl std::fmt::Debug for CompiledSymmetricAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledSymmetricAdapter")
+            .field("inner", &self.inner)
+            .field("func", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `ExprAdapter`.
-#[derive(Debug)]
-pub struct CompiledExprAdapter;
+pub struct CompiledExprAdapter {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Decode function applied after parsing the inner node.
+    pub decode: DecodeFunc,
+    /// Encode function applied before building the inner node.
+    pub encode: EncodeFunc,
+}
+impl std::fmt::Debug for CompiledExprAdapter {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledExprAdapter")
+            .field("inner", &self.inner)
+            .field("decode", &"<closure>")
+            .field("encode", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `Validator`.
-#[derive(Debug)]
-pub struct CompiledValidator;
+pub struct CompiledValidator {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The validation function. Returns `Ok(())` on success.
+    pub check: CheckFunc,
+}
+impl std::fmt::Debug for CompiledValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledValidator")
+            .field("inner", &self.inner)
+            .field("check", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `ExprValidator`.
-#[derive(Debug)]
-pub struct CompiledExprValidator;
+pub struct CompiledExprValidator {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// The validation function. Returns `Ok(())` on success.
+    pub check: CheckFunc,
+}
+impl std::fmt::Debug for CompiledExprValidator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledExprValidator")
+            .field("inner", &self.inner)
+            .field("check", &"<closure>")
+            .finish()
+    }
+}
 /// Compiled node for `Hex`.
 #[derive(Debug)]
-pub struct CompiledHex;
+pub struct CompiledHex {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 /// Compiled node for `HexDump`.
 #[derive(Debug)]
-pub struct CompiledHexDump;
+pub struct CompiledHexDump {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+}
 
 // -- Meta constructors (leaf: embed concrete construct, Phase 12.4) --
 /// Compiled node for `Pass`.
@@ -279,15 +370,36 @@ pub struct CompiledSelect;
 pub struct CompiledFocusedSeq;
 
 // -- Enum / computed constructors (mapping tables in 12.8) --
+// Enum, FlagsEnum, and Mapping are implemented in Phase 12.5; the rest
+// remain stubs until Phase 12.8.
 /// Compiled node for `Enum`.
 #[derive(Debug)]
-pub struct CompiledEnum;
+pub struct CompiledEnum {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Encoding map: label name → integer value.
+    pub mapping: IndexMap<String, u64>,
+    /// Decoding map: integer value → label name.
+    pub decmap: IndexMap<u64, String>,
+}
 /// Compiled node for `FlagsEnum`.
 #[derive(Debug)]
-pub struct CompiledFlagsEnum;
+pub struct CompiledFlagsEnum {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Mapping of flag names to their integer bit values.
+    pub flags: IndexMap<String, u64>,
+}
 /// Compiled node for `Mapping`.
 #[derive(Debug)]
-pub struct CompiledMapping;
+pub struct CompiledMapping {
+    /// The recursively compiled inner subcon.
+    pub inner: Box<CompiledNode>,
+    /// Forward (encoding) pairs: (build key, build value passed to inner).
+    pub mapping: Vec<(Value, Value)>,
+    /// Reverse (decoding) pairs: (parsed value from inner, return value).
+    pub decmapping: Vec<(Value, Value)>,
+}
 /// Compiled node for `Computed`.
 #[derive(Debug)]
 pub struct CompiledComputed;
@@ -667,18 +779,11 @@ macro_rules! impl_compiled_exec_stub {
 }
 
 impl_compiled_exec_stub! {
-    // core
-    CompiledSubconstruct, CompiledRenamed,
-    // const / mapping
-    CompiledConst, CompiledMapping,
-    // adapters
-    CompiledAdapter, CompiledSymmetricAdapter, CompiledExprAdapter,
-    CompiledValidator, CompiledExprValidator,
     // composite
     CompiledStruct, CompiledSequence, CompiledUnion, CompiledSelect,
     CompiledFocusedSeq,
-    // enum / computed
-    CompiledEnum, CompiledFlagsEnum, CompiledComputed, CompiledRebuild,
+    // computed (Enum, FlagsEnum, Mapping implemented in 12.5)
+    CompiledComputed, CompiledRebuild,
     CompiledDefault, CompiledIndex, CompiledPadded, CompiledAligned,
     CompiledFixedSized, CompiledNamedTuple, CompiledTimestampAdapter,
     // repetition
@@ -692,8 +797,6 @@ impl_compiled_exec_stub! {
     CompiledLazyBound,
     // control flow
     CompiledIfThenElse, CompiledSwitch, CompiledCheck, CompiledStopIf,
-    // formatting
-    CompiledHex, CompiledHexDump,
 }
 
 // Feature-gated stub for CompiledCompressed.
@@ -752,6 +855,382 @@ impl_leaf_exec! {
     // meta leaves
     CompiledPass, CompiledTerminated, CompiledTell, CompiledSeek,
     CompiledSeekExpr, CompiledError,
+}
+
+// ===========================================================================
+// Functional CompiledExec for wrapper nodes (Phase 12.5)
+// ===========================================================================
+//
+// Wrapper compiled nodes hold a recursively-compiled inner `Box<CompiledNode>`
+// plus wrapper-specific data (Arc closures, cloned mapping tables, or a cloned
+// Value). At runtime, exec delegates to the compiled inner node and applies
+// the wrapper's transform / check / mapping logic.
+
+/// Helper: executes `exec_parse` on the inner compiled node and returns the
+/// resulting [`Value`] via a temporary [`ValueSink`].
+///
+/// Used by wrapper nodes that need to inspect the inner parse result before
+/// applying their own transform (e.g. Adapter's decode, Validator's check).
+fn exec_parse_inner_value(
+    inner: &CompiledNode,
+    stream: &mut CombinedStream,
+    ctx: &mut Context,
+) -> Result<Value> {
+    let mut sub = ValueSink::new();
+    inner.exec_parse(stream, ctx, &mut sub)?;
+    Box::new(sub).into_value()
+}
+
+/// Macro to generate functional [`CompiledExec`] impls for **pure-forward**
+/// wrapper nodes that delegate every operation directly to their inner
+/// compiled node with no transform.
+macro_rules! impl_forward_wrapper_exec {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CompiledExec for $ty {
+                fn exec_parse(
+                    &self,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                    sink: &mut dyn OutputSink,
+                ) -> Result<()> {
+                    let value = exec_parse_inner_value(&self.inner, stream, ctx)?;
+                    sink.set_scalar(value)
+                }
+
+                fn exec_build(
+                    &self,
+                    input: &Value,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                ) -> Result<()> {
+                    self.inner.exec_build(input, stream, ctx)
+                }
+
+                fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+                    self.inner.exec_sizeof(ctx)
+                }
+            }
+        )*
+    };
+}
+
+impl_forward_wrapper_exec! {
+    CompiledSubconstruct, CompiledRenamed, CompiledHex, CompiledHexDump,
+}
+
+// -- Const ----------------------------------------------------------------
+
+impl CompiledExec for CompiledConst {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let obj = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        if obj != self.value {
+            return Err(ConstructError::Const {
+                path: String::new(),
+                expected: format!("{:?}", self.value),
+                actual: format!("{:?}", obj),
+            });
+        }
+        sink.set_scalar(obj)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        if !input.is_none() && *input != self.value {
+            return Err(ConstructError::Const {
+                path: String::new(),
+                expected: format!("None or {:?}", self.value),
+                actual: format!("{:?}", input),
+            });
+        }
+        self.inner.exec_build(&self.value, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+// -- Adapter / ExprAdapter (decode then deposit / encode then delegate) ---
+
+/// Macro to generate [`CompiledExec`] for adapter-style wrappers that hold
+/// separate `decode` and `encode` closures.
+macro_rules! impl_adapter_exec {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CompiledExec for $ty {
+                fn exec_parse(
+                    &self,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                    sink: &mut dyn OutputSink,
+                ) -> Result<()> {
+                    let raw = exec_parse_inner_value(&self.inner, stream, ctx)?;
+                    let decoded = (self.decode)(&raw, ctx)?;
+                    sink.set_scalar(decoded)
+                }
+
+                fn exec_build(
+                    &self,
+                    input: &Value,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                ) -> Result<()> {
+                    let encoded = (self.encode)(input, ctx)?;
+                    self.inner.exec_build(&encoded, stream, ctx)
+                }
+
+                fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+                    self.inner.exec_sizeof(ctx)
+                }
+            }
+        )*
+    };
+}
+
+impl_adapter_exec!(CompiledAdapter, CompiledExprAdapter,);
+
+// -- SymmetricAdapter (single func for both directions) -------------------
+
+impl CompiledExec for CompiledSymmetricAdapter {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let raw = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let decoded = (self.func)(&raw, ctx)?;
+        sink.set_scalar(decoded)
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let encoded = (self.func)(input, ctx)?;
+        self.inner.exec_build(&encoded, stream, ctx)
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner.exec_sizeof(ctx)
+    }
+}
+
+// -- Validator / ExprValidator (check then pass-through) ------------------
+
+/// Macro to generate [`CompiledExec`] for validator-style wrappers that hold
+/// a `check` closure. The value passes through unchanged when validation
+/// succeeds.
+macro_rules! impl_validator_exec {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl CompiledExec for $ty {
+                fn exec_parse(
+                    &self,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                    sink: &mut dyn OutputSink,
+                ) -> Result<()> {
+                    let raw = exec_parse_inner_value(&self.inner, stream, ctx)?;
+                    (self.check)(&raw, ctx)?;
+                    sink.set_scalar(raw)
+                }
+
+                fn exec_build(
+                    &self,
+                    input: &Value,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
+                ) -> Result<()> {
+                    (self.check)(input, ctx)?;
+                    self.inner.exec_build(input, stream, ctx)
+                }
+
+                fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+                    self.inner.exec_sizeof(ctx)
+                }
+            }
+        )*
+    };
+}
+
+impl_validator_exec!(CompiledValidator, CompiledExprValidator,);
+
+// -- Enum (integer ↔ string mapping) --------------------------------------
+
+impl CompiledExec for CompiledEnum {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let obj = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let int_val = obj.to_u64().map_err(|e| e.with_path_prefix("Enum"))?;
+        match self.decmap.get(&int_val) {
+            Some(label) => sink.set_scalar(Value::String(label.clone())),
+            None => sink.set_scalar(obj),
+        }
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let build_val = match input {
+            Value::String(label) => match self.mapping.get(label) {
+                Some(&v) => Value::UInt(v),
+                None => {
+                    return Err(ConstructError::Mapping {
+                        path: String::new(),
+                        key: format!("{:?}", label),
+                    }
+                    .with_path_prefix("Enum"))
+                }
+            },
+            Value::Int(i) => Value::Int(*i),
+            other => {
+                let v = other.to_u64().map_err(|e| e.with_path_prefix("Enum"))?;
+                Value::UInt(v)
+            }
+        };
+        self.inner
+            .exec_build(&build_val, stream, ctx)
+            .map_err(|e| e.with_path_prefix("Enum"))
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner
+            .exec_sizeof(ctx)
+            .map_err(|e| e.with_path_prefix("Enum"))
+    }
+}
+
+// -- FlagsEnum (bit-flag expansion) ---------------------------------------
+
+impl CompiledExec for CompiledFlagsEnum {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let obj = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        let int_val = obj.to_u64().map_err(|e| e.with_path_prefix("FlagsEnum"))?;
+        let mut container = IndexMap::new();
+        for (name, &flag_value) in &self.flags {
+            let set = (int_val & flag_value) == flag_value;
+            container.insert(name.clone(), Value::Bool(set));
+        }
+        sink.set_scalar(Value::Container(container))
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        let container = input
+            .as_container()
+            .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
+        let mut flags_val: u64 = 0;
+        for (name, value) in container {
+            if name.starts_with('_') {
+                continue;
+            }
+            match self.flags.get(name) {
+                Some(&flag_bits) => {
+                    let is_set = value
+                        .as_bool()
+                        .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
+                    if is_set {
+                        flags_val |= flag_bits;
+                    }
+                }
+                None => {
+                    return Err(ConstructError::Mapping {
+                        path: String::new(),
+                        key: format!("{:?}", name),
+                    }
+                    .with_path_prefix("FlagsEnum"))
+                }
+            }
+        }
+        self.inner
+            .exec_build(&Value::UInt(flags_val), stream, ctx)
+            .map_err(|e| e.with_path_prefix("FlagsEnum"))
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner
+            .exec_sizeof(ctx)
+            .map_err(|e| e.with_path_prefix("FlagsEnum"))
+    }
+}
+
+// -- Mapping (arbitrary Value ↔ Value mapping) ----------------------------
+
+impl CompiledExec for CompiledMapping {
+    fn exec_parse(
+        &self,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+        sink: &mut dyn OutputSink,
+    ) -> Result<()> {
+        let obj = exec_parse_inner_value(&self.inner, stream, ctx)?;
+        for (k, v) in &self.decmapping {
+            if k == &obj {
+                return sink.set_scalar(v.clone());
+            }
+        }
+        Err(ConstructError::Mapping {
+            path: String::new(),
+            key: format!("{:?}", obj),
+        }
+        .with_path_prefix("Mapping"))
+    }
+
+    fn exec_build(
+        &self,
+        input: &Value,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
+    ) -> Result<()> {
+        for (k, v) in &self.mapping {
+            if k == input {
+                return self
+                    .inner
+                    .exec_build(v, stream, ctx)
+                    .map_err(|e| e.with_path_prefix("Mapping"));
+            }
+        }
+        Err(ConstructError::Mapping {
+            path: String::new(),
+            key: format!("{:?}", input),
+        }
+        .with_path_prefix("Mapping"))
+    }
+
+    fn exec_sizeof(&self, ctx: &Context) -> Result<usize> {
+        self.inner
+            .exec_sizeof(ctx)
+            .map_err(|e| e.with_path_prefix("Mapping"))
+    }
 }
 
 // ===========================================================================
@@ -976,6 +1455,21 @@ fn try_fold_static_size(node: &CompiledNode) -> Option<usize> {
         | CompiledNode::Seek(_)
         | CompiledNode::SeekExpr(_)
         | CompiledNode::Error(_) => None,
+        // Wrappers (Phase 12.5): static size folds to the inner node's size,
+        // since wrappers add no bytes of their own.
+        CompiledNode::Subconstruct(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Renamed(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Const(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Adapter(w) => try_fold_static_size(&w.inner),
+        CompiledNode::SymmetricAdapter(w) => try_fold_static_size(&w.inner),
+        CompiledNode::ExprAdapter(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Validator(w) => try_fold_static_size(&w.inner),
+        CompiledNode::ExprValidator(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Hex(w) => try_fold_static_size(&w.inner),
+        CompiledNode::HexDump(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Enum(w) => try_fold_static_size(&w.inner),
+        CompiledNode::FlagsEnum(w) => try_fold_static_size(&w.inner),
+        CompiledNode::Mapping(w) => try_fold_static_size(&w.inner),
         // Dynamic escape-hatch and all not-yet-implemented nodes: unknown.
         _ => None,
     }
@@ -1119,12 +1613,253 @@ mod tests {
     }
 
     #[test]
-    fn stub_exec_for_adapter_returns_error() {
-        // Adapter (wrapper) is implemented in Phase 12.5 — still a stub here.
-        let node = CompiledNode::Adapter(CompiledAdapter);
+    fn wrapper_adapter_exec_sizeof_delegates_to_inner() {
+        // Adapter (Phase 12.5): exec_sizeof delegates to the compiled inner
+        // node. We build a CompiledAdapter wrapping a compiled FormatField
+        // (static size 1) with identity closures.
+        use crate::constructs::adapters::{DecodeFuncBox, EncodeFuncBox};
+        let inner = Box::new(CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U8),
+        }));
+        let decode: DecodeFuncBox = Box::new(|v, _ctx| Ok(v.clone()));
+        let encode: EncodeFuncBox = Box::new(|v, _ctx| Ok(v.clone()));
+        let adapter = CompiledAdapter {
+            inner,
+            decode: Arc::from(decode),
+            encode: Arc::from(encode),
+        };
+        let node = CompiledNode::Adapter(adapter);
         let ctx = Context::new();
-        let err = node.exec_sizeof(&ctx).unwrap_err();
+        assert_eq!(node.exec_sizeof(&ctx).unwrap(), 1);
+    }
+
+    // -- Wrapper CompiledExec delegation (Phase 12.5) -----------------------
+    //
+    // Wrapper compiled nodes hold a recursively-compiled inner
+    // Box<CompiledNode> and apply their transform/check/mapping logic on top.
+
+    /// Helper: builds a compiled inner FormatField U8 big-endian node.
+    fn compiled_u8() -> CompiledNode {
+        CompiledNode::FormatField(CompiledFormatField {
+            inner: FormatField::new(Endianness::Big, FormatKind::U8),
+        })
+    }
+
+    #[test]
+    fn wrapper_hex_exec_forwards_parse_and_build() {
+        // Hex is pure-forward: parse and build delegate to inner.
+        let node = CompiledNode::Hex(CompiledHex {
+            inner: Box::new(compiled_u8()),
+        });
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[42]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(42));
+
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        node.exec_build(&Value::UInt(42), &mut stream2, &mut Context::new())
+            .unwrap();
+        assert_eq!(stream2.into_bytes(), vec![42]);
+    }
+
+    #[test]
+    fn wrapper_const_exec_parse_checks_value() {
+        let node = CompiledNode::Const(CompiledConst {
+            inner: Box::new(compiled_u8()),
+            value: Value::UInt(7),
+        });
+        // Matching value: succeeds.
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[7]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(7));
+        // Non-matching value: ConstError.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(&[9]));
+        let err = node
+            .exec_parse(&mut stream2, &mut ctx, &mut ValueSink::new())
+            .unwrap_err();
+        assert!(matches!(err, ConstructError::Const { .. }));
+    }
+
+    #[test]
+    fn wrapper_const_exec_build_ignores_input() {
+        let node = CompiledNode::Const(CompiledConst {
+            inner: Box::new(compiled_u8()),
+            value: Value::UInt(42),
+        });
+        // build with None: writes the constant value.
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+        node.exec_build(&Value::None, &mut stream, &mut Context::new())
+            .unwrap();
+        assert_eq!(stream.into_bytes(), vec![42]);
+        // build with wrong value: error.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        let err = node
+            .exec_build(&Value::UInt(99), &mut stream2, &mut Context::new())
+            .unwrap_err();
+        assert!(matches!(err, ConstructError::Const { .. }));
+    }
+
+    #[test]
+    fn wrapper_adapter_exec_parse_applies_decode() {
+        use crate::constructs::adapters::{DecodeFuncBox, EncodeFuncBox};
+        // decode: multiply by 2; encode: divide by 2.
+        let decode: DecodeFuncBox = Box::new(|v, _ctx| {
+            let n = v.to_u64()?;
+            Ok(Value::UInt(n * 2))
+        });
+        let encode: EncodeFuncBox = Box::new(|v, _ctx| {
+            let n = v.to_u64()?;
+            Ok(Value::UInt(n / 2))
+        });
+        let node = CompiledNode::Adapter(CompiledAdapter {
+            inner: Box::new(compiled_u8()),
+            decode: Arc::from(decode),
+            encode: Arc::from(encode),
+        });
+        // Parse raw 5 → decode → 10.
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[5]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(10));
+        // Build 10 → encode → 5.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        node.exec_build(&Value::UInt(10), &mut stream2, &mut Context::new())
+            .unwrap();
+        assert_eq!(stream2.into_bytes(), vec![5]);
+    }
+
+    #[test]
+    fn wrapper_validator_exec_parse_checks_value() {
+        use crate::constructs::adapters::CheckFuncBox;
+        // check: value must be > 0.
+        let check: CheckFuncBox = Box::new(|v, _ctx| {
+            let n = v.to_u64()?;
+            if n > 0 {
+                Ok(())
+            } else {
+                Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: "must be positive".to_string(),
+                })
+            }
+        });
+        let node = CompiledNode::Validator(CompiledValidator {
+            inner: Box::new(compiled_u8()),
+            check: Arc::from(check),
+        });
+        // Parse 5: passes validation.
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[5]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(Box::new(sink).into_value().unwrap(), Value::UInt(5));
+        // Parse 0: fails validation.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(&[0]));
+        let err = node
+            .exec_parse(&mut stream2, &mut ctx, &mut ValueSink::new())
+            .unwrap_err();
         assert!(matches!(err, ConstructError::Generic { .. }));
+    }
+
+    #[test]
+    fn wrapper_enum_exec_parse_maps_int_to_string() {
+        let mut decmap = IndexMap::new();
+        decmap.insert(1u64, "one".to_string());
+        decmap.insert(2u64, "two".to_string());
+        let node = CompiledNode::Enum(CompiledEnum {
+            inner: Box::new(compiled_u8()),
+            mapping: IndexMap::new(),
+            decmap,
+        });
+        // Parse 1 → "one".
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(
+            Box::new(sink).into_value().unwrap(),
+            Value::String("one".to_string())
+        );
+        // Parse unmapped 255 → raw integer.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(&[255]));
+        let mut sink2 = ValueSink::new();
+        node.exec_parse(&mut stream2, &mut ctx, &mut sink2).unwrap();
+        assert_eq!(Box::new(sink2).into_value().unwrap(), Value::UInt(255));
+    }
+
+    #[test]
+    fn wrapper_flagsenum_exec_parse_expands_bits() {
+        let mut flags = IndexMap::new();
+        flags.insert("read".to_string(), 1u64);
+        flags.insert("write".to_string(), 2u64);
+        flags.insert("exec".to_string(), 4u64);
+        let node = CompiledNode::FlagsEnum(CompiledFlagsEnum {
+            inner: Box::new(compiled_u8()),
+            flags,
+        });
+        // Parse 0b101 → read=true, write=false, exec=true.
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0b101]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        let container = Box::new(sink)
+            .into_value()
+            .unwrap()
+            .as_container()
+            .unwrap()
+            .clone();
+        assert_eq!(container.get("read").unwrap(), &Value::Bool(true));
+        assert_eq!(container.get("write").unwrap(), &Value::Bool(false));
+        assert_eq!(container.get("exec").unwrap(), &Value::Bool(true));
+    }
+
+    #[test]
+    fn wrapper_mapping_exec_parse_and_build() {
+        let node = CompiledNode::Mapping(CompiledMapping {
+            inner: Box::new(compiled_u8()),
+            mapping: vec![
+                (Value::String("A".to_string()), Value::UInt(0)),
+                (Value::String("B".to_string()), Value::UInt(1)),
+            ],
+            decmapping: vec![
+                (Value::UInt(0), Value::String("A".to_string())),
+                (Value::UInt(1), Value::String("B".to_string())),
+            ],
+        });
+        // Parse 0 → "A".
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0]));
+        let mut ctx = Context::new();
+        let mut sink = ValueSink::new();
+        node.exec_parse(&mut stream, &mut ctx, &mut sink).unwrap();
+        assert_eq!(
+            Box::new(sink).into_value().unwrap(),
+            Value::String("A".to_string())
+        );
+        // Build "B" → writes 1.
+        let mut stream2 = CombinedStream::ByteStream(ByteStream::new_write());
+        node.exec_build(
+            &Value::String("B".to_string()),
+            &mut stream2,
+            &mut Context::new(),
+        )
+        .unwrap();
+        assert_eq!(stream2.into_bytes(), vec![1]);
+    }
+
+    #[test]
+    fn wrapper_static_size_folds_to_inner() {
+        // A wrapper around a fixed-size leaf folds the static size.
+        let node = CompiledNode::Hex(CompiledHex {
+            inner: Box::new(CompiledNode::FormatField(CompiledFormatField {
+                inner: FormatField::new(Endianness::Big, FormatKind::U32),
+            })),
+        });
+        let schema = CompiledSchema::new(node);
+        assert_eq!(schema.static_size(), Some(4));
     }
 
     #[test]
@@ -1284,19 +2019,33 @@ mod tests {
     fn all_major_variants_are_constructible() {
         // Smoke test: construct one of each variant category to ensure
         // the enum compiles and enum_dispatch generates valid dispatch.
-        let _ = CompiledNode::Subconstruct(CompiledSubconstruct);
+        // Wrappers need a compiled inner node (Phase 12.5).
+        let inner_leaf = Box::new(compiled_pass());
+        let _ = CompiledNode::Subconstruct(CompiledSubconstruct { inner: inner_leaf });
         let _ = CompiledNode::FormatField(CompiledFormatField {
             inner: FormatField::new(Endianness::Big, FormatKind::U8),
         });
-        let _ = CompiledNode::Adapter(CompiledAdapter);
+        let decode: crate::constructs::adapters::DecodeFuncBox = Box::new(|v, _ctx| Ok(v.clone()));
+        let encode: crate::constructs::adapters::EncodeFuncBox = Box::new(|v, _ctx| Ok(v.clone()));
+        let _ = CompiledNode::Adapter(CompiledAdapter {
+            inner: Box::new(compiled_pass()),
+            decode: Arc::from(decode),
+            encode: Arc::from(encode),
+        });
         let _ = compiled_pass();
         let _ = CompiledNode::Struct(CompiledStruct);
-        let _ = CompiledNode::Enum(CompiledEnum);
+        let _ = CompiledNode::Enum(CompiledEnum {
+            inner: Box::new(compiled_pass()),
+            mapping: IndexMap::new(),
+            decmap: IndexMap::new(),
+        });
         let _ = CompiledNode::Array(CompiledArray);
         let _ = CompiledNode::Lazy(CompiledLazy);
         let _ = CompiledNode::Bitwise(CompiledBitwise);
         let _ = CompiledNode::IfThenElse(CompiledIfThenElse);
-        let _ = CompiledNode::Hex(CompiledHex);
+        let _ = CompiledNode::Hex(CompiledHex {
+            inner: Box::new(compiled_pass()),
+        });
         let _ = CompiledNode::Dynamic(dynamic_pass());
     }
 }
