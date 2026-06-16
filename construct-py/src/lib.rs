@@ -141,6 +141,7 @@ fn register_exceptions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> 
 
 /// Registers all pyclass types.
 fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use compiled_ext::CompiledSchemaHolder;
     use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
@@ -225,10 +226,13 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyRenamed>()?;
     // ContextView (13.5)
     m.add_class::<PyContextView>()?;
+    // CompiledSchemaHolder (14.1 — dataclass-first API)
+    m.add_class::<CompiledSchemaHolder>()?;
     Ok(())
 }
 /// Registers all pyfunction factories.
 fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    use compiled_ext::py_compile_schema;
     use constructs_adapter::*;
     use constructs_atomic::*;
     use constructs_composite::*;
@@ -322,6 +326,8 @@ fn register_functions(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("Pass", Py::new(py, py_pass())?)?;
     m.add("Terminated", Py::new(py, py_terminated())?)?;
     m.add("Tell", Py::new(py, py_tell())?)?;
+    // Compiled schema factory (14.1 — dataclass-first API)
+    m.add_function(wrap_pyfunction!(py_compile_schema, m)?)?;
     Ok(())
 }
 

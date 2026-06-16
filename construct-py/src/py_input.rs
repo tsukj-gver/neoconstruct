@@ -15,7 +15,9 @@ use construct::compiled::input::Input;
 use construct::core::error::{ConstructError, Result};
 use construct::value::Value;
 
+use indexmap::IndexMap;
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 
 use crate::conversions::py_to_value;
 use crate::py_sink::py_err_to_construct;
@@ -77,7 +79,41 @@ impl Input for PyInput {
     fn as_value(&self) -> Result<Value> {
         Python::with_gil(|py| {
             let bound = self.obj.bind(py);
-            py_to_value(py, bound).map_err(py_err_to_construct)
+
+            // Standard conversion handles: None, bool, int, float, bytes,
+            // string, list, and dict (including Container subclasses).
+            match py_to_value(py, bound) {
+                Ok(v) => Ok(v),
+                Err(_) => {
+                    // Fallback: the object is not a primitive or dict/list.
+                    // Try converting it as a struct-like object by reading
+                    // its __dict__ (dataclass instances, plain objects, etc.).
+                    if let Ok(dict_attr) = bound.getattr("__dict__") {
+                        if let Ok(dict) = dict_attr.downcast::<PyDict>() {
+                            let mut map = IndexMap::new();
+                            for (key, value) in dict.iter() {
+                                if let Ok(key_str) = key.extract::<String>() {
+                                    if let Ok(val) = py_to_value(py, &value) {
+                                        map.insert(key_str, val);
+                                    }
+                                }
+                            }
+                            return Ok(Value::Container(map));
+                        }
+                    }
+                    // Cannot convert — return a type-mismatch error.
+                    let type_name = bound
+                        .get_type()
+                        .name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_else(|_| "<unknown>".to_string());
+                    Err(ConstructError::TypeMismatch {
+                        path: String::new(),
+                        expected: "convertible Value or object with __dict__".to_string(),
+                        actual: type_name,
+                    })
+                }
+            }
         })
     }
 
@@ -174,6 +210,47 @@ mod tests {
         Python::with_gil(|py| {
             let input = PyInput::new(py.None());
             assert_eq!(input.as_value().unwrap(), Value::None);
+        });
+    }
+
+    #[test]
+    fn py_input_as_value_object_with_dict() {
+        // Non-primitive objects with __dict__ (e.g., dataclass instances,
+        // plain Python objects) should be converted to Value::Container
+        // by reading their __dict__ attributes.
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            // Create a simple Python object with attributes.
+            py.run_bound("class _TestObj:\n    pass\n", None, None)
+                .unwrap();
+            let obj = py.eval_bound("_TestObj()", None, None).unwrap();
+            obj.setattr("x", 42i64).unwrap();
+            obj.setattr("y", "hello").unwrap();
+            let input = PyInput::from_bound(&obj);
+            let val = input.as_value().unwrap();
+            match val {
+                Value::Container(map) => {
+                    assert_eq!(map.get("x"), Some(&Value::Int(42)));
+                    assert_eq!(map.get("y"), Some(&Value::String("hello".into())));
+                }
+                other => panic!("expected Container, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn py_input_as_value_unconvertible_returns_error() {
+        // Objects without __dict__ and not convertible to a standard Value
+        // should return a TypeMismatch error.
+        crate::ensure_python();
+        Python::with_gil(|py| {
+            // Create a class with __slots__ (no __dict__).
+            py.run_bound("class _NoDict:\n    __slots__ = ()\n", None, None)
+                .unwrap();
+            let obj = py.eval_bound("_NoDict()", None, None).unwrap();
+            let input = PyInput::from_bound(&obj);
+            let err = input.as_value().unwrap_err();
+            assert!(matches!(err, ConstructError::TypeMismatch { .. }));
         });
     }
 

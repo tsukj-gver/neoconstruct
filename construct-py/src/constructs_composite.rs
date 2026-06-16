@@ -174,8 +174,35 @@ impl PyConstructWrapper for PyStruct {
     }
 }
 
+impl PyStruct {
+    /// Reconstructs an owned `Box<CombinedConstruct>` from `py_subcons`.
+    ///
+    /// This produces a `CombinedConstruct::Struct` (preserving static dispatch
+    /// in `SchemaCompiler`). Used by `compile_schema` (Phase 14) to obtain an
+    /// owned declaration tree without requiring `construct::constructs::Struct`
+    /// to be `Clone`.
+    ///
+    /// The reconstruction iterates `py_subcons` and delegates to
+    /// [`add_struct_subcon`], which correctly handles `PyRenamed`, list/tuple
+    /// unpacking, and anonymous subcons — matching the original `py_struct`
+    /// factory semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns `PyErr` if any subcon cannot be extracted (e.g. an unsupported
+    /// Python object in `py_subcons`).
+    pub(crate) fn make_combined(&self, py: Python<'_>) -> PyResult<Box<CombinedConstruct>> {
+        let mut builder = construct::constructs::Struct::new();
+        let mut _discarded_py_subs: Vec<PyObject> = Vec::new();
+        for sub in &self.py_subcons {
+            builder = add_struct_subcon(py, builder, &mut _discarded_py_subs, sub.bind(py))?;
+        }
+        Ok(Box::new(CombinedConstruct::Struct(builder)))
+    }
+}
+
 /// Adds a subcon to a Struct builder, handling list unpacking.
-fn add_struct_subcon(
+pub(crate) fn add_struct_subcon(
     py: Python<'_>,
     mut builder: construct::constructs::Struct,
     py_subcons: &mut Vec<PyObject>,

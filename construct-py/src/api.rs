@@ -371,7 +371,7 @@ pub fn compile_schema(construct: &CombinedConstruct) -> PyResult<Arc<CompiledSch
 ///
 /// Compiles `construct` (if `holder` is `None`) or reuses a cached
 /// [`CompiledSchemaHolder`], then calls
-/// [`CompiledSchemaHolder::parse_bytes_py`]. The result is written directly
+/// [`CompiledSchemaHolder::parse_bytes_raw`]. The result is written directly
 /// into a `PyDict` / `PyList` — no `Value::Container` intermediate tree is
 /// built (S-ARCH-2).
 ///
@@ -390,10 +390,10 @@ pub fn py_parse_compiled(
     kw: IndexMap<String, Value>,
 ) -> PyResult<PyObject> {
     match holder {
-        Some(h) => h.parse_bytes_py(py, data, kw),
+        Some(h) => h.parse_bytes_raw(py, data, kw),
         None => {
             let h = CompiledSchemaHolder::compile(construct)?;
-            h.parse_bytes_py(py, data, kw)
+            h.parse_bytes_raw(py, data, kw)
         }
     }
 }
@@ -402,7 +402,7 @@ pub fn py_parse_compiled(
 ///
 /// Compiles `construct` (if `holder` is `None`) or reuses a cached
 /// [`CompiledSchemaHolder`], then calls
-/// [`CompiledSchemaHolder::build_from_py`]. The build input is read lazily
+/// [`CompiledSchemaHolder::build_from_raw`]. The build input is read lazily
 /// from `obj` via [`PyInput`](crate::py_input::PyInput) — only fields
 /// actually consumed by `exec_build` incur FFI.
 ///
@@ -420,10 +420,10 @@ pub fn py_build_compiled(
     kw: IndexMap<String, Value>,
 ) -> PyResult<PyObject> {
     match holder {
-        Some(h) => h.build_from_py(py, obj, kw),
+        Some(h) => h.build_from_raw(py, obj, kw),
         None => {
             let h = CompiledSchemaHolder::compile(construct)?;
-            h.build_from_py(py, obj, kw)
+            h.build_from_raw(py, obj, kw)
         }
     }
 }
