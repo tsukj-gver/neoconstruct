@@ -15,7 +15,10 @@ pub mod exceptions;
 pub mod expr_bridge;
 pub mod gallery;
 pub mod py_adapter;
+pub mod py_context;
+pub mod py_input;
 pub mod py_renamed;
+pub mod py_sink;
 pub mod pystream;
 
 use pyo3::prelude::*;
@@ -142,6 +145,7 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     use constructs_stream::*;
     use constructs_string::*;
     use gallery::PyGalleryParser;
+    use py_context::PyContextView;
     use py_renamed::PyRenamed;
 
     // Atomic
@@ -217,6 +221,8 @@ fn register_classes(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyGalleryParser>()?;
     // Renamed
     m.add_class::<PyRenamed>()?;
+    // ContextView (13.5)
+    m.add_class::<PyContextView>()?;
     Ok(())
 }
 /// Registers all pyfunction factories.
