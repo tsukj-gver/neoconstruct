@@ -213,7 +213,9 @@ mod tests {
         let owned = wrapper.make_owned().unwrap();
         // Verify the owned construct works independently.
         let c: &dyn Construct = owned.as_ref();
-        let mut stream = construct::core::stream::ByteStream::new_read(b"hi\x00");
+        let mut stream = construct::core::stream::CombinedStream::ByteStream(
+            construct::core::stream::ByteStream::new_read(b"hi\x00"),
+        );
         let mut ctx = construct::core::context::Context::new();
         let result = c.parse(&mut stream, &mut ctx).unwrap();
         assert_eq!(result, construct::value::Value::String("hi".to_string()));

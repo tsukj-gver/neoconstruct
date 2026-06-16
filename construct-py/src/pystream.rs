@@ -29,6 +29,23 @@ impl PyStream {
     pub fn new(obj: Py<PyAny>) -> Self {
         PyStream { obj }
     }
+
+    /// Reads all remaining bytes from the Python stream by calling `read()`
+    /// with no arguments.
+    ///
+    /// This is used by [`py_parse_stream`](crate::api::py_parse_stream) to
+    /// buffer the entire stream into memory before parsing (since `PyStream`
+    /// cannot be a `CombinedStream` variant).
+    pub fn read_all(&mut self) -> Result<Vec<u8>> {
+        Python::with_gil(|py| {
+            let obj = self.obj.bind(py);
+            let result = obj.call_method0("read").map_err(pyerr_to_stream)?;
+            let bytes_obj = result
+                .downcast::<PyBytes>()
+                .map_err(|_| stream_error("Python stream read() did not return bytes"))?;
+            Ok(bytes_obj.as_bytes().to_vec())
+        })
+    }
 }
 
 /// Converts a [`PyErr`] into a [`ConstructError::Stream`] with an empty path.

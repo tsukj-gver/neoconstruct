@@ -18,7 +18,9 @@
 //! `Box<dyn Construct>`, the wrapper's `make_owned` method re-bridges the
 //! closures from the stored PyObjects.
 
+use construct::combined::CombinedConstruct;
 use construct::core::context::Context;
+use construct::core::stream::CombinedStream;
 use construct::core::Construct;
 use construct::value::Value;
 
@@ -63,7 +65,7 @@ impl ErrorWithMessage {
 impl Construct for ErrorWithMessage {
     fn parse(
         &self,
-        _stream: &mut dyn construct::core::stream::Stream,
+        _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> construct::core::error::Result<Value> {
         Err(construct::core::error::ConstructError::Check {
@@ -75,7 +77,7 @@ impl Construct for ErrorWithMessage {
     fn build(
         &self,
         _data: &Value,
-        _stream: &mut dyn construct::core::stream::Stream,
+        _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> construct::core::error::Result<()> {
         Err(construct::core::error::ConstructError::Check {
@@ -1187,20 +1189,21 @@ impl PyConstructWrapper for PyLazyBound {
 impl PyLazyBound {
     pub(crate) fn make_owned(&self) -> PyResult<Box<dyn Construct>> {
         let ctxfunc_obj = Python::with_gil(|py| self.ctxfunc_obj.clone_ref(py));
-        let subcon_func: Box<dyn Fn() -> Box<dyn Construct>> = Box::new(move || {
-            Python::with_gil(|py| {
-                let result: PyResult<Box<dyn Construct>> = (|| {
-                    let py_constr = ctxfunc_obj.call0(py)?;
-                    let sc: Box<dyn Construct> = extract_subcon(py_constr.bind(py))?;
-                    Ok(sc)
-                })();
-                result.unwrap_or_else(|e| {
-                    boxed(ErrorWithMessage::new(format!(
-                        "LazyBound failed to resolve subcon: {e}"
-                    )))
+        let subcon_func: Box<dyn Fn() -> Box<CombinedConstruct> + Send + Sync> =
+            Box::new(move || {
+                Python::with_gil(|py| {
+                    let result: PyResult<Box<CombinedConstruct>> = (|| {
+                        let py_constr = ctxfunc_obj.call0(py)?;
+                        let sc = extract_subcon(py_constr.bind(py))?;
+                        Ok(sc)
+                    })();
+                    result.unwrap_or_else(|e| {
+                        Box::new(construct::combined::dynamic(ErrorWithMessage::new(
+                            format!("LazyBound failed to resolve subcon: {e}"),
+                        )))
+                    })
                 })
-            })
-        });
+            });
         Ok(boxed(construct::constructs::stream_ops::LazyBound::new(
             subcon_func,
         )))
@@ -1213,16 +1216,16 @@ impl PyLazyBound {
 pub fn py_lazy_bound(py: Python<'_>, ctxfunc: &Bound<PyAny>) -> PyResult<PyLazyBound> {
     let ctxfunc_obj: PyObject = ctxfunc.clone().unbind();
     let captured = ctxfunc_obj.clone_ref(py);
-    let subcon_func: Box<dyn Fn() -> Box<dyn Construct>> = Box::new(move || {
+    let subcon_func: Box<dyn Fn() -> Box<CombinedConstruct> + Send + Sync> = Box::new(move || {
         Python::with_gil(|py| {
-            let result: PyResult<Box<dyn Construct>> = (|| {
+            let result: PyResult<Box<CombinedConstruct>> = (|| {
                 let py_constr = captured.call0(py)?;
-                let sc: Box<dyn Construct> = extract_subcon(py_constr.bind(py))?;
+                let sc = extract_subcon(py_constr.bind(py))?;
                 Ok(sc)
             })();
             result.unwrap_or_else(|e| {
-                boxed(ErrorWithMessage::new(format!(
-                    "LazyBound failed to resolve subcon: {e}"
+                Box::new(construct::combined::dynamic(ErrorWithMessage::new(
+                    format!("LazyBound failed to resolve subcon: {e}"),
                 )))
             })
         })
@@ -1321,7 +1324,8 @@ pub fn py_bit_struct(
     // bit-level fields (Bit, Nibble) working correctly because they operate
     // directly on the Rust Bitwise sub-stream.
     let py_struct_for_inner = crate::constructs_composite::py_struct(py, subcons, subconskw)?;
-    let sc: Box<dyn Construct> = Box::new(py_struct_for_inner.inner);
+    let sc: Box<CombinedConstruct> =
+        Box::new(construct::combined::dynamic(py_struct_for_inner.inner));
 
     // Build a separate PyStruct instance to store as subcon_obj. This is used
     // by make_owned() when the Bitwise is nested inside another composite.
@@ -1355,19 +1359,24 @@ pub fn py_prefixed_array(
     // count field: Rebuild(countfield, len_(this.items))
     // ComputeFunc = Fn(&Context) -> Result<Value>; adapt from Evaluate.
     let len_expr = LenThisItemsExpr;
-    let count_compute: Box<dyn Fn(&Context) -> construct::core::error::Result<Value>> =
-        Box::new(move |ctx| construct::expr::Evaluate::evaluate(&len_expr, ctx, None));
+    let count_compute: Box<
+        dyn Fn(&Context) -> construct::core::error::Result<Value> + Send + Sync,
+    > = Box::new(move |ctx| construct::expr::Evaluate::evaluate(&len_expr, ctx, None));
     let count_rebuild = construct::constructs::Rebuild::new(cf, count_compute);
 
     // items field: subcon[this.count]  →  ArrayExpr(this.count, subcon)
-    let count_ref: Box<dyn construct::expr::Evaluate> = Box::new(ThisCountExpr);
+    let count_ref: Box<construct::expr::CombinedExpr> =
+        Box::new(construct::expr::dynamic_expr(ThisCountExpr));
     let items_array = construct::constructs::ArrayExpr::new(count_ref, sc);
 
     let focused = construct::constructs::FocusedSeq::new(
         "items",
         vec![
-            StructField::new("count", boxed(count_rebuild)),
-            StructField::new("items", boxed(items_array)),
+            StructField::new(
+                "count",
+                Box::new(construct::combined::dynamic(count_rebuild)),
+            ),
+            StructField::new("items", Box::new(construct::combined::dynamic(items_array))),
         ],
     );
     Ok(crate::constructs_composite::PyFocusedSeq { inner: focused })

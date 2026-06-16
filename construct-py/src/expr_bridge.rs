@@ -13,7 +13,7 @@
 
 use construct::core::context::Context;
 use construct::core::error::{ConstructError, Result};
-use construct::expr::{ConstExpr, Evaluate};
+use construct::expr::{CombinedExpr, ConstExpr, Evaluate};
 use construct::value::Value;
 
 use pyo3::prelude::*;
@@ -118,31 +118,27 @@ fn pyerr_to_expr_or_keyerr(prefix: &str, e: PyErr) -> ConstructError {
     })
 }
 
-/// Adapts a Python callable into a `CondFunc` (`Fn(&Context) -> Result<bool>`).
+/// Adapts a Python callable into a `CondFunc` (`Fn(&Context) -> bool`).
 ///
 /// The callable is invoked as `callable(context)`. The return value is
 /// interpreted using Python truthiness. Errors from the callable (e.g.,
-/// `KeyError` from accessing a missing context field) are propagated as
-/// `Err` so that callers like `IfThenElse.sizeof` can convert them to
-/// `SizeofError`, matching the upstream Python behaviour.
+/// `KeyError` from accessing a missing context field) are swallowed and
+/// treated as `false`, because the 13.1 `CondFunc` signature is infallible
+/// (`Fn(&Context) -> bool`).
 ///
 /// Used by `IfThenElse`. Note: `StopIf` uses the separate
-/// [`py_to_stop_cond_func`] which keeps the bool signature because
-/// `StopIf` does not propagate errors during `sizeof`.
+/// [`py_to_stop_cond_func`] which shares the same infallible bool signature.
 #[allow(clippy::type_complexity)]
-pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<bool>> {
+pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool + Send + Sync> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
-            let py_ctx = context_to_py_container(py, ctx).map_err(|e| ConstructError::Generic {
-                path: String::new(),
-                message: format!("cond: cannot convert context: {e}"),
-            })?;
+            let py_ctx = match context_to_py_container(py, ctx) {
+                Ok(c) => c,
+                Err(_) => return false,
+            };
             match callable.call1(py, (py_ctx.bind(py),)) {
-                Ok(result) => Ok(result.is_truthy(py).unwrap_or(false)),
-                Err(e) => Err(ConstructError::Generic {
-                    path: String::new(),
-                    message: format!("cond evaluation failed: {e}"),
-                }),
+                Ok(result) => result.is_truthy(py).unwrap_or(false),
+                Err(_) => false,
             }
         })
     })
@@ -155,7 +151,7 @@ pub fn py_to_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<boo
 /// Errors are swallowed and treated as `false` (do not stop), matching the
 /// upstream behaviour where `StopIf` only triggers on a truthy return.
 #[allow(clippy::type_complexity)]
-pub fn py_to_stop_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool> {
+pub fn py_to_stop_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool + Send + Sync> {
     Box::new(move |ctx| {
         Python::with_gil(|py| {
             let py_ctx = match context_to_py_container(py, ctx) {
@@ -177,7 +173,7 @@ pub fn py_to_stop_cond_func(callable: PyObject) -> Box<dyn Fn(&Context) -> bool>
 ///
 /// Used by `Switch`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value>> {
+pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value> + Send + Sync> {
     // Python's Switch accepts non-callable keyfuncs: Switch(5, ...) always uses 5 as key.
     // Only call if the object is actually callable; otherwise evaluate as a constant.
     let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
@@ -197,7 +193,7 @@ pub fn py_to_key_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Valu
 ///
 /// Used by `Check`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()>> {
+pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()> + Send + Sync> {
     // Python's Check accepts non-callable values: Check(True) always passes,
     // Check(False) always fails. Only call if the object is actually callable.
     let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
@@ -243,7 +239,9 @@ pub fn py_to_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()
 ///
 /// Used by `Computed` and `Rebuild`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_compute_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<Value>> {
+pub fn py_to_compute_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Context) -> Result<Value> + Send + Sync> {
     py_to_key_func(callable)
 }
 
@@ -258,7 +256,7 @@ pub fn py_to_compute_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<
 #[allow(clippy::type_complexity)]
 pub fn py_to_repeat_predicate(
     callable: PyObject,
-) -> Box<dyn Fn(&Value, &[Value], &Context) -> bool> {
+) -> Box<dyn Fn(&Value, &[Value], &Context) -> bool + Send + Sync> {
     // Handle non-callable values: RepeatUntil(True, ...) always returns True.
     let is_callable = Python::with_gil(|py| callable.bind(py).is_callable());
     if !is_callable {
@@ -309,7 +307,9 @@ fn err_to_generic(prefix: &str, e: impl std::fmt::Display) -> ConstructError {
 /// Uses the two-argument calling convention: `callable(obj, context)`.
 /// Used by `ExprAdapter` and `Adapter`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_decode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+pub fn py_to_decode_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync> {
     Box::new(move |obj, ctx| {
         Python::with_gil(|py| {
             let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Decoder value", e))?;
@@ -330,7 +330,9 @@ pub fn py_to_decode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> 
 /// Uses the two-argument calling convention: `callable(obj, context)`.
 /// Used by `ExprAdapter` and `Adapter`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_encode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+pub fn py_to_encode_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync> {
     Box::new(move |obj, ctx| {
         Python::with_gil(|py| {
             let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Encoder value", e))?;
@@ -351,7 +353,9 @@ pub fn py_to_encode_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> 
 /// Uses the two-argument calling convention: `callable(obj, context)`.
 /// Used by `SymmetricAdapter` and `ExprSymmetricAdapter`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_symmetric_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<Value>> {
+pub fn py_to_symmetric_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Value, &Context) -> Result<Value> + Send + Sync> {
     Box::new(move |obj, ctx| {
         Python::with_gil(|py| {
             let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Symmetric value", e))?;
@@ -375,7 +379,9 @@ pub fn py_to_symmetric_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) 
 ///
 /// Used by `Validator` and `ExprValidator`.
 #[allow(clippy::type_complexity)]
-pub fn py_to_adapter_check_func(callable: PyObject) -> Box<dyn Fn(&Value, &Context) -> Result<()>> {
+pub fn py_to_adapter_check_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Value, &Context) -> Result<()> + Send + Sync> {
     Box::new(move |obj, ctx| {
         Python::with_gil(|py| {
             let py_obj = value_to_py(py, obj).map_err(|e| err_to_generic("Validator value", e))?;
@@ -402,7 +408,9 @@ pub fn py_to_adapter_check_func(callable: PyObject) -> Box<dyn Fn(&Value, &Conte
 /// Functionally identical to [`py_to_check_func`]; provided as a separate
 /// function for semantic clarity (used by the `Check` control-flow construct).
 #[allow(clippy::type_complexity)]
-pub fn py_to_control_check_func(callable: PyObject) -> Box<dyn Fn(&Context) -> Result<()>> {
+pub fn py_to_control_check_func(
+    callable: PyObject,
+) -> Box<dyn Fn(&Context) -> Result<()> + Send + Sync> {
     py_to_check_func(callable)
 }
 
@@ -420,7 +428,7 @@ use pyo3::types::PyBytes;
 /// Used by `Transformed` (decode/encode) and `Restreamed` (decoder/encoder).
 pub fn py_to_transform_func(
     callable: PyObject,
-) -> construct::constructs::stream_ops::TransformFunc {
+) -> construct::constructs::stream_ops::TransformFuncBox {
     Box::new(move |data: &[u8]| {
         Python::with_gil(|py| {
             let py_input = PyBytes::new_bound(py, data);
@@ -443,7 +451,9 @@ pub fn py_to_transform_func(
 /// match and `Checksum` raises a `ChecksumError`).
 ///
 /// Used by `Checksum` (hashfunc).
-pub fn py_to_checksum_func(callable: PyObject) -> construct::constructs::stream_ops::ChecksumFunc {
+pub fn py_to_checksum_func(
+    callable: PyObject,
+) -> construct::constructs::stream_ops::ChecksumFuncBox {
     Box::new(move |data: &[u8]| {
         Python::with_gil(|py| {
             let py_input = PyBytes::new_bound(py, data);
@@ -470,7 +480,7 @@ pub fn py_to_checksum_func(callable: PyObject) -> construct::constructs::stream_
 /// Used by `Checksum` (bytesfunc).
 pub fn py_to_checksum_bytes_func(
     callable: PyObject,
-) -> construct::constructs::stream_ops::ChecksumBytesFunc {
+) -> construct::constructs::stream_ops::ChecksumBytesFuncBox {
     let closure = PyClosure::new(callable);
     Box::new(move |ctx: &Context| {
         let val = closure.evaluate(ctx, None)?;
@@ -492,7 +502,9 @@ pub fn py_to_checksum_bytes_func(
 ///
 /// Python calling convention: `callable(n: int) -> int`.
 /// On error, returns 0 (fail-safe; sizeof may be inaccurate but no panic).
-pub fn py_to_size_computer(callable: PyObject) -> PyResult<Box<dyn Fn(usize) -> usize>> {
+pub fn py_to_size_computer(
+    callable: PyObject,
+) -> PyResult<Box<dyn Fn(usize) -> usize + Send + Sync>> {
     Ok(Box::new(move |n: usize| {
         Python::with_gil(|py| match callable.call1(py, (n,)) {
             Ok(r) => r.extract::<usize>(py).unwrap_or(0),
@@ -505,42 +517,46 @@ pub fn py_to_size_computer(callable: PyObject) -> PyResult<Box<dyn Fn(usize) -> 
 // Parameter helpers (dual-mode: callable vs plain value)
 // ===========================================================================
 
-/// Converts a Python parameter into a `Box<dyn Evaluate>`.
+/// Converts a Python parameter into a `Box<CombinedExpr>`.
 ///
-/// - **Callable** (Path, BinExpr, FuncPath, lambda) → wrapped in [`PyClosure`].
-/// - **Non-callable** (int, bytes, float, bool) → wrapped in [`ConstExpr`].
+/// - **Callable** (Path, BinExpr, FuncPath, lambda) → wrapped in [`PyClosure`]
+///   as a [`CombinedExpr::Dynamic`] variant.
+/// - **Non-callable** (int, bytes, float, bool) → wrapped in [`ConstExpr`]
+///   as a [`CombinedExpr::ConstExpr`] variant.
 ///
 /// This enables constructs like `Bytes(this.length)` (expression) and
 /// `Bytes(5)` (constant) to work with the same API.
 pub fn py_param_to_evaluate(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Evaluate>> {
+) -> PyResult<Box<CombinedExpr>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
-        Ok(Box::new(PyClosure::new(callable)))
+        Ok(Box::new(construct::expr::dynamic_expr(PyClosure::new(
+            callable,
+        ))))
     } else {
         let value = py_to_value(py, param)?;
-        Ok(Box::new(ConstExpr::new(value)))
+        Ok(Box::new(CombinedExpr::ConstExpr(ConstExpr::new(value))))
     }
 }
 
 /// Converts a Python parameter into a `CondFunc`.
 ///
 /// - **Callable** → [`py_to_cond_func`].
-/// - **Non-callable truthy** → constant function always returning `Ok(true)`.
-/// - **Non-callable falsy** → constant function always returning `Ok(false)`.
+/// - **Non-callable truthy** → constant function always returning `true`.
+/// - **Non-callable falsy** → constant function always returning `false`.
 #[allow(clippy::type_complexity)]
 pub fn py_param_to_cond_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Fn(&Context) -> Result<bool>>> {
+) -> PyResult<Box<dyn Fn(&Context) -> bool + Send + Sync>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
         Ok(py_to_cond_func(callable))
     } else {
         let truthy = param.is_truthy()?;
-        Ok(Box::new(move |_| Ok(truthy)))
+        Ok(Box::new(move |_| truthy))
     }
 }
 
@@ -558,7 +574,7 @@ pub fn py_param_to_cond_func(
 pub fn py_param_to_stop_cond_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Fn(&Context) -> bool>> {
+) -> PyResult<Box<dyn Fn(&Context) -> bool + Send + Sync>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
         Ok(py_to_stop_cond_func(callable))
@@ -576,7 +592,7 @@ pub fn py_param_to_stop_cond_func(
 pub fn py_param_to_compute_func(
     py: Python<'_>,
     param: &Bound<'_, PyAny>,
-) -> PyResult<Box<dyn Fn(&Context) -> Result<Value>>> {
+) -> PyResult<Box<dyn Fn(&Context) -> Result<Value> + Send + Sync>> {
     if param.is_callable() {
         let callable: PyObject = param.into_py(py);
         Ok(py_to_compute_func(callable))
@@ -653,7 +669,7 @@ mod tests {
             let cond = py_to_cond_func(callable);
             let mut ctx = Context::new();
             ctx.insert("flag", Value::Bool(true));
-            assert!(cond(&ctx).unwrap());
+            assert!(cond(&ctx));
         });
     }
 
@@ -668,7 +684,7 @@ mod tests {
             let cond = py_to_cond_func(callable);
             let mut ctx = Context::new();
             ctx.insert("flag", Value::Bool(false));
-            assert!(!cond(&ctx).unwrap());
+            assert!(!cond(&ctx));
         });
     }
 
@@ -777,11 +793,11 @@ mod tests {
         Python::with_gil(|py| {
             let true_obj = true.into_py(py);
             let cond = py_param_to_cond_func(py, true_obj.bind(py)).unwrap();
-            assert!(cond(&Context::new()).unwrap());
+            assert!(cond(&Context::new()));
 
             let false_obj = false.into_py(py);
             let cond2 = py_param_to_cond_func(py, false_obj.bind(py)).unwrap();
-            assert!(!cond2(&Context::new()).unwrap());
+            assert!(!cond2(&Context::new()));
         });
     }
 
@@ -796,7 +812,9 @@ mod tests {
             );
             let ctx = Context::new();
             let err = closure.evaluate(&ctx, None).unwrap_err();
-            assert!(matches!(err, ConstructError::Expr { .. }));
+            // KeyError from accessing a missing field is mapped to FieldMissing
+            // (not Expr) by pyerr_to_expr_or_keyerr, preserving KeyError semantics.
+            assert!(matches!(err, ConstructError::FieldMissing { .. }));
         });
     }
 

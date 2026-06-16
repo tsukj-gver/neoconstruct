@@ -1,5 +1,6 @@
 //! PyO3 wrappers for composite constructors (Struct, Sequence, Array, etc.).
 
+use construct::combined::CombinedConstruct;
 use construct::core::Construct;
 
 use pyo3::exceptions::PyAttributeError;
@@ -27,7 +28,7 @@ fn collect_subcons_for_struct_merge(
     py: Python<'_>,
     obj: &Bound<PyAny>,
     out_py: &mut Vec<PyObject>,
-) -> PyResult<Vec<(Option<String>, Box<dyn Construct>)>> {
+) -> PyResult<Vec<(Option<String>, Box<CombinedConstruct>)>> {
     let mut result = Vec::new();
 
     // Expand PyStruct only; PySequence and other types are treated as single subcons
@@ -59,7 +60,7 @@ fn collect_subcons_for_sequence_merge(
     py: Python<'_>,
     obj: &Bound<PyAny>,
     out_py: &mut Vec<PyObject>,
-) -> PyResult<Vec<(Option<String>, Box<dyn Construct>)>> {
+) -> PyResult<Vec<(Option<String>, Box<CombinedConstruct>)>> {
     let mut result = Vec::new();
 
     // Expand PySequence only; PyStruct and other types are treated as single subcons
@@ -613,13 +614,13 @@ pub fn py_select(
     subcons: &Bound<PyTuple>,
     subconskw: Option<&Bound<PyDict>>,
 ) -> PyResult<PySelect> {
-    let mut subs: Vec<Box<dyn Construct>> = Vec::new();
+    let mut subs: Vec<CombinedConstruct> = Vec::new();
     for item in subcons.iter() {
-        subs.push(extract_subcon(&item)?);
+        subs.push(*extract_subcon(&item)?);
     }
     if let Some(d) = subconskw {
         for (_key, val) in d.iter() {
-            subs.push(extract_subcon(&val)?);
+            subs.push(*extract_subcon(&val)?);
         }
     }
     Ok(PySelect {
@@ -863,7 +864,9 @@ pub fn py_padding(length: usize, pattern: Option<&Bound<PyAny>>) -> PyResult<PyP
         )));
     }
     let pad = pat_bytes[0];
-    let pass_box: Box<dyn Construct> = Box::new(construct::constructs::Pass::new());
+    let pass_box: Box<CombinedConstruct> = Box::new(construct::combined::dynamic(
+        construct::constructs::Pass::new(),
+    ));
     Python::with_gil(|py| {
         let pass_obj = Py::new(py, crate::constructs_atomic::py_pass())?.into_any();
         Ok(PyPadded {
@@ -894,14 +897,20 @@ pub fn py_aligned_struct(
             pyo3::exceptions::PyValueError::new_err("AlignedStruct requires named subcons")
         })?;
         let aligned = construct::constructs::Aligned::new(modulus, inner, 0x00);
-        builder = builder.field(name.clone(), Box::new(aligned));
+        builder = builder.field(
+            name.clone(),
+            Box::new(construct::combined::dynamic(aligned)),
+        );
         py_subcons.push(item.clone().unbind());
     }
     for (key, val) in subconskw.into_iter().flat_map(|d| d.iter()) {
         let name: String = key.extract()?;
         let inner = extract_subcon(&val)?;
         let aligned = construct::constructs::Aligned::new(modulus, inner, 0x00);
-        builder = builder.field(name.clone(), Box::new(aligned));
+        builder = builder.field(
+            name.clone(),
+            Box::new(construct::combined::dynamic(aligned)),
+        );
         py_subcons.push(val.clone().unbind());
     }
 

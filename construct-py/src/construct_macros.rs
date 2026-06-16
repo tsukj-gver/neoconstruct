@@ -123,26 +123,6 @@ macro_rules! impl_api_methods {
                 )
             }
 
-            /// Build a Python value and return the effective value.
-            #[pyo3(signature = (obj, stream, **kw))]
-            fn build_effective_stream(
-                &self,
-                py: Python<'_>,
-                obj: &Bound<PyAny>,
-                stream: PyObject,
-                kw: Option<&Bound<pyo3::types::PyDict>>,
-            ) -> PyResult<PyObject> {
-                use $crate::construct_macros::PyConstructWrapper;
-                let ctx = $crate::api::opt_kw_to_indexmap(py, kw)?;
-                $crate::api::py_build_effective_stream(
-                    <Self as PyConstructWrapper>::as_construct(self),
-                    py,
-                    obj,
-                    stream,
-                    ctx,
-                )
-            }
-
             /// Build a Python value and write to a file.
             #[pyo3(signature = (obj, filename, **kw))]
             fn build_file(

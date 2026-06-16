@@ -114,13 +114,13 @@ crate::impl_construct_operators!(PyGalleryParser);
 mod tests {
     use super::*;
     use construct::core::context::Context;
-    use construct::core::stream::ByteStream;
+    use construct::core::stream::{ByteStream, CombinedStream};
 
     #[test]
     fn elf_factory_returns_parser() {
         let parser = py_elf();
         // Invalid signature should cause a parse error.
-        let mut stream = ByteStream::new_read(b"NOT-ELF");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"NOT-ELF"));
         let mut ctx = Context::new();
         assert!(parser.inner.parse(&mut stream, &mut ctx).is_err());
     }
@@ -129,7 +129,7 @@ mod tests {
     fn pe32file_factory_returns_parser() {
         let parser = py_pe32file();
         // Invalid MZ signature should cause a parse error.
-        let mut stream = ByteStream::new_read(b"XXXX");
+        let mut stream = CombinedStream::ByteStream(ByteStream::new_read(b"XXXX"));
         let mut ctx = Context::new();
         assert!(parser.inner.parse(&mut stream, &mut ctx).is_err());
     }

@@ -71,6 +71,8 @@ pub enum FormatKind {
     I8,
     /// `B` — unsigned 8-bit integer.
     U8,
+    /// `?` — boolean (1 byte, nonzero = true).
+    Bool,
     /// `h` — signed 16-bit integer.
     I16,
     /// `H` — unsigned 16-bit integer.
@@ -95,7 +97,7 @@ impl FormatKind {
     /// Returns the number of bytes this format occupies.
     const fn byte_size(self) -> usize {
         match self {
-            FormatKind::I8 | FormatKind::U8 => 1,
+            FormatKind::I8 | FormatKind::U8 | FormatKind::Bool => 1,
             FormatKind::I16 | FormatKind::U16 | FormatKind::F16 => 2,
             FormatKind::I32 | FormatKind::U32 | FormatKind::F32 => 4,
             FormatKind::I64 | FormatKind::U64 | FormatKind::F64 => 8,
@@ -171,6 +173,7 @@ impl Construct for FormatField {
         let value = match self.kind {
             FormatKind::I8 => Value::Int(i8::from_be_bytes([bytes[0]]) as i64),
             FormatKind::U8 => Value::UInt(u8::from_be_bytes([bytes[0]]) as u64),
+            FormatKind::Bool => Value::Bool(bytes[0] != 0),
             FormatKind::I16 => Value::Int(i16::from_be_bytes([bytes[0], bytes[1]]) as i64),
             FormatKind::U16 => Value::UInt(u16::from_be_bytes([bytes[0], bytes[1]]) as u64),
             FormatKind::I32 => {
@@ -227,6 +230,13 @@ impl Construct for FormatField {
                     });
                 }
                 (v as u8).to_be_bytes().to_vec()
+            }
+            FormatKind::Bool => {
+                vec![if data.as_bool().unwrap_or(false) {
+                    1
+                } else {
+                    0
+                }]
             }
             FormatKind::I16 => {
                 let v = data.to_i64()?;

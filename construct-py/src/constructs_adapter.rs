@@ -11,7 +11,7 @@
 //! [`extract_subcon`] needs an owned `Box<dyn Construct>`, the wrapper's
 //! `make_owned` method re-bridges the closures from the stored PyObjects.
 
-use construct::core::error::Result;
+use construct::combined::CombinedConstruct;
 use construct::core::Construct;
 use construct::value::Value;
 use indexmap::IndexMap;
@@ -145,7 +145,9 @@ pub fn py_if(
 ) -> PyResult<PyIfThenElse> {
     let cond = py_param_to_cond_func(py, condfunc)?;
     let sc = extract_subcon(subcon)?;
-    let pass = Box::new(construct::constructs::meta::Pass::new());
+    let pass = Box::new(construct::combined::dynamic(
+        construct::constructs::meta::Pass::new(),
+    ));
     Ok(PyIfThenElse {
         inner: construct::constructs::control_flow::IfThenElse::new(cond, sc, pass),
         cond_obj: condfunc.clone().unbind(),
@@ -163,18 +165,20 @@ pub fn py_if(
 pub fn py_optional(py: Python<'_>, subcon: &Bound<PyAny>) -> PyResult<PyIfThenElse> {
     use construct::core::context::Context;
     let sc = extract_subcon(subcon)?;
-    let pass = Box::new(construct::constructs::meta::Pass::new());
-    let cond: Box<dyn Fn(&Context) -> Result<bool>> = Box::new(|ctx: &Context| {
+    let pass = Box::new(construct::combined::dynamic(
+        construct::constructs::meta::Pass::new(),
+    ));
+    let cond: Box<dyn Fn(&Context) -> bool + Send + Sync> = Box::new(|ctx: &Context| {
         // During build, the value being built is stored as "_" in context.
         // During parse, "_" is the parsed value from the preceding field.
         // Optional should activate (use subcon) when the value is not None.
-        Ok(match ctx.get("_") {
+        match ctx.get("_") {
             Some(v) => !matches!(v, Value::None),
             None => match ctx.get("_embedding") {
                 Some(v) => v.as_bool().unwrap_or(false),
                 None => false,
             },
-        })
+        }
     });
     Ok(PyIfThenElse {
         inner: construct::constructs::control_flow::IfThenElse::new(cond, sc, pass),
@@ -1083,7 +1087,9 @@ impl PySlicing {
     fn make_decode(
         &self,
     ) -> Box<
-        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>,
+        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>
+            + Send
+            + Sync,
     > {
         let (start, stop, step) = (self.start, self.stop, self.step);
         Box::new(move |obj, _ctx| {
@@ -1101,7 +1107,9 @@ impl PySlicing {
     fn make_encode(
         &self,
     ) -> Box<
-        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>,
+        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>
+            + Send
+            + Sync,
     > {
         let (count, start, stop, step) = (self.count, self.start, self.stop, self.step);
         let empty = self.empty_val.clone();
@@ -1201,7 +1209,9 @@ impl PyIndexing {
     fn make_decode(
         &self,
     ) -> Box<
-        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>,
+        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>
+            + Send
+            + Sync,
     > {
         let index = self.index;
         Box::new(move |obj, _ctx| {
@@ -1224,7 +1234,9 @@ impl PyIndexing {
     fn make_encode(
         &self,
     ) -> Box<
-        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>,
+        dyn Fn(&Value, &construct::core::context::Context) -> construct::core::error::Result<Value>
+            + Send
+            + Sync,
     > {
         let (count, index) = (self.count, self.index);
         let empty = self.empty_val.clone();
@@ -1291,7 +1303,7 @@ crate::impl_construct_operators!(PyIndexing);
 // try_extract_registered: type-specific extraction for all 10.7 wrappers
 // ===========================================================================
 
-/// Tries to extract an owned `Box<dyn Construct>` from a Python object by
+/// Tries to extract an owned `Box<CombinedConstruct>` from a Python object by
 /// checking against all registered 10.7 `#[pyclass]` wrapper types.
 ///
 /// Returns `Ok(Some(...))` if a match was found, `Ok(None)` if no registered
@@ -1300,12 +1312,14 @@ crate::impl_construct_operators!(PyIndexing);
 /// This function is called by [`extract_subcon`] before the duck-typing
 /// fallback, enabling direct Rust-to-Rust delegation without Python
 /// round-trips for all 10.7 adapter/control-flow/enum/hex wrappers.
-pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn Construct>>> {
+pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<CombinedConstruct>>> {
     // Helper macro to avoid repetitive boilerplate.
     macro_rules! try_type {
         ($obj:expr, $wrapper:ty) => {
             if let Ok(w) = $obj.extract::<PyRef<$wrapper>>() {
-                return Ok(Some(w.make_owned()?));
+                return Ok(Some(crate::py_adapter::box_dyn_to_combined(
+                    w.make_owned()?,
+                )));
             }
         };
     }
@@ -1375,49 +1389,63 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
     // and correct stream-position reporting (critical for Tell/Seek).
     use crate::constructs_atomic as atom;
     if let Ok(w) = obj.extract::<PyRef<atom::PyFormatField>>() {
-        return Ok(Some(Box::new(w.inner)));
+        return Ok(Some(Box::new(construct::combined::dynamic(w.inner))));
     }
     if let Ok(w) = obj.extract::<PyRef<atom::PyVarInt>>() {
-        return Ok(Some(Box::new(w.inner)));
+        return Ok(Some(Box::new(construct::combined::dynamic(w.inner))));
     }
     if let Ok(w) = obj.extract::<PyRef<atom::PyZigZag>>() {
-        return Ok(Some(Box::new(w.inner)));
+        return Ok(Some(Box::new(construct::combined::dynamic(w.inner))));
     }
 
     // Unit-struct wrappers (Copy types) — direct extraction avoids stream
     // position issues when used inside Struct/Sequence via PyConstructAdapter.
     if obj.extract::<PyRef<atom::PyTell>>().is_ok() {
-        return Ok(Some(Box::new(construct::constructs::Tell::new())));
+        return Ok(Some(Box::new(construct::combined::dynamic(
+            construct::constructs::Tell::new(),
+        ))));
     }
     if obj.extract::<PyRef<atom::PyPass>>().is_ok() {
-        return Ok(Some(Box::new(construct::constructs::Pass::new())));
+        return Ok(Some(Box::new(construct::combined::dynamic(
+            construct::constructs::Pass::new(),
+        ))));
     }
     if obj.extract::<PyRef<atom::PyTerminated>>().is_ok() {
-        return Ok(Some(Box::new(construct::constructs::Terminated::new())));
+        return Ok(Some(Box::new(construct::combined::dynamic(
+            construct::constructs::Terminated::new(),
+        ))));
     }
     if obj.extract::<PyRef<atom::PyError>>().is_ok() {
-        return Ok(Some(Box::new(construct::constructs::Error::new())));
+        return Ok(Some(Box::new(construct::combined::dynamic(
+            construct::constructs::Error::new(),
+        ))));
     }
 
     // Computed/Rebuild (10.5) — must be reconstructed to preserve build_effective
     if let Ok(w) = obj.extract::<PyRef<atom::PyRebuild>>() {
-        return Ok(Some(w.make_owned()?));
+        return Ok(Some(crate::py_adapter::box_dyn_to_combined(
+            w.make_owned()?,
+        )));
     }
     if let Ok(w) = obj.extract::<PyRef<atom::PyComputed>>() {
-        return Ok(Some(w.make_owned()?));
+        return Ok(Some(crate::py_adapter::box_dyn_to_combined(
+            w.make_owned()?,
+        )));
     }
 
     // PyBytes — must be reconstructed to preserve build_effective (returns bytes)
     if let Ok(w) = obj.extract::<PyRef<atom::PyBytes>>() {
         if let Some(owned) = w.make_owned()? {
-            return Ok(Some(owned));
+            return Ok(Some(crate::py_adapter::box_dyn_to_combined(owned)));
         }
     }
 
     // PySeek — must be reconstructed to preserve stream-position semantics
     // (avoid PyConstructAdapter's BytesIO round-trip which breaks Seek).
     if let Ok(w) = obj.extract::<PyRef<atom::PySeek>>() {
-        return Ok(Some(w.make_owned()?));
+        return Ok(Some(crate::py_adapter::box_dyn_to_combined(
+            w.make_owned()?,
+        )));
     }
 
     // Note: PyRenamed is NOT registered here. It is handled specially by
@@ -1436,7 +1464,7 @@ pub fn try_extract_registered(obj: &Bound<'_, PyAny>) -> PyResult<Option<Box<dyn
 mod tests {
     use super::*;
     use construct::core::context::Context;
-    use construct::core::stream::ByteStream;
+    use construct::core::stream::{ByteStream, CombinedStream};
 
     /// Helper: create a Python Byte (Int8ub) pyclass instance for tests.
     fn get_byte(py: Python<'_>) -> Py<PyAny> {
@@ -1456,7 +1484,7 @@ mod tests {
                 .eval_bound("lambda obj, ctx: obj - 1", None, None)
                 .unwrap();
             let adapter = py_expr_adapter(byte.bind(py), &decoder, &encoder).unwrap();
-            let mut stream = ByteStream::new_read(&[4]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[4]));
             let mut ctx = Context::new();
             let result = adapter.inner.parse(&mut stream, &mut ctx).unwrap();
             assert_eq!(result, Value::Int(5));
@@ -1472,7 +1500,7 @@ mod tests {
                 .eval_bound("lambda obj, ctx: obj != 0", None, None)
                 .unwrap();
             let v = py_expr_validator(byte.bind(py), &validator).unwrap();
-            let mut stream = ByteStream::new_read(&[0]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0]));
             let mut ctx = Context::new();
             let err = v.inner.parse(&mut stream, &mut ctx).unwrap_err();
             assert!(matches!(
@@ -1495,7 +1523,7 @@ mod tests {
             // `HexAdapter` PyObject — not a Rust struct exposing `.inner`.)
             let sc = extract_subcon(byte.bind(py)).unwrap();
             let hex = construct::constructs::hex::Hex::new(sc);
-            let mut stream = ByteStream::new_read(&[42]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[42]));
             let mut ctx = Context::new();
             let result = hex.parse(&mut stream, &mut ctx).unwrap();
             // FormatField "B" (unsigned byte) parses to Value::UInt; since Hex
@@ -1564,7 +1592,7 @@ mod tests {
             let e = py_enum(py, &args, Some(&kw)).unwrap();
 
             // Parse raw 1 → "one"
-            let mut stream = ByteStream::new_read(&[1]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[1]));
             let mut ctx = Context::new();
             assert_eq!(
                 e.inner.parse(&mut stream, &mut ctx).unwrap(),
@@ -1572,7 +1600,7 @@ mod tests {
             );
 
             // Build "two" → raw 2
-            let mut out = ByteStream::new_write();
+            let mut out = CombinedStream::ByteStream(ByteStream::new_write());
             e.inner
                 .build(&Value::String("two".to_string()), &mut out, &mut ctx)
                 .unwrap();
@@ -1602,7 +1630,7 @@ mod tests {
             let m_ref = m_ref.borrow();
 
             // Parse raw 0 → decoded "A"
-            let mut stream = ByteStream::new_read(&[0]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[0]));
             let mut ctx = Context::new();
             assert_eq!(
                 m_ref.inner.parse(&mut stream, &mut ctx).unwrap(),
@@ -1610,14 +1638,14 @@ mod tests {
             );
 
             // Parse raw 1 → decoded "B"
-            let mut stream2 = ByteStream::new_read(&[1]);
+            let mut stream2 = CombinedStream::ByteStream(ByteStream::new_read(&[1]));
             assert_eq!(
                 m_ref.inner.parse(&mut stream2, &mut ctx).unwrap(),
                 Value::String("B".to_string())
             );
 
             // Build "B" → raw 1
-            let mut out = ByteStream::new_write();
+            let mut out = CombinedStream::ByteStream(ByteStream::new_write());
             m_ref
                 .inner
                 .build(&Value::String("B".to_string()), &mut out, &mut ctx)
@@ -1625,7 +1653,7 @@ mod tests {
             assert_eq!(out.into_bytes(), vec![1]);
 
             // Build "A" → raw 0
-            let mut out2 = ByteStream::new_write();
+            let mut out2 = CombinedStream::ByteStream(ByteStream::new_write());
             m_ref
                 .inner
                 .build(&Value::String("A".to_string()), &mut out2, &mut ctx)
@@ -1645,7 +1673,7 @@ mod tests {
             let m_ref = m.bind(py).downcast::<PyMapping>().unwrap();
             let m_ref = m_ref.borrow();
 
-            let mut out = ByteStream::new_write();
+            let mut out = CombinedStream::ByteStream(ByteStream::new_write());
             let mut ctx = Context::new();
             m_ref
                 .inner
@@ -1653,7 +1681,7 @@ mod tests {
                 .unwrap();
             let bytes = out.into_bytes();
 
-            let mut stream = ByteStream::new_read(&bytes);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
             assert_eq!(
                 m_ref.inner.parse(&mut stream, &mut ctx).unwrap(),
                 Value::String("B".to_string())

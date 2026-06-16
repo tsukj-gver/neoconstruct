@@ -84,9 +84,6 @@ pub fn rust_err_to_py(_py: Python<'_>, e: RustConstructError) -> PyErr {
             &path,
             &format!("expected {expected} bytes but got {actual}"),
         )),
-        RustConstructError::Integer { path, message } => {
-            IntegerError::new_err(format_with_path(&path, &message))
-        }
         RustConstructError::Sizeof { path, reason } => {
             SizeofError::new_err(format_with_path(&path, &reason))
         }

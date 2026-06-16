@@ -21,9 +21,10 @@
 //! Known limitation: large data and streaming constructs may incur high
 //! memory usage. This is acceptable for Phase 10; optimisation is deferred.
 
+use construct::combined::CombinedConstruct;
 use construct::core::context::Context;
 use construct::core::error::{ConstructError, Result};
-use construct::core::stream::Stream;
+use construct::core::stream::{CombinedStream, Stream};
 use construct::core::Construct;
 use construct::value::Value;
 
@@ -192,7 +193,7 @@ impl std::fmt::Debug for PyConstructAdapter {
 }
 
 impl Construct for PyConstructAdapter {
-    fn parse(&self, stream: &mut dyn Stream, ctx: &mut Context) -> Result<Value> {
+    fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> Result<Value> {
         Python::with_gil(|py| {
             // Fast path: delegate to Rust inner construct for known types.
             // This preserves the Context parent chain (critical for _root,
@@ -259,7 +260,7 @@ impl Construct for PyConstructAdapter {
         })
     }
 
-    fn build(&self, data: &Value, stream: &mut dyn Stream, ctx: &mut Context) -> Result<()> {
+    fn build(&self, data: &Value, stream: &mut CombinedStream, ctx: &mut Context) -> Result<()> {
         Python::with_gil(|py| {
             // Fast path: delegate to Rust inner construct for known types.
             let bound = self.py_obj.bind(py);
@@ -292,7 +293,7 @@ impl Construct for PyConstructAdapter {
             );
 
             // Helper closure: read built bytes from BytesIO and write to Rust stream.
-            let flush_bytes = |stream: &mut dyn Stream| -> Result<()> {
+            let flush_bytes = |stream: &mut CombinedStream| -> Result<()> {
                 let built: PyObject = py_stream
                     .call_method0(py, "getvalue")
                     .map_err(|e| Self::generic_err(format!("Failed to get built bytes: {e}")))?;
@@ -357,79 +358,6 @@ impl Construct for PyConstructAdapter {
         })
     }
 
-    fn build_effective(
-        &self,
-        data: &Value,
-        stream: &mut dyn Stream,
-        ctx: &mut Context,
-    ) -> Result<Value> {
-        Python::with_gil(|py| {
-            // Fast path: delegate to Rust inner construct for known types.
-            let bound = self.py_obj.bind(py);
-            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PyStruct>>() {
-                return s.inner.build_effective(data, stream, ctx);
-            }
-            if let Ok(s) = bound.extract::<PyRef<'_, crate::constructs_composite::PySequence>>() {
-                return s.inner.build_effective(data, stream, ctx);
-            }
-
-            // 1. Value → Python object.
-            let py_data = value_to_py(py, data).map_err(Self::generic_err)?;
-
-            // 2. Create empty Python BytesIO for writing.
-            let bytesio_class = Self::get_bytesio(py)?;
-            let py_stream = bytesio_class
-                .call0(py)
-                .map_err(|e| Self::generic_err(format!("Failed to create BytesIO: {e}")))?;
-
-            // 3. Prepare kwargs from context.
-            let kwargs = Self::context_to_kwargs(py, ctx).map_err(Self::generic_err)?;
-
-            // 4. Try build_effective_stream first; fall back to build_stream.
-            let has_method = self
-                .py_obj
-                .bind(py)
-                .hasattr("build_effective_stream")
-                .unwrap_or(false);
-
-            if has_method {
-                let result = self
-                    .py_obj
-                    .bind(py)
-                    .call_method(
-                        "build_effective_stream",
-                        (py_data.bind(py), py_stream.bind(py)),
-                        kwargs.as_ref().map(|d| d as &Bound<PyDict>),
-                    )
-                    .map_err(|e| Self::pyerr_to_construct_err(py, e, "build_effective"))?;
-
-                // 5. Read bytes from BytesIO and write to Rust stream.
-                let built: PyObject = py_stream
-                    .call_method0(py, "getvalue")
-                    .map_err(|e| Self::generic_err(format!("Failed to get built bytes: {e}")))?;
-                let bytes_obj: Vec<u8> = built
-                    .bind(py)
-                    .extract()
-                    .map_err(|_| Self::generic_err("Python build did not produce bytes"))?;
-                if !bytes_obj.is_empty() {
-                    stream
-                        .write_bytes(&bytes_obj)
-                        .map_err(|e| ConstructError::Stream {
-                            path: String::new(),
-                            source: std::io::Error::new(std::io::ErrorKind::Other, e.to_string()),
-                        })?;
-                }
-
-                // 6. Convert effective value → Value.
-                py_to_value(py, &result).map_err(Self::generic_err)
-            } else {
-                // Fallback: use regular build_stream and return data.clone().
-                self.build(data, stream, ctx)?;
-                Ok(data.clone())
-            }
-        })
-    }
-
     fn sizeof(&self, ctx: &Context) -> Result<usize> {
         Python::with_gil(|py| {
             // Fast path: delegate to Rust inner construct for known types.
@@ -475,17 +403,18 @@ impl Construct for PyConstructAdapter {
     }
 }
 
-/// Attempts to extract a Rust [`Construct`] from a Python object.
+/// Attempts to extract a Rust construct from a Python object, returning it
+/// as a `Box<CombinedConstruct>`.
 ///
 /// - **PyO3 `#[pyclass]` objects** (Rust-backed constructs): directly use
-///   their inner `Box<dyn Construct>`. *(Not yet implemented — requires the
-///   PyO3 wrapper types from 10.5+.)*
+///   their inner construct via [`try_extract_registered`].
 /// - **Pure-Python objects** (duck-typed with `parse_stream` + `build_stream`):
-///   wrapped in [`PyConstructAdapter`].
+///   wrapped in [`PyConstructAdapter`] then boxed as a
+///   [`CombinedConstruct::Dynamic`].
 ///
 /// This function enables the **mixed architecture** where Rust Structs,
 /// Sequences, and other composites can embed user-defined Python constructs.
-pub fn extract_subcon(obj: &Bound<'_, PyAny>) -> PyResult<Box<dyn Construct>> {
+pub fn extract_subcon(obj: &Bound<'_, PyAny>) -> PyResult<Box<CombinedConstruct>> {
     // Check registered PyO3 wrapper types first (10.5+ atomic, 10.6 composite,
     // 10.7 adapter/control-flow). This enables direct Rust-to-Rust delegation
     // without Python round-trips.
@@ -498,7 +427,7 @@ pub fn extract_subcon(obj: &Bound<'_, PyAny>) -> PyResult<Box<dyn Construct>> {
     let has_build = obj.hasattr("build_stream")?;
     if has_parse && has_build {
         let adapter = PyConstructAdapter::new(obj.clone().unbind());
-        return Ok(Box::new(adapter));
+        return Ok(Box::new(construct::combined::dynamic(adapter)));
     }
 
     let class_name = obj
@@ -518,6 +447,16 @@ pub fn is_construct_like(obj: &Bound<'_, PyAny>) -> bool {
     obj.hasattr("parse_stream").unwrap_or(false) && obj.hasattr("build_stream").unwrap_or(false)
 }
 
+/// Wraps a `Box<dyn Construct>` into a `Box<CombinedConstruct>` via the
+/// [`CombinedConstruct::Dynamic`] escape-hatch variant.
+///
+/// This is the uniform conversion used by [`try_extract_registered`] to adapt
+/// `make_owned()` results (which return `Box<dyn Construct>`) into the
+/// `Box<CombinedConstruct>` expected by construct-rs constructors.
+pub(crate) fn box_dyn_to_combined(b: Box<dyn Construct>) -> Box<CombinedConstruct> {
+    Box::new(CombinedConstruct::Dynamic(std::sync::Arc::from(b)))
+}
+
 // ===========================================================================
 // Tests
 // ===========================================================================
@@ -525,7 +464,7 @@ pub fn is_construct_like(obj: &Bound<'_, PyAny>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use construct::core::stream::ByteStream;
+    use construct::core::stream::{ByteStream, CombinedStream};
 
     /// A simple Python construct that reads/writes 4 bytes as a u32.
     const PY_U32_CLASS: &str = r#"
@@ -551,7 +490,8 @@ class PyU32:
             let instance = class.call0().unwrap();
             let adapter = PyConstructAdapter::new(instance.unbind());
 
-            let mut stream = ByteStream::new_read(&[0x00, 0x00, 0x00, 0x2A]);
+            let mut stream =
+                CombinedStream::ByteStream(ByteStream::new_read(&[0x00, 0x00, 0x00, 0x2A]));
             let mut ctx = Context::new();
             let result = adapter.parse(&mut stream, &mut ctx).unwrap();
             assert_eq!(result, Value::Int(42));
@@ -568,7 +508,7 @@ class PyU32:
             let instance = class.call0().unwrap();
             let adapter = PyConstructAdapter::new(instance.unbind());
 
-            let mut stream = ByteStream::new_write();
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
             let mut ctx = Context::new();
             adapter
                 .build(&Value::UInt(0xDEADBEEF), &mut stream, &mut ctx)
@@ -603,8 +543,9 @@ class PyU32:
             let adapter = PyConstructAdapter::new(instance.unbind());
 
             // 8 bytes: parse 4, leave 4 remaining.
-            let mut stream =
-                ByteStream::new_read(&[0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF]);
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[
+                0x00, 0x01, 0x02, 0x03, 0xFF, 0xFF, 0xFF, 0xFF,
+            ]));
             let mut ctx = Context::new();
             let result = adapter.parse(&mut stream, &mut ctx).unwrap();
             assert_eq!(result, Value::Int(0x00010203));
@@ -624,7 +565,7 @@ class PyU32:
             let adapter = PyConstructAdapter::new(instance.unbind());
 
             // Build
-            let mut build_stream = ByteStream::new_write();
+            let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
             let mut build_ctx = Context::new();
             adapter
                 .build(&Value::UInt(999), &mut build_stream, &mut build_ctx)
@@ -632,7 +573,7 @@ class PyU32:
             let bytes = build_stream.into_bytes();
 
             // Parse back
-            let mut parse_stream = ByteStream::new_read(&bytes);
+            let mut parse_stream = CombinedStream::ByteStream(ByteStream::new_read(&bytes));
             let mut parse_ctx = Context::new();
             let parsed = adapter.parse(&mut parse_stream, &mut parse_ctx).unwrap();
             assert_eq!(parsed, Value::Int(999));
@@ -649,7 +590,8 @@ class PyU32:
             let instance = class.call0().unwrap();
 
             let con = extract_subcon(&instance).unwrap();
-            let mut stream = ByteStream::new_read(&[0x00, 0x00, 0x00, 0x05]);
+            let mut stream =
+                CombinedStream::ByteStream(ByteStream::new_read(&[0x00, 0x00, 0x00, 0x05]));
             let mut ctx = Context::new();
             let result = con.parse(&mut stream, &mut ctx).unwrap();
             assert_eq!(result, Value::Int(5));

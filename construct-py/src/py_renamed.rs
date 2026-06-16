@@ -58,13 +58,12 @@ impl PyRenamed {
     }
 
     /// Extracts the inner subcon (without the Renamed wrapper) as an owned
-    /// `Box<dyn Construct>`.
+    /// `Box<CombinedConstruct>`.
     ///
     /// Used by `add_struct_subcon` when a PyRenamed is encountered as a struct
     /// field — the name is handled separately by `get_subcon_name`, so only the
-    /// inner construct is needed. This preserves `build_effective` delegation
-    /// for constructs like `Rebuild`.
-    pub(crate) fn make_owned_inner(&self) -> PyResult<Box<dyn Construct>> {
+    /// inner construct is needed.
+    pub(crate) fn make_owned_inner(&self) -> PyResult<Box<construct::combined::CombinedConstruct>> {
         Python::with_gil(|py| extract_subcon(self.py_subcon.bind(py)))
     }
 }

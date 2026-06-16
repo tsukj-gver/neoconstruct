@@ -9,7 +9,7 @@ use std::path::Path;
 
 use construct::core::context::Context;
 use construct::core::error::ConstructError;
-use construct::core::stream::{ByteStream, Stream};
+use construct::core::stream::{ByteStream, CombinedStream, Stream};
 use construct::core::Construct;
 use construct::value::Value;
 
@@ -85,7 +85,7 @@ pub fn py_parse(
     data: &[u8],
     kw: IndexMap<String, Value>,
 ) -> PyResult<PyObject> {
-    let mut stream = ByteStream::new_read(data);
+    let mut stream = CombinedStream::ByteStream(ByteStream::new_read(data));
     let mut ctx = Context::new();
     ctx.insert("_parsing".to_string(), Value::Bool(true));
     ctx.insert("_building".to_string(), Value::Bool(false));
@@ -112,7 +112,14 @@ pub fn py_parse_stream(
     stream_obj: Py<PyAny>,
     kw: IndexMap<String, Value>,
 ) -> PyResult<PyObject> {
-    let mut stream = PyStream::new(stream_obj);
+    // PyStream cannot be a CombinedStream variant (different crate), so we
+    // read all remaining data into memory, parse from a ByteStream, then sync
+    // the Python stream's position to match bytes consumed.
+    let mut py_stream = PyStream::new(stream_obj);
+    let start_pos = py_stream.tell().unwrap_or(0);
+    // Read all remaining bytes from the Python stream.
+    let data: Vec<u8> = py_stream.read_all().map_err(|e| rust_err_to_py(py, e))?;
+    let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&data));
     let mut ctx = Context::new();
     ctx.insert("_parsing".to_string(), Value::Bool(true));
     ctx.insert("_building".to_string(), Value::Bool(false));
@@ -121,8 +128,17 @@ pub fn py_parse_stream(
         ctx.insert(key, value);
     }
     match constr.parse(&mut stream, &mut ctx) {
-        Ok(value) => value_to_py(py, &value),
-        Err(e) => Err(rust_err_to_py(py, e.with_path_prefix(PARSE_PATH))),
+        Ok(value) => {
+            // Sync Python stream position to match bytes consumed.
+            let consumed = stream.tell().unwrap_or(0);
+            let _ = py_stream.seek(start_pos + consumed);
+            value_to_py(py, &value)
+        }
+        Err(e) => {
+            let consumed = stream.tell().unwrap_or(0);
+            let _ = py_stream.seek(start_pos + consumed);
+            Err(rust_err_to_py(py, e.with_path_prefix(PARSE_PATH)))
+        }
     }
 }
 
@@ -170,7 +186,7 @@ pub fn py_build(
     kw: IndexMap<String, Value>,
 ) -> PyResult<PyObject> {
     let value = py_to_value(py, data)?;
-    let mut stream = ByteStream::new_write();
+    let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
     let mut ctx = Context::new();
     ctx.insert("_parsing".to_string(), Value::Bool(false));
     ctx.insert("_building".to_string(), Value::Bool(true));
@@ -207,7 +223,7 @@ pub fn py_build_stream(
     kw: IndexMap<String, Value>,
 ) -> PyResult<()> {
     let value = py_to_value(py, data)?;
-    let mut byte_stream = ByteStream::new_write();
+    let mut byte_stream = CombinedStream::ByteStream(ByteStream::new_write());
     let mut ctx = Context::new();
     ctx.insert("_parsing".to_string(), Value::Bool(false));
     ctx.insert("_building".to_string(), Value::Bool(true));
@@ -245,49 +261,6 @@ pub fn py_build_stream(
     Ok(())
 }
 
-/// Builds binary data using `build_effective` and writes to a stream,
-/// returning the effective value as a Python object.
-///
-/// Used by [`PyConstructAdapter::build_effective`] to propagate the
-/// effective value (e.g. a Container from a Struct) through the FFI boundary.
-pub fn py_build_effective_stream(
-    constr: &dyn Construct,
-    py: Python<'_>,
-    data: &Bound<'_, PyAny>,
-    stream_obj: Py<PyAny>,
-    kw: IndexMap<String, Value>,
-) -> PyResult<PyObject> {
-    let value = py_to_value(py, data)?;
-    let mut byte_stream = ByteStream::new_write();
-    let mut ctx = Context::new();
-    ctx.insert("_parsing".to_string(), Value::Bool(false));
-    ctx.insert("_building".to_string(), Value::Bool(true));
-    ctx.insert("_sizing".to_string(), Value::Bool(false));
-    for (key, val) in kw {
-        ctx.insert(key, val);
-    }
-    let effective = constr
-        .build_effective(&value, &mut byte_stream, &mut ctx)
-        .map_err(|e| rust_err_to_py(py, e.with_path_prefix(BUILD_PATH)))?;
-    let final_pos = byte_stream.tell().unwrap_or(0) as usize;
-    let bytes = byte_stream.into_bytes();
-    let bytes = if final_pos > bytes.len() {
-        let mut padded = bytes;
-        padded.resize(final_pos, 0);
-        padded
-    } else {
-        bytes
-    };
-    let mut py_stream = PyStream::new(stream_obj);
-    py_stream
-        .write_bytes(&bytes)
-        .map_err(|e| rust_err_to_py(py, e))?;
-    if final_pos < bytes.len() {
-        let _ = py_stream.seek(final_pos as u64);
-    }
-    value_to_py(py, &effective)
-}
-
 /// Builds binary data and writes it to a file.
 ///
 /// Uses `OpenOptions` with write+create+truncate+read modes to match the
@@ -304,7 +277,7 @@ pub fn py_build_file(
     kw: IndexMap<String, Value>,
 ) -> PyResult<()> {
     let value = py_to_value(py, data)?;
-    let mut stream = ByteStream::new_write();
+    let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
     let mut ctx = Context::new();
     for (key, val) in kw {
         ctx.insert(key, val);
@@ -354,18 +327,14 @@ pub fn py_sizeof(
 mod tests {
     use super::*;
     use construct::core::error::Result as ConstructResult;
-    use construct::core::stream::Stream as ConstructStream;
+    use construct::core::stream::CombinedStream;
 
     /// A minimal construct that reads/writes exactly 4 bytes as a big-endian
     /// u32, used solely for testing the API helpers.
     struct U32Big;
 
     impl Construct for U32Big {
-        fn parse(
-            &self,
-            stream: &mut dyn ConstructStream,
-            _ctx: &mut Context,
-        ) -> ConstructResult<Value> {
+        fn parse(&self, stream: &mut CombinedStream, _ctx: &mut Context) -> ConstructResult<Value> {
             let bytes = stream.read_bytes(4)?;
             let val = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
             Ok(Value::UInt(val as u64))
@@ -374,7 +343,7 @@ mod tests {
         fn build(
             &self,
             data: &Value,
-            stream: &mut dyn ConstructStream,
+            stream: &mut CombinedStream,
             ctx: &mut Context,
         ) -> ConstructResult<()> {
             let val = data.to_u64()?;
@@ -394,11 +363,7 @@ mod tests {
     struct VarBytes;
 
     impl Construct for VarBytes {
-        fn parse(
-            &self,
-            stream: &mut dyn ConstructStream,
-            ctx: &mut Context,
-        ) -> ConstructResult<Value> {
+        fn parse(&self, stream: &mut CombinedStream, ctx: &mut Context) -> ConstructResult<Value> {
             let length = ctx
                 .get_recursive("length")
                 .ok_or_else(|| ConstructError::FieldMissing {
@@ -413,7 +378,7 @@ mod tests {
         fn build(
             &self,
             data: &Value,
-            stream: &mut dyn ConstructStream,
+            stream: &mut CombinedStream,
             _ctx: &mut Context,
         ) -> ConstructResult<()> {
             stream.write_bytes(data.as_bytes()?)
