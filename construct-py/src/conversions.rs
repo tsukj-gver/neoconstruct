@@ -12,7 +12,7 @@ use num_bigint::BigInt;
 use num_traits::ToPrimitive;
 use pyo3::exceptions::PyTypeError;
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyList, PyString};
+use pyo3::types::{PyBool, PyByteArray, PyBytes, PyDict, PyFloat, PyList, PyString, PyType};
 
 use construct::core::context::Context;
 use construct::value::Value;
@@ -169,6 +169,33 @@ pub fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
             map.insert(key_str, val);
         }
         return Ok(Value::Container(map));
+    }
+
+    // 8.5 Dataclass instance → Container via dataclasses.asdict (recursive).
+    // Phase 14.2: enables nested-dataclass build (PyInput::as_value on a
+    // dataclass instance reads its fields). The check is placed AFTER the
+    // dict branch so Container subclasses (which are also dataclass-like
+    // under is_dataclass when wrapped via ConstructMixin) still take the
+    // fast dict path.
+    //
+    // We exclude class objects (``is_dataclass(SomeClass) == True``) — only
+    // instances are converted.
+    if !obj.is_instance_of::<PyType>() {
+        let is_dc = py
+            .import_bound("dataclasses")
+            .and_then(|m| m.getattr("is_dataclass"))
+            .and_then(|f| f.call1((obj,)))
+            .and_then(|r| r.extract::<bool>());
+        if matches!(is_dc, Ok(true)) {
+            // dataclasses.asdict recursively converts dataclass instances,
+            // lists-of-dataclass, etc. into plain dict/list/bytes/primitives.
+            // We then feed the resulting dict back through py_to_value.
+            let asdict = py
+                .import_bound("dataclasses")?
+                .getattr("asdict")?
+                .call1((obj,))?;
+            return py_to_value(py, asdict.as_ref());
+        }
     }
 
     // 9. Unknown type
