@@ -21,6 +21,7 @@ reference detection.
 
 import dataclasses
 import sys
+import types
 import typing
 from typing import TYPE_CHECKING, Any, ClassVar, Optional
 
@@ -39,6 +40,24 @@ if TYPE_CHECKING:
 # Sentinel value used to distinguish "cache miss" from cached ``None``.
 # (``None`` is a valid type-hints result for empty dataclasses.)
 _HINTS_UNSET: Any = object()
+
+
+def _is_union_origin(origin: Any) -> bool:
+    """Returns ``True`` if *origin* is a Union origin type.
+
+    Supports both :data:`typing.Union` (the classic ``Union[X, None]`` /
+    ``Optional[X]`` form) and :class:`types.UnionType` (the PEP 604
+    ``X | None`` syntax, available on Python 3.10+).
+
+    Used by :meth:`ConstructMixin._maybe_wrap_optional`,
+    :meth:`ConstructMixin._subcon_from_annotation`, and
+    :func:`_coerce_value_to_dataclass` to consistently detect Optional
+    types regardless of which Union syntax the user employed.
+    """
+    if origin is typing.Union:
+        return True
+    union_type = getattr(types, "UnionType", None)
+    return union_type is not None and origin is union_type
 
 
 class _DualMethod:
@@ -402,8 +421,8 @@ class ConstructMixin:
         args = typing.get_args(ftype)
         # Optional[T] is Union[T, None] (or Union[T1, T2, ..., None]).
         # Python 3.10+ also supports `T | None` (types.UnionType).
-        union_types = {typing.Union, getattr(__import__("types"), "UnionType", None)}
-        if origin in union_types and origin is not None:
+        # _is_union_origin handles both forms consistently (M1 fix).
+        if _is_union_origin(origin):
             non_none = [a for a in args if a is not type(None)]  # noqa: E721
             if len(non_none) == len(args):
                 # Union without None — not supported, fall through to bare type.
@@ -524,7 +543,8 @@ class ConstructMixin:
         if ftype is None:
             return subcon
         origin = typing.get_origin(ftype)
-        if origin is not typing.Union:
+        # M1 fix: check both typing.Union and types.UnionType (PEP 604).
+        if not _is_union_origin(origin):
             return subcon
         args = typing.get_args(ftype)
         if type(None) not in args:
@@ -743,8 +763,9 @@ def _coerce_value_to_dataclass(ftype: Any, val: Any) -> Any:
     if _is_construct_mixin_subclass(ftype) and isinstance(val, dict):
         return ftype._dict_to_instance(val)
     # Optional[T] / Union[T, None]: unwrap and recurse on T.
+    # M1 fix: also handle types.UnionType (PEP 604 `T | None` syntax).
     origin = typing.get_origin(ftype)
-    if origin is typing.Union:
+    if _is_union_origin(origin):
         args = typing.get_args(ftype)
         non_none = [a for a in args if a is not type(None)]  # noqa: E721
         if len(non_none) == 1 and type(None) in args:
@@ -868,3 +889,100 @@ class _DataclassSubcon:
         from ._core import Renamed
 
         return Renamed(self, name)
+
+
+# ── @construct_dataclass decorator (Phase 14.4) ────────────────────────────
+
+
+def construct_dataclass(cls: Any = None, **dataclass_kwargs: Any) -> Any:
+    """Decorator that combines ``@dataclasses.dataclass`` with
+    :class:`ConstructMixin` injection.
+
+    This is syntactic sugar equivalent to::
+
+        @dataclasses.dataclass(**dataclass_kwargs)
+        class Header(ConstructMixin):
+            ...
+
+    but lets the user omit the explicit ``ConstructMixin`` base::
+
+        @construct_dataclass
+        class Header:
+            magic: bytes = cs_field(Bytes(4))
+            version: int = cs_field(Int32ul)
+
+    Works both bare (``@construct_dataclass``) and parameterised
+    (``@construct_dataclass(frozen=True)``).
+
+    **Implementation** (design §4.3, I-COMP-3 fix): instead of mutating
+    ``cls.__bases__`` (which is risky and can conflict with existing bases),
+    this function creates a **new subclass** via :func:`type` that inherits
+    from :class:`ConstructMixin` and the original class's bases. All class
+    body attributes (annotations, field defaults from :func:`cs_field`,
+    methods) are preserved by copying ``cls.__dict__`` into the new class's
+    namespace. The new class replaces the original in the caller's
+    namespace (standard decorator semantics).
+
+    If the class already inherits :class:`ConstructMixin`, the decorator
+    simply applies ``@dataclasses.dataclass`` without creating a subclass.
+
+    Args:
+        cls: The class to decorate. When ``None``, the decorator was used
+            with parentheses (``@construct_dataclass(frozen=True)``); a
+            wrapper function is returned instead.
+        **dataclass_kwargs: Keyword arguments forwarded to
+            :func:`dataclasses.dataclass` (e.g. ``frozen=True``,
+            ``slots=True``).
+
+    Returns:
+        A dataclass that also inherits :class:`ConstructMixin`, with
+        ``parse`` / ``build`` / ``sizeof`` methods available.
+
+    Example::
+
+        @construct_dataclass
+        class Header:
+            magic: bytes = cs_field(Bytes(4))
+            version: int = cs_field(Int32ul)
+
+        header = Header.parse(b'MAGC\\x01\\x00\\x00\\x00')
+        assert header.magic == b'MAGC'
+
+        @construct_dataclass(frozen=True)
+        class ImmutablePoint:
+            x: int = cs_field(Int8ub)
+            y: int = cs_field(Int8ub)
+    """
+
+    def _decorate(target_cls: Any) -> Any:
+        # If ConstructMixin is already in the MRO, just apply @dataclass.
+        if ConstructMixin in target_cls.__mro__:
+            return dataclasses.dataclass(target_cls, **dataclass_kwargs)
+
+        # Create a new class inheriting from ConstructMixin + original bases.
+        # I-COMP-3 fix: use type() instead of mutating __bases__.
+        # Copy the full __dict__ so field defaults (cs_field() results) and
+        # annotations are present in the new class's own namespace —
+        # dataclasses.dataclass reads defaults from cls.__dict__, not via
+        # inheritance, so a shallow copy is essential.
+        namespace: "dict[str, Any]" = {}
+        for key, value in target_cls.__dict__.items():
+            # Skip internal descriptors that type() manages automatically.
+            if key in ("__dict__", "__weakref__"):
+                continue
+            namespace[key] = value
+
+        new_cls = type(
+            target_cls.__name__,
+            (ConstructMixin,) + target_cls.__bases__,
+            namespace,
+        )
+        new_cls.__module__ = target_cls.__module__
+        new_cls.__qualname__ = target_cls.__qualname__
+        return dataclasses.dataclass(new_cls, **dataclass_kwargs)
+
+    if cls is not None:
+        # Bare decorator: @construct_dataclass
+        return _decorate(cls)
+    # Parameterised: @construct_dataclass(frozen=True)
+    return _decorate

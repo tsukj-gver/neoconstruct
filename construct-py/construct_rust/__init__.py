@@ -60,7 +60,7 @@ from ._optional import Optional
 
 # 14.1 dataclass-first API: ConstructMixin + cs_field
 from ._fields import cs_field
-from ._mixins import ConstructMixin
+from ._mixins import ConstructMixin, construct_dataclass
 
 # 10.7 Timestamp stub: requires 'arrow' library (not installed in Phase 10).
 # Import does not fail; calling Timestamp/TimestampAdapter raises ImportError.

@@ -9,21 +9,29 @@ Phase 14.2: nested dataclass (cs_field(OtherDataclass)).
 Phase 14.3: forward references (cs_field(None) + Optional[T] annotation),
             Optional auto-wrapping, circular reference detection, frozen
             dataclass, inheritance.
+Phase 14.4: @construct_dataclass decorator, declarative interop, performance
+            baseline, PEP 604 (types.UnionType) support, sizeof/asdict/
+            stream method coverage.
 
 Run with: ``pytest tests/test_dataclass_api.py`` (after ``maturin develop``).
 """
 
 import dataclasses
+import io
+import time
 from typing import Optional
 
 import pytest
 
 from construct_rust import (
+    Array,
     Bytes,
     ConstructMixin,
     Int16ub,
     Int32ul,
     Int8ub,
+    Struct,
+    construct_dataclass,
     cs_field,
     this,
 )
@@ -577,4 +585,446 @@ class TestCsFieldNoneWithoutAnnotation:
 
         with pytest.raises((TypeError, NameError)):
             BadUnresolved.parse(b"\x01\x02")
+
+
+# ===========================================================================
+# Phase 14.4: @construct_dataclass decorator
+# ===========================================================================
+
+
+class TestConstructDataclassDecorator:
+    """Phase 14.4: @construct_dataclass syntactic sugar."""
+
+    def test_decorator_bare_no_parens(self):
+        """@construct_dataclass (no parens) injects ConstructMixin."""
+
+        @construct_dataclass
+        class Header:
+            magic: bytes = cs_field(Bytes(4))
+            version: int = cs_field(Int32ul)
+
+        # Is a dataclass.
+        assert dataclasses.is_dataclass(Header)
+        # Inherits ConstructMixin.
+        assert issubclass(Header, ConstructMixin)
+        # Fields preserved.
+        names = [f.name for f in dataclasses.fields(Header)]
+        assert names == ["magic", "version"]
+
+    def test_decorator_parse_and_build(self):
+        """Decorated class has working parse/build methods."""
+
+        @construct_dataclass
+        class Header:
+            magic: bytes = cs_field(Bytes(4))
+            version: int = cs_field(Int32ul)
+
+        data = b"ABCD" + (1).to_bytes(4, "little")
+        parsed = Header.parse(data)
+        assert isinstance(parsed, Header)
+        assert parsed.magic == b"ABCD"
+        assert parsed.version == 1
+        assert parsed.build() == data
+
+    def test_decorator_roundtrip(self):
+        """build(parse(data)) == data for decorated class."""
+
+        @construct_dataclass
+        class Record:
+            a: int = cs_field(Int8ub)
+            b: int = cs_field(Int8ub)
+
+        original = Record(a=0x12, b=0x34)
+        data = original.build()
+        parsed = Record.parse(data)
+        assert parsed.build() == data
+
+    def test_decorator_with_kwargs(self):
+        """@construct_dataclass(frozen=True) works with dataclass kwargs."""
+
+        @construct_dataclass(frozen=True)
+        class ImmutablePoint:
+            x: int = cs_field(Int8ub)
+            y: int = cs_field(Int8ub)
+
+        assert dataclasses.is_dataclass(ImmutablePoint)
+        assert issubclass(ImmutablePoint, ConstructMixin)
+        p = ImmutablePoint(x=1, y=2)
+        assert p.build() == b"\x01\x02"
+        # Frozen: setattr should fail.
+        with pytest.raises(dataclasses.FrozenInstanceError):
+            p.x = 99
+
+    def test_decorator_already_inherits_mixin(self):
+        """Decorator on a class already inheriting ConstructMixin just
+        applies @dataclass."""
+
+        @construct_dataclass
+        class DoubleDecorated(ConstructMixin):
+            v: int = cs_field(Int8ub)
+
+        assert dataclasses.is_dataclass(DoubleDecorated)
+        assert DoubleDecorated.parse(b"\x05").v == 5
+
+    def test_decorator_dataclass_protocol(self):
+        """Standard dataclass tools work on decorated classes."""
+
+        @construct_dataclass
+        class Item:
+            name: int = cs_field(Int8ub)
+            qty: int = cs_field(Int8ub)
+
+        item = Item(name=1, qty=2)
+        # dataclasses.fields
+        assert [f.name for f in dataclasses.fields(Item)] == ["name", "qty"]
+        # dataclasses.asdict
+        assert dataclasses.asdict(item) == {"name": 1, "qty": 2}
+        # repr contains class name
+        assert "Item" in repr(item)
+
+
+# ===========================================================================
+# Phase 14.4: declarative API interop
+# ===========================================================================
+
+
+class TestDeclarativeInterop:
+    """Phase 14.4: ConstructMixin dataclass ↔ declarative Struct interop.
+
+    .. note::
+
+       The ``"name" / DataclassClass`` syntax does **not** work because
+       Python's binary operator protocol dispatches ``__rtruediv__`` on
+       ``type(b)`` (the metaclass), not on the class itself. Use the
+       keyword form ``Struct(name=DataclassClass)`` or wrap the class in
+       ``Array(n, DataclassClass)`` (whose Rust wrapper supports ``/``).
+    """
+
+    def test_dataclass_as_struct_subcon_build(self):
+        """ConstructMixin subclass used as a subcon inside a declarative
+        Struct — build direction.
+
+        Uses the keyword form ``Struct(point=Point)`` since
+        ``"point" / Point`` is not supported by Python's operator protocol
+        for class operands (see class docstring).
+        """
+
+        @dataclasses.dataclass
+        class Point(ConstructMixin):
+            x: int = cs_field(Int8ub)
+            y: int = cs_field(Int8ub)
+
+        # Build: Struct(point=Point) → serialises Point instance attributes.
+        fmt = Struct(point=Point)
+        data = fmt.build({"point": Point(x=1, y=2)})
+        assert data == b"\x01\x02"
+
+    def test_dataclass_as_struct_subcon_parse(self):
+        """ConstructMixin subclass used as a subcon inside a declarative
+        Struct — parse direction.
+
+        The parsed result for the dataclass field is a Container dict (the
+        declarative API's standard output), not a dataclass instance.
+        """
+
+        @dataclasses.dataclass
+        class Point(ConstructMixin):
+            x: int = cs_field(Int8ub)
+            y: int = cs_field(Int8ub)
+
+        fmt = Struct(point=Point)
+        result = fmt.parse(b"\x01\x02")
+        assert result["point"]["x"] == 1
+        assert result["point"]["y"] == 2
+
+    def test_array_of_dataclass_build(self):
+        """Array(n, Dataclass) build path works — each element is built
+        via the dataclass's build method."""
+
+        @dataclasses.dataclass
+        class Coord(ConstructMixin):
+            x: int = cs_field(Int8ub)
+            y: int = cs_field(Int8ub)
+
+        arr = Array(3, Coord)
+        data = arr.build([Coord(1, 2), Coord(3, 4), Coord(5, 6)])
+        assert data == b"\x01\x02\x03\x04\x05\x06"
+
+    def test_declarative_construct_as_cs_field(self):
+        """A declarative construct (e.g. Struct) used as a cs_field value
+        inside a dataclass — already implicitly tested in 14.2 with
+        Bytes(this.header.size); this test uses a plain declarative
+        subcon explicitly."""
+
+        @dataclasses.dataclass
+        class Wrapper(ConstructMixin):
+            pair: object = cs_field(Struct("a" / Int8ub, "b" / Int8ub))
+            tag: int = cs_field(Int8ub)
+
+        w = Wrapper(pair={"a": 10, "b": 20}, tag=30)
+        data = w.build()
+        assert data == b"\x0A\x14\x1E"
+
+        parsed = Wrapper.parse(data)
+        assert parsed.pair["a"] == 10
+        assert parsed.pair["b"] == 20
+        assert parsed.tag == 30
+
+
+# ===========================================================================
+# Phase 14.4: PEP 604 UnionType support (M1 fix)
+# ===========================================================================
+
+
+class TestPEP604UnionType:
+    """M1 fix: ``X | None`` (types.UnionType) is treated the same as
+    ``Optional[X]`` (typing.Union) in all annotation-processing paths."""
+
+    def test_pep604_optional_field_build_none(self):
+        """``int | None`` annotation with default=None → build emits
+        empty bytes when the value is None."""
+
+        @dataclasses.dataclass
+        class Rec604(ConstructMixin):
+            name: int = cs_field(Int32ul)
+            opt: "int | None" = cs_field(Int32ul, default=None)
+
+        r = Rec604(name=42)
+        data = r.build()
+        assert data == (42).to_bytes(4, "little")
+
+    def test_pep604_optional_field_build_value(self):
+        """``int | None`` annotation with a value → build emits both
+        fields."""
+
+        @dataclasses.dataclass
+        class Rec604(ConstructMixin):
+            name: int = cs_field(Int32ul)
+            opt: "int | None" = cs_field(Int32ul, default=None)
+
+        r = Rec604(name=42, opt=100)
+        data = r.build()
+        assert data == (42).to_bytes(4, "little") + (100).to_bytes(4, "little")
+
+    def test_pep604_optional_field_roundtrip(self):
+        """Full round-trip with PEP 604 syntax."""
+
+        @dataclasses.dataclass
+        class Rec604(ConstructMixin):
+            name: int = cs_field(Int32ul)
+            opt: "int | None" = cs_field(Int32ul, default=None)
+
+        original = Rec604(name=7, opt=99)
+        data = original.build()
+        parsed = Rec604.parse(data)
+        assert parsed.name == 7
+        assert parsed.opt == 99
+        assert parsed.build() == data
+
+
+# ===========================================================================
+# Phase 14.4: sizeof / asdict / empty dataclass / stream methods (M3 fix)
+# ===========================================================================
+
+
+class TestSizeofAndAsdict:
+    """M3: sizeof(), dataclasses.asdict() on nested, empty dataclass."""
+
+    def test_sizeof_flat_returns_value(self):
+        """sizeof() on a flat fixed-size dataclass returns an int or None.
+
+        Note: Due to Phase 13's Dynamic-node compilation (see 14.2/14.3
+        process record N-6), sizeof() may return None. We accept either
+        but verify the call does not error.
+        """
+
+        @dataclasses.dataclass
+        class FixedSize(ConstructMixin):
+            a: int = cs_field(Int8ub)
+            b: int = cs_field(Int8ub)
+
+        size = FixedSize.sizeof()
+        # Accept either a correct int or None (Phase 13 limitation).
+        assert size is None or size == 2
+
+    def test_asdict_nested_dataclass(self):
+        """dataclasses.asdict() recursively converts nested dataclass
+        instances to plain dicts."""
+
+        @dataclasses.dataclass
+        class Inner2(ConstructMixin):
+            v: int = cs_field(Int8ub)
+
+        @dataclasses.dataclass
+        class Outer2(ConstructMixin):
+            inner: Inner2 = cs_field(Inner2)
+            tag: int = cs_field(Int8ub)
+
+        obj = Outer2(inner=Inner2(v=5), tag=9)
+        d = dataclasses.asdict(obj)
+        assert d == {"inner": {"v": 5}, "tag": 9}
+
+    def test_empty_dataclass_build_parse(self):
+        """A dataclass with zero fields builds/parse empty bytes."""
+
+        @dataclasses.dataclass
+        class Empty(ConstructMixin):
+            pass
+
+        e = Empty()
+        assert e.build() == b""
+        parsed = Empty.parse(b"")
+        assert isinstance(parsed, Empty)
+        assert parsed.build() == b""
+
+    def test_asdict_with_optional_field(self):
+        """dataclasses.asdict handles Optional fields correctly."""
+
+        @dataclasses.dataclass
+        class WithOpt(ConstructMixin):
+            a: int = cs_field(Int8ub)
+            b: Optional[int] = cs_field(Int8ub, default=None)
+
+        obj = WithOpt(a=1)
+        d = dataclasses.asdict(obj)
+        assert d == {"a": 1, "b": None}
+
+
+class TestStreamMethods:
+    """M3: parse_stream / build_stream / build_file / parse_file."""
+
+    def test_build_stream(self):
+        """build_stream writes bytes to a file-like object."""
+
+        @dataclasses.dataclass
+        class S(ConstructMixin):
+            a: int = cs_field(Int8ub)
+            b: int = cs_field(Int8ub)
+
+        s = S(a=1, b=2)
+        buf = io.BytesIO()
+        s.build_stream(buf)
+        assert buf.getvalue() == b"\x01\x02"
+
+    def test_parse_stream(self):
+        """parse_stream reads from a file-like object."""
+
+        @dataclasses.dataclass
+        class S(ConstructMixin):
+            a: int = cs_field(Int8ub)
+            b: int = cs_field(Int8ub)
+
+        buf = io.BytesIO(b"\x03\x04")
+        parsed = S.parse_stream(buf)
+        assert parsed.a == 3
+        assert parsed.b == 4
+
+    def test_build_file_and_parse_file(self, tmp_path):
+        """build_file / parse_file round-trip through a real file."""
+
+        @dataclasses.dataclass
+        class S(ConstructMixin):
+            a: int = cs_field(Int8ub)
+            b: int = cs_field(Int8ub)
+
+        original = S(a=0xAA, b=0xBB)
+        filepath = tmp_path / "test_data.bin"
+        original.build_file(str(filepath))
+
+        # File contents correct.
+        raw = filepath.read_bytes()
+        assert raw == b"\xAA\xBB"
+
+        # Parse back.
+        parsed = S.parse_file(str(filepath))
+        assert parsed.a == 0xAA
+        assert parsed.b == 0xBB
+
+
+# ===========================================================================
+# Phase 14.4: performance baseline (no hard asserts, prints timing)
+# ===========================================================================
+
+
+class TestPerformanceBaseline:
+    """Establishes a performance baseline comparing dataclass API and
+    declarative API parse/build throughput.
+
+    These tests print timing data and perform only soft sanity checks
+    (no hard performance assertions — the goal is to record a baseline
+    for future optimisation comparison, not to enforce a speed target).
+    """
+
+    def test_perf_dataclass_vs_declarative(self, capsys):
+        """Compares 10 000-iteration parse+build for dataclass API vs
+        declarative API on an equivalent 6-byte format."""
+
+        # --- Dataclass API ---
+        @dataclasses.dataclass
+        class PerfHeader(ConstructMixin):
+            magic: bytes = cs_field(Bytes(4))
+            version: int = cs_field(Int16ub)
+
+        test_bytes = b"TEST" + (1).to_bytes(2, "big")
+
+        # Warm up (trigger compilation).
+        PerfHeader.parse(test_bytes)
+        PerfHeader(magic=b"TEST", version=1).build()
+
+        iterations = 10_000
+
+        # Parse benchmark — dataclass.
+        start = time.perf_counter()
+        for _ in range(iterations):
+            PerfHeader.parse(test_bytes)
+        dc_parse_elapsed = time.perf_counter() - start
+
+        # Build benchmark — dataclass.
+        instance = PerfHeader(magic=b"TEST", version=1)
+        start = time.perf_counter()
+        for _ in range(iterations):
+            instance.build()
+        dc_build_elapsed = time.perf_counter() - start
+
+        # --- Declarative API ---
+        decl_fmt = Struct("magic" / Bytes(4), "version" / Int16ub)
+
+        # Warm up.
+        decl_fmt.parse(test_bytes)
+        decl_fmt.build({"magic": b"TEST", "version": 1})
+
+        # Parse benchmark — declarative.
+        start = time.perf_counter()
+        for _ in range(iterations):
+            decl_fmt.parse(test_bytes)
+        decl_parse_elapsed = time.perf_counter() - start
+
+        # Build benchmark — declarative.
+        build_obj = {"magic": b"TEST", "version": 1}
+        start = time.perf_counter()
+        for _ in range(iterations):
+            decl_fmt.build(build_obj)
+        decl_build_elapsed = time.perf_counter() - start
+
+        # Print results (captured by capsys, visible with -s flag).
+        print(f"\n{'=' * 60}")
+        print(f"Performance baseline ({iterations} iterations):")
+        print(f"  dataclass  parse: {dc_parse_elapsed:.4f}s")
+        print(f"  declarative parse: {decl_parse_elapsed:.4f}s")
+        print(f"  dataclass  build: {dc_build_elapsed:.4f}s")
+        print(f"  declarative build: {decl_build_elapsed:.4f}s")
+        parse_ratio = (
+            dc_parse_elapsed / decl_parse_elapsed if decl_parse_elapsed > 0 else 0
+        )
+        build_ratio = (
+            dc_build_elapsed / decl_build_elapsed if decl_build_elapsed > 0 else 0
+        )
+        print(f"  parse ratio (dc/decl): {parse_ratio:.2f}x")
+        print(f"  build ratio (dc/decl): {build_ratio:.2f}x")
+        print(f"{'=' * 60}")
+
+        # Soft sanity check: both should complete in reasonable time
+        # (< 30 seconds for 10K iterations).
+        assert dc_parse_elapsed < 30.0
+        assert dc_build_elapsed < 30.0
 

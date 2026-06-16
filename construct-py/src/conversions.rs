@@ -180,21 +180,24 @@ pub fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> PyResult<Value> {
     //
     // We exclude class objects (``is_dataclass(SomeClass) == True``) — only
     // instances are converted.
+    //
+    // M2 fix: import the ``dataclasses`` module once and reuse the bound
+    // reference for both ``is_dataclass`` and ``asdict`` lookups.
     if !obj.is_instance_of::<PyType>() {
-        let is_dc = py
-            .import_bound("dataclasses")
-            .and_then(|m| m.getattr("is_dataclass"))
-            .and_then(|f| f.call1((obj,)))
-            .and_then(|r| r.extract::<bool>());
-        if matches!(is_dc, Ok(true)) {
-            // dataclasses.asdict recursively converts dataclass instances,
-            // lists-of-dataclass, etc. into plain dict/list/bytes/primitives.
-            // We then feed the resulting dict back through py_to_value.
-            let asdict = py
-                .import_bound("dataclasses")?
-                .getattr("asdict")?
-                .call1((obj,))?;
-            return py_to_value(py, asdict.as_ref());
+        let dc_mod = py.import_bound("dataclasses");
+        if let Ok(dc_mod) = &dc_mod {
+            let is_dc = dc_mod
+                .getattr("is_dataclass")
+                .and_then(|f| f.call1((obj,)))
+                .and_then(|r| r.extract::<bool>())
+                .unwrap_or(false);
+            if is_dc {
+                // dataclasses.asdict recursively converts dataclass instances,
+                // lists-of-dataclass, etc. into plain dict/list/bytes/primitives.
+                // We then feed the resulting dict back through py_to_value.
+                let asdict = dc_mod.getattr("asdict")?.call1((obj,))?;
+                return py_to_value(py, asdict.as_ref());
+            }
         }
     }
 
