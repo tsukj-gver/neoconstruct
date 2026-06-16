@@ -4,9 +4,18 @@
 //! `sizeof` methods to one of these seven helper functions. The helpers
 //! handle `**contextkw` injection, Value &harr; PyObject conversion, and
 //! error mapping uniformly.
+//!
+//! # Phase 13: compiled path
+//!
+//! [`py_parse_compiled`] / [`py_build_compiled`] use the Phase 13
+//! direct-to-Python path via [`CompiledSchemaHolder`](crate::compiled_ext::CompiledSchemaHolder).
+//! These are opt-in: the existing [`py_parse`] / [`py_build`] (declaration-tree
+//! path) remain the default until the full wrapper migration is done.
 
 use std::path::Path;
+use std::sync::Arc;
 
+use construct::combined::CombinedConstruct;
 use construct::core::context::Context;
 use construct::core::error::ConstructError;
 use construct::core::stream::{ByteStream, CombinedStream, Stream};
@@ -17,6 +26,7 @@ use indexmap::IndexMap;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
+use crate::compiled_ext::CompiledSchemaHolder;
 use crate::conversions::{py_to_value, value_to_py};
 use crate::exceptions::rust_err_to_py;
 use crate::pystream::PyStream;
@@ -323,6 +333,101 @@ pub fn py_sizeof(
         .map_err(|e| rust_err_to_py(py, e.with_path_prefix(SIZEOF_PATH)))
 }
 
+// ===========================================================================
+// Phase 13: compiled (direct-to-Python) path
+// ===========================================================================
+//
+// These helpers compile a CombinedConstruct into a CompiledSchemaHolder and
+// invoke the direct-to-Python parse/build path. They are the foundation for
+// migrating the PyO3 wrappers away from the declaration-tree `Construct` trait
+// to the compiled execution tree.
+//
+// Unlike the declaration-tree helpers above, the compiled path writes parse
+// results straight into a PyDict (no Value::Container intermediate tree) and
+// reads build input lazily (no full py_to_value recursion). This is the S-ARCH-2
+// direct-to-Python path (design §2/§3).
+
+/// Compiles a [`CombinedConstruct`] declaration tree into a
+/// [`CompiledSchemaHolder`].
+///
+/// This is the compilation trigger for the Phase 13 direct-to-Python path
+/// (design §7.3). The resulting holder can be cached on a PyO3 wrapper via
+/// `OnceLock` to avoid recompiling on every parse/build call.
+///
+/// # Errors
+///
+/// Returns `PyErr` if the construct cannot be compiled (e.g. contains an
+/// uncompilable variant).
+pub fn compile_schema(construct: &CombinedConstruct) -> PyResult<Arc<CompiledSchemaHolder>> {
+    // SchemaCompiler is stateless; CompiledSchemaHolder::compile wraps it.
+    // The Arc<CompiledSchemaHolder> mirrors the I3 design decision (see
+    // compiled_ext.rs) — not Send + Sync, used for cheap cloning/caching.
+    let holder = CompiledSchemaHolder::compile(construct)?;
+    #[allow(clippy::arc_with_non_send_sync)]
+    Ok(Arc::new(holder))
+}
+
+/// Parses binary data via the **direct-to-Python path** (Phase 13).
+///
+/// Compiles `construct` (if `holder` is `None`) or reuses a cached
+/// [`CompiledSchemaHolder`], then calls
+/// [`CompiledSchemaHolder::parse_bytes_py`]. The result is written directly
+/// into a `PyDict` / `PyList` — no `Value::Container` intermediate tree is
+/// built (S-ARCH-2).
+///
+/// Pass `holder: Some(...)` to use a pre-compiled/cached schema; pass `None`
+/// to compile on the fly (useful for one-shot parses).
+///
+/// # Errors
+///
+/// Returns `PyErr` (a construct exception subclass) on parse or compilation
+/// failure.
+pub fn py_parse_compiled(
+    construct: &CombinedConstruct,
+    holder: Option<&CompiledSchemaHolder>,
+    py: Python<'_>,
+    data: &[u8],
+    kw: IndexMap<String, Value>,
+) -> PyResult<PyObject> {
+    match holder {
+        Some(h) => h.parse_bytes_py(py, data, kw),
+        None => {
+            let h = CompiledSchemaHolder::compile(construct)?;
+            h.parse_bytes_py(py, data, kw)
+        }
+    }
+}
+
+/// Builds binary data via the **direct-from-Python path** (Phase 13).
+///
+/// Compiles `construct` (if `holder` is `None`) or reuses a cached
+/// [`CompiledSchemaHolder`], then calls
+/// [`CompiledSchemaHolder::build_from_py`]. The build input is read lazily
+/// from `obj` via [`PyInput`](crate::py_input::PyInput) — only fields
+/// actually consumed by `exec_build` incur FFI.
+///
+/// Pass `holder: Some(...)` to use a pre-compiled/cached schema; pass `None`
+/// to compile on the fly.
+///
+/// # Errors
+///
+/// Returns `PyErr` on build or compilation failure.
+pub fn py_build_compiled(
+    construct: &CombinedConstruct,
+    holder: Option<&CompiledSchemaHolder>,
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    kw: IndexMap<String, Value>,
+) -> PyResult<PyObject> {
+    match holder {
+        Some(h) => h.build_from_py(py, obj, kw),
+        None => {
+            let h = CompiledSchemaHolder::compile(construct)?;
+            h.build_from_py(py, obj, kw)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -555,6 +660,78 @@ mod tests {
             dict.set_item(42i32, "value").unwrap();
             let err = pykw_to_indexmap(py, &dict).unwrap_err();
             assert!(err.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+        });
+    }
+
+    // -- Phase 13: compiled path (py_parse_compiled / py_build_compiled) ---
+
+    #[test]
+    fn py_parse_compiled_struct_roundtrip() {
+        crate::ensure_python();
+        use construct::combined::CombinedConstruct;
+        use construct::constructs::format_field::INT8UB;
+        use construct::constructs::Struct;
+        use pyo3::types::PyDict as PyDictType;
+
+        let decl: CombinedConstruct = Struct::new()
+            .field("magic", Box::new(INT8UB.into()))
+            .field("count", Box::new(INT8UB.into()))
+            .into();
+        Python::with_gil(|py| {
+            // Parse.
+            let parsed =
+                py_parse_compiled(&decl, None, py, &[0xAB, 0x05], IndexMap::new()).unwrap();
+            let dict = parsed.bind(py).downcast::<PyDictType>().unwrap();
+            let magic: i64 = dict.as_any().get_item("magic").unwrap().extract().unwrap();
+            let count: i64 = dict.as_any().get_item("count").unwrap().extract().unwrap();
+            assert_eq!(magic, 0xAB);
+            assert_eq!(count, 5);
+
+            // Build.
+            let build_dict = PyDictType::new_bound(py);
+            build_dict.set_item("magic", 0xCDi64).unwrap();
+            build_dict.set_item("count", 9i64).unwrap();
+            let built =
+                py_build_compiled(&decl, None, py, build_dict.as_any(), IndexMap::new()).unwrap();
+            let bytes: Vec<u8> = built.extract(py).unwrap();
+            assert_eq!(bytes, vec![0xCD, 0x09]);
+        });
+    }
+
+    #[test]
+    fn py_parse_compiled_with_cached_holder() {
+        crate::ensure_python();
+        use construct::combined::CombinedConstruct;
+        use construct::constructs::format_field::INT8UB;
+        use construct::constructs::Struct;
+
+        let decl: CombinedConstruct = Struct::new().field("magic", Box::new(INT8UB.into())).into();
+        let holder = compile_schema(&decl).unwrap();
+        Python::with_gil(|py| {
+            // First parse — uses the cached holder.
+            let r1 = py_parse_compiled(&decl, Some(&holder), py, &[0x11], IndexMap::new()).unwrap();
+            // Second parse — same holder, no recompilation.
+            let r2 = py_parse_compiled(&decl, Some(&holder), py, &[0x22], IndexMap::new()).unwrap();
+            let v1: i64 = r1
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap()
+                .as_any()
+                .get_item("magic")
+                .unwrap()
+                .extract()
+                .unwrap();
+            let v2: i64 = r2
+                .bind(py)
+                .downcast::<PyDict>()
+                .unwrap()
+                .as_any()
+                .get_item("magic")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(v1, 0x11);
+            assert_eq!(v2, 0x22);
         });
     }
 }

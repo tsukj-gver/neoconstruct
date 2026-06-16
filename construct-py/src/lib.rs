@@ -4,6 +4,7 @@
 #![allow(clippy::type_complexity)]
 
 pub mod api;
+pub mod compiled_ext;
 pub mod construct_macros;
 pub mod constructs_adapter;
 pub mod constructs_atomic;
@@ -15,6 +16,7 @@ pub mod exceptions;
 pub mod expr_bridge;
 pub mod gallery;
 pub mod py_adapter;
+pub mod py_callback;
 pub mod py_context;
 pub mod py_input;
 pub mod py_renamed;
