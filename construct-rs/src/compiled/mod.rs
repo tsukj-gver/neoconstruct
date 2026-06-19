@@ -25,6 +25,11 @@ pub mod expr;
 pub mod input;
 pub mod sink;
 
+#[cfg(feature = "python")]
+pub mod py_input;
+#[cfg(feature = "python")]
+pub mod py_sink;
+
 pub use build::BuildConstruct;
 pub use expr::{compile_expr, CompiledExpr, ExprExtension};
 pub use input::{Input, OwnedValueInput, ValueInput};

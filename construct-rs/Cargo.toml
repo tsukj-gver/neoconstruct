@@ -16,6 +16,18 @@ default = []
 byteorder = ["dep:byteorder"]
 bigint = ["dep:num-bigint"]
 compression = ["dep:flate2"]
+# Python-first output layer (Phase 16). Enables pyo3 so that the compiled
+# execution tree can produce PyObject directly, eliminating the Value
+# intermediate type on the Python parse/build hot path. pyo3's num-bigint
+# feature is required to convert Value::BigInt (i128) into a Python int.
+#
+# Note: `auto-initialize` is deliberately NOT enabled. It has a race
+# condition when multiple test threads call `Python::with_gil` before the
+# interpreter is started. Instead, `cargo test --features python` uses
+# `ensure_test_python` (a `Once`-guarded `prepare_freethreaded_python`) in
+# the test modules. Under `maturin develop`, the interpreter is already
+# running (managed by the Python process), so no initialization is needed.
+python = ["dep:pyo3", "pyo3/num-bigint", "dep:num-bigint"]
 
 [dependencies.byteorder]
 version = "1"
@@ -28,6 +40,11 @@ optional = true
 [dependencies.flate2]
 version = "1"
 optional = true
+
+[dependencies.pyo3]
+version = "0.22"
+optional = true
+default-features = false
 
 [dev-dependencies]
 criterion = { version = "0.5", default-features = false, features = ["html_reports", "plotters", "cargo_bench_support"] }
