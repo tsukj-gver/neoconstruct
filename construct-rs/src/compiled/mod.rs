@@ -26,6 +26,8 @@ pub mod input;
 pub mod sink;
 
 #[cfg(feature = "python")]
+pub mod py_exec;
+#[cfg(feature = "python")]
 pub mod py_input;
 #[cfg(feature = "python")]
 pub mod py_sink;

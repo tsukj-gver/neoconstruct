@@ -26,6 +26,8 @@ use std::sync::Arc;
 
 use construct::combined::CombinedConstruct;
 use construct::compiled::input::Input;
+use construct::compiled::py_exec::exec_parse_py_dispatch;
+use construct::compiled::py_sink::{PyDictSink2, PySink};
 use construct::compiled::{CompiledExec, CompiledSchema};
 use construct::compiler::SchemaCompiler;
 use construct::core::context::Context;
@@ -38,7 +40,6 @@ use pyo3::types::PyBytes;
 
 use crate::exceptions::rust_err_to_py;
 use crate::py_input::PyInput;
-use crate::py_sink::PyDictSink;
 
 /// Path prefix added to errors originating from parse operations.
 const PARSE_PATH: &str = "(parsing)";
@@ -144,16 +145,18 @@ impl CompiledSchemaHolder {
         for (key, value) in kw {
             ctx.insert(key, value);
         }
-        let mut sink = PyDictSink::new_root(py);
-        match self
-            .schema
-            .tree()
-            .exec_parse(&mut stream, &mut ctx, &mut sink)
-        {
-            Ok(()) => sink.into_py_object(),
+        // Phase 16.3: direct-to-Python parse path via PyDictSink2.
+        // The compiled tree is traversed in Rust while holding the GIL,
+        // writing parse results straight into PyDict / PyList — no
+        // Value::Container intermediate tree is built (design S-ARCH-2).
+        let mut sink = PyDictSink2::new_root_struct(py);
+        match exec_parse_py_dispatch(self.schema.tree(), py, &mut stream, &mut ctx, &mut sink) {
+            Ok(()) => Box::new(sink)
+                .into_root_py(py)
+                .map_err(|e| rust_err_to_py(py, e.with_path_prefix(PARSE_PATH))),
             Err(e) => Err(rust_err_to_py(py, e.with_path_prefix(PARSE_PATH))),
         }
-        // Err path: `sink` (PyDictSink owning a Py<PyDict>) is dropped here.
+        // Err path: `sink` (PyDictSink2 owning a Py<PyDict>) is dropped here.
         // PyO3 decrements the refcount; Python GC reclaims the partial dict.
         // Python only sees the exception.
     }

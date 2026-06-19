@@ -35,6 +35,7 @@ dependencies = [
  "flate2",
  "indexmap",
  "num-bigint",
+ "pyo3",
  "thiserror",
 ]
 

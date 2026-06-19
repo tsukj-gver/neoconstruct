@@ -10,7 +10,7 @@ name = "construct_rust"
 crate-type = ["cdylib"]
 
 [dependencies]
-construct = { path = "../construct-rs", features = ["byteorder", "bigint", "compression"] }
+construct = { path = "../construct-rs", features = ["byteorder", "bigint", "compression", "python"] }
 pyo3 = { version = "0.22", features = ["num-bigint", "multiple-pymethods"] }
 num-bigint = "0.4"
 num-traits = "0.2"
