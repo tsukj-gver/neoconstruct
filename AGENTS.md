@@ -5,9 +5,35 @@
 
 ---
 
+## 0. 项目定位（最高优先级，所有决策的前提）
+
+**这是一个 Python 项目。**
+
+交付物是 Python 包（`pip install construct`）。用户是 Python 开发者。他们调用 `construct.parse(data)` / `construct.build(obj)`，期望比纯 Python 原版更快。
+
+Rust 代码是**内核实现手段**，不是独立产品。没有任何 Rust 用户。不存在"纯 Rust 使用场景"。
+
+### 这意味着什么（所有架构决策必须遵守）
+
+1. **Python 端性能是唯一性能指标**。Rust 内部基准（cargo bench）只是诊断工具，不是验收标准。验收标准 S-PERF 必须从 Python 用户视角测量（`time.perf_counter` 端到端）。
+
+2. **pyo3 是核心依赖，不是可选附加**。Rust 代码的直接产出目标是 `PyObject`，不是某个 Rust 中间类型。任何"Rust 类型 → Python 类型"的转换层都是**需要消除的开销**，不是"必要的抽象"。
+
+3. **不允许以"Rust 纯净性"为由牺牲 Python 性能**。"construct-rs 不依赖 pyo3"不是一个有效约束——它从未被正式决策过，且与项目目标直接矛盾。
+
+4. **Value 枚举是内部实现细节**，不应该出现在 Python 关键路径上。如果 Value→PyObject 的转换成为性能瓶颈，应该让 Rust 代码直接产出 PyObject，而不是优化转换层。
+
+> **历史教训（2026-06-19）**：Phase 1-15 将项目错误地架构为"碰巧有 Python 绑定的 Rust 库"，
+> 导致 Value 枚举 / OutputSink trait / conversions.rs 等间接层被当作架构支柱。
+> 这些间接层的累积开销使 Python 端性能仅 0.26x（比纯 Python 原版慢 4x），
+> 完全违背了"用 Rust 加速 Python"的项目初衷。
+> Phase 16+ 必须以 Python-first 视角修正产出层。
+
+---
+
 ## 1. 项目简介
 
-将 Python 库 [construct](https://github.com/construct/construct) (v2.10.70) 的核心内核用 Rust 重写。Construct 是一个声明式、对称的二进制数据解析与构建库——同一套定义既能解析（parse）二进制数据，也能构建（build）二进制数据。
+将 Python 库 [construct](https://github.com/construct/construct) (v2.10.70) 的核心内核用 Rust 重写，**使其更快**。Construct 是一个声明式、对称的二进制数据解析与构建库——同一套定义既能解析（parse）二进制数据，也能构建（build）二进制数据。
 
 **Python 原版源码位置**：`construct/construct/`（在本项目目录下）
 - `core.py`（6447行）：所有构造器实现，是核心中的核心
@@ -165,16 +191,21 @@ git tag phase-N-complete            # 阶段验收标签
 
 ## 7. 核心技术决策（全员须知）
 
+> ⚠️ 以下决策中标注 `[Python-first]` 的项以 §0 项目定位为最高优先级。
+> 如任何决策与 §0 冲突，以 §0 为准。
+
 | 决策 | 内容 | 理由 |
 |------|------|------|
-| 动态类型替代 | `Value` 枚举 + 模式匹配 | Rust 无动态类型，枚举是标准方案 |
-| 构造器抽象 | `Box<dyn Construct>` | 灵活性优先，与 Python 动态组合能力对齐 |
+| **pyo3 定位** `[Python-first]` | pyo3 是核心依赖。Rust 代码应直接产出 PyObject，而非产出中间 Rust 类型再转换 | 消除 Value→PyObject 转换开销。详见 §0 第 2/4 条 |
+| **Value 枚举定位** `[Python-first]` | Value 是内部实现细节和测试工具，**不出现在 Python 关键路径上** | Phase 1-15 教训：Value 作为架构支柱导致 0.26x 性能 |
+| 动态类型替代 | `Value` 枚举 + 模式匹配（内部）/ `PyObject`（产出） | Rust 无动态类型；但产出目标是 PyObject |
+| 构造器抽象 | `enum_dispatch` (CombinedConstruct) | Phase 11 已迁移，替代 Box\<dyn\> |
 | 错误处理 | `Result<T, ConstructError>` + `thiserror` | 统一错误体系，`?` 传播 |
-| 上下文传递 | `Context` 结构体（IndexMap + parent 引用） | 支持嵌套和字段间引用 |
-| 流抽象 | 自定义 `Stream` trait（基于 Cursor） | 统一错误类型，支持位级扩展 |
-| 容器类型 | `IndexMap<String, Value>` | 保持插入顺序 + O(1) 查找 |
-| 可选依赖 | feature gate 控制 | 与 Python 版本零依赖理念一致 |
-| 项目结构 | workspace 下 `construct-rs/` 子目录 | 与原版 Python 仓库隔离 |
+| 上下文传递 | `Context` 结构体（IndexMap + Arc\<Context\> parent） | 支持嵌套和字段间引用 |
+| 流抽象 | `CombinedStream` (enum_dispatch) | Phase 11 已迁移 |
+| 容器类型 | `IndexMap<String, Value>`（内部）/ `PyDict`（产出） | 保持插入顺序 + O(1) 查找 |
+| 编译执行树 | `CompiledNode` + `SchemaCompiler`（build-once） | Phase 12 已实现，运行时零构建开销 |
+| ~~项目结构~~ | ~~construct-rs 纯 Rust + construct-py 绑定层~~ | **已修正**：Phase 16+ 可将 pyo3 引入 construct-rs 或合并 crate |
 
 ## 8. Rust 编码红线（全员必须遵守）
 
