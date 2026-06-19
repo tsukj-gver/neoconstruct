@@ -139,6 +139,16 @@ cargo bench
 
 **所有阶段出口必须通过**：`cargo build` + `cargo clippy` + `cargo fmt --check` + `cargo test`
 
+### ⚠️ 性能门禁（涉及性能的阶段必须遵守）
+
+详见 `.opencode/skills/performance-gate.md`。三条硬规则：
+
+1. **设计阶段**：ARCH 必须在设计中写入"性能假设"（瓶颈识别 + 可证伪预测 + 验证方法）。REV 必须检查预测覆盖了**所有**瓶颈来源。
+2. **首个实现后**：PM 必须执行性能烟雾测试（vs 绝对基线，非旧路径）。< 0.5x → 暂停后续阶段。
+3. **验收阶段**：PM 必须检查证据类型匹配。"≥1.0x"要求对比数据表，不接受"编译通过"。
+
+**S-PERF 基线必须用绝对基线**（Python 原版 construct），不可用相对基线（旧路径）。
+
 ### Git 命令
 
 ```bash

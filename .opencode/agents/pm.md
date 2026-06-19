@@ -161,8 +161,36 @@ permission:
 1. 执行 `cargo build && cargo clippy && cargo fmt --check && cargo test`（需在 `construct-rs/` 目录下运行，使用 bash 工具的 `workdir="construct-rs"` 参数）
 2. 检查总纲中所有子任务已完成
 3. 检查过程记录完整性
-4. 在过程记录中填写阶段验收记录
-5. `git tag phase-N-complete`
+4. **⚠️ 验收证据类型匹配**（见下方硬规则）
+5. 在过程记录中填写阶段验收记录
+6. `git tag phase-N-complete`
+
+### ⚠️ 验收硬规则（不可覆盖）
+
+**规则 1：证据类型匹配**
+
+```
+IF 验收标准定义为"≥X metric"（如 S-PERF "≥1.0x"）
+AND DEV/VET 报告的证据类型不包含"实际测量数据"
+THEN PM MUST 驳回，要求补测
+AND PM MUST NOT 标注"通过"
+AND PM MUST NOT 打 tag
+```
+
+| 标准类型 | 要求的证据 | 不可接受的替代 |
+|---------|-----------|-------------|
+| S-PERF "≥1.0x" | 对比数据表（多格式 × 多方向 × vs 绝对基线） | "bench 编译通过" / "1 个 test passed" |
+| S-FUNC "功能覆盖" | 测试结果汇总（pass/fail 计数 + 失败列表） | "代码已实现" |
+| S-QUAL "零 warning" | clippy/fmt 命令输出 | "我觉得没问题" |
+| S-ARCH "D1-D7 实现" | 逐项源码位置确认（file:line） | "设计文档里写了" |
+
+**规则 2：S-PERF 必须用绝对基线**
+
+S-PERF 的性能对比必须使用**绝对基线**（Python 原版 construct），不可使用相对基线（旧路径）。详见 `docs/workflow/工作流文档.md` §5.2。
+
+**规则 3：性能关键路径的首个端到端实现后，必须执行烟雾测试**
+
+详见 `.opencode/skills/performance-gate.md` Checkpoint 2。如果红灯（< 0.5x），暂停后续阶段。
 
 ## 阶段依赖检查
 
