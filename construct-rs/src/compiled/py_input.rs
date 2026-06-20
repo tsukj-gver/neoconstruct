@@ -97,6 +97,25 @@ pub trait PyInput: std::fmt::Debug {
     /// applicable (input is not a list, or elements are not all integers).
     /// The caller falls back to per-index extraction.
     fn extract_batch_int_py(&self, py: Python<'_>) -> Result<Option<Vec<i64>>>;
+
+    /// Extracts a [`Value`] suitable for context insertion.
+    ///
+    /// Unlike [`extract_scalar_py`](Self::extract_scalar_py), which fails on
+    /// composite inputs (dict / list), this method handles both:
+    /// - **Scalar inputs** (int, str, bytes, …): returned directly.
+    /// - **Composite inputs** (dict, list): shallow-extracted via
+    ///   [`shallow_py_to_value_for_ctx`] — top-level scalar fields are
+    ///   extracted, nested composites become empty placeholders.
+    ///
+    /// Used by composite nodes (`Struct`, `Sequence`, `Array`, …) and wrapper
+    /// nodes (`Adapter`, `Const`, `Enum`, …) to obtain the value for context
+    /// expression evaluation (`this.field`) during build.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConstructError::TypeMismatch`] only if the object is neither
+    /// a scalar nor a recognised composite type.
+    fn extract_ctx_value_py(&self, py: Python<'_>) -> Result<Value>;
 }
 
 // ===========================================================================
@@ -225,6 +244,70 @@ fn extract_scalar_short_circuit(obj: &Bound<'_, PyAny>) -> Option<Value> {
 }
 
 // ===========================================================================
+// Helper: shallow dict/list → Value for context insertion
+// ===========================================================================
+
+/// Shallow extraction of a Python dict / list into a [`Value`] for context.
+///
+/// Top-level scalar fields are extracted via [`extract_scalar_short_circuit`];
+/// nested composite values (sub-dicts / sub-lists) become [`Value::None`]
+/// placeholders. This avoids the cost of a full recursive conversion while
+/// supporting the majority of context expressions (`this.field`,
+/// `this.field.subfield` at one level deep).
+///
+/// If the object is already a scalar, it is returned directly.
+///
+/// # Errors
+///
+/// Returns [`ConstructError::TypeMismatch`] if `obj` is not a scalar, dict,
+/// or list.
+fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
+    use pyo3::types::{PyDict, PyList};
+
+    // Scalar fast-path (covers leaf fields like int, str, bytes, …).
+    if let Some(scalar) = extract_scalar_short_circuit(obj) {
+        return Ok(scalar);
+    }
+    // Dict: shallow-extract top-level keys.
+    if let Ok(dict) = obj.downcast::<PyDict>() {
+        let mut map = indexmap::IndexMap::new();
+        for (key, value) in dict {
+            let key_str: String = key.extract().unwrap_or_default();
+            if let Some(scalar) = extract_scalar_short_circuit(&value) {
+                map.insert(key_str, scalar);
+            } else {
+                // Nested composite: placeholder (avoids deep conversion).
+                map.insert(key_str, Value::None);
+            }
+        }
+        return Ok(Value::Container(map));
+    }
+    // List: shallow-extract elements.
+    if let Ok(list) = obj.downcast::<PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for item in list {
+            if let Some(scalar) = extract_scalar_short_circuit(&item) {
+                items.push(scalar);
+            } else {
+                items.push(Value::None);
+            }
+        }
+        return Ok(Value::List(items));
+    }
+    // Fallback: type mismatch.
+    let type_name = obj
+        .get_type()
+        .name()
+        .map(|n| n.to_string())
+        .unwrap_or_else(|_| "<unknown>".to_string());
+    Err(ConstructError::TypeMismatch {
+        path: String::new(),
+        expected: "scalar, dict, or list".to_string(),
+        actual: type_name,
+    })
+}
+
+// ===========================================================================
 // PyDictInput — generic PyObject wrapper
 // ===========================================================================
 
@@ -344,6 +427,11 @@ impl PyInput for PyDictInput {
         // concurrently mutated. See `extract_batch_int_raw` safety docs.
         unsafe { extract_batch_int_raw(py, bound) }
     }
+
+    fn extract_ctx_value_py(&self, py: Python<'_>) -> Result<Value> {
+        let bound = self.obj.bind(py);
+        shallow_py_to_value_for_ctx(bound)
+    }
 }
 
 // ===========================================================================
@@ -455,6 +543,10 @@ impl PyInput for PyScalarInput {
         } else {
             Ok(None)
         }
+    }
+
+    fn extract_ctx_value_py(&self, _py: Python<'_>) -> Result<Value> {
+        Ok(self.value.clone())
     }
 }
 

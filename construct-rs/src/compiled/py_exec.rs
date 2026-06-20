@@ -108,19 +108,6 @@ pub trait PyCompiledExec {
     ) -> Result<()>;
 }
 
-/// Error message for `exec_build_py` stub implementations (Phase 16.3).
-///
-/// Real `exec_build_py` implementations are filled in by Phase 16.4.
-const BUILD_PY_STUB_MESSAGE: &str = "exec_build_py not yet implemented (Phase 16.4)";
-
-/// Builds the standard "not yet implemented" error for `exec_build_py`.
-fn build_py_not_yet_impl() -> ConstructError {
-    ConstructError::Generic {
-        path: String::new(),
-        message: BUILD_PY_STUB_MESSAGE.to_string(),
-    }
-}
-
 // ===========================================================================
 // Helper: parse inner into a temporary PyDictSink2, return (Value, PyObject)
 // ===========================================================================
@@ -182,7 +169,10 @@ fn deposit_pair_as_leaf(py: Python<'_>, sink: &mut dyn PySink, value: Value) -> 
 /// 2. `value_to_py_scalar(py, &value)` — one C API call (type known).
 /// 3. `sink.deposit_leaf(py, value, obj)` — stores both for ctx and output.
 ///
-/// `exec_build_py` is a stub returning "not yet implemented (Phase 16.4)".
+/// `exec_build_py` flow:
+/// 1. `input.extract_scalar_py(py)` — schema-guided scalar extraction (no
+///    7× type-check chain).
+/// 2. `self.inner.build(&value, stream, ctx)` — shared encode logic.
 macro_rules! impl_leaf_py_exec {
     ($($ty:ty),* $(,)?) => {
         $(
@@ -206,12 +196,13 @@ macro_rules! impl_leaf_py_exec {
 
                 fn exec_build_py(
                     &self,
-                    _py: Python<'_>,
-                    _input: &dyn PyInput,
-                    _stream: &mut CombinedStream,
-                    _ctx: &mut Context,
+                    py: Python<'_>,
+                    input: &dyn PyInput,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
                 ) -> Result<()> {
-                    Err(build_py_not_yet_impl())
+                    let value = input.extract_scalar_py(py)?;
+                    self.inner.build(&value, stream, ctx)
                 }
             }
         )*
@@ -267,12 +258,12 @@ macro_rules! impl_forward_wrapper_py_exec {
 
                 fn exec_build_py(
                     &self,
-                    _py: Python<'_>,
-                    _input: &dyn PyInput,
-                    _stream: &mut CombinedStream,
-                    _ctx: &mut Context,
+                    py: Python<'_>,
+                    input: &dyn PyInput,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
                 ) -> Result<()> {
-                    Err(build_py_not_yet_impl())
+                    self.inner.exec_build_py(py, input, stream, ctx)
                 }
             }
         )*
@@ -320,12 +311,15 @@ macro_rules! impl_adapter_py_exec {
 
                 fn exec_build_py(
                     &self,
-                    _py: Python<'_>,
-                    _input: &dyn PyInput,
-                    _stream: &mut CombinedStream,
-                    _ctx: &mut Context,
+                    py: Python<'_>,
+                    input: &dyn PyInput,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
                 ) -> Result<()> {
-                    Err(build_py_not_yet_impl())
+                    let value = input.extract_ctx_value_py(py)?;
+                    let encoded = (self.encode)(&value, ctx)?;
+                    let scalar_input = crate::compiled::py_input::PyScalarInput::new(encoded);
+                    self.inner.exec_build_py(py, &scalar_input, stream, ctx)
                 }
             }
         )*
@@ -354,12 +348,15 @@ impl PyCompiledExec for crate::compiled::CompiledSymmetricAdapter {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let value = input.extract_ctx_value_py(py)?;
+        let encoded = (self.func)(&value, ctx)?;
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(encoded);
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -391,12 +388,14 @@ macro_rules! impl_validator_py_exec {
 
                 fn exec_build_py(
                     &self,
-                    _py: Python<'_>,
-                    _input: &dyn PyInput,
-                    _stream: &mut CombinedStream,
-                    _ctx: &mut Context,
+                    py: Python<'_>,
+                    input: &dyn PyInput,
+                    stream: &mut CombinedStream,
+                    ctx: &mut Context,
                 ) -> Result<()> {
-                    Err(build_py_not_yet_impl())
+                    let value = input.extract_ctx_value_py(py)?;
+                    (self.check)(&value, ctx)?;
+                    self.inner.exec_build_py(py, input, stream, ctx)
                 }
             }
         )*
@@ -433,12 +432,21 @@ impl PyCompiledExec for crate::compiled::CompiledConst {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let value = input.extract_ctx_value_py(py)?;
+        if !value.is_none() && value != self.value {
+            return Err(ConstructError::Const {
+                path: String::new(),
+                expected: format!("None or {:?}", self.value),
+                actual: format!("{:?}", value),
+            });
+        }
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(self.value.clone());
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -465,12 +473,33 @@ impl PyCompiledExec for crate::compiled::CompiledEnum {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        let build_val = match &raw {
+            Value::String(label) => match self.mapping.get(label) {
+                Some(&v) => Value::UInt(v),
+                None => {
+                    return Err(ConstructError::Mapping {
+                        path: String::new(),
+                        key: format!("{:?}", label),
+                    }
+                    .with_path_prefix("Enum"))
+                }
+            },
+            Value::Int(i) => Value::Int(*i),
+            other => {
+                let v = other.to_u64().map_err(|e| e.with_path_prefix("Enum"))?;
+                Value::UInt(v)
+            }
+        };
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(build_val);
+        self.inner
+            .exec_build_py(py, &scalar_input, stream, ctx)
+            .map_err(|e| e.with_path_prefix("Enum"))
     }
 }
 
@@ -498,12 +527,42 @@ impl PyCompiledExec for crate::compiled::CompiledFlagsEnum {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        let container = raw
+            .as_container()
+            .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
+        let mut flags_val: u64 = 0;
+        for (name, value) in container {
+            if name.starts_with('_') {
+                continue;
+            }
+            match self.flags.get(name) {
+                Some(&flag_bits) => {
+                    let is_set = value
+                        .as_bool()
+                        .map_err(|e| e.with_path_prefix("FlagsEnum"))?;
+                    if is_set {
+                        flags_val |= flag_bits;
+                    }
+                }
+                None => {
+                    return Err(ConstructError::Mapping {
+                        path: String::new(),
+                        key: format!("{:?}", name),
+                    }
+                    .with_path_prefix("FlagsEnum"));
+                }
+            }
+        }
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(Value::UInt(flags_val));
+        self.inner
+            .exec_build_py(py, &scalar_input, stream, ctx)
+            .map_err(|e| e.with_path_prefix("FlagsEnum"))
     }
 }
 
@@ -534,12 +593,26 @@ impl PyCompiledExec for crate::compiled::CompiledMapping {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        for (k, v) in &self.mapping {
+            if k == &raw {
+                let scalar_input = crate::compiled::py_input::PyScalarInput::new(v.clone());
+                return self
+                    .inner
+                    .exec_build_py(py, &scalar_input, stream, ctx)
+                    .map_err(|e| e.with_path_prefix("Mapping"));
+            }
+        }
+        Err(ConstructError::Mapping {
+            path: String::new(),
+            key: format!("{:?}", raw),
+        }
+        .with_path_prefix("Mapping"))
     }
 }
 
@@ -564,9 +637,10 @@ impl PyCompiledExec for crate::compiled::CompiledComputed {
         _py: Python<'_>,
         _input: &dyn PyInput,
         _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let _ = (self.func)(ctx)?;
+        Ok(())
     }
 }
 
@@ -594,7 +668,7 @@ impl PyCompiledExec for crate::compiled::CompiledIndex {
         _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        Ok(())
     }
 }
 
@@ -607,7 +681,6 @@ impl PyCompiledExec for crate::compiled::CompiledCheck {
         sink: &mut dyn PySink,
     ) -> Result<()> {
         (self.check)(ctx)?;
-        // Check produces None as output (matches Value-path behavior).
         let value = Value::None;
         let obj = py.None();
         sink.deposit_leaf(py, value, obj)
@@ -618,9 +691,9 @@ impl PyCompiledExec for crate::compiled::CompiledCheck {
         _py: Python<'_>,
         _input: &dyn PyInput,
         _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        (self.check)(ctx)
     }
 }
 
@@ -648,14 +721,20 @@ impl PyCompiledExec for crate::compiled::CompiledStopIf {
         _py: Python<'_>,
         _input: &dyn PyInput,
         _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        if (self.cond)(ctx) {
+            Err(ConstructError::StopField {
+                path: String::new(),
+            })
+        } else {
+            Ok(())
+        }
     }
 }
 
 // ===========================================================================
-// Default / Rebuild (forward parse; build differs but is stubbed in 16.3)
+// Default / Rebuild (forward parse; build differs)
 // ===========================================================================
 
 impl PyCompiledExec for crate::compiled::CompiledDefault {
@@ -666,18 +745,24 @@ impl PyCompiledExec for crate::compiled::CompiledDefault {
         ctx: &mut Context,
         sink: &mut dyn PySink,
     ) -> Result<()> {
-        // Forward to inner (parse direction: no default substitution).
         self.inner.exec_parse_py(py, stream, ctx, sink)
     }
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        let effective = if raw.is_none() {
+            self.value.clone()
+        } else {
+            raw
+        };
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(effective);
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -689,18 +774,19 @@ impl PyCompiledExec for crate::compiled::CompiledRebuild {
         ctx: &mut Context,
         sink: &mut dyn PySink,
     ) -> Result<()> {
-        // Forward to inner (parse direction: rebuild semantics is build-only).
         self.inner.exec_parse_py(py, stream, ctx, sink)
     }
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let value = (self.func)(ctx)?;
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(value);
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -724,12 +810,15 @@ impl PyCompiledExec for crate::compiled::CompiledNamedTuple {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        let encoded = named_tuple_encode_value(&raw, &self.field_names)?;
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(encoded);
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -800,12 +889,30 @@ impl PyCompiledExec for crate::compiled::CompiledTimestampAdapter {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let raw = input.extract_ctx_value_py(py)?;
+        let container = raw.as_container()?;
+        let secs = container
+            .get("secs")
+            .ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: "secs".to_string(),
+            })?
+            .to_i64()?;
+        let nanos = container
+            .get("nanos")
+            .ok_or_else(|| ConstructError::FieldMissing {
+                path: String::new(),
+                field: "nanos".to_string(),
+            })?
+            .to_u64()? as u32;
+        let raw_i64 = secs_nanos_to_timestamp(secs, nanos, self.unit);
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(Value::Int(raw_i64));
+        self.inner.exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -820,6 +927,44 @@ fn timestamp_to_secs_nanos(
         TimestampUnit::Milliseconds => (raw / 1000, ((raw % 1000) * 1_000_000) as u32),
         TimestampUnit::Microseconds => (raw / 1_000_000, ((raw % 1_000_000) * 1000) as u32),
         TimestampUnit::Nanoseconds => (raw / 1_000_000_000, (raw % 1_000_000_000) as u32),
+    }
+}
+
+/// Mirrors `secs_nanos_to_timestamp` in mod.rs.
+fn secs_nanos_to_timestamp(
+    secs: i64,
+    nanos: u32,
+    unit: crate::constructs::computed::TimestampUnit,
+) -> i64 {
+    use crate::constructs::computed::TimestampUnit;
+    match unit {
+        TimestampUnit::Seconds => secs,
+        TimestampUnit::Milliseconds => secs * 1000 + (i64::from(nanos) / 1_000_000),
+        TimestampUnit::Microseconds => secs * 1_000_000 + (i64::from(nanos) / 1000),
+        TimestampUnit::Nanoseconds => secs * 1_000_000_000 + i64::from(nanos),
+    }
+}
+
+/// Local copy of `CompiledNamedTuple::encode_value` (mirrors mod.rs).
+fn named_tuple_encode_value(data: &Value, field_names: &[String]) -> Result<Value> {
+    match data {
+        Value::List(items) => {
+            let plain: Vec<Value> = items
+                .iter()
+                .zip(field_names.iter())
+                .map(|(item, _name)| match item {
+                    Value::Container(entry) => entry.get("value").cloned().unwrap_or(Value::None),
+                    other => other.clone(),
+                })
+                .collect();
+            Ok(Value::List(plain))
+        }
+        Value::Container(map) => Ok(Value::Container(map.clone())),
+        other => Err(ConstructError::TypeMismatch {
+            path: String::new(),
+            expected: "List or Container".to_string(),
+            actual: other.type_name().to_string(),
+        }),
     }
 }
 
@@ -876,12 +1021,30 @@ impl PyCompiledExec for crate::compiled::CompiledPadded {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let pos_before = stream.tell()?;
+        self.inner.exec_build_py(py, input, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let written = (pos_after - pos_before) as usize;
+        if written > self.length {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "subcon build {} bytes but was allowed only {}",
+                    written, self.length
+                ),
+            });
+        }
+        let pad = self.length - written;
+        if pad > 0 {
+            let padding = vec![self.pattern; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
     }
 }
 
@@ -915,12 +1078,30 @@ impl PyCompiledExec for crate::compiled::CompiledAligned {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        if self.modulus < ALIGNED_MIN_MODULUS {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "expected modulus {} or greater, got {}",
+                    ALIGNED_MIN_MODULUS, self.modulus
+                ),
+            });
+        }
+        let pos_before = stream.tell()?;
+        self.inner.exec_build_py(py, input, stream, ctx)?;
+        let pos_after = stream.tell()?;
+        let written = (pos_after - pos_before) as usize;
+        let pad = (self.modulus - (written % self.modulus)) % self.modulus;
+        if pad > 0 {
+            let padding = vec![self.pattern; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
     }
 }
 
@@ -941,12 +1122,31 @@ impl PyCompiledExec for crate::compiled::CompiledFixedSized {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        if built.len() > self.length {
+            return Err(ConstructError::Padding {
+                path: String::new(),
+                message: format!(
+                    "subcon build {} bytes but was allowed only {}",
+                    built.len(),
+                    self.length
+                ),
+            });
+        }
+        stream.write_bytes(&built)?;
+        let pad = self.length - built.len();
+        if pad > 0 {
+            let padding = vec![0u8; pad];
+            stream.write_bytes(&padding)?;
+        }
+        Ok(())
     }
 }
 
@@ -1006,12 +1206,43 @@ impl PyCompiledExec for crate::compiled::CompiledStruct {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut child_ctx = ctx.subcontext();
+        for field in &self.fields {
+            let field_input: Box<dyn PyInput> = match &field.name {
+                Some(name) => {
+                    if field.flagbuildnone && !input.has_field_py(py, name) {
+                        Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None))
+                    } else {
+                        input.sub_field_py(py, name)?
+                    }
+                }
+                None => Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None)),
+            };
+            let ctx_value = field_input.extract_ctx_value_py(py)?;
+            if let Some(name) = &field.name {
+                child_ctx.insert(name.clone(), ctx_value);
+            }
+            match field
+                .subcon
+                .exec_build_py(py, &*field_input, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(name) = &field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1057,12 +1288,34 @@ impl PyCompiledExec for crate::compiled::CompiledSequence {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut child_ctx = ctx.subcontext();
+        for (i, entry) in self.entries.iter().enumerate() {
+            let entry_input = input.sub_index_py(py, i)?;
+            let build_value = entry_input.extract_ctx_value_py(py)?;
+            if let Some(name) = &entry.name {
+                child_ctx.insert(name.clone(), build_value);
+            }
+            match entry
+                .subcon
+                .exec_build_py(py, &*entry_input, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(name) = &entry.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix(&format!("[{i}]"))
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1091,12 +1344,46 @@ impl PyCompiledExec for crate::compiled::CompiledArray {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Fast path: homogeneous int array batch extraction.
+        if let Some(ints) = input.extract_batch_int_py(py)? {
+            if ints.len() != self.count {
+                return Err(ConstructError::Array {
+                    path: String::new(),
+                    expected: self.count,
+                    actual: ints.len(),
+                });
+            }
+            for (i, &val) in ints.iter().enumerate() {
+                ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+                let elem_input = crate::compiled::py_input::PyScalarInput::new(Value::Int(val));
+                self.subcon
+                    .exec_build_py(py, &elem_input, stream, ctx)
+                    .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            }
+            return Ok(());
+        }
+        // Fallback: per-index extraction.
+        let len = input.len_py(py);
+        if len != self.count {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected: self.count,
+                actual: len,
+            });
+        }
+        for i in 0..self.count {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = input.sub_index_py(py, i)?;
+            self.subcon
+                .exec_build_py(py, &*elem_input, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1133,12 +1420,55 @@ impl PyCompiledExec for crate::compiled::CompiledArrayExpr {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let expected_val = self
+            .compiled_count
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("ArrayExpr"))?;
+        let expected = expected_val.to_u64().map_err(|e| {
+            ConstructError::Expr {
+                path: String::new(),
+                message: format!("ArrayExpr count must be a non-negative integer: {e}"),
+            }
+            .with_path_prefix("ArrayExpr")
+        })? as usize;
+        if let Some(ints) = input.extract_batch_int_py(py)? {
+            if ints.len() != expected {
+                return Err(ConstructError::Array {
+                    path: String::new(),
+                    expected,
+                    actual: ints.len(),
+                });
+            }
+            for (i, &val) in ints.iter().enumerate() {
+                ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+                let elem_input = crate::compiled::py_input::PyScalarInput::new(Value::Int(val));
+                self.subcon
+                    .exec_build_py(py, &elem_input, stream, ctx)
+                    .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            }
+            return Ok(());
+        }
+        let len = input.len_py(py);
+        if len != expected {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected,
+                actual: len,
+            });
+        }
+        for i in 0..expected {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = input.sub_index_py(py, i)?;
+            self.subcon
+                .exec_build_py(py, &*elem_input, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1175,12 +1505,20 @@ impl PyCompiledExec for crate::compiled::CompiledGreedyRange {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let len = input.len_py(py);
+        for i in 0..len {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = input.sub_index_py(py, i)?;
+            self.subcon
+                .exec_build_py(py, &*elem_input, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1221,12 +1559,32 @@ impl PyCompiledExec for crate::compiled::CompiledRepeatUntil {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let len = input.len_py(py);
+        let mut built: Vec<Value> = Vec::new();
+        for i in 0..len {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = input.sub_index_py(py, i)?;
+            let element = elem_input.extract_ctx_value_py(py)?;
+            self.subcon
+                .exec_build_py(py, &*elem_input, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            if !self.discard {
+                built.push(element.clone());
+            }
+            if (self.predicate)(&element, &built, ctx) {
+                return Ok(());
+            }
+        }
+        Err(ConstructError::Array {
+            path: String::new(),
+            expected: 0,
+            actual: 0,
+        })
     }
 }
 
@@ -1268,12 +1626,36 @@ impl PyCompiledExec for crate::compiled::CompiledSelect {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        for sc in &self.subcons {
+            let mut build_stream = CombinedStream::ByteStream(ByteStream::new_write());
+            match sc.exec_build_py(py, input, &mut build_stream, ctx) {
+                Ok(()) => {
+                    let bytes = build_stream.into_bytes();
+                    stream.write_bytes(&bytes)?;
+                    return Ok(());
+                }
+                Err(ConstructError::StopField { .. }) => {
+                    return Err(ConstructError::StopField {
+                        path: String::new(),
+                    });
+                }
+                Err(_) => {
+                    // Try next subconstruct.
+                }
+            }
+        }
+        Err(ConstructError::Select {
+            path: String::new(),
+            message: format!(
+                "no subconstruct matched for building after trying {} candidates",
+                self.subcons.len()
+            ),
+        })
     }
 }
 
@@ -1349,12 +1731,44 @@ impl PyCompiledExec for crate::compiled::CompiledUnion {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut child_ctx = ctx.subcontext();
+        for field in &self.fields {
+            let name_ref = field.name.as_deref();
+            let should_build = match name_ref {
+                Some(n) => input.has_field_py(py, n),
+                None => false,
+            };
+            if !should_build {
+                continue;
+            }
+            let field_input: Box<dyn PyInput> = match name_ref {
+                Some(n) => input.sub_field_py(py, n)?,
+                None => Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None)),
+            };
+            let ctx_value = field_input.extract_ctx_value_py(py)?;
+            if let Some(name) = &field.name {
+                child_ctx.insert(name.clone(), ctx_value);
+            }
+            return field
+                .subcon
+                .exec_build_py(py, &*field_input, stream, &mut child_ctx)
+                .map_err(|e| {
+                    if let Some(name) = &field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    }
+                });
+        }
+        Err(ConstructError::Union {
+            path: String::new(),
+            message: "cannot build, none of the subcons were found in the dictionary".to_string(),
+        })
     }
 }
 
@@ -1416,12 +1830,41 @@ impl PyCompiledExec for crate::compiled::CompiledFocusedSeq {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let input_val = input.extract_ctx_value_py(py)?;
+        let mut child_ctx = ctx.subcontext();
+        child_ctx.insert(self.parsebuildfrom.clone(), input_val.clone());
+        for field in &self.fields {
+            let name_ref = field.name.as_deref();
+            let build_value = if name_ref == Some(self.parsebuildfrom.as_str()) {
+                input_val.clone()
+            } else {
+                Value::None
+            };
+            if let Some(name) = &field.name {
+                child_ctx.insert(name.clone(), build_value.clone());
+            }
+            let field_input = crate::compiled::py_input::PyScalarInput::new(build_value);
+            match field
+                .subcon
+                .exec_build_py(py, &field_input, stream, &mut child_ctx)
+            {
+                Ok(()) => {}
+                Err(ConstructError::StopField { .. }) => return Ok(()),
+                Err(e) => {
+                    return Err(if let Some(name) = &field.name {
+                        e.with_path_prefix(name)
+                    } else {
+                        e.with_path_prefix("(anonymous)")
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1462,12 +1905,44 @@ impl PyCompiledExec for crate::compiled::CompiledLazyArray {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        if let Some(ints) = input.extract_batch_int_py(py)? {
+            if ints.len() != self.count {
+                return Err(ConstructError::Array {
+                    path: String::new(),
+                    expected: self.count,
+                    actual: ints.len(),
+                });
+            }
+            for (i, &val) in ints.iter().enumerate() {
+                ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+                let elem_input = crate::compiled::py_input::PyScalarInput::new(Value::Int(val));
+                self.subcon
+                    .exec_build_py(py, &elem_input, stream, ctx)
+                    .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+            }
+            return Ok(());
+        }
+        let len = input.len_py(py);
+        if len != self.count {
+            return Err(ConstructError::Array {
+                path: String::new(),
+                expected: self.count,
+                actual: len,
+            });
+        }
+        for i in 0..self.count {
+            ctx.insert(REPETITION_INDEX_KEY, Value::UInt(i as u64));
+            let elem_input = input.sub_index_py(py, i)?;
+            self.subcon
+                .exec_build_py(py, &*elem_input, stream, ctx)
+                .map_err(|e| e.with_path_prefix(&format!("[{i}]")))?;
+        }
+        Ok(())
     }
 }
 
@@ -1490,12 +1965,12 @@ impl PyCompiledExec for crate::compiled::CompiledRebuffered {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        self.inner.exec_build_py(py, input, stream, ctx)
     }
 }
 
@@ -1525,12 +2000,16 @@ impl PyCompiledExec for crate::compiled::CompiledBitwise {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let bits = sub_stream.into_bytes();
+        let bytes = crate::binary::bits2bytes(&bits)?;
+        stream.write_bytes(&bytes)
     }
 }
 
@@ -1551,12 +2030,16 @@ impl PyCompiledExec for crate::compiled::CompiledBytewise {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let bytes = sub_stream.into_bytes();
+        let bits = crate::binary::bytes2bits(&bytes);
+        stream.write_bytes(&bits)
     }
 }
 
@@ -1578,12 +2061,16 @@ impl PyCompiledExec for crate::compiled::CompiledByteSwapped {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let swapped = crate::binary::swapbytes(&built);
+        stream.write_bytes(&swapped)
     }
 }
 
@@ -1609,12 +2096,16 @@ impl PyCompiledExec for crate::compiled::CompiledBitsSwapped {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let swapped = swap_bits_in_bytes(&built);
+        stream.write_bytes(&swapped)
     }
 }
 
@@ -1653,12 +2144,28 @@ impl PyCompiledExec for crate::compiled::CompiledTransformed {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let encoded = (self.encode)(&built)?;
+        if let Some(expected) = self.encode_amount {
+            if encoded.len() != expected {
+                return Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: format!(
+                        "Transformed: encode produced {} bytes but expected {}",
+                        encoded.len(),
+                        expected
+                    ),
+                });
+            }
+        }
+        stream.write_bytes(&encoded)
     }
 }
 
@@ -1689,12 +2196,25 @@ impl PyCompiledExec for crate::compiled::CompiledRestreamed {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        if self.encoder_unit == 0 {
+            return Err(ConstructError::Generic {
+                path: String::new(),
+                message: "Restreamed encoder_unit must be positive".to_string(),
+            });
+        }
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        for chunk in built.chunks(self.encoder_unit) {
+            let encoded_chunk = (self.encoder)(chunk)?;
+            stream.write_bytes(&encoded_chunk)?;
+        }
+        Ok(())
     }
 }
 
@@ -1742,12 +2262,48 @@ impl PyCompiledExec for crate::compiled::CompiledCompressed {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        use crate::constructs::stream_ops::CompressionAlgorithm;
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.inner.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built = sub_stream.into_bytes();
+        let encoded = match self.algorithm {
+            CompressionAlgorithm::Zlib => {
+                use std::io::Write;
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder
+                    .write_all(&built)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("zlib compression failed: {e}"),
+                    })?;
+                encoder.finish().map_err(|e| ConstructError::Generic {
+                    path: String::new(),
+                    message: format!("zlib compression finalize failed: {e}"),
+                })?
+            }
+            CompressionAlgorithm::Deflate => {
+                use std::io::Write;
+                let mut encoder =
+                    flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+                encoder
+                    .write_all(&built)
+                    .map_err(|e| ConstructError::Generic {
+                        path: String::new(),
+                        message: format!("deflate compression failed: {e}"),
+                    })?;
+                encoder.finish().map_err(|e| ConstructError::Generic {
+                    path: String::new(),
+                    message: format!("deflate compression finalize failed: {e}"),
+                })?
+            }
+        };
+        stream.write_bytes(&encoded)
     }
 }
 
@@ -1770,12 +2326,16 @@ impl PyCompiledExec for crate::compiled::CompiledPointer {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, self.offset)?;
+        let result = self.inner.exec_build_py(py, input, stream, ctx);
+        let _ = stream.seek(fallback);
+        result
     }
 }
 
@@ -1804,12 +2364,24 @@ impl PyCompiledExec for crate::compiled::CompiledPointerExpr {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let offset_val = self
+            .compiled_offset
+            .eval(ctx, None)
+            .map_err(|e| e.with_path_prefix("PointerExpr"))?;
+        let offset = offset_val.to_i64().map_err(|e| ConstructError::Expr {
+            path: String::new(),
+            message: format!("PointerExpr offset must be an integer: {e}"),
+        })?;
+        let fallback = stream.tell()?;
+        seek_to_offset(stream, offset)?;
+        let result = self.inner.exec_build_py(py, input, stream, ctx);
+        let _ = stream.seek(fallback);
+        result
     }
 }
 
@@ -1856,7 +2428,8 @@ impl PyCompiledExec for crate::compiled::CompiledPeek {
         _stream: &mut CombinedStream,
         _ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Peek does not write anything during build (mirrors Python original).
+        Ok(())
     }
 }
 
@@ -1883,12 +2456,26 @@ impl PyCompiledExec for crate::compiled::CompiledPrefixed {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Build subcon into a temporary stream to measure length.
+        let mut sub_stream = CombinedStream::ByteStream(ByteStream::new_write());
+        self.subcon.exec_build_py(py, input, &mut sub_stream, ctx)?;
+        let built_data = sub_stream.into_bytes();
+        let mut length = built_data.len() as u64;
+        if self.include_length {
+            let lf_size = self.length_field.exec_sizeof(ctx)?;
+            length += lf_size as u64;
+        }
+        // Build the length field with the computed length value.
+        let lf_input = crate::compiled::py_input::PyScalarInput::new(Value::UInt(length));
+        self.length_field
+            .exec_build_py(py, &lf_input, stream, ctx)?;
+        // Append the built subcon data.
+        stream.write_bytes(&built_data)
     }
 }
 
@@ -1917,12 +2504,35 @@ impl PyCompiledExec for crate::compiled::CompiledRawCopy {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // RawCopy build accepts either {"data": bytes} or {"value": ...}.
+        let raw = input.extract_ctx_value_py(py)?;
+        match &raw {
+            Value::Container(map) => {
+                if let Some(Value::Bytes(data)) = map.get("data") {
+                    return stream.write_bytes(data);
+                }
+                if let Some(value) = map.get("value") {
+                    let scalar_input = crate::compiled::py_input::PyScalarInput::new(value.clone());
+                    return self.inner.exec_build_py(py, &scalar_input, stream, ctx);
+                }
+                Err(ConstructError::Generic {
+                    path: String::new(),
+                    message: "RawCopy build requires 'data' or 'value' key".to_string(),
+                })
+            }
+            // If the input is itself bytes (no container wrapper), write directly.
+            Value::Bytes(data) => stream.write_bytes(data),
+            _ => {
+                // Fall back: treat the input as a value for the inner subcon.
+                let scalar_input = crate::compiled::py_input::PyScalarInput::new(raw);
+                self.inner.exec_build_py(py, &scalar_input, stream, ctx)
+            }
+        }
     }
 }
 
@@ -1952,12 +2562,18 @@ impl PyCompiledExec for crate::compiled::CompiledChecksum {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Compute the checksum from the context-extracted bytes, then build the
+        // checksum field with that value.
+        let raw_bytes = (self.bytes_func)(ctx)?;
+        let checksum = (self.hash_func)(&raw_bytes);
+        let scalar_input = crate::compiled::py_input::PyScalarInput::new(Value::Bytes(checksum));
+        self.checksum_field
+            .exec_build_py(py, &scalar_input, stream, ctx)
     }
 }
 
@@ -1982,12 +2598,16 @@ impl PyCompiledExec for crate::compiled::CompiledIfThenElse {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        if (self.cond)(ctx) {
+            self.then_constr.exec_build_py(py, input, stream, ctx)
+        } else {
+            self.else_constr.exec_build_py(py, input, stream, ctx)
+        }
     }
 }
 
@@ -2019,12 +2639,26 @@ impl PyCompiledExec for crate::compiled::CompiledSwitch {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        let key = (self.keyfunc)(ctx)?;
+        let node = self
+            .cases
+            .iter()
+            .find(|(k, _)| k == &key)
+            .map(|(_, n)| n.as_ref())
+            .or(self.default.as_deref());
+        match node {
+            Some(n) => n.exec_build_py(py, input, stream, ctx),
+            None => {
+                // No matching case and no default — build nothing (matches
+                // Python's Switch which returns Pass for missing keys).
+                Ok(())
+            }
+        }
     }
 }
 
@@ -2050,12 +2684,15 @@ impl PyCompiledExec for crate::compiled::CompiledDynamic {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Escape hatch: extract the input as a Value and delegate to the
+        // legacy Value-path build.
+        let value = input.extract_ctx_value_py(py)?;
+        self.inner.build(&value, stream, ctx)
     }
 }
 
@@ -2074,12 +2711,15 @@ impl PyCompiledExec for crate::compiled::CompiledLazyBound {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Escape hatch: extract the input as a Value and delegate to the
+        // legacy Value-path build.
+        let value = input.extract_ctx_value_py(py)?;
+        self.inner.build(&value, stream, ctx)
     }
 }
 
@@ -2109,12 +2749,16 @@ impl PyCompiledExec for crate::compiled::CompiledExternal {
 
     fn exec_build_py(
         &self,
-        _py: Python<'_>,
-        _input: &dyn PyInput,
-        _stream: &mut CombinedStream,
-        _ctx: &mut Context,
+        py: Python<'_>,
+        input: &dyn PyInput,
+        stream: &mut CombinedStream,
+        ctx: &mut Context,
     ) -> Result<()> {
-        Err(build_py_not_yet_impl())
+        // Escape hatch: extract Value from PyInput, wrap in OwnedValueInput,
+        // and delegate to the Value-path ext_build.
+        let value = input.extract_ctx_value_py(py)?;
+        let owned = crate::compiled::input::OwnedValueInput::new(value);
+        self.inner.ext_build(&owned, stream, ctx)
     }
 }
 
@@ -2257,14 +2901,16 @@ pub fn exec_parse_py_dispatch(
 /// Dispatches [`PyCompiledExec::exec_build_py`] over all `CompiledNode`
 /// variants.
 ///
-/// **Phase 16.3**: all variants return the "not yet implemented" error.
-/// This dispatch is provided now so that the compile-time exhaustiveness
-/// check holds — Phase 16.4 fills in real implementations.
+/// This is the build-direction entry point for the Python-direct path
+/// (Phase 16.4). It reads field values lazily from a [`PyInput`] (typically
+/// [`PyDictInput`](crate::compiled::py_input::PyDictInput)) and writes
+/// binary output directly to the stream — no intermediate `Value` tree is
+/// built.
 ///
 /// # Errors
 ///
-/// Always returns `Err(ConstructError::Generic { message: "exec_build_py
-/// not yet implemented (Phase 16.4)" })` in Phase 16.3.
+/// Propagates any [`ConstructError`] from the build traversal (field
+/// missing, type mismatch, stream write failure, …).
 pub fn exec_build_py_dispatch(
     node: &CompiledNode,
     py: Python<'_>,
@@ -2534,10 +3180,10 @@ mod tests {
         });
     }
 
-    // ---- 5. exec_build_py returns stub error --------------------------------
+    // ---- 5. exec_build_py produces correct bytes ---------------------------
 
     #[test]
-    fn py_build_returns_stub_error() {
+    fn py_build_produces_correct_bytes() {
         let cc: CombinedConstruct = INT8UB.into();
         ensure_test_python();
         Python::with_gil(|py| {
@@ -2545,16 +3191,12 @@ mod tests {
                 .compile(&cc)
                 .unwrap_or_else(|e| panic!("compile failed: {e:?}"));
             let node = compiled.tree();
-            let mut stream = CombinedStream::ByteStream(ByteStream::new_read(&[]));
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
             let mut ctx = Context::new();
-            let input = crate::compiled::py_input::PyScalarInput::new(Value::UInt(0));
-            let err = exec_build_py_dispatch(node, py, &input, &mut stream, &mut ctx).unwrap_err();
-            match err {
-                ConstructError::Generic { message, .. } => {
-                    assert!(message.contains("Phase 16.4"), "got: {message}");
-                }
-                other => panic!("expected Generic stub error, got {other:?}"),
-            }
+            let input = crate::compiled::py_input::PyScalarInput::new(Value::UInt(42));
+            exec_build_py_dispatch(node, py, &input, &mut stream, &mut ctx).unwrap();
+            let result = stream.into_bytes();
+            assert_eq!(result, vec![42]);
         });
     }
 }

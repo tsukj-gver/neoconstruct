@@ -18,17 +18,17 @@
 //!   [`CompiledSchemaHolder::parse_bytes_py`] (a `#[pymethod]`) converts
 //!   `**kwargs` into an [`IndexMap`] and delegates here.
 //! - [`CompiledSchemaHolder::build_from_raw`] reads build input lazily via
-//!   [`PyInput`] — only fields actually consumed by `exec_build` incur FFI.
+//!   [`PyDictInput`] — only fields actually consumed by `exec_build_py` incur FFI.
 //!   The Python-facing wrapper [`CompiledSchemaHolder::build_from_py`] (a
 //!   `#[pymethod]`) delegates here.
 
 use std::sync::Arc;
 
 use construct::combined::CombinedConstruct;
-use construct::compiled::input::Input;
-use construct::compiled::py_exec::exec_parse_py_dispatch;
+use construct::compiled::py_exec::{exec_build_py_dispatch, exec_parse_py_dispatch};
+use construct::compiled::py_input::{PyDictInput, PyInput};
 use construct::compiled::py_sink::{PyDictSink2, PySink};
-use construct::compiled::{CompiledExec, CompiledSchema};
+use construct::compiled::CompiledSchema;
 use construct::compiler::SchemaCompiler;
 use construct::core::context::Context;
 use construct::core::stream::{ByteStream, CombinedStream};
@@ -39,7 +39,6 @@ use pyo3::prelude::*;
 use pyo3::types::PyBytes;
 
 use crate::exceptions::rust_err_to_py;
-use crate::py_input::PyInput;
 
 /// Path prefix added to errors originating from parse operations.
 const PARSE_PATH: &str = "(parsing)";
@@ -163,8 +162,10 @@ impl CompiledSchemaHolder {
 
     /// Builds binary data from a Python object, returning it as `bytes`.
     ///
-    /// Uses [`PyInput`] for lazy field reading — only fields actually
-    /// consumed by `exec_build` incur FFI, not the entire object.
+    /// **Python-direct path** (Phase 16.4): the entire compiled tree is
+    /// traversed in Rust while holding the GIL. Field values are read lazily
+    /// from the Python input object via [`PyDictInput`] — only fields
+    /// actually consumed by `exec_build_py` incur FFI, not the entire object.
     ///
     /// `kw` provides top-level context fields (matching `**contextkw`).
     ///
@@ -181,22 +182,24 @@ impl CompiledSchemaHolder {
         obj: &Bound<'_, PyAny>,
         kw: IndexMap<String, Value>,
     ) -> PyResult<PyObject> {
-        let input = PyInput::from_bound(obj);
+        let input = PyDictInput::from_bound(obj);
         let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
         let mut ctx = Context::new();
         ctx.insert("_parsing", Value::Bool(false));
         ctx.insert("_building", Value::Bool(true));
         ctx.insert("_sizing", Value::Bool(false));
-        // Set the embedding value in context (context._ = obj), matching the
-        // Python original so condition-based constructs (Optional, IfThenElse)
-        // can inspect the value being built via `ctx.get("_")`.
-        if let Ok(embed) = input.as_value() {
+        // Embed the input as a shallow Value in context (context._ = obj),
+        // matching the Python original so condition-based constructs (Optional,
+        // IfThenElse) can inspect the value being built via `ctx.get("_")`.
+        // Uses a shallow conversion (top-level scalars only; nested composites
+        // become empty placeholders) to avoid full-tree conversion overhead.
+        if let Ok(embed) = input.extract_ctx_value_py(py) {
             ctx.insert("_", embed);
         }
         for (key, value) in kw {
             ctx.insert(key, value);
         }
-        match self.schema.tree().exec_build(&input, &mut stream, &mut ctx) {
+        match exec_build_py_dispatch(self.schema.tree(), py, &input, &mut stream, &mut ctx) {
             Ok(()) => {
                 let bytes = stream.into_bytes();
                 Ok(PyBytes::new_bound(py, &bytes).into_any().unbind())
@@ -248,7 +251,7 @@ impl CompiledSchemaHolder {
     ///
     /// Python signature: ``build_from_py(obj, **kw)``.
     ///
-    /// `obj` is typically a dict or a dataclass instance; [`PyInput`] reads
+    /// `obj` is typically a dict or a dataclass instance; [`PyDictInput`] reads
     /// its attributes lazily. `**kw` provides top-level context fields.
     ///
     /// # Errors
