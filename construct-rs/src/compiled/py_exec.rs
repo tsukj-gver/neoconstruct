@@ -3369,11 +3369,16 @@ mod tests {
     }
 
     #[test]
-    fn py_build_struct_with_list_field_uses_empty_ctx_placeholder() {
-        // RC1 + RC2: a Struct with a list field must build correctly. The
-        // RC1 change makes `extract_ctx_value_py` return an empty List
-        // placeholder, and the composite classifier keeps the original
-        // Python input so the Array child can still iterate the list.
+    fn py_build_struct_with_list_field_shallow_extracts_list() {
+        // Phase 16.5 RC1 rollback + RC2: a Struct with a list field must
+        // build correctly. `extract_ctx_value_py` now shallow-extracts each
+        // list element (no longer returns an empty placeholder), and the
+        // composite classifier still keeps the original Python input so the
+        // Array child can iterate the list directly via `sub_index_py`.
+        //
+        // This guards the regression introduced by RC1 where Dynamic-wrapped
+        // `Array` build broke because the empty placeholder was fed to the
+        // Value-path build. See `shallow_py_to_value_for_ctx` doc comment.
         let arr: CombinedConstruct = Array::new(3, Box::new(INT8UB.into())).into();
         let cc: CombinedConstruct = Struct::new()
             .field("count", Box::new(INT8UB.into()))

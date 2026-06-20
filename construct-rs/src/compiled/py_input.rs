@@ -98,14 +98,17 @@ pub trait PyInput: std::fmt::Debug {
     /// The caller falls back to per-index extraction.
     fn extract_batch_int_py(&self, py: Python<'_>) -> Result<Option<Vec<i64>>>;
 
-    /// Extracts a [`Value`] suitable for context insertion.
+    /// Extracts a [`Value`] suitable for context insertion **and** for
+    /// Dynamic-build fallback.
     ///
     /// Unlike [`extract_scalar_py`](Self::extract_scalar_py), which fails on
     /// composite inputs (dict / list), this method handles both:
     /// - **Scalar inputs** (int, str, bytes, …): returned directly.
     /// - **Composite inputs** (dict, list): shallow-extracted via
     ///   [`shallow_py_to_value_for_ctx`] — top-level scalar fields are
-    ///   extracted, nested composites become empty placeholders.
+    ///   extracted; nested composites are reduced to one-level-deep
+    ///   placeholders, but list elements are iterated so that Dynamic-wrapped
+    ///   `Array` build still works.
     ///
     /// Used by composite nodes (`Struct`, `Sequence`, `Array`, …) and wrapper
     /// nodes (`Adapter`, `Const`, `Enum`, …) to obtain the value for context
@@ -273,22 +276,30 @@ fn extract_scalar_short_circuit(obj: &Bound<'_, PyAny>) -> Option<Value> {
 ///
 /// - **Scalars** (int, str, bytes, bool, float, None): returned directly.
 /// - **Dict** (or `Container` subclass): top-level keys shallow-extracted.
-/// - **List** (or `ListContainer` subclass): empty placeholder (RC1).
+/// - **List** (or `ListContainer` subclass): each element recursively
+///   shallow-extracted (one level of recursion per element).
 /// - **Dataclass / object with `__dict__`**: top-level attributes
 ///   shallow-extracted via `__dict__` (Phase 16.5 fix for nested-dataclass
 ///   build support).
 ///
-/// # List handling (RC1, Phase 16.5)
+/// # List handling (Phase 16.5 RC1 rollback)
 ///
-/// The `list` branch returns an **empty** [`Value::List`] placeholder — it
-/// does **not** iterate over list elements. Previously this function
-/// shallow-extracted every list element, which dominated the cost of
-/// building structs containing list fields (e.g. `Array` items), even though
-/// the resulting context value is rarely read by expressions. Iterating
-/// `this._.list_field[i]` against the placeholder returns nothing useful,
-/// but this matches the design's documented known limitation (§4.6 of
-/// `模块设计-Python-first产出层.md`): deep list-index references in context
-/// expressions are not supported.
+/// The `list` branch shallow-extracts each element by recursively calling
+/// this function. This is **required** for correctness because
+/// [`PyInput::extract_ctx_value_py`] is used in two code paths:
+///
+/// 1. **Context insertion** in `CompiledStruct::exec_build_py` — only needs
+///    a shallow value (expressions like `this.field`).
+/// 2. **Dynamic build data** in `CompiledDynamic::exec_build_py` — needs
+///    the *full* value tree, which it hands directly to the Value-path
+///    `Construct::build`. For `Array(n, subcon)` wrapped by a Dynamic node,
+///    truncating the list to an empty placeholder breaks build entirely.
+///
+/// An earlier revision (RC1) returned an empty `Value::List` placeholder
+/// here, which was correct for path (1) but caused build correctness
+/// regressions in path (2). The recursion is bounded — each element goes
+/// through the scalar fast-path if it is a leaf, so the per-element cost is
+/// one `downcast` + one scalar extract (no deep conversion).
 ///
 /// # Errors
 ///
@@ -315,14 +326,25 @@ fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
         }
         return Ok(Value::Container(map));
     }
-    // List: return an empty placeholder (RC1, Phase 16.5).
+    // List: shallow-extract each element via a recursive call.
     //
-    // We intentionally do NOT iterate list elements. Context expressions
-    // rarely reference list elements (`this._.items[0]`), and the previous
-    // per-element extraction dominated the cost of building structs with
-    // list/array fields. See the function-level doc comment for details.
-    if obj.downcast::<PyList>().is_ok() {
-        return Ok(Value::List(Vec::new()));
+    // Each element is fed through `shallow_py_to_value_for_ctx` so that
+    // scalar leaves are taken directly via the fast-path and nested
+    // composites are reduced to a one-level-deep placeholder (e.g. a list
+    // inside a list becomes a list of Containers / placeholders).
+    //
+    // This branch is on the critical path of `CompiledDynamic::exec_build_py`
+    // (line ~2773 of py_exec.rs), which feeds the resulting `Value::List`
+    // directly into the Value-path `Construct::build` for the wrapped
+    // subcon. Truncating to an empty placeholder (RC1) broke Dynamic-wrapped
+    // `Array` build. See the function-level doc comment for the full
+    // rationale.
+    if let Ok(list) = obj.downcast::<PyList>() {
+        let mut items = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            items.push(shallow_py_to_value_for_ctx(&item)?);
+        }
+        return Ok(Value::List(items));
     }
     // Dataclass / arbitrary Python object with a `__dict__` attribute
     // (Phase 16.5 fix for Phase 16.4 regression).
@@ -346,8 +368,9 @@ fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
     // Performance note: this recursion only fires for dataclass instances
     // (not dicts/lists/scalars). Dict shallow-extraction above remains
     // one-level (only top-level scalars are extracted, nested composites
-    // become `Value::None`). List extraction returns an empty placeholder
-    // (RC1). The cost is bounded by the dataclass nesting depth, which is
+    // become `Value::None`). List extraction iterates elements via the
+    // scalar fast-path (one `downcast` + one scalar extract per element).
+    // The cost is bounded by the dataclass nesting depth, which is
     // typically shallow (2-3 levels).
     if let Ok(dunder_dict) = obj.getattr("__dict__") {
         if let Ok(dict) = dunder_dict.downcast::<PyDict>() {
@@ -909,39 +932,75 @@ mod tests {
         });
     }
 
-    // -- RC1: shallow_py_to_value_for_ctx list placeholder -----------------
+    // -- shallow_py_to_value_for_ctx list branch (RC1 rollback) ------------
 
     #[test]
-    fn shallow_py_to_value_for_ctx_list_returns_empty_placeholder() {
-        // RC1 (Phase 16.5): the list branch must return an empty
-        // `Value::List` placeholder without iterating elements.
+    fn shallow_py_to_value_for_ctx_list_shallow_extracts_elements() {
+        // Phase 16.5 RC1 rollback: the list branch must shallow-extract each
+        // element (not return an empty placeholder), because
+        // `CompiledDynamic::exec_build_py` relies on this to feed the Value-
+        // path `Construct::build` for Dynamic-wrapped `Array`.
         ensure_test_python();
         Python::with_gil(|py| {
             let list = PyList::new_bound(py, [1i64, 2, 3, 4, 5]);
             let v = shallow_py_to_value_for_ctx(list.as_any()).unwrap();
             match v {
                 Value::List(items) => {
-                    // Must be empty regardless of input list length.
-                    assert!(
-                        items.is_empty(),
-                        "RC1: expected empty placeholder, got {items:?}"
-                    );
+                    assert_eq!(items.len(), 5, "list branch must preserve element count");
+                    assert_eq!(items[0], Value::Int(1));
+                    assert_eq!(items[4], Value::Int(5));
                 }
-                other => panic!("RC1: expected Value::List, got {other:?}"),
+                other => panic!("expected Value::List, got {other:?}"),
             }
         });
     }
 
     #[test]
-    fn shallow_py_to_value_for_ctx_list_subclass_returns_empty_placeholder() {
-        // RC1 regression guard: ListContainer (list subclass) must also
-        // return an empty placeholder (downcast must accept subclasses).
+    fn shallow_py_to_value_for_ctx_list_subclass_shallow_extracts_elements() {
+        // Regression guard: ListContainer (list subclass) must also
+        // shallow-extract elements (downcast must accept subclasses).
         ensure_test_python();
         Python::with_gil(|py| {
-            let code = "[1, 2, 3]";
+            let code = "[10, 20, 30]";
             let list = py.eval_bound(code, None, None).unwrap();
             let v = shallow_py_to_value_for_ctx(&list).unwrap();
-            assert!(matches!(v, Value::List(ref items) if items.is_empty()));
+            match v {
+                Value::List(items) => {
+                    assert_eq!(items.len(), 3);
+                    assert_eq!(items[0], Value::Int(10));
+                    assert_eq!(items[2], Value::Int(30));
+                }
+                other => panic!("expected Value::List, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_list_of_dicts_shallow_extracts_one_level() {
+        // Phase 16.5 RC1 rollback behaviour: when list elements are
+        // composite (dict), each element is shallow-extracted one level
+        // (top-level scalars retained, nested composites become `Value::None`).
+        // This is the same shallow policy applied by the dict branch.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let globals = pyo3::types::PyDict::new_bound(py);
+            let list = py
+                .eval_bound("[{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]", Some(&globals), None)
+                .unwrap();
+            let v = shallow_py_to_value_for_ctx(&list).unwrap();
+            match v {
+                Value::List(items) => {
+                    assert_eq!(items.len(), 2);
+                    match &items[0] {
+                        Value::Container(map) => {
+                            assert_eq!(map.get("a"), Some(&Value::Int(1)));
+                            assert_eq!(map.get("b"), Some(&Value::Int(2)));
+                        }
+                        other => panic!("expected Container for list[0], got {other:?}"),
+                    }
+                }
+                other => panic!("expected Value::List, got {other:?}"),
+            }
         });
     }
 
