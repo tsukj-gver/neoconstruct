@@ -149,6 +149,33 @@ fn deposit_pair_as_leaf(py: Python<'_>, sink: &mut dyn PySink, value: Value) -> 
     sink.deposit_leaf(py, value, obj)
 }
 
+/// Classifies a [`Value`] as a scalar for the purposes of Struct/Sequence
+/// build dispatch (RC2+RC3, Phase 16.5).
+///
+/// When `exec_build_py` extracts a field's context value once, scalar
+/// fields can be re-wrapped in [`PyScalarInput`] and handed to the child
+/// node, eliminating the child's redundant `extract_scalar_py` FFI round-trip
+/// (RC3). Composite fields (`Container` / `List`) must keep the original
+/// Python-backed input, because the child needs to recurse into the Python
+/// object (sub-fields / indices).
+///
+/// `Value::None` is treated as scalar: when a field is absent
+/// (`flagbuildnone`) the placeholder `None` is a terminal value for the
+/// child, never re-queried.
+fn is_scalar_value(v: &Value) -> bool {
+    matches!(
+        v,
+        Value::None
+            | Value::Bool(_)
+            | Value::Int(_)
+            | Value::UInt(_)
+            | Value::BigInt(_)
+            | Value::Float(_)
+            | Value::Bytes(_)
+            | Value::String(_)
+    )
+}
+
 // ===========================================================================
 // Leaf PyCompiledExec implementations
 // ===========================================================================
@@ -1213,28 +1240,59 @@ impl PyCompiledExec for crate::compiled::CompiledStruct {
     ) -> Result<()> {
         let mut child_ctx = ctx.subcontext();
         for field in &self.fields {
-            let field_input: Box<dyn PyInput> = match &field.name {
-                Some(name) => {
-                    if field.flagbuildnone && !input.has_field_py(py, name) {
-                        Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None))
-                    } else {
-                        input.sub_field_py(py, name)?
-                    }
+            // RC2+RC3 (Phase 16.5): single-extract optimisation.
+            //
+            // Previously each named field called `extract_ctx_value_py` once
+            // (for context insertion) and the child leaf then called
+            // `extract_scalar_py` again (RC3). We now extract once and, for
+            // scalar fields, wrap the value in `PyScalarInput` so the child
+            // node no longer crosses the FFI boundary.
+            //
+            // P-MUST-2 (REV): `flagbuildnone` fields are built with
+            // `Value::None` only when the field is actually absent. When a
+            // flagbuildnone field *has* a value, we extract it normally so
+            // Optional-style constructors still build correctly.
+            let name_ref = field.name.as_deref();
+            let field_input: Box<dyn PyInput> = match name_ref {
+                Some(name) if field.flagbuildnone && !input.has_field_py(py, name) => {
+                    // flagbuildnone + missing → build None.
+                    Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None))
                 }
+                Some(name) => input.sub_field_py(py, name)?,
                 None => Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None)),
             };
-            let ctx_value = field_input.extract_ctx_value_py(py)?;
-            if let Some(name) = &field.name {
-                child_ctx.insert(name.clone(), ctx_value);
+
+            // Extract the context value once. Named fields share this value
+            // between `child_ctx` insertion and (for scalars) the child
+            // build input. Anonymous fields do not contribute to context.
+            let build_value = if name_ref.is_some() {
+                field_input.extract_ctx_value_py(py)?
+            } else {
+                Value::None
+            };
+
+            if let Some(name) = name_ref {
+                child_ctx.insert(name.to_string(), build_value.clone());
             }
+
+            // RC3: scalar fields hand the already-extracted `Value` to the
+            // child via `PyScalarInput`, eliminating the leaf's second FFI
+            // extraction. Composite fields keep the original Python-backed
+            // input so the child can recurse.
+            let child_input: Box<dyn PyInput> = if is_scalar_value(&build_value) {
+                Box::new(crate::compiled::py_input::PyScalarInput::new(build_value))
+            } else {
+                field_input
+            };
+
             match field
                 .subcon
-                .exec_build_py(py, &*field_input, stream, &mut child_ctx)
+                .exec_build_py(py, &*child_input, stream, &mut child_ctx)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => return Ok(()),
                 Err(e) => {
-                    return Err(if let Some(name) = &field.name {
+                    return Err(if let Some(name) = name_ref {
                         e.with_path_prefix(name)
                     } else {
                         e.with_path_prefix("(anonymous)")
@@ -1296,13 +1354,22 @@ impl PyCompiledExec for crate::compiled::CompiledSequence {
         let mut child_ctx = ctx.subcontext();
         for (i, entry) in self.entries.iter().enumerate() {
             let entry_input = input.sub_index_py(py, i)?;
+            // RC2+RC3 (Phase 16.5): single-extract optimisation, mirroring
+            // `CompiledStruct::exec_build_py`. Extract once, share between
+            // context insertion and (for scalars) the child build input.
             let build_value = entry_input.extract_ctx_value_py(py)?;
             if let Some(name) = &entry.name {
-                child_ctx.insert(name.clone(), build_value);
+                child_ctx.insert(name.clone(), build_value.clone());
             }
+            // RC3: scalar entries reuse the extracted `Value` directly.
+            let child_input: Box<dyn PyInput> = if is_scalar_value(&build_value) {
+                Box::new(crate::compiled::py_input::PyScalarInput::new(build_value))
+            } else {
+                entry_input
+            };
             match entry
                 .subcon
-                .exec_build_py(py, &*entry_input, stream, &mut child_ctx)
+                .exec_build_py(py, &*child_input, stream, &mut child_ctx)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => return Ok(()),
@@ -1750,15 +1817,27 @@ impl PyCompiledExec for crate::compiled::CompiledUnion {
                 Some(n) => input.sub_field_py(py, n)?,
                 None => Box::new(crate::compiled::py_input::PyScalarInput::new(Value::None)),
             };
-            let ctx_value = field_input.extract_ctx_value_py(py)?;
-            if let Some(name) = &field.name {
-                child_ctx.insert(name.clone(), ctx_value);
+            // RC2+RC3 (Phase 16.5): single-extract optimisation. Union
+            // builds exactly one field; still beneficial to extract once
+            // and reuse for scalar children.
+            let build_value = if name_ref.is_some() {
+                field_input.extract_ctx_value_py(py)?
+            } else {
+                Value::None
+            };
+            if let Some(name) = name_ref {
+                child_ctx.insert(name.to_string(), build_value.clone());
             }
+            let child_input: Box<dyn PyInput> = if is_scalar_value(&build_value) {
+                Box::new(crate::compiled::py_input::PyScalarInput::new(build_value))
+            } else {
+                field_input
+            };
             return field
                 .subcon
-                .exec_build_py(py, &*field_input, stream, &mut child_ctx)
+                .exec_build_py(py, &*child_input, stream, &mut child_ctx)
                 .map_err(|e| {
-                    if let Some(name) = &field.name {
+                    if let Some(name) = name_ref {
                         e.with_path_prefix(name)
                     } else {
                         e.with_path_prefix("(anonymous)")
@@ -3197,6 +3276,119 @@ mod tests {
             exec_build_py_dispatch(node, py, &input, &mut stream, &mut ctx).unwrap();
             let result = stream.into_bytes();
             assert_eq!(result, vec![42]);
+        });
+    }
+
+    // ---- 6. is_scalar_value classifier (RC2+RC3 helper) --------------------
+
+    #[test]
+    fn is_scalar_value_classifies_scalars() {
+        // RC2+RC3: the classifier must accept every terminal scalar variant
+        // so that Struct/Sequence build can wrap them in PyScalarInput.
+        assert!(is_scalar_value(&Value::None));
+        assert!(is_scalar_value(&Value::Bool(true)));
+        assert!(is_scalar_value(&Value::Int(-5)));
+        assert!(is_scalar_value(&Value::UInt(5)));
+        assert!(is_scalar_value(&Value::BigInt(0)));
+        assert!(is_scalar_value(&Value::Float(1.5)));
+        assert!(is_scalar_value(&Value::Bytes(vec![1, 2])));
+        assert!(is_scalar_value(&Value::String("x".to_string())));
+    }
+
+    #[test]
+    fn is_scalar_value_rejects_composites() {
+        // Composite values must keep the original Python-backed input so
+        // children can recurse into sub-fields/indices.
+        assert!(!is_scalar_value(&Value::Container(
+            indexmap::IndexMap::new()
+        )));
+        assert!(!is_scalar_value(&Value::List(Vec::new())));
+    }
+
+    // ---- 7. Struct build via Py dispatch (RC2+RC3 + scalar reuse) ---------
+
+    /// Helper: build via the Py dispatch path, returning the produced bytes.
+    fn build_via_py_bytes(cc: &CombinedConstruct, input: &dyn PyInput) -> Vec<u8> {
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let compiled = SchemaCompiler::new()
+                .compile(cc)
+                .unwrap_or_else(|e| panic!("compile failed: {e:?}"));
+            let node = compiled.tree();
+            let mut stream = CombinedStream::ByteStream(ByteStream::new_write());
+            let mut ctx = Context::new();
+            exec_build_py_dispatch(node, py, input, &mut stream, &mut ctx)
+                .unwrap_or_else(|e| panic!("exec_build_py failed: {e:?}"));
+            stream.into_bytes()
+        })
+    }
+
+    #[test]
+    fn py_build_struct_scalar_fields_round_trip() {
+        // RC2+RC3 regression guard: a Struct with multiple scalar int
+        // fields must still produce the correct bytes after the
+        // single-extract + PyScalarInput-reuse refactor.
+        let cc: CombinedConstruct = Struct::new()
+            .field("a", Box::new(INT8UB.into()))
+            .field("b", Box::new(INT8UB.into()))
+            .field("c", Box::new(INT8UB.into()))
+            .into();
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new_bound(py);
+            dict.set_item("a", 10i64).unwrap();
+            dict.set_item("b", 20i64).unwrap();
+            dict.set_item("c", 30i64).unwrap();
+            let input = crate::compiled::py_input::PyDictInput::from_bound(dict.as_any());
+            let bytes = build_via_py_bytes(&cc, &input);
+            assert_eq!(bytes, vec![10, 20, 30]);
+        });
+    }
+
+    #[test]
+    fn py_build_struct_nested_composite_keeps_python_input() {
+        // RC2+RC3: composite (nested Struct) fields must NOT be wrapped in
+        // PyScalarInput — the child needs to recurse into the Python dict.
+        // This test verifies a nested struct build still works.
+        let inner: CombinedConstruct = Struct::new().field("y", Box::new(INT8UB.into())).into();
+        let cc: CombinedConstruct = Struct::new()
+            .field("x", Box::new(INT8UB.into()))
+            .field("data", Box::new(inner))
+            .into();
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let outer = pyo3::types::PyDict::new_bound(py);
+            outer.set_item("x", 1i64).unwrap();
+            let inner_dict = pyo3::types::PyDict::new_bound(py);
+            inner_dict.set_item("y", 2i64).unwrap();
+            outer.set_item("data", inner_dict).unwrap();
+            let input = crate::compiled::py_input::PyDictInput::from_bound(outer.as_any());
+            let bytes = build_via_py_bytes(&cc, &input);
+            assert_eq!(bytes, vec![1, 2]);
+        });
+    }
+
+    #[test]
+    fn py_build_struct_with_list_field_uses_empty_ctx_placeholder() {
+        // RC1 + RC2: a Struct with a list field must build correctly. The
+        // RC1 change makes `extract_ctx_value_py` return an empty List
+        // placeholder, and the composite classifier keeps the original
+        // Python input so the Array child can still iterate the list.
+        let arr: CombinedConstruct = Array::new(3, Box::new(INT8UB.into())).into();
+        let cc: CombinedConstruct = Struct::new()
+            .field("count", Box::new(INT8UB.into()))
+            .field("items", Box::new(arr))
+            .into();
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let dict = pyo3::types::PyDict::new_bound(py);
+            dict.set_item("count", 3i64).unwrap();
+            let list = pyo3::types::PyList::new_bound(py, [1i64, 2, 3]);
+            dict.set_item("items", list).unwrap();
+            let input = crate::compiled::py_input::PyDictInput::from_bound(dict.as_any());
+            let bytes = build_via_py_bytes(&cc, &input);
+            // count(3) + 3 array bytes
+            assert_eq!(bytes, vec![3, 1, 2, 3]);
         });
     }
 }

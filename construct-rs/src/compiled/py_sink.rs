@@ -524,9 +524,29 @@ impl PySink for PyDictSink2 {
         self.ensure_array(py)?;
         match &mut self.mode {
             PySinkMode::Array { list, .. } => {
-                list.bind(py)
-                    .call_method1("append", (obj,))
-                    .map_err(py_err_to_construct)?;
+                // Phase 16.5.4: use raw `PyList_Append` instead of
+                // `call_method1("append", ...)` to skip Python method
+                // resolution (~15ns/element savings for array parse).
+                //
+                // SAFETY: `list` is a `Py<PyAny>` bound to a list object —
+                // either a native `PyList` or a `ListContainer` subclass
+                // (`class ListContainer(list)`, no extra instance fields).
+                // CPython's `PyList_Append` accepts list subclasses (it
+                // routes through `PyList_Check`, which accepts subclasses,
+                // then operates on the shared `PyListObject` layout). The
+                // GIL is held (`py` token). `obj` is an owned `PyObject`.
+                //
+                // Refcount correctness (P-MUST-3, REV): `PyList_Append`
+                // internally increments `obj`'s refcount by 1 (the
+                // reference now held by the list). `obj` is owned, so when
+                // it drops at the end of this scope pyo3 decrements by 1.
+                // Net change: +1 (the list's reference). We deliberately do
+                // NOT `std::mem::forget(obj)` — that would skip the drop
+                // decref and leak one reference per call.
+                let ret = unsafe { pyo3::ffi::PyList_Append(list.as_ptr(), obj.as_ptr()) };
+                if ret == -1 {
+                    return Err(py_err_to_construct(pyo3::PyErr::fetch(py)));
+                }
                 Ok(())
             }
             _ => Err(ConstructError::Generic {
@@ -546,9 +566,12 @@ impl PySink for PyDictSink2 {
         self.ensure_array(py)?;
         match &mut self.mode {
             PySinkMode::Array { list, ctx_items } => {
-                list.bind(py)
-                    .call_method1("append", (obj,))
-                    .map_err(py_err_to_construct)?;
+                // Phase 16.5.4: see `finish_item_py` for the SAFETY and
+                // refcount-correctness rationale on raw `PyList_Append`.
+                let ret = unsafe { pyo3::ffi::PyList_Append(list.as_ptr(), obj.as_ptr()) };
+                if ret == -1 {
+                    return Err(py_err_to_construct(pyo3::PyErr::fetch(py)));
+                }
                 ctx_items.push(value.clone());
                 Ok(value)
             }

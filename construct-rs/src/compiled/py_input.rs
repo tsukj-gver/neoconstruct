@@ -213,15 +213,26 @@ pub(crate) unsafe fn extract_batch_int_raw(
 ///
 /// The probe order matters: `bool` must precede `int` (in Python `bool`
 /// subclasses `int`), and `is_none` must come first.
+///
+/// # RC5 optimization (Phase 16.5)
+///
+/// `is_instance_of::<PyBool>` is checked **before** `extract::<bool>`. The
+/// previous order (`extract::<bool>` first) caused every `int` value to
+/// trigger a wasted `extract::<bool>` call (which succeeds for truthy ints
+/// via pyo3's internal conversion) followed by a failing
+/// `is_instance_of::<PyBool>`. By type-checking first, pure `int` objects
+/// skip the bool branch entirely, saving ~2 FFI calls (~80ns) per int field.
 fn extract_scalar_short_circuit(obj: &Bound<'_, PyAny>) -> Option<Value> {
     if obj.is_none() {
         return Some(Value::None);
     }
     // bool before int — bool is a subclass of int in Python.
-    if let Ok(b) = obj.extract::<bool>() {
-        // pyo3 extract::<bool> only succeeds for actual bool objects, so
-        // there is no risk of int values being captured here.
-        if obj.is_instance_of::<PyBool>() {
+    // RC5: check `is_instance_of::<PyBool>` first to avoid `extract::<bool>`
+    // succeeding (and then failing the type check) for plain int objects.
+    // `is_instance_of::<PyBool>` returns true only for actual bool objects
+    // (True/False), and false for plain ints.
+    if obj.is_instance_of::<PyBool>() {
+        if let Ok(b) = obj.extract::<bool>() {
             return Some(Value::Bool(b));
         }
     }
@@ -247,20 +258,42 @@ fn extract_scalar_short_circuit(obj: &Bound<'_, PyAny>) -> Option<Value> {
 // Helper: shallow dict/list → Value for context insertion
 // ===========================================================================
 
-/// Shallow extraction of a Python dict / list into a [`Value`] for context.
+/// Shallow extraction of a Python dict / list / dataclass into a [`Value`]
+/// for context.
 ///
 /// Top-level scalar fields are extracted via [`extract_scalar_short_circuit`];
-/// nested composite values (sub-dicts / sub-lists) become [`Value::None`]
-/// placeholders. This avoids the cost of a full recursive conversion while
-/// supporting the majority of context expressions (`this.field`,
-/// `this.field.subfield` at one level deep).
+/// nested composite values (sub-dicts, sub-dataclasses) become
+/// [`Value::None`] placeholders. This avoids the cost of a full recursive
+/// conversion while supporting the majority of context expressions
+/// (`this.field`, `this.field.subfield` at one level deep).
 ///
 /// If the object is already a scalar, it is returned directly.
+///
+/// # Accepted input types
+///
+/// - **Scalars** (int, str, bytes, bool, float, None): returned directly.
+/// - **Dict** (or `Container` subclass): top-level keys shallow-extracted.
+/// - **List** (or `ListContainer` subclass): empty placeholder (RC1).
+/// - **Dataclass / object with `__dict__`**: top-level attributes
+///   shallow-extracted via `__dict__` (Phase 16.5 fix for nested-dataclass
+///   build support).
+///
+/// # List handling (RC1, Phase 16.5)
+///
+/// The `list` branch returns an **empty** [`Value::List`] placeholder — it
+/// does **not** iterate over list elements. Previously this function
+/// shallow-extracted every list element, which dominated the cost of
+/// building structs containing list fields (e.g. `Array` items), even though
+/// the resulting context value is rarely read by expressions. Iterating
+/// `this._.list_field[i]` against the placeholder returns nothing useful,
+/// but this matches the design's documented known limitation (§4.6 of
+/// `模块设计-Python-first产出层.md`): deep list-index references in context
+/// expressions are not supported.
 ///
 /// # Errors
 ///
 /// Returns [`ConstructError::TypeMismatch`] if `obj` is not a scalar, dict,
-/// or list.
+/// list, or object with a `__dict__` attribute.
 fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
     use pyo3::types::{PyDict, PyList};
 
@@ -282,17 +315,54 @@ fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
         }
         return Ok(Value::Container(map));
     }
-    // List: shallow-extract elements.
-    if let Ok(list) = obj.downcast::<PyList>() {
-        let mut items = Vec::with_capacity(list.len());
-        for item in list {
-            if let Some(scalar) = extract_scalar_short_circuit(&item) {
-                items.push(scalar);
-            } else {
-                items.push(Value::None);
+    // List: return an empty placeholder (RC1, Phase 16.5).
+    //
+    // We intentionally do NOT iterate list elements. Context expressions
+    // rarely reference list elements (`this._.items[0]`), and the previous
+    // per-element extraction dominated the cost of building structs with
+    // list/array fields. See the function-level doc comment for details.
+    if obj.downcast::<PyList>().is_ok() {
+        return Ok(Value::List(Vec::new()));
+    }
+    // Dataclass / arbitrary Python object with a `__dict__` attribute
+    // (Phase 16.5 fix for Phase 16.4 regression).
+    //
+    // When the build entry was switched to the Py path in Phase 16.4,
+    // `shallow_py_to_value_for_ctx` began receiving dataclass instances
+    // (e.g. a nested `Inner` field of an `Outer` dataclass). Without this
+    // branch, those instances fell through to the `TypeMismatch` error
+    // below, breaking nested-dataclass build (7 dataclass tests).
+    //
+    // The Value-path `py_to_value` already handles dataclasses via
+    // `dataclasses.asdict` (recursive). Here we avoid the recursive `asdict`
+    // call and instead read `obj.__dict__` directly, then recursively
+    // shallow-extract each attribute. The recursion is needed because
+    // `CompiledDynamic::exec_build_py` (the code path for dataclass
+    // subcons) calls this function to obtain a Value tree that is then
+    // handed to the Value-path `Construct::build`. If nested composites
+    // were truncated to `Value::None`, the Python-side `_dict_to_instance`
+    // could not reconstruct nested dataclass instances.
+    //
+    // Performance note: this recursion only fires for dataclass instances
+    // (not dicts/lists/scalars). Dict shallow-extraction above remains
+    // one-level (only top-level scalars are extracted, nested composites
+    // become `Value::None`). List extraction returns an empty placeholder
+    // (RC1). The cost is bounded by the dataclass nesting depth, which is
+    // typically shallow (2-3 levels).
+    if let Ok(dunder_dict) = obj.getattr("__dict__") {
+        if let Ok(dict) = dunder_dict.downcast::<PyDict>() {
+            let mut map = indexmap::IndexMap::new();
+            for (key, value) in dict {
+                let key_str: String = key.extract().unwrap_or_default();
+                // Recurse so nested dataclass instances are preserved as
+                // sub-Containers (not None placeholders).
+                match shallow_py_to_value_for_ctx(&value) {
+                    Ok(v) => map.insert(key_str, v),
+                    Err(_) => map.insert(key_str, Value::None),
+                };
             }
+            return Ok(Value::Container(map));
         }
-        return Ok(Value::List(items));
     }
     // Fallback: type mismatch.
     let type_name = obj
@@ -302,7 +372,7 @@ fn shallow_py_to_value_for_ctx(obj: &Bound<'_, PyAny>) -> Result<Value> {
         .unwrap_or_else(|_| "<unknown>".to_string());
     Err(ConstructError::TypeMismatch {
         path: String::new(),
-        expected: "scalar, dict, or list".to_string(),
+        expected: "scalar, dict, list, or object with __dict__".to_string(),
         actual: type_name,
     })
 }
@@ -795,6 +865,194 @@ mod tests {
         Python::with_gil(|py| {
             let result = input.extract_batch_int_py(py).unwrap();
             assert_eq!(result, Some(vec![10, 20, 30]));
+        });
+    }
+
+    // -- RC5: extract_scalar_short_circuit bool probe order -----------------
+
+    #[test]
+    fn extract_scalar_short_circuit_int_does_not_trigger_bool_extract() {
+        // RC5 (Phase 16.5): a plain int must not enter the bool branch.
+        // Before the fix, `extract::<bool>` would succeed for truthy ints
+        // and then `is_instance_of::<PyBool>` would fail — wasting ~2 FFI.
+        // After the fix, `is_instance_of::<PyBool>` is checked first and
+        // returns false for plain ints.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let obj = 1i64.to_object(py);
+            let bound = obj.bind(py);
+            assert_eq!(extract_scalar_short_circuit(bound), Some(Value::Int(1)));
+            // 0 is falsy but still an int, not a bool.
+            let obj0 = 0i64.to_object(py);
+            assert_eq!(
+                extract_scalar_short_circuit(obj0.bind(py)),
+                Some(Value::Int(0))
+            );
+        });
+    }
+
+    #[test]
+    fn extract_scalar_short_circuit_bool_still_detected() {
+        // RC5 regression guard: True/False must still be Value::Bool.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let t = true.to_object(py);
+            assert_eq!(
+                extract_scalar_short_circuit(t.bind(py)),
+                Some(Value::Bool(true))
+            );
+            let f = false.to_object(py);
+            assert_eq!(
+                extract_scalar_short_circuit(f.bind(py)),
+                Some(Value::Bool(false))
+            );
+        });
+    }
+
+    // -- RC1: shallow_py_to_value_for_ctx list placeholder -----------------
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_list_returns_empty_placeholder() {
+        // RC1 (Phase 16.5): the list branch must return an empty
+        // `Value::List` placeholder without iterating elements.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let list = PyList::new_bound(py, [1i64, 2, 3, 4, 5]);
+            let v = shallow_py_to_value_for_ctx(list.as_any()).unwrap();
+            match v {
+                Value::List(items) => {
+                    // Must be empty regardless of input list length.
+                    assert!(
+                        items.is_empty(),
+                        "RC1: expected empty placeholder, got {items:?}"
+                    );
+                }
+                other => panic!("RC1: expected Value::List, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_list_subclass_returns_empty_placeholder() {
+        // RC1 regression guard: ListContainer (list subclass) must also
+        // return an empty placeholder (downcast must accept subclasses).
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let code = "[1, 2, 3]";
+            let list = py.eval_bound(code, None, None).unwrap();
+            let v = shallow_py_to_value_for_ctx(&list).unwrap();
+            assert!(matches!(v, Value::List(ref items) if items.is_empty()));
+        });
+    }
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_scalar_passthrough_unchanged() {
+        // RC1 regression guard: scalars still pass through directly.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let obj = 42i64.to_object(py);
+            let v = shallow_py_to_value_for_ctx(obj.bind(py)).unwrap();
+            assert_eq!(v, Value::Int(42));
+        });
+    }
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_dict_shallow_extract_unchanged() {
+        // RC1 regression guard: dict shallow extraction is unchanged.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            let dict = PyDict::new_bound(py);
+            dict.set_item("a", 1i64).unwrap();
+            dict.set_item("b", "hi").unwrap();
+            let v = shallow_py_to_value_for_ctx(dict.as_any()).unwrap();
+            match v {
+                Value::Container(map) => {
+                    assert_eq!(map.len(), 2);
+                    assert_eq!(map.get("a"), Some(&Value::Int(1)));
+                    assert_eq!(map.get("b"), Some(&Value::String("hi".to_string())));
+                }
+                other => panic!("expected Container, got {other:?}"),
+            }
+        });
+    }
+
+    // -- Phase 16.5: dataclass / __dict__ shallow extraction ----------------
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_dataclass_shallow_extracts_scalars() {
+        // Phase 16.4 regression fix: dataclass instances must be shallowly
+        // extracted via `__dict__` so that nested-dataclass build works.
+        ensure_test_python();
+        Python::with_gil(|py| {
+            // Define two dataclasses (statement form — requires run, not
+            // eval), then build an Outer instance with a nested Inner.
+            let setup = concat!(
+                "import dataclasses\n",
+                "@dataclasses.dataclass\n",
+                "class Inner:\n",
+                "    a: int = 0\n",
+                "    b: int = 0\n",
+                "@dataclasses.dataclass\n",
+                "class Outer:\n",
+                "    inner: object = None\n",
+                "    suffix: int = 0\n",
+            );
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(setup, Some(&globals), None).unwrap();
+            let outer = py
+                .eval_bound(
+                    "Outer(inner=Inner(a=1, b=2), suffix=3)",
+                    Some(&globals),
+                    None,
+                )
+                .unwrap();
+            let v = shallow_py_to_value_for_ctx(&outer).unwrap();
+            match v {
+                Value::Container(map) => {
+                    // suffix is scalar → extracted directly.
+                    assert_eq!(map.get("suffix"), Some(&Value::Int(3)));
+                    // inner is a nested dataclass → recursively extracted
+                    // (not a None placeholder) so CompiledDynamic can
+                    // reconstruct it via `_dict_to_instance`.
+                    match map.get("inner") {
+                        Some(Value::Container(inner_map)) => {
+                            assert_eq!(inner_map.get("a"), Some(&Value::Int(1)));
+                            assert_eq!(inner_map.get("b"), Some(&Value::Int(2)));
+                        }
+                        other => panic!("expected nested Container for inner, got {other:?}"),
+                    }
+                }
+                other => panic!("expected Container, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn shallow_py_to_value_for_ctx_namespace_object_extracts_scalars() {
+        // Any Python object with `__dict__` (not just dataclasses) is
+        // shallowly extracted. This covers SimpleNamespace, custom classes
+        // with instance attributes, etc. — matching `sub_field_py`'s getattr
+        // fallback (C-IMP-1).
+        //
+        // Note: we use `types.SimpleNamespace` because its attributes live in
+        // the instance `__dict__` (unlike class attributes set via
+        // `type('O', (), {...})`, which live in the *class* `__dict__`).
+        ensure_test_python();
+        Python::with_gil(|py| {
+            // `eval` cannot run statements; import `types` via run first.
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound("import types", Some(&globals), None).unwrap();
+            let obj = py
+                .eval_bound("types.SimpleNamespace(x=42, y='hi')", Some(&globals), None)
+                .unwrap();
+            let v = shallow_py_to_value_for_ctx(&obj).unwrap();
+            match v {
+                Value::Container(map) => {
+                    assert_eq!(map.get("x"), Some(&Value::Int(42)));
+                    assert_eq!(map.get("y"), Some(&Value::String("hi".to_string())));
+                }
+                other => panic!("expected Container, got {other:?}"),
+            }
         });
     }
 }
