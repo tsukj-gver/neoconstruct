@@ -1,5 +1,0 @@
-"""Version metadata -- aligned with construct 2.10.70 (release 2023.11.29)."""
-
-version = (2, 10, 70)
-version_string = "2.10.70"
-release_date = "2023.11.29"
