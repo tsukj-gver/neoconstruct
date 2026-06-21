@@ -4,10 +4,19 @@
 //! 编译后由 maturin 安装为 `construct._construct_rust` 扩展模块，
 //! Python 侧通过 `from ._construct_rust import *` 导入。
 //!
-//! Phase 1（子任务 1.1）仅为骨架：注册模块名与一个 `version` 函数，
-//! 验证 FFI 链路可用。后续子任务逐步填充编译入口、执行树、描述符等内容。
+//! Phase 1：
+//! - 子任务 1.1：项目骨架，注册模块名与 `version` 函数，验证 FFI 链路。
+//! - 子任务 1.2：Rust 基础设施（错误 / Path / Stream / Context），不暴露给 Python。
+//!
+//! 后续子任务将逐步填充编译入口（compile_schema）、执行树（Node）、
+//! 类型描述符（Int8ub 等）与 Python 异常层次。
 //!
 //! 参考设计：`docs/架构设计.md` §D.1（crate 结构）、§B（FFI 边界）。
+
+pub mod context;
+pub mod error;
+pub mod path;
+pub mod stream;
 
 use pyo3::prelude::*;
 
