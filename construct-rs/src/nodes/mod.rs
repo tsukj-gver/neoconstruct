@@ -113,6 +113,7 @@ pub trait Construct {
 ///
 /// - 3 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`
 /// - 2 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）
+#[derive(Debug)]
 #[enum_dispatch(Construct)]
 pub enum Node {
     /// 整数读写节点：`Int8ub` / `Int16ul` / ... （对应 Python construct `FormatField`）

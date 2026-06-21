@@ -63,6 +63,7 @@ use super::{Construct, Node};
 /// # sizeof
 ///
 /// 累加所有字段 sizeof；任一字段返回 Err（如 `GreedyBytes`）则整体返回 Err。
+#[derive(Debug)]
 pub struct StructNode {
     /// 有序字段列表：`(字段名, 子节点)`。
     fields: Vec<(String, Node)>,

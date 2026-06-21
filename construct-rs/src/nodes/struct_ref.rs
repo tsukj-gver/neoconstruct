@@ -64,6 +64,7 @@ use super::Construct;
 /// `[设计质疑]` 当前 [`Construct`] trait 的 sizeof 签名不含 `Python` 参数，
 /// 无法在 sizeof 中获取 GIL 来解析引用。StructRefNode 的 sizeof 返回 Err。
 /// 若需支持嵌套 sizeof，需在后续子任务修改 trait 签名（给 sizeof 加 py 参数）。
+#[derive(Debug)]
 pub struct StructRefNode {
     /// 对方类的 Python 引用（`StructMixin` 子类）。
     cls: Py<PyType>,
