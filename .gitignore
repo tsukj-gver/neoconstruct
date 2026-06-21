@@ -1,9 +1,9 @@
-# Rust
+﻿# Rust
 construct-rs/target/
 construct-rs/Cargo.lock
 
-# Python 原版仓库（有独立 git）
-construct/
+# Python 原版仓库（有独立 git，锚定根目录避免误伤 construct-rs/python/construct/）
+/construct/
 
 # opencode
 .opencode/node_modules/

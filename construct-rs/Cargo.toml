@@ -1,0 +1,22 @@
+[package]
+name = "construct-rs"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance binary parsing/building for Python, powered by Rust"
+license = "MIT"
+
+[lib]
+# Python 扩展模块名：编译后由 maturin 安装为 construct._construct_rust
+name = "construct_rust"
+# cdylib: 供 Python 加载的 cpython 扩展（.pyd/.so）
+# rlib:   供 Rust 单元测试与未来可能的 Rust 调用方使用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# pyo3 是核心依赖（非 optional feature），Rust 内部直接操作 Python 对象。
+# 见 AGENTS.md §7 核心技术决策与 docs/架构设计.md §D.1。
+pyo3 = { version = "0.22", features = ["extension-module"] }
+# 统一错误处理，见 docs/架构设计.md §B.8。
+thiserror = "1.0"
+# 执行树节点静态分派，见 docs/架构设计.md §C.2。
+enum_dispatch = "0.3"
