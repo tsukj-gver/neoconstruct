@@ -23,21 +23,22 @@
 #![allow(clippy::useless_conversion)]
 
 use crate::context::Context;
-use crate::error::ConstructError;
 use crate::nodes::{Construct, Node};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyDict, PyType};
+use pyo3::types::{PyAny, PyBytes, PyType};
 
 /// 编译产物：一棵不可变的执行树，关联到用户类。
 ///
 /// `#[pyclass(frozen)]` 使 Python 侧无法修改其属性。Rust 侧 `root`（[`Node`]）
 /// 与 `cls` 不可变，运行时不允许增删节点或修改参数。
 ///
-/// parse 入口返回字段 dict（Rust 通过 C API 构造的 `PyDict`），Python 侧用
-/// `cls(**dict)` 构造实例。嵌套字段的实例化由 [`crate::nodes::struct_ref::StructRefNode`]
-/// 在 parse 内部通过 Rust→Python 回调完成。
+/// parse 入口（[`CompiledSchema::_parse_raw`]）直接返回用户类实例（方案 B'，
+/// Rust 内部 create_class + force_setattr 构造，不返回 dict 到 Python）。
+/// 嵌套字段的实例化由 [`crate::nodes::struct_node::StructNode`] 与
+/// [`crate::nodes::struct_ref::StructRefNode`] 在 Rust 内部递归完成，
+/// 全程无 Python 回调。
 ///
 /// # 线程安全
 ///
@@ -50,9 +51,8 @@ pub struct CompiledSchema {
     root: Node,
     /// 用户类的 Python 引用（`StructMixin` 子类）。
     ///
-    /// 用于：
-    /// - 调试与错误信息中报告类名；
-    /// - parse 时 Python 侧的 `cls(**dict)`（Python 侧已持有 cls，此处作为元数据）。
+    /// 用于：调试与错误信息中报告类名。Rust 内部由 StructNode 持有独立的
+    /// `cls` 引用（详见设计修订 §3.2 根节点关系说明），此字段为元数据。
     cls: Py<PyType>,
 }
 
@@ -87,40 +87,35 @@ impl CompiledSchema {
 
 #[pymethods]
 impl CompiledSchema {
-    /// 从字节解析为字段 dict（parse FFI 入口，恰好一次 FFI 穿越）。
+    /// 从字节解析为用户类实例（parse FFI 入口，恰好一次 FFI 穿越）。
     ///
     /// Python 可见签名：
     /// ```python
-    /// _parse_raw(self, data: bytes) -> dict[str, Any]
+    /// _parse_raw(self, data: bytes) -> Any
     /// ```
     ///
-    /// # 内部流程
+    /// # 内部流程（方案 B'）
     ///
     /// 1. 从 `PyBytes` 提取 `&[u8]`，创建 `ParseStream`（纯 Rust）。
     /// 2. 创建根 `Context` 与 `Path`。
     /// 3. 调用 `self.root.parse(...)`——进入执行树遍历。
-    /// 4. 将返回的 `Py<PyAny>` downcast 为 `PyDict` 返回。
+    /// 4. StructNode.parse 内部完整构造用户类实例（create_class + force_setattr）。
+    /// 5. 直接返回实例（不再跨 FFI 返回 dict 到 Python）。
     ///
-    /// Python 侧用 `cls(**dict)` 构造实例（解释器内部，无额外 FFI）。
+    /// 详见 `docs/设计修订-parse路径优化.md` §3.1。
     #[pyo3(signature = (data))]
     pub fn _parse_raw<'py>(
         &self,
         py: Python<'py>,
         data: &Bound<'py, PyBytes>,
-    ) -> PyResult<Bound<'py, PyDict>> {
+    ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = data.as_bytes();
         let mut stream = ParseStream::new(bytes);
         let mut ctx = Context::new_root(py)?;
         let mut path = Path::new();
+        // root.parse 返回用户类实例（StructNode 内部 create_class + force_setattr）
         let result = self.root.parse(py, &mut stream, &mut ctx, &mut path)?;
-        let dict = result
-            .into_bound(py)
-            .downcast_into::<PyDict>()
-            .map_err(|_| ConstructError::Generic {
-                message: "root parse did not produce a dict".to_string(),
-                path: path.to_string(),
-            })?;
-        Ok(dict)
+        Ok(result.into_bound(py))
     }
 
     /// 从 Python 对象构建字节（build FFI 入口，恰好一次 FFI 穿越）。
@@ -171,8 +166,16 @@ mod tests {
     }
 
     /// 构造一个最小的 Struct 根节点（无字段），用于测试。
-    fn empty_root() -> Node {
-        Node::Struct(StructNode::new(Vec::new()))
+    fn empty_root(py: Python<'_>) -> Node {
+        // 用 object 作为 cls（无字段的 mock 类），has_post_init=false。
+        let cls = py
+            .import_bound("builtins")
+            .expect("import builtins")
+            .getattr("object")
+            .expect("get object")
+            .extract::<Py<PyType>>()
+            .expect("extract type");
+        Node::Struct(StructNode::new(Vec::new(), cls, false))
     }
 
     #[test]
@@ -185,7 +188,7 @@ mod tests {
                 .extract::<Py<PyType>>()
                 .expect("extract type");
 
-            let root = empty_root();
+            let root = empty_root(py);
             let schema = CompiledSchema::new(root, object_cls.clone_ref(py));
 
             // root 返回的 Node 是 Struct 变体
@@ -203,7 +206,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(), cls);
+            let schema = CompiledSchema::new(empty_root(py), cls);
             match schema.root() {
                 Node::Struct(s) => assert_eq!(s.len(), 0),
                 _ => panic!("expected Node::Struct"),
@@ -221,7 +224,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(), cls.clone_ref(py));
+            let schema = CompiledSchema::new(empty_root(py), cls.clone_ref(py));
             let schema_py = Py::new(py, schema).expect("Py::new");
 
             // setattr 到 cls

@@ -1,6 +1,6 @@
 //! StructRefNode：嵌套引用节点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.5、§B.7。
+//! 设计依据：`docs/架构设计.md` §C.3.5、§B.7、`docs/设计修订-parse路径优化.md` §3.4。
 //!
 //! ## 用途
 //!
@@ -18,15 +18,10 @@
 //!   [`StructRefNode::resolve_schema`] 通过 `cls._construct_compiled` 获取 NodeB 产物。
 //! - **缓存**：`OnceLock` 首次解析后缓存，后续调用零查找开销。
 //!
-//! ## parse 嵌套实例化（§B.7）
+//! ## parse 委托（方案 B'，§3.4）
 //!
-//! Rust 内部递归遍历对方执行树构造子 `PyDict`，随后调用对方类构造实例
-//! （Rust→Python 回调，归类为 FFI 设计 §4.4 的用户钩子例外）：
-//!
-//! ```text
-//! let sub_dict = schema.root().parse(...)?;   // 递归遍历对方执行树
-//! let instance = cls.call((), Some(&sub_dict))?;  // Rust→Python 回调
-//! ```
+//! StructRefNode.parse 直接委托对方 root StructNode.parse——对方 root 内部已通过
+//! 方案 B' 流程构造实例（create_class + force_setattr）。无需 Rust→Python 回调。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -34,7 +29,7 @@ use crate::path::Path;
 use crate::schema::CompiledSchema;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyType};
+use pyo3::types::PyType;
 use std::sync::OnceLock;
 
 use super::Construct;
@@ -44,13 +39,14 @@ use super::Construct;
 /// 存储类引用（`Py<PyType>`），运行时通过 `cls._construct_compiled` 动态获取对方的
 /// [`CompiledSchema`]。首次解析后缓存到 `schema_cache`，后续调用零查找开销。
 ///
-/// # parse 行为（§B.7 嵌套实例化）
+/// # parse 行为（方案 B' §3.4）
 ///
 /// 1. [`StructRefNode::resolve_schema`] 获取对方执行树。
-/// 2. 递归遍历对方 `root.parse(...)`，获得子 `PyDict`。
-/// 3. 调用对方类构造实例（`cls(**dict)`），返回实例。
+/// 2. 委托对方 `root.parse(...)`——对方 StructNode.parse 内部已构造实例
+///    （create_class + force_setattr + 可选 __post_init__）。
+/// 3. 直接返回对方产出（用户类实例）。
 ///
-/// 步骤 3 是 Rust→Python 回调（归类为 FFI 设计 §4.4 的用户钩子例外）。
+/// 全程 Rust 内部递归，无 Python 回调，严格一次 FFI。
 ///
 /// # build 行为
 ///
@@ -162,28 +158,10 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // 递归遍历对方执行树，获得子 PyDict
-        let sub_dict = root.parse(py, stream, ctx, path)?;
-
-        // 调用对方类构造实例（Rust→Python 回调，归类为用户钩子）
-        // cls(**sub_dict)
-        let dict_bound =
-            sub_dict
-                .bind(py)
-                .downcast::<PyDict>()
-                .map_err(|_| ConstructError::Generic {
-                    message: "StructRef parse: inner parse did not return a dict".to_string(),
-                    path: path.to_string(),
-                })?;
-        let instance =
-            self.cls
-                .bind(py)
-                .call((), Some(dict_bound))
-                .map_err(|e| ConstructError::Generic {
-                    message: format!("failed to instantiate nested class: {}", e),
-                    path: path.to_string(),
-                })?;
-        Ok(instance.unbind())
+        // 方案 B' §3.4：直接委托对方 root.parse。
+        // 对方 StructNode.parse 内部已通过 create_class + force_setattr 构造实例，
+        // 返回的就是对方类的实例（不是 dict）。
+        root.parse(py, stream, ctx, path)
     }
 
     fn build(
@@ -294,7 +272,12 @@ class {name}:
         cls: &Py<PyType>,
         fields: Vec<(String, Node)>,
     ) -> Py<CompiledSchema> {
-        let root = Node::Struct(StructNode::new(fields));
+        // 将 String 字段名转换为 FieldName（interned），并传入 cls + has_post_init=false。
+        let interned_fields = fields
+            .into_iter()
+            .map(|(name, node)| (crate::nodes::struct_node::FieldName::new(py, name), node))
+            .collect();
+        let root = Node::Struct(StructNode::new(interned_fields, cls.clone_ref(py), false));
         let schema = CompiledSchema::new(root, cls.clone_ref(py));
         let schema_py = Py::new(py, schema).expect("Py::new schema");
         cls.bind(py)
@@ -461,20 +444,17 @@ class {name}:
             install_schema_for_class(py, &inner_cls, vec![("x".to_string(), u8_node())]);
 
             // Outer: { tag: Int8ub, inner: Inner }
+            // Outer 是用户类实例：parse 产出 Outer 实例（方案 B'）
             let outer_cls = define_test_class(py, "Outer", &["tag", "inner"]);
-            let outer_struct = Node::Struct(StructNode::new(vec![
+            let outer_fields = vec![
                 ("tag".to_string(), u8_node()),
                 (
                     "inner".to_string(),
                     Node::StructRef(StructRefNode::new(inner_cls.clone_ref(py))),
                 ),
-            ]));
-            let outer_schema = CompiledSchema::new(outer_struct, outer_cls.clone_ref(py));
-            let outer_schema_py = Py::new(py, outer_schema).expect("schema");
-            outer_cls
-                .bind(py)
-                .setattr("_construct_compiled", outer_schema_py)
-                .expect("setattr");
+            ];
+            // 用 install_schema_for_class 复用 intern + StructNode::new 装配逻辑
+            install_schema_for_class(py, &outer_cls, outer_fields);
 
             // parse b'\xAA\x05'
             let outer_root = outer_cls.bind(py).getattr("_construct_compiled").unwrap();
@@ -487,11 +467,16 @@ class {name}:
             let result = root_node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            let tag: i64 = dict.get_item("tag").unwrap().unwrap().extract().unwrap();
+            // 方案 B'：parse 返回 Outer 类实例（不是 dict）
+            let inst = result.bind(py);
+            assert!(
+                inst.is_instance(outer_cls.bind(py)).expect("is_instance"),
+                "should be Outer instance"
+            );
+            let tag: i64 = inst.getattr("tag").unwrap().extract().unwrap();
             assert_eq!(tag, 0xAA);
-            // inner 应该是 Inner 实例（StructRef 回调构造）
-            let inner_obj = dict.get_item("inner").unwrap().unwrap();
+            // inner 应该是 Inner 实例（StructRef 委托对方 root.parse 构造）
+            let inner_obj = inst.getattr("inner").unwrap();
             assert!(
                 inner_obj
                     .is_instance(inner_cls.bind(py))

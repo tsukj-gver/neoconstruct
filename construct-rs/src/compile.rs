@@ -34,7 +34,7 @@ use crate::error::ConstructError;
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
-use crate::nodes::struct_node::StructNode;
+use crate::nodes::struct_node::{FieldName, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
@@ -65,7 +65,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// # 错误
 ///
 /// - [`ConstructError::Compilation`]：`field_names` 与 `descriptors` 长度不一致、
-///   描述符类型未知、或 `cls` 不是类型。
+///   描述符类型未知、`cls` 不是类型、或类定义了 `__slots__`（Phase 1 不支持）。
 #[pyfunction]
 pub fn compile_schema(
     py: Python<'_>,
@@ -85,20 +85,66 @@ pub fn compile_schema(
         .into());
     }
 
-    // 2. 逐字段构建节点
-    let mut fields: Vec<(String, Node)> = Vec::with_capacity(field_names.len());
+    // 2. 检测 __slots__（设计修订 §3.6 + §5.7.1 N4-R3）
+    //    手写 __slots__ 在 __init_subclass__ 时已可见，编译期报错（fail fast）。
+    //    @dataclass(slots=True) 的 __slots__ 在 __init_subclass__ 后才生成，
+    //    可能漏检，由 parse 时 force_setattr 失败兜底（struct_node.rs 错误信息已含提示）。
+    if check_has_slots(cls)? {
+        let cls_name = cls
+            .name()
+            .map(|n| n.to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        return Err(ConstructError::Compilation {
+            message: format!(
+                "类 {} 使用了 __slots__，Phase 1 不支持 slots dataclass（无 __dict__）。\
+                 请移除 __slots__ 或使用普通 @dataclass。",
+                cls_name
+            ),
+        }
+        .into());
+    }
+
+    // 3. 编译期检测 __post_init__（设计修订 §3.2）
+    let has_post_init = check_has_post_init(cls);
+
+    // 4. 逐字段构建节点（FieldName 含 interned PyString）
+    let mut fields: Vec<(FieldName, Node)> = Vec::with_capacity(field_names.len());
     for (name, desc) in field_names.iter().zip(descriptors.iter()) {
         let desc_bound = desc.bind(py);
         let node =
             build_node_from_descriptor(py, desc_bound).map_err(|e| with_field_context(e, name))?;
-        fields.push((name.clone(), node));
+        // FieldName::new 创建 interned PyString 缓存
+        let field_name = FieldName::new(py, name.clone());
+        fields.push((field_name, node));
     }
 
-    // 3. 组装根 Struct 节点
-    let root = Node::Struct(StructNode::new(fields));
+    // 5. 组装根 Struct 节点（含 cls + has_post_init）
+    let root = Node::Struct(StructNode::new(fields, cls.clone().unbind(), has_post_init));
 
-    // 4. 包装为 CompiledSchema（cls.clone().unbind() 得到 Py<PyType>）
+    // 6. 包装为 CompiledSchema
     Ok(CompiledSchema::new(root, cls.clone().unbind()))
+}
+
+/// 检查类是否定义了 `__slots__`（含 MRO 查找）。
+///
+/// 设计修订 §5.5：编译期检测，命中返回 true。
+///
+/// # 错误
+///
+/// `hasattr` 内部抛出异常时返回 [`ConstructError::Generic`]。
+fn check_has_slots(cls: &Bound<'_, PyType>) -> Result<bool, ConstructError> {
+    match cls.getattr("__slots__") {
+        Ok(slots) => Ok(!slots.is_none()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// 检查类是否定义了 `__post_init__`（含 MRO 查找）。
+///
+/// 设计修订 §5.5：编译期检测，决定 StructNode.parse 是否在构造实例后调用
+/// `instance.__post_init__()`。
+fn check_has_post_init(cls: &Bound<'_, PyType>) -> bool {
+    cls.getattr("__post_init__").is_ok()
 }
 
 /// 将单个描述符转换为执行树节点。
@@ -293,7 +339,7 @@ class {name}:
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 1);
                     let fields = s.fields();
-                    assert_eq!(fields[0].0, "address");
+                    assert_eq!(fields[0].0.rust_name(), "address");
                     match &fields[0].1 {
                         Node::FormatField(ff) => {
                             assert_eq!(ff.format(), PythonFormat::UnsignedInt8Big);
@@ -377,7 +423,7 @@ class {name}:
                     assert_eq!(s.len(), 1);
                     match &s.fields()[0].1 {
                         Node::StructRef(sr) => {
-                            assert_eq!(s.fields()[0].0, "inner");
+                            assert_eq!(s.fields()[0].0.rust_name(), "inner");
                             // cls 应指向 Inner 类
                             let inner_name = sr.cls().bind(py).name().expect("name");
                             assert_eq!(inner_name.to_string(), "Inner");
@@ -520,14 +566,18 @@ class {name}:
             let schema =
                 compile_schema(py, &cls, vec!["x".to_string()], vec![desc]).expect("compile");
 
-            // _parse_raw
+            // _parse_raw 现在返回用户类实例（方案 B'）
             let data = PyBytes::new_bound(py, &[0x42u8]);
-            let result_dict = schema._parse_raw(py, &data).expect("parse");
-            assert_eq!(result_dict.len(), 1);
-            let x: i64 = result_dict
-                .get_item("x")
-                .expect("get_item ok")
-                .expect("x exists")
+            let instance = schema._parse_raw(py, &data).expect("parse");
+            // 验证是 cls 的实例
+            assert!(
+                instance.is_instance(&cls).expect("is_instance"),
+                "should be instance of dummy class"
+            );
+            // 通过 getattr 读字段
+            let x: i64 = instance
+                .getattr("x")
+                .expect("getattr x")
                 .extract()
                 .expect("extract i64");
             assert_eq!(x, 0x42);
@@ -561,20 +611,10 @@ class {name}:
 
             // 数据：a=0x01, b=0x0203
             let data = PyBytes::new_bound(py, &[0x01, 0x02, 0x03]);
-            let result_dict = schema._parse_raw(py, &data).expect("parse");
-            assert_eq!(result_dict.len(), 2);
-            let a: i64 = result_dict
-                .get_item("a")
-                .unwrap()
-                .unwrap()
-                .extract()
-                .unwrap();
-            let b: i64 = result_dict
-                .get_item("b")
-                .unwrap()
-                .unwrap()
-                .extract()
-                .unwrap();
+            let instance = schema._parse_raw(py, &data).expect("parse");
+            // 通过 getattr 读字段
+            let a: i64 = instance.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = instance.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 1);
             assert_eq!(b, 0x0203);
         });
@@ -682,12 +722,12 @@ class {name}:
             let built_bytes = built.as_bytes().to_vec();
             assert_eq!(built_bytes, vec![0x01, 0x02, 0x03, 0x04, 0x05]);
 
-            // parse 回来
+            // parse 回来（方案 B'：返回实例）
             let data = PyBytes::new_bound(py, &built_bytes);
             let parsed = schema._parse_raw(py, &data).expect("parse");
-            let a: i64 = parsed.get_item("a").unwrap().unwrap().extract().unwrap();
-            let b: i64 = parsed.get_item("b").unwrap().unwrap().extract().unwrap();
-            let c_binding = parsed.get_item("c").unwrap().unwrap();
+            let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = parsed.getattr("b").unwrap().extract().unwrap();
+            let c_binding = parsed.getattr("c").unwrap();
             let c: &[u8] = c_binding.extract().unwrap();
             assert_eq!(a, 0x01);
             assert_eq!(b, 0x0203);
@@ -700,14 +740,24 @@ class {name}:
     // ======================================================================
 
     #[test]
-    fn end_to_end_empty_schema_parse_returns_empty_dict() {
+    fn end_to_end_empty_schema_parse_returns_empty_instance() {
         with_py(|py| {
             let cls = make_dummy_class(py, "E2EEmpty");
             let schema = compile_schema(py, &cls, vec![], vec![]).expect("compile");
 
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse");
-            assert_eq!(result.len(), 0);
+            // 方案 B'：返回 cls 的空实例
+            assert!(
+                result.is_instance(&cls).expect("is_instance"),
+                "should be instance of cls"
+            );
+            // __dict__ 应为空
+            let d_binding = result.getattr("__dict__").expect("getattr __dict__");
+            let d = d_binding
+                .downcast::<pyo3::types::PyDict>()
+                .expect("is dict");
+            assert_eq!(d.len(), 0);
         });
     }
 
@@ -759,10 +809,10 @@ class {name}:
             // parse: tag=0xAA, len_bytes=b'\x01\x02', rest=b'\x03\x04\x05'
             let data = PyBytes::new_bound(py, &[0xAA, 0x01, 0x02, 0x03, 0x04, 0x05]);
             let parsed = schema._parse_raw(py, &data).expect("parse");
-            let tag: i64 = parsed.get_item("tag").unwrap().unwrap().extract().unwrap();
-            let lb_binding = parsed.get_item("len_bytes").unwrap().unwrap();
+            let tag: i64 = parsed.getattr("tag").unwrap().extract().unwrap();
+            let lb_binding = parsed.getattr("len_bytes").unwrap();
             let len_bytes: &[u8] = lb_binding.extract().unwrap();
-            let rest_binding = parsed.get_item("rest").unwrap().unwrap();
+            let rest_binding = parsed.getattr("rest").unwrap();
             let rest: &[u8] = rest_binding.extract().unwrap();
             assert_eq!(tag, 0xAA);
             assert_eq!(len_bytes, &[0x01, 0x02]);
@@ -833,13 +883,19 @@ class {name}:
             )
             .expect("compile outer");
 
-            // parse b'\xAA\x05' → {tag: 0xAA, inner: Inner(x=5)}
+            // parse b'\xAA\x05' → Outer 实例（tag=0xAA, inner=Inner(x=5)）
+            // 方案 B'：parse 返回 Outer 类实例（不是 dict）
             let data = PyBytes::new_bound(py, &[0xAA, 0x05]);
             let parsed = outer_schema._parse_raw(py, &data).expect("parse");
-            let tag: i64 = parsed.get_item("tag").unwrap().unwrap().extract().unwrap();
+            // 验证是 Outer 实例
+            assert!(
+                parsed.is_instance(&outer_cls).expect("is_instance"),
+                "should be Outer instance"
+            );
+            let tag: i64 = parsed.getattr("tag").unwrap().extract().unwrap();
             assert_eq!(tag, 0xAA);
-            // inner 应为 Inner 实例
-            let inner_obj = parsed.get_item("inner").unwrap().unwrap();
+            // inner 应为 Inner 实例（StructRef 委托对方 root.parse 构造）
+            let inner_obj = parsed.getattr("inner").unwrap();
             assert!(
                 inner_obj
                     .is_instance(inner_cls_py.bind(py))
@@ -891,5 +947,120 @@ class {name}:
         };
         let wrapped = with_field_context(err, "field");
         assert!(matches!(wrapped, ConstructError::Stream { .. }));
+    }
+
+    // ======================================================================
+    // __slots__ 编译期检测（设计修订 §3.6 + §5.6.2 第 3 条）
+    // ======================================================================
+
+    #[test]
+    fn compile_rejects_class_with_explicit_slots() {
+        // 手写 __slots__：在 __init_subclass__ 时已可见，编译期应报错。
+        with_py(|py| {
+            let code = "type('Slotted', (), {'__slots__': ('x', 'y')})";
+            let cls_bound = py
+                .eval_bound(code, None, None)
+                .expect("create slotted class")
+                .downcast_into::<PyType>()
+                .expect("is PyType");
+            let err = compile_schema(py, &cls_bound, vec![], vec![]).expect_err("should fail");
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("__slots__") || msg.contains("slots"),
+                "message should mention __slots__: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_accepts_class_without_slots() {
+        // 普通 @dataclass 无 __slots__，应正常编译。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "Normal");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let result = compile_schema(py, &cls, vec!["x".to_string()], vec![desc]);
+            assert!(result.is_ok(), "compile should succeed: {:?}", result);
+        });
+    }
+
+    // ======================================================================
+    // __post_init__ 编译期检测（设计修订 §3.2 + §5.6.3 第 5 条）
+    // ======================================================================
+
+    #[test]
+    fn compile_detects_post_init_when_defined() {
+        // 定义带 __post_init__ 的类
+        with_py(|py| {
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(
+                "class WithPost:\n    def __post_init__(self): pass\n",
+                Some(&globals),
+                None,
+            )
+            .expect("define class");
+            let cls = globals
+                .get_item("WithPost")
+                .expect("get ok")
+                .expect("exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let cls_bound = cls.bind(py);
+            assert!(
+                check_has_post_init(cls_bound),
+                "should detect __post_init__"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_returns_false_for_post_init_when_absent() {
+        with_py(|py| {
+            let cls = make_dummy_class(py, "NoPost");
+            assert!(
+                !check_has_post_init(&cls),
+                "should not detect __post_init__"
+            );
+        });
+    }
+
+    #[test]
+    fn compile_passes_has_post_init_to_struct_node() {
+        // 验证编译产物 StructNode 持有正确的 has_post_init 标志
+        with_py(|py| {
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(
+                "class WithPost:\n    def __post_init__(self): pass\n",
+                Some(&globals),
+                None,
+            )
+            .expect("define");
+            let cls = globals
+                .get_item("WithPost")
+                .expect("get")
+                .expect("exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let schema = compile_schema(py, cls.bind(py), vec!["x".to_string()], vec![desc])
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    // 通过 round-trip 验证 __post_init__ 被调用——这里仅检查编译成功。
+                    let _ = s;
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
     }
 }

@@ -194,8 +194,8 @@ def _install_lazy_stubs(cls):
             raise ConstructError(
                 "{} 尚未完成编译（延迟编译失败）".format(cls_.__name__)
             )
-        raw_fields = schema._parse_raw(data)
-        return cls_(**raw_fields)
+        # 方案 B'：Rust 内部直接构造实例（与 StructMixin.parse 一致）
+        return schema._parse_raw(data)
 
     def _lazy_build(self):
         """延迟 build 桩：首次调用时重试编译，然后执行 build。"""
@@ -270,8 +270,9 @@ class StructMixin:
     def parse(cls, data):
         """从字节解析为本类的实例。
 
-        恰好一次 FFI 穿越：调用 ``CompiledSchema._parse_raw`` 返回字段 dict，
-        随后在本类 ``__init__`` 中构造实例（Python 解释器内部，无额外 FFI）。
+        恰好一次 FFI 穿越：调用 ``CompiledSchema._parse_raw`` 直接返回本类实例
+        （方案 B'：Rust 内部通过 create_class + force_setattr 构造实例，
+        无 Python 侧 ``cls(**dict)`` kwargs unpacking 开销）。
 
         :param data: 待解析的字节数据。
         :return: 本类的实例，字段值从 ``data`` 中解析得到。
@@ -283,8 +284,8 @@ class StructMixin:
                 "{} 尚未完成编译（可能存在未解析的前向引用），"
                 "请确保所有被引用的类型已定义后再调用 parse".format(cls.__name__)
             )
-        raw_fields = schema._parse_raw(data)
-        return cls(**raw_fields)
+        # 方案 B'：Rust 内部直接构造实例，不再 cls(**raw_fields)
+        return schema._parse_raw(data)
 
     def build(self):
         """从本实例构造字节。

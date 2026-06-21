@@ -1,80 +1,163 @@
 //! StructNode：字段序列根节点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.4。
+//! 设计依据：`docs/架构设计.md` §C.3.4、`docs/设计修订-parse路径优化.md` §3.2（方案 B'）。
 //! Python 参考：`construct/construct/core.py` `Struct._parse` / `_build`（L2162-2268）。
 //!
 //! ## 行为概述
 //!
 //! StructNode 是 StructMixin 子类执行树的根节点：按顺序解析/构建一组命名字段。
 //!
-//! - **parse**：创建 `PyDict`，逐字段递归子节点解析并 `set_item`，最后返回 dict。
-//!   Python 侧用 `cls(**dict)` 构造实例（见 `docs/架构设计.md` §A.2、§B.7）。
+//! - **parse（方案 B'）**：Rust 内完整构造用户类实例——创建独立 PyDict →
+//!   逐字段解析并 `set_item` → [`crate::instance::create_class`] 创建空实例 →
+//!   [`crate::instance::force_setattr`] 整体替换 `__dict__` → 可选调用 `__post_init__`。
+//!   返回最终的用户类实例（不是 dict），消除 Python 侧 `cls(**dict)` O(N²) 开销。
 //! - **build**：逐字段从 Python 对象 `getattr` 取值，递归子节点构建，写入 stream。
 //! - **sizeof**：累加所有字段 sizeof；任一字段返回 Err 则整体返回 Err。
 //!
-//! ## 与 Python construct Struct 的对齐
+//! ## 方案 B' 与 pydantic-core 对齐
 //!
-//! Python construct 的 `Struct._parse` 创建 `Container`（dict 子类），遍历 `subcons`，
-//! 每个有名 subcon 调用 `_parsereport`，结果存入 `obj[sc.name]` 和 `context[sc.name]`。
-//! 我们的实现语义一致：创建 `PyDict`，每个字段递归 parse 后 `dict.set_item` 和
-//! `ctx.set_field`。
+//! 实例构造策略与 `pydantic_core::validators::model` 一致：
+//! - `create_class`（model.rs:348-365）：`tp_new(cls, (), NULL)`。
+//! - `set_model_attrs`（model.rs:367-379）：构造独立 dict 并整体替换 `__dict__`。
+//! - `force_setattr`（model.rs:381-394）：`PyObject_GenericSetAttr` 绕过自定义 `__setattr__`。
 //!
 //! ## 关于 Context 的嵌套
 //!
-//! 设计文档 §C.5 提到 Struct 节点 parse 时 `new_child` 创建嵌套 context。但子任务 1.4
-//! 的 Phase 1 范围不支持 this 表达式，context 仅用于存储（不读取），不创建嵌套层不影响
-//! 正确性。本实现按子任务要求直接使用传入的 ctx 调用 `set_field`。
+//! Phase 1 不支持 this 表达式，context 不会被读取。因此 StructNode.parse/build
+//! **不调用 `ctx.set_field`**（设计修订 §3.5），减少每字段 ~40-70ns 开销。
 
 use crate::context::Context;
 use crate::error::ConstructError;
+use crate::instance::{create_class, force_setattr, intern_pystring};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyAny, PyDict, PyString, PyType};
 
 use super::{Construct, Node};
+
+/// 编译期缓存的字段名：包含 interned PyString（C API 快速比较）和 Rust 侧 String。
+///
+/// 设计依据：设计修订 §3.2。
+///
+/// - `py_name`：interned `Py<PyString>`，parse 时作为 dict key（避免每次创建 str
+///   + 计算 hash）、build 时作为 `getattr` 参数（interned 可命中 method cache）。
+/// - `rust_name`：Rust 侧字符串副本，用于 path 追踪与错误信息。
+#[derive(Debug)]
+pub struct FieldName {
+    /// 缓存的 interned Python 字符串引用。
+    py_name: Py<PyString>,
+    /// Rust 侧字段名（用于 path、错误信息）。
+    rust_name: String,
+}
+
+impl FieldName {
+    /// 创建字段名。`py` 用于创建 interned PyString。
+    ///
+    /// # 参数
+    ///
+    /// - `py`：GIL token。
+    /// - `name`：字段名字符串。
+    pub fn new(py: Python<'_>, name: impl Into<String>) -> Self {
+        let rust_name = name.into();
+        let py_name = intern_pystring(py, &rust_name);
+        Self { py_name, rust_name }
+    }
+
+    /// 返回 interned Python 字符串引用（`Py<PyString>`，拥有所有权）。
+    pub fn py_name(&self) -> &Py<PyString> {
+        &self.py_name
+    }
+
+    /// 返回 Rust 侧字段名（用于 path 追踪与错误信息）。
+    pub fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
+}
 
 /// StructMixin 子类的根节点：按顺序解析/构建一组命名字段。
 ///
 /// 对应 Python construct 的 `Struct`。
 ///
-/// # parse 行为
+/// # parse 行为（方案 B'）
 ///
 /// 1. 创建 `PyDict`（C API `PyDict_New`）。
-/// 2. 对每个字段 `(name, node)`：
-///    - `path.push_field(name)` —— 进入字段路径，错误时 path 含字段名
+/// 2. 对每个字段 `(FieldName, node)`：
+///    - `path.push_field(rust_name)` —— 进入字段路径
 ///    - `node.parse(...)` —— 递归解析子节点
-///    - `dict.set_item(name, value)` —— C API `PyDict_SetItem`
-///    - `ctx.set_field(name, value)` —— 存入上下文（供 Phase 2 this 引用）
+///    - `dict.set_item(py_name, value)` —— 用 interned key 写入 dict
 ///    - `path.pop()` —— 离开字段路径
-/// 3. 返回 `PyDict`（Python 侧 `cls(**dict)` 构造实例）。
+/// 3. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例。
+/// 4. [`force_setattr`]：`PyObject_GenericSetAttr(instance, "__dict__", dict)`
+///    整体替换实例 `__dict__`。
+/// 5. 若 `has_post_init`：调用 `instance.__post_init__()`。
+/// 6. 返回实例（用户类对象，不是 dict）。
+///
+/// Phase 1 **不调用 `ctx.set_field`**（无 this 表达式，context 不被读取）。
 ///
 /// parse **不要求消费全部输入**：多余字节被忽略（对齐 Python construct Struct 语义）。
 ///
 /// # build 行为
 ///
-/// 对每个字段 `(name, node)`：
-/// - `obj.getattr(name)` —— 从 Python 对象读取属性（C API `PyObject_GetAttr`）
-/// - `path.push_field(name)`
-/// - `ctx.set_field(name, value)`
+/// 对每个字段 `(FieldName, node)`：
+/// - `obj.getattr(py_name)` —— 用 interned key 读取属性（命中 method cache）
+/// - `path.push_field(rust_name)`
 /// - `node.build(value, ...)` —— 递归构建子节点
 /// - `path.pop()`
+///
+/// Phase 1 **不调用 `ctx.set_field`**。
 ///
 /// # sizeof
 ///
 /// 累加所有字段 sizeof；任一字段返回 Err（如 `GreedyBytes`）则整体返回 Err。
 #[derive(Debug)]
 pub struct StructNode {
-    /// 有序字段列表：`(字段名, 子节点)`。
-    fields: Vec<(String, Node)>,
+    /// 有序字段列表：`(字段名缓存, 子节点)`。
+    fields: Vec<(FieldName, Node)>,
+    /// 用户类引用（parse 时 `create_class` 构造实例 + 错误信息中报告类名）。
+    cls: Py<PyType>,
+    /// 编译期检测：用户类是否定义了 `__post_init__`。
+    has_post_init: bool,
 }
 
 impl StructNode {
-    /// 创建一个 `StructNode`，包含给定的有序字段列表。
+    /// 创建一个 `StructNode`，包含给定的有序字段列表与用户类引用。
     ///
-    /// 字段顺序即声明顺序，决定 parse/build 的字段处理顺序。
-    pub fn new(fields: Vec<(String, Node)>) -> Self {
-        Self { fields }
+    /// # 参数
+    ///
+    /// - `fields`：有序字段列表（`FieldName` 已含 interned PyString）。
+    /// - `cls`：用户类 Python 引用（`@dataclass` 装饰的 StructMixin 子类）。
+    /// - `has_post_init`：编译期检测用户类是否定义了 `__post_init__`。
+    pub fn new(fields: Vec<(FieldName, Node)>, cls: Py<PyType>, has_post_init: bool) -> Self {
+        Self {
+            fields,
+            cls,
+            has_post_init,
+        }
+    }
+
+    /// 测试专用构造器：用给定的字段名（非 interned）与默认 mock 类创建 StructNode。
+    ///
+    /// 自动 intern 传入的字段名，并创建一个最小 Python `object` 子类作为 `cls`，
+    /// `has_post_init = false`。供单元测试无需手工构造 `Py<PyType>` 与
+    /// `FieldName`（设计修订 §5.7.2 N6-R3 建议）。
+    ///
+    /// # 参数
+    ///
+    /// - `py`：GIL token。
+    /// - `fields`：`(字段名字符串, 子节点)` 列表。
+    #[cfg(test)]
+    pub fn new_for_test(py: Python<'_>, fields: Vec<(String, Node)>) -> Self {
+        let interned_fields = fields
+            .into_iter()
+            .map(|(name, node)| (FieldName::new(py, name), node))
+            .collect();
+        let cls = py
+            .eval_bound("type('MockStruct', (), {})", None, None)
+            .expect("create mock class")
+            .extract::<Py<PyType>>()
+            .expect("extract Py<PyType>");
+        Self::new(interned_fields, cls, false)
     }
 
     /// 返回字段数量。
@@ -90,8 +173,13 @@ impl StructNode {
     }
 
     /// 返回字段列表的只读切片。
-    pub fn fields(&self) -> &[(String, Node)] {
+    pub fn fields(&self) -> &[(FieldName, Node)] {
         &self.fields
+    }
+
+    /// 返回用户类引用。
+    pub fn cls(&self) -> &Py<PyType> {
+        &self.cls
     }
 }
 
@@ -103,24 +191,58 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
+        // 方案 B' 步骤 1：创建独立 dict（PyDict_New，ABI3 兼容）。
         let dict = PyDict::new_bound(py);
-        for (name, node) in &self.fields {
-            path.push_field(name);
+
+        // 方案 B' 步骤 2：逐字段解析 + set_item 到独立 dict（使用 interned key）。
+        // Phase 1 不调用 ctx.set_field（context 不被读取）。
+        for (field_name, node) in &self.fields {
+            path.push_field(field_name.rust_name());
             let value = node.parse(py, stream, ctx, path)?;
-            let value_bound = value.bind(py);
-            dict.set_item(name, value_bound)
+            // set_item 接收 &Bound<PyAny>；用 interned py_name 避免 str 重建。
+            dict.set_item(field_name.py_name().bind(py), value.bind(py))
                 .map_err(|e| ConstructError::Generic {
-                    message: format!("failed to set dict item for field '{}': {}", name, e),
-                    path: path.to_string(),
-                })?;
-            ctx.set_field(name, value_bound)
-                .map_err(|e| ConstructError::Generic {
-                    message: format!("failed to set context field '{}': {}", name, e),
+                    message: format!(
+                        "failed to set dict item for field '{}': {}",
+                        field_name.rust_name(),
+                        e
+                    ),
                     path: path.to_string(),
                 })?;
             path.pop();
         }
-        Ok(dict.into_any().unbind())
+
+        // 方案 B' 步骤 3：tp_new 创建空实例（直接读 tp_new 槽位）。
+        let instance = create_class(self.cls.bind(py)).map_err(|e| ConstructError::Generic {
+            message: format!("failed to create instance via tp_new: {}", e),
+            path: path.to_string(),
+        })?;
+
+        // 方案 B' 步骤 4：整体替换 __dict__（绕过自定义 __setattr__）。
+        // 错误时附加 slots 提示（设计修订 §5.7.1 N4-R3 运行期兜底）。
+        force_setattr(py, &instance, "__dict__", dict.into_any().unbind()).map_err(|e| {
+            ConstructError::Generic {
+                message: format!(
+                    "failed to set __dict__ on instance: {}. \
+                     该类可能使用了 __slots__ 或 @dataclass(slots=True)，\
+                     Phase 1 不支持 slots dataclass。",
+                    e
+                ),
+                path: path.to_string(),
+            }
+        })?;
+
+        // 方案 B' 步骤 5：可选 __post_init__ 调用（仅 has_post_init=True 时）。
+        if self.has_post_init {
+            instance
+                .call_method0("__post_init__")
+                .map_err(|e| ConstructError::Generic {
+                    message: format!("__post_init__ raised: {}", e),
+                    path: path.to_string(),
+                })?;
+        }
+
+        Ok(instance.unbind())
     }
 
     fn build(
@@ -131,24 +253,21 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        for (name, node) in &self.fields {
-            // 从 Python 对象读取属性（getattr 在 push_field 之前，
-            // 对齐设计文档 §C.3.4。错误消息含字段名以辅助定位）。
-            let value = obj
-                .getattr(name.as_str())
-                .map_err(|e| ConstructError::Generic {
+        for (field_name, node) in &self.fields {
+            // 用 interned py_name getattr（命中 method cache）。
+            let value = obj.getattr(field_name.py_name().bind(py)).map_err(|e| {
+                ConstructError::Generic {
                     message: format!(
                         "object has no attribute '{}' (required for build): {}",
-                        name, e
+                        field_name.rust_name(),
+                        e
                     ),
                     path: path.to_string(),
-                })?;
-            path.push_field(name);
-            ctx.set_field(name, &value)
-                .map_err(|e| ConstructError::Generic {
-                    message: format!("failed to set context field '{}': {}", name, e),
-                    path: path.to_string(),
-                })?;
+                }
+            })?;
+            path.push_field(field_name.rust_name());
+            // Phase 1 不调用 ctx.set_field（context 不被读取）。
+            let _ = ctx; // 静默 unused 警告，保留 trait 签名一致性。
             node.build(py, &value, stream, ctx, path)?;
             path.pop();
         }
@@ -209,17 +328,30 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn empty_struct_parse_empty_bytes_returns_empty_dict() {
+    fn empty_struct_parse_empty_bytes_returns_empty_instance() {
         with_py(|py| {
-            let node = StructNode::new(Vec::new());
+            let node = StructNode::new_for_test(py, Vec::new());
             let mut stream = ParseStream::new(b"");
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("is dict");
-            assert_eq!(dict.len(), 0);
+            // 返回的是用户类实例
+            assert!(
+                result
+                    .bind(py)
+                    .is_instance(node.cls().bind(py))
+                    .expect("is_instance"),
+                "result should be an instance of the user class"
+            );
+            // 实例的 __dict__ 应为空
+            let d_binding = result
+                .bind(py)
+                .getattr("__dict__")
+                .expect("getattr __dict__");
+            let d = d_binding.downcast::<PyDict>().expect("is dict");
+            assert_eq!(d.len(), 0);
             assert_eq!(stream.tell(), 0);
         });
     }
@@ -228,15 +360,19 @@ mod tests {
     fn empty_struct_parse_ignores_extra_bytes() {
         // 对齐 Python construct Struct：不要求消费全部输入。
         with_py(|py| {
-            let node = StructNode::new(Vec::new());
+            let node = StructNode::new_for_test(py, Vec::new());
             let mut stream = ParseStream::new(b"abc");
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("is dict");
-            assert_eq!(dict.len(), 0);
+            let d_binding = result
+                .bind(py)
+                .getattr("__dict__")
+                .expect("getattr __dict__");
+            let d = d_binding.downcast::<PyDict>().expect("is dict");
+            assert_eq!(d.len(), 0);
             // 多余字节未被消费
             assert_eq!(stream.tell(), 0);
             assert!(!stream.is_at_end());
@@ -246,7 +382,7 @@ mod tests {
     #[test]
     fn empty_struct_build_empty_dict_returns_empty_bytes() {
         with_py(|py| {
-            let node = StructNode::new(Vec::new());
+            let node = StructNode::new_for_test(py, Vec::new());
             let obj = py.eval_bound("{}", None, None).expect("empty dict");
             let mut stream = BuildStream::new();
             let mut ctx = Context::new_root(py).expect("ctx");
@@ -262,21 +398,20 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn single_field_parse_returns_dict_with_value() {
+    fn single_field_parse_returns_instance_with_value() {
         with_py(|py| {
-            let node = StructNode::new(vec![("x".to_string(), u8_node())]);
+            let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
             let mut stream = ParseStream::new(&[0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("is dict");
-            assert_eq!(dict.len(), 1);
-            let x: i64 = dict
-                .get_item("x")
-                .expect("get_item ok")
-                .expect("x exists")
+            // 验证属性可读
+            let x: i64 = result
+                .bind(py)
+                .getattr("x")
+                .expect("getattr x")
                 .extract()
                 .expect("extract i64");
             assert_eq!(x, 0x42);
@@ -286,7 +421,7 @@ mod tests {
     #[test]
     fn single_field_build_writes_bytes() {
         with_py(|py| {
-            let node = StructNode::new(vec![("x".to_string(), u8_node())]);
+            let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
             // 用简单 Python 对象 {x: 42}
             let obj = py
                 .eval_bound("type('O', (), {'x': 42})()", None, None)
@@ -303,7 +438,7 @@ mod tests {
     #[test]
     fn single_field_round_trip_preserves_value() {
         with_py(|py| {
-            let node = StructNode::new(vec![("x".to_string(), u8_node())]);
+            let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
 
@@ -321,11 +456,10 @@ mod tests {
             let result = node
                 .parse(py, &mut pstream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            let x: i64 = dict
-                .get_item("x")
-                .expect("ok")
-                .expect("exist")
+            let x: i64 = result
+                .bind(py)
+                .getattr("x")
+                .expect("getattr x")
                 .extract()
                 .expect("extract");
             assert_eq!(x, 200);
@@ -337,14 +471,17 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn multi_field_parse_returns_all_values_in_order() {
+    fn multi_field_parse_returns_instance_with_all_values() {
         // Int8ub + Int16ub + Bytes(2)
         with_py(|py| {
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("b".to_string(), u16_node()),
-                ("c".to_string(), Node::Bytes(BytesNode::new(2))),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),
+                    ("b".to_string(), u16_node()),
+                    ("c".to_string(), Node::Bytes(BytesNode::new(2))),
+                ],
+            );
             // a=0x01, b=0x0203, c=0x0405
             let mut stream = ParseStream::new(&[0x01, 0x02, 0x03, 0x04, 0x05]);
             let mut ctx = Context::new_root(py).expect("ctx");
@@ -352,11 +489,10 @@ mod tests {
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            assert_eq!(dict.len(), 3);
-            let a: i64 = dict.get_item("a").unwrap().unwrap().extract().unwrap();
-            let b: i64 = dict.get_item("b").unwrap().unwrap().extract().unwrap();
-            let c_binding = dict.get_item("c").unwrap().unwrap();
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            let c_binding = inst.getattr("c").unwrap();
             let c: &[u8] = c_binding.extract().unwrap();
             assert_eq!(a, 1);
             assert_eq!(b, 0x0203);
@@ -368,11 +504,14 @@ mod tests {
     #[test]
     fn multi_field_build_writes_all_fields_in_order() {
         with_py(|py| {
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("b".to_string(), u16_node()),
-                ("c".to_string(), Node::Bytes(BytesNode::new(2))),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),
+                    ("b".to_string(), u16_node()),
+                    ("c".to_string(), Node::Bytes(BytesNode::new(2))),
+                ],
+            );
             let obj = py
                 .eval_bound(
                     "type('O', (), {'a': 1, 'b': 0x0203, 'c': b'\\x04\\x05'})()",
@@ -392,10 +531,10 @@ mod tests {
     #[test]
     fn multi_field_parse_does_not_consume_extra_bytes() {
         with_py(|py| {
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("b".to_string(), u8_node()),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![("a".to_string(), u8_node()), ("b".to_string(), u8_node())],
+            );
             // 只消费 2 字节，多余 3 字节忽略
             let mut stream = ParseStream::new(&[0x10, 0x20, 0x30, 0x40, 0x50]);
             let mut ctx = Context::new_root(py).expect("ctx");
@@ -403,9 +542,9 @@ mod tests {
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            let a: i64 = dict.get_item("a").unwrap().unwrap().extract().unwrap();
-            let b: i64 = dict.get_item("b").unwrap().unwrap().extract().unwrap();
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 0x10);
             assert_eq!(b, 0x20);
             assert_eq!(stream.tell(), 2);
@@ -420,10 +559,10 @@ mod tests {
     #[test]
     fn build_missing_field_returns_generic_error_with_field_name() {
         with_py(|py| {
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("b".to_string(), u8_node()),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![("a".to_string(), u8_node()), ("b".to_string(), u8_node())],
+            );
             // 对象只有 a，缺 b
             let obj = py
                 .eval_bound("type('O', (), {'a': 1})()", None, None)
@@ -454,44 +593,46 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn nested_struct_parse_returns_nested_dict() {
+    fn nested_struct_parse_returns_nested_instance() {
         with_py(|py| {
             // 外层 { len: Int8ub, inner: Struct { value: Int8ub } }
-            let inner = Node::Struct(StructNode::new(vec![("value".to_string(), u8_node())]));
-            let outer = StructNode::new(vec![
-                ("len".to_string(), u8_node()),
-                ("inner".to_string(), inner),
-            ]);
+            // 内层 StructNode 也走方案 B' 流程，构造内层实例
+            let inner = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![("value".to_string(), u8_node())],
+            ));
+            let outer = StructNode::new_for_test(
+                py,
+                vec![("len".to_string(), u8_node()), ("inner".to_string(), inner)],
+            );
             let mut stream = ParseStream::new(&[0x03, 0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
             let result = outer
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            let len: i64 = dict.get_item("len").unwrap().unwrap().extract().unwrap();
+            let inst = result.bind(py);
+            let len: i64 = inst.getattr("len").unwrap().extract().unwrap();
             assert_eq!(len, 3);
-            let inner_dict = dict.get_item("inner").unwrap().unwrap();
-            let inner_dict = inner_dict.downcast::<PyDict>().expect("inner dict");
-            let value: i64 = inner_dict
-                .get_item("value")
-                .unwrap()
-                .unwrap()
-                .extract()
-                .unwrap();
+            // inner 是内层 mock 类的实例
+            let inner_inst = inst.getattr("inner").unwrap();
+            let value: i64 = inner_inst.getattr("value").unwrap().extract().unwrap();
             assert_eq!(value, 0x42);
         });
     }
 
     #[test]
-    fn nested_struct_build_writes_nested_dict() {
+    fn nested_struct_build_writes_from_nested_instance() {
         with_py(|py| {
-            let inner = Node::Struct(StructNode::new(vec![("value".to_string(), u8_node())]));
-            let outer = StructNode::new(vec![
-                ("len".to_string(), u8_node()),
-                ("inner".to_string(), inner),
-            ]);
-            // 构造嵌套 dict 对象
+            let inner = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![("value".to_string(), u8_node())],
+            ));
+            let outer = StructNode::new_for_test(
+                py,
+                vec![("len".to_string(), u8_node()), ("inner".to_string(), inner)],
+            );
+            // 构造嵌套实例对象
             let obj = py
                 .eval_bound(
                     "type('O', (), {'len': 3, 'inner': type('I',(),{'value':0x42})()})()",
@@ -512,12 +653,18 @@ mod tests {
     #[test]
     fn nested_struct_round_trip() {
         with_py(|py| {
-            let inner = Node::Struct(StructNode::new(vec![("value".to_string(), u8_node())]));
-            let outer = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("inner".to_string(), inner),
-                ("b".to_string(), u8_node()),
-            ]);
+            let inner = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![("value".to_string(), u8_node())],
+            ));
+            let outer = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),
+                    ("inner".to_string(), inner),
+                    ("b".to_string(), u8_node()),
+                ],
+            );
 
             // build
             let obj = py
@@ -541,19 +688,13 @@ mod tests {
             let result = outer
                 .parse(py, &mut pstream, &mut ctx, &mut path)
                 .expect("parse");
-            let dict = result.bind(py).downcast::<PyDict>().expect("dict");
-            let a: i64 = dict.get_item("a").unwrap().unwrap().extract().unwrap();
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
             assert_eq!(a, 0xAA);
-            let inner_dict = dict.get_item("inner").unwrap().unwrap();
-            let inner_dict = inner_dict.downcast::<PyDict>().expect("inner dict");
-            let value: i64 = inner_dict
-                .get_item("value")
-                .unwrap()
-                .unwrap()
-                .extract()
-                .unwrap();
+            let inner_inst = inst.getattr("inner").unwrap();
+            let value: i64 = inner_inst.getattr("value").unwrap().extract().unwrap();
             assert_eq!(value, 0xBB);
-            let b: i64 = dict.get_item("b").unwrap().unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
             assert_eq!(b, 0xCC);
         });
     }
@@ -567,13 +708,16 @@ mod tests {
         with_py(|py| {
             // { a: Int8ub, b: Int32ub }
             // b 读取时字节不足
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                (
-                    "b".to_string(),
-                    Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt32Big)),
-                ),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),
+                    (
+                        "b".to_string(),
+                        Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt32Big)),
+                    ),
+                ],
+            );
             let mut stream = ParseStream::new(&[0x01]); // 只够 a，b 需 4 字节
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -594,14 +738,17 @@ mod tests {
     fn error_path_tracks_nested_field() {
         with_py(|py| {
             // { a: Int8ub, inner: Struct { c: Int32ub } }
-            let inner = Node::Struct(StructNode::new(vec![(
-                "c".to_string(),
-                Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt32Big)),
-            )]));
-            let outer = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("inner".to_string(), inner),
-            ]);
+            let inner = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![(
+                    "c".to_string(),
+                    Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt32Big)),
+                )],
+            ));
+            let outer = StructNode::new_for_test(
+                py,
+                vec![("a".to_string(), u8_node()), ("inner".to_string(), inner)],
+            );
             // 只够 a（1 字节），inner.c 需要 4 字节
             let mut stream = ParseStream::new(&[0x01]);
             let mut ctx = Context::new_root(py).expect("ctx");
@@ -633,7 +780,7 @@ mod tests {
     fn sizeof_empty_struct_is_zero() {
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
-            let node = StructNode::new(Vec::new());
+            let node = StructNode::new_for_test(py, Vec::new());
             assert_eq!(node.sizeof(&ctx).unwrap(), 0);
         });
     }
@@ -642,11 +789,14 @@ mod tests {
     fn sizeof_sums_all_fields() {
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),                      // 1
-                ("b".to_string(), u16_node()),                     // 2
-                ("c".to_string(), Node::Bytes(BytesNode::new(4))), // 4
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),                      // 1
+                    ("b".to_string(), u16_node()),                     // 2
+                    ("c".to_string(), Node::Bytes(BytesNode::new(4))), // 4
+                ],
+            );
             assert_eq!(node.sizeof(&ctx).unwrap(), 7);
         });
     }
@@ -656,10 +806,13 @@ mod tests {
         with_py(|py| {
             use crate::nodes::greedy_bytes::GreedyBytesNode;
             let ctx = Context::new_root(py).expect("ctx");
-            let node = StructNode::new(vec![
-                ("a".to_string(), u8_node()),
-                ("b".to_string(), Node::GreedyBytes(GreedyBytesNode::new())),
-            ]);
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("a".to_string(), u8_node()),
+                    ("b".to_string(), Node::GreedyBytes(GreedyBytesNode::new())),
+                ],
+            );
             assert!(node.sizeof(&ctx).is_err());
         });
     }
@@ -670,24 +823,234 @@ mod tests {
 
     #[test]
     fn len_and_is_empty() {
-        let empty = StructNode::new(Vec::new());
-        assert!(empty.is_empty());
-        assert_eq!(empty.len(), 0);
+        with_py(|py| {
+            let empty = StructNode::new_for_test(py, Vec::new());
+            assert!(empty.is_empty());
+            assert_eq!(empty.len(), 0);
 
-        let nonempty = StructNode::new(vec![("x".to_string(), u8_node())]);
-        assert!(!nonempty.is_empty());
-        assert_eq!(nonempty.len(), 1);
+            let nonempty = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
+            assert!(!nonempty.is_empty());
+            assert_eq!(nonempty.len(), 1);
+        });
     }
 
     #[test]
     fn fields_returns_slice() {
-        let node = StructNode::new(vec![
-            ("a".to_string(), u8_node()),
-            ("b".to_string(), u16_node()),
-        ]);
-        let fields = node.fields();
-        assert_eq!(fields.len(), 2);
-        assert_eq!(fields[0].0, "a");
-        assert_eq!(fields[1].0, "b");
+        with_py(|py| {
+            let node = StructNode::new_for_test(
+                py,
+                vec![("a".to_string(), u8_node()), ("b".to_string(), u16_node())],
+            );
+            let fields = node.fields();
+            assert_eq!(fields.len(), 2);
+            assert_eq!(fields[0].0.rust_name(), "a");
+            assert_eq!(fields[1].0.rust_name(), "b");
+        });
+    }
+
+    // ======================================================================
+    // 方案 B' 新增测试
+    // ======================================================================
+
+    #[test]
+    fn parse_returns_instance_of_user_class() {
+        // 方案 B' 核心断言：parse 返回用户类实例（不是 dict）。
+        with_py(|py| {
+            let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
+            let mut stream = ParseStream::new(&[0x05]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            assert!(
+                result
+                    .bind(py)
+                    .is_instance(node.cls().bind(py))
+                    .expect("is_instance"),
+                "parse should return instance of user class"
+            );
+        });
+    }
+
+    #[test]
+    fn parse_dict_keys_match_field_names() {
+        // 验证写入 __dict__ 的 key 与编译期字段名一致（设计修订 §5.6.4 第 8 条）。
+        with_py(|py| {
+            let node = StructNode::new_for_test(
+                py,
+                vec![
+                    ("alpha".to_string(), u8_node()),
+                    ("beta".to_string(), u8_node()),
+                ],
+            );
+            let mut stream = ParseStream::new(&[0x01, 0x02]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let d_binding = result
+                .bind(py)
+                .getattr("__dict__")
+                .expect("getattr __dict__");
+            let d = d_binding.downcast::<PyDict>().expect("is dict");
+            assert_eq!(d.len(), 2);
+            assert!(d.contains("alpha").expect("contains alpha"));
+            assert!(d.contains("beta").expect("contains beta"));
+        });
+    }
+
+    #[test]
+    fn parse_dict_keys_are_interned_identity() {
+        // 验证 __dict__ 的 key 是 interned（与 field_name.py_name 同一对象）。
+        // 设计修订 §5.6.5 第 10 条。
+        with_py(|py| {
+            let node = StructNode::new_for_test(py, vec![("count".to_string(), u8_node())]);
+            // 提取 field_name 的 py_name 用于后续比较
+            let expected_key = node.fields()[0].0.py_name().clone_ref(py);
+
+            let mut stream = ParseStream::new(&[0x10]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let d_binding = result.bind(py).getattr("__dict__").expect("dict");
+            let d = d_binding.downcast::<PyDict>().expect("is dict");
+            let actual_key = d.keys().into_iter().next().expect("at least one key");
+            // identity 比较（is）—— interned 应共享同一对象
+            assert!(
+                actual_key.is(&expected_key),
+                "dict key should be identical to interned field name (same object)"
+            );
+        });
+    }
+
+    #[test]
+    fn parse_invokes_post_init_when_flag_set() {
+        // 验证 has_post_init 标志触发 __post_init__ 调用（§5.6.3 第 5 条）。
+        with_py(|py| {
+            // 定义带 __post_init__ 的类
+            let code = concat!(
+                "class WithPostInit:\n",
+                "    def __post_init__(self):\n",
+                "        self.post_init_called = True\n",
+            );
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None)
+                .expect("define class");
+            let cls = globals
+                .get_item("WithPostInit")
+                .expect("get_item ok")
+                .expect("class exists")
+                .extract::<Py<PyType>>()
+                .expect("extract Py<PyType>");
+
+            let fields = vec![(FieldName::new(py, "x"), u8_node())];
+            let node = StructNode::new(fields, cls, true);
+            let mut stream = ParseStream::new(&[0x42]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // __post_init__ 应已写入 post_init_called 属性
+            let called: bool = result
+                .bind(py)
+                .getattr("post_init_called")
+                .expect("getattr post_init_called")
+                .extract()
+                .expect("extract bool");
+            assert!(called, "__post_init__ should have been called");
+            // 字段也已写入
+            let x: i64 = result
+                .bind(py)
+                .getattr("x")
+                .expect("getattr x")
+                .extract()
+                .expect("extract i64");
+            assert_eq!(x, 0x42);
+        });
+    }
+
+    #[test]
+    fn parse_does_not_invoke_post_init_when_flag_clear() {
+        with_py(|py| {
+            let code = concat!("class WithoutPostInit:\n", "    pass\n",);
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None)
+                .expect("define class");
+            let cls = globals
+                .get_item("WithoutPostInit")
+                .expect("get_item ok")
+                .expect("class exists")
+                .extract::<Py<PyType>>()
+                .expect("extract Py<PyType>");
+
+            let fields = vec![(FieldName::new(py, "x"), u8_node())];
+            let node = StructNode::new(fields, cls, false);
+            let mut stream = ParseStream::new(&[0x42]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // 无 post_init_called 属性
+            assert!(
+                result.bind(py).getattr("post_init_called").is_err(),
+                "no post_init_called attribute expected"
+            );
+        });
+    }
+
+    #[test]
+    fn parse_frozen_dataclass_does_not_raise() {
+        // 验证 frozen dataclass 可正常 parse（force_setattr 绕过 frozen 拦截）。
+        // 设计修订 §5.6.3 第 7 条。
+        with_py(|py| {
+            let code = concat!(
+                "from dataclasses import dataclass\n",
+                "@dataclass(frozen=True)\n",
+                "class Frozen:\n",
+                "    x: int = 0\n",
+                "    y: int = 0\n",
+            );
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None)
+                .expect("define Frozen");
+            let cls = globals
+                .get_item("Frozen")
+                .expect("get_item ok")
+                .expect("Frozen exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+
+            let fields = vec![
+                (FieldName::new(py, "x"), u8_node()),
+                (FieldName::new(py, "y"), u8_node()),
+            ];
+            let node = StructNode::new(fields, cls, false);
+            let mut stream = ParseStream::new(&[0xAA, 0xBB]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse should succeed on frozen dataclass");
+            let x: i64 = result
+                .bind(py)
+                .getattr("x")
+                .expect("getattr x")
+                .extract()
+                .expect("extract");
+            let y: i64 = result
+                .bind(py)
+                .getattr("y")
+                .expect("getattr y")
+                .extract()
+                .expect("extract");
+            assert_eq!(x, 0xAA);
+            assert_eq!(y, 0xBB);
+        });
     }
 }

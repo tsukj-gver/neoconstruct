@@ -1,0 +1,87 @@
+======================================================================
+construct-rs vs Python construct 2.10.70 性能基准测试结果
+======================================================================
+
+环境信息：
+  Python 版本    : 3.14.2
+  平台           : Windows-11-10.0.26200-SP0
+  处理器         : Intel64 Family 6 Model 183 Stepping 1, GenuineIntel
+  machine        : AMD64
+  timeit number  : 100000
+  repeat (中位数): 5
+  测量时间       : 2026-06-22 02:45:48
+
+通过标准（§G.4.5）：
+  - B1-B5 ≥ 4x（硬目标）
+  - B6 深嵌套 ≥ 2x（已知退化）
+  - B7 功能性（不要求加速比）
+  - B1 < 0.5x → 暂停（性能门禁 §2）
+
+对比表：
+用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定      
+-------------------------------------------------------------------------
+B1   parse  1789.1             2931.6                 1.64      x [FAIL]
+B1   build  1533.7             2825.7                 1.84      x [FAIL]
+B2   parse  3435.4             5969.7                 1.74      x [FAIL]
+B2   build  3316.2             5542.3                 1.67      x [FAIL]
+B3   parse  13022.8            23359.4                1.79      x [FAIL]
+B3   build  11731.0            19994.8                1.70      x [FAIL]
+B4   parse  23873.3            44437.3                1.86      x [FAIL]
+B4   build  22455.6            38163.7                1.70      x [FAIL]
+B5   parse  3792.3             7283.3                 1.92      x [FAIL]
+B5   build  3281.2             6923.4                 2.11      x [FAIL]
+B6   parse  5409.1             11386.4                2.11      x [PASS]
+B6   build  4061.8             11856.4                2.92      x [PASS]
+B7   parse  976.3              1553.3                 1.59      x [-]
+B7   build  759.8              1624.4                 2.14      x [-]
+
+用例说明：
+  B1: ModbusRTUMessage (3 字段：Int8ub×2 + GreedyBytes)
+  B2: 扁平 Struct 10 字段 (Int32ub×10)
+  B3: 扁平 Struct 50 字段 (Int32ub×50)
+  B4: 扁平 Struct 100 字段 (Int32ub×100)
+  B5: 嵌套 Struct 2 层 × 5 字段
+  B6: 深嵌套 Struct 5 层 × 2 字段
+  B7: 空 Struct (0 字段)
+
+门禁检查：
+  [FAIL] 硬目标失败：B1 parse 加速比 1.64x < 4.0x
+  [FAIL] 硬目标失败：B1 build 加速比 1.84x < 4.0x
+  [FAIL] 硬目标失败：B2 parse 加速比 1.74x < 4.0x
+  [FAIL] 硬目标失败：B2 build 加速比 1.67x < 4.0x
+  [FAIL] 硬目标失败：B3 parse 加速比 1.79x < 4.0x
+  [FAIL] 硬目标失败：B3 build 加速比 1.70x < 4.0x
+  [FAIL] 硬目标失败：B4 parse 加速比 1.86x < 4.0x
+  [FAIL] 硬目标失败：B4 build 加速比 1.70x < 4.0x
+  [FAIL] 硬目标失败：B5 parse 加速比 1.92x < 4.0x
+  [FAIL] 硬目标失败：B5 build 加速比 2.11x < 4.0x
+
+原始数据（per_call_ns = 每次调用纳秒数）：
+  B1 parse rs: median=1789.1ns  min=1782.6ns
+  B1 parse py: median=2931.6ns  min=2916.4ns
+  B1 build rs: median=1533.7ns  min=1517.9ns
+  B1 build py: median=2825.7ns  min=2819.8ns
+  B2 parse rs: median=3435.4ns  min=3373.3ns
+  B2 parse py: median=5969.7ns  min=5944.4ns
+  B2 build rs: median=3316.2ns  min=3275.7ns
+  B2 build py: median=5542.3ns  min=5535.8ns
+  B3 parse rs: median=13022.8ns  min=12700.0ns
+  B3 parse py: median=23359.4ns  min=22723.5ns
+  B3 build rs: median=11731.0ns  min=11683.6ns
+  B3 build py: median=19994.8ns  min=19823.4ns
+  B4 parse rs: median=23873.3ns  min=23648.7ns
+  B4 parse py: median=44437.3ns  min=43363.0ns
+  B4 build rs: median=22455.6ns  min=22092.2ns
+  B4 build py: median=38163.7ns  min=37884.0ns
+  B5 parse rs: median=3792.3ns  min=3786.6ns
+  B5 parse py: median=7283.3ns  min=7242.5ns
+  B5 build rs: median=3281.2ns  min=3250.0ns
+  B5 build py: median=6923.4ns  min=6896.5ns
+  B6 parse rs: median=5409.1ns  min=5351.7ns
+  B6 parse py: median=11386.4ns  min=11298.9ns
+  B6 build rs: median=4061.8ns  min=4022.9ns
+  B6 build py: median=11856.4ns  min=11042.5ns
+  B7 parse rs: median=976.3ns  min=974.1ns
+  B7 parse py: median=1553.3ns  min=1545.7ns
+  B7 build rs: median=759.8ns  min=755.4ns
+  B7 build py: median=1624.4ns  min=1611.2ns
