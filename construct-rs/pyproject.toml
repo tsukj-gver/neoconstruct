@@ -32,3 +32,11 @@ python-source = "python"
 # 显式启用 extension-module feature，避免在 cargo build/test 时
 # 因链接 Python 解释器导致测试编译失败。
 features = ["pyo3/extension-module"]
+
+[tool.pytest.ini_options]
+# 将 python/ 加入 sys.path，使 construct-rs 包覆盖任何 site-packages 中的同名包
+# （例如为基准测试安装的 Python 原版 construct==2.10.70）。
+pythonpath = ["python"]
+testpaths = ["tests"]
+# 输出摘要：失败用例的 traceback 全打印。
+addopts = "-ra"
