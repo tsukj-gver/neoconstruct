@@ -9,7 +9,7 @@ mode: subagent
     "construct/**": "deny"
     "docs/**": "allow"
   bash:
-    "*": "deny"
+    "*": "allow"
 ---
 
 # 角色：架构师 (ARCH)
