@@ -9,25 +9,24 @@
 
 **这是一个 Python 项目。**
 
-交付物是 Python 包（`pip install construct`）。用户是 Python 开发者。他们调用 `construct.parse(data)` / `construct.build(obj)`，期望比纯 Python 原版更快。
+交付物是 Python 包。用户是 Python 开发者。性能目标：**≥4x vs Python construct 2.10.70**（10x 为理想目标）。
 
 Rust 代码是**内核实现手段**，不是独立产品。没有任何 Rust 用户。不存在"纯 Rust 使用场景"。
 
-### 这意味着什么（所有架构决策必须遵守）
+### 核心原则（所有架构决策必须遵守）
 
-1. **Python 端性能是唯一性能指标**。Rust 内部基准（cargo bench）只是诊断工具，不是验收标准。验收标准 S-PERF 必须从 Python 用户视角测量（`time.perf_counter` 端到端）。
+1. **一次 FFI**：编译、parse、build 各只有一次 Python↔Rust 边界穿越。Rust 内部通过 CPython C API 直接操作 Python 对象。
 
-2. **pyo3 是核心依赖，不是可选附加**。Rust 代码的直接产出目标是 `PyObject`，不是某个 Rust 中间类型。任何"Rust 类型 → Python 类型"的转换层都是**需要消除的开销**，不是"必要的抽象"。
+2. **无中间表示层**：parse 直接从 bytes 构造 PyObject，build 直接从 PyObject 读属性写字节，不在 Rust 侧引入独立的中间数据类型再转换。参考 pydantic-core。
 
-3. **不允许以"Rust 纯净性"为由牺牲 Python 性能**。"construct-rs 不依赖 pyo3"不是一个有效约束——它从未被正式决策过，且与项目目标直接矛盾。
+3. **pyo3 是核心依赖**：单 crate，不存在独立的 Python 绑定层。
 
-4. **Value 枚举是内部实现细节**，不应该出现在 Python 关键路径上。如果 Value→PyObject 的转换成为性能瓶颈，应该让 Rust 代码直接产出 PyObject，而不是优化转换层。
+4. **mashumaro 式 API**：`@dataclass class X(StructMixin)`，不照搬 pydantic BaseModel。编译在 `__init_subclass__` 中完成，用户无感。
 
-> **历史教训（2026-06-19）**：Phase 1-15 将项目错误地架构为"碰巧有 Python 绑定的 Rust 库"，
-> 导致 Value 枚举 / OutputSink trait / conversions.rs 等间接层被当作架构支柱。
-> 这些间接层的累积开销使 Python 端性能仅 0.26x（比纯 Python 原版慢 4x），
-> 完全违背了"用 Rust 加速 Python"的项目初衷。
-> Phase 16+ 必须以 Python-first 视角修正产出层。
+> **历史教训**：此前的实现将解析结果先构造为 Rust 中间类型再逐个转换为 Python 对象，
+> 并在输入/输出侧引入 trait 抽象层使每个字段都跨越 FFI 边界，
+> 这些间接层的累积开销使 Python 端性能仅为原版的 0.3-1.8x。
+> 本项目于 2026-06-21 推倒重来，坚持一次 FFI、直接操作 Python 对象的设计。
 
 ---
 
@@ -48,29 +47,15 @@ Rust 代码是**内核实现手段**，不是独立产品。没有任何 Rust �
 ```
 construct_rust/
 ├── construct/              ← Python 原版仓库（只读参考，禁止修改）
-├── construct-rs/           ← Rust 项目源码（Phase 1 初始化后创建）
-│   ├── src/
-│   ├── tests/
-│   ├── benches/
-│   └── Cargo.toml
+├── refs/                   ← 参考项目（pydantic-core, mashumaro）
+├── examples/               ← 用户 API 定义（example.py, construct.py）
 ├── plans/                  ← 阶段计划
-│   ├── 00-项目进度.md      ← 总进度仪表盘（PM 恢复工作入口，每次状态变更后更新）
-│   ├── phase1-foundation/
-│   │   ├── 总纲.md         ← 该阶段的所有子任务清单 + 出口标准
-│   │   └── 过程记录.md     ← 每个子任务的状态、操作日志、验证/审查结果
-│   ├── phase2-atomic/
-│   ├── ...
-│   └── phase9-optimization/
+│   ├── 00-项目进度.md      ← 总进度仪表盘（PM 恢复工作入口）
+│   ├── phase0-architecture/← Phase 0 架构设计
+│   └── phase1-foundation/  ← Phase 1 垂直切片
 └── docs/                   ← 设计文档
-    ├── 总设计文档.md        ← 项目整体架构、设计原则、核心决策
-    ├── 模块设计-*.md        ← 各模块的接口设计（按需创建）
-    └── workflow/            ← 工作流与角色定义
-        ├── 工作流文档.md
-        ├── 角色-项目经理.md
-        ├── 角色-架构师.md
-        ├── 角色-开发者.md
-        ├── 角色-对照验证员.md
-        └── 角色-代码审查员.md
+    ├── 架构设计.md          ← Phase 0 产出的核心设计（待创建）
+    └── analysis/           ← 分析报告（pydantic-core 对比、mashumaro 分析）
 ```
 
 ## 3. 工作流概要
@@ -105,7 +90,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 |------|------|------|
 | PM | `plans/00-项目进度.md`（总进度）、`plans/phaseN/过程记录.md`（状态更新）、`plans/phaseN/总纲.md`（清单勾选） | 全部 |
 | ARCH | `docs/`（设计文档） | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`construct-py/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
+| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
 | REV | `plans/phaseN/过程记录.md`（设计检视结果） | 全部 |
 | VET | `plans/phaseN/过程记录.md`（代码审查结果） | 全部 |
 
@@ -191,21 +176,19 @@ git tag phase-N-complete            # 阶段验收标签
 
 ## 7. 核心技术决策（全员须知）
 
-> ⚠️ 以下决策中标注 `[Python-first]` 的项以 §0 项目定位为最高优先级。
-> 如任何决策与 §0 冲突，以 §0 为准。
+> ⚠️ 以下决策由 Phase 0 架构设计最终确定。当前为暂定方向，ARCH 在设计过程中可细化。
 
 | 决策 | 内容 | 理由 |
 |------|------|------|
-| **pyo3 定位** `[Python-first]` | pyo3 是核心依赖。Rust 代码应直接产出 PyObject，而非产出中间 Rust 类型再转换 | 消除 Value→PyObject 转换开销。详见 §0 第 2/4 条 |
-| **Value 枚举定位** `[Python-first]` | Value 是内部实现细节和测试工具，**不出现在 Python 关键路径上** | Phase 1-15 教训：Value 作为架构支柱导致 0.26x 性能 |
-| 动态类型替代 | `Value` 枚举 + 模式匹配（内部）/ `PyObject`（产出） | Rust 无动态类型；但产出目标是 PyObject |
-| 构造器抽象 | `enum_dispatch` (CombinedConstruct) | Phase 11 已迁移，替代 Box\<dyn\> |
-| 错误处理 | `Result<T, ConstructError>` + `thiserror` | 统一错误体系，`?` 传播 |
-| 上下文传递 | `Context` 结构体（IndexMap + Arc\<Context\> parent） | 支持嵌套和字段间引用 |
-| 流抽象 | `CombinedStream` (enum_dispatch) | Phase 11 已迁移 |
-| 容器类型 | `IndexMap<String, Value>`（内部）/ `PyDict`（产出） | 保持插入顺序 + O(1) 查找 |
-| 编译执行树 | `CompiledNode` + `SchemaCompiler`（build-once） | Phase 12 已实现，运行时零构建开销 |
-| ~~项目结构~~ | ~~construct-rs 纯 Rust + construct-py 绑定层~~ | **已修正**：Phase 16+ 可将 pyo3 引入 construct-rs 或合并 crate |
+| **pyo3 定位** | pyo3 是核心依赖，非 optional feature。parse 直接产 `Py<PyAny>`，build 直接接收 `&Bound<PyAny>` | 消除中间表示层。详见 §0 |
+| **直接操作 Python 对象** | parse 从 bytes 直接构造 PyObject；build 从 PyObject 直接读属性写字节，Rust 侧不引入独立的中间数据类型 | 中间类型转换层是不可接受的开销（见 §0 历史教训） |
+| **输出/输入侧无抽象 trait** | 参考pydantic-core：不在输入/输出侧引入 trait 抽象层，直接操作 CPython C API | trait 抽象层会使每字段都跨越 FFI 边界，是不可接受的开销（见 §0 历史教训） |
+| **单 crate** | 不存在独立的 Python 绑定层，pyo3 在主 crate 中 | 消除 crate 间的边界开销 |
+| **mashumaro 式 API** | `@dataclass class X(StructMixin)`，编译在 `__init_subclass__` 中 | 用户无感，不照搬 pydantic BaseModel |
+| **一次 FFI** | 编译、parse、build 各只有一次 Python↔Rust 边界穿越 | 每字段跨越 FFI 是不可接受的开销（见 §0 历史教训） |
+| **构造器分派** | `enum_dispatch` 静态分派（参考 pydantic-core CombinedValidator） | 避免 `Box<dyn>` 动态分派开销 |
+| **错误处理** | `Result<T, ConstructError>` + `thiserror` | 统一错误体系，`?` 传播 |
+| **Stream 抽象** | 纯 Rust 内部抽象，不跨 FFI | parse/build 边界内完整处理 |
 
 ## 8. Rust 编码红线（全员必须遵守）
 
@@ -220,24 +203,14 @@ git tag phase-N-complete            # 阶段验收标签
 ## 9. 阶段依赖关系
 
 ```
-Phase 1 (基础架构)
+Phase 0 (架构设计)
   ↓
-Phase 2 (原子构造器)
+Phase 1 (垂直切片) ←── 验证架构可行性 + 性能 >4x
   ↓
-Phase 3 (复合构造器) ←── 依赖 Phase 2 的原子构造器
-  ↓
-Phase 4 (适配器+控制流) ←── 依赖 Phase 3 的复合构造器
-  ↓
-Phase 5 (表达式系统) ←── 可与 Phase 2-4 并行设计（DESIGNING），但 CODING 需等 Phase 4 完成
-  ↓
-Phase 6 (流操作+隧道) ←── 依赖 Phase 1-5
-  ↓
-Phase 7 (惰性解析) ←── 依赖 Phase 1-6
-  ↓
-Phase 8 (Gallery) ←── 依赖 Phase 1-7，真实格式验证
-  ↓
-Phase 9 (性能优化) ←── 依赖 Phase 1-8
+Phase 2+ ←── 由用户在 Phase 1 验收通过后指定
 ```
+
+> 阶段规划在 Phase 0 架构设计完成后由 PM 根据设计文档制定。
 
 **禁止**：在依赖阶段未完成验收时开始后续阶段的子任务。
 
@@ -248,7 +221,7 @@ Phase 9 (性能优化) ←── 依赖 Phase 1-8
 | Rust 模块 | Python 源码位置 |
 |-----------|---------------|
 | Construct trait | `construct/construct/core.py` → `Construct` 类 (line ~321) |
-| Value 类型 | 对应 Python 的动态类型 + `Container` / `ListContainer` |
+| 动态类型 | 对应 Python 的动态类型 + `Container` / `ListContainer`（直接以 PyObject 表达，无 Rust 中间枚举） |
 | Context | `construct/construct/core.py` → parse/build 中的 `context` 参数 |
 | Stream | `construct/construct/core.py` → `stream_read` 等辅助函数 |
 | 错误 | `construct/construct/core.py` → 文件末尾 ~40 个 Exception 子类 |
@@ -306,11 +279,11 @@ Task 工具参数：
 
 | 角色 agent | 可写范围 | 禁止写入 |
 |-----------|---------|---------|
-| pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
-| architect | `docs/` | `construct-rs/`, `construct-py/`, `plans/`, `construct/` |
-| developer | `construct-rs/`, `construct-py/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
-| reviewer | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
-| vetter | `plans/*/过程记录.md` | `construct-rs/`, `construct-py/`, `docs/`, `construct/` |
+| pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `docs/`, `construct/` |
+| architect | `docs/` | `construct-rs/`, `plans/`, `construct/` |
+| developer | `construct-rs/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
+| reviewer | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
+| vetter | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
 
 ### 切换 agent
 
