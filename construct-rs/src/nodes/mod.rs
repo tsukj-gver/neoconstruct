@@ -8,18 +8,20 @@
 //! 三个方法。节点类型用封闭 [`Node`] 枚举列举，通过 `enum_dispatch` 宏自动生成
 //! `match` 分派代码，无 `Box<dyn>` 动态分派开销。
 //!
-//! ## Phase 1.3 范围
+//! ## Phase 1.4 范围
 //!
-//! 当前仅含 3 个原子节点变体：
-//! - [`FormatFieldNode`](format_field::FormatFieldNode)：整数读写（Int8ub 等）
-//! - [`BytesNode`](bytes::BytesNode)：固定长度字节读写
-//! - [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)：剩余字节读写
-//!
-//! Phase 1.4 将添加 `Struct` / `StructRef` 复合节点变体。
+//! 当前含 5 个节点变体：
+//! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
+//!   [`BytesNode`](bytes::BytesNode)（固定长度字节）、
+//!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）
+//! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
+//!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）
 
 pub mod bytes;
 pub mod format_field;
 pub mod greedy_bytes;
+pub mod struct_node;
+pub mod struct_ref;
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -30,6 +32,8 @@ use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use pyo3::prelude::*;
+use struct_node::StructNode;
+use struct_ref::StructRefNode;
 
 /// 所有构造器节点实现的统一接口。
 ///
@@ -38,6 +42,13 @@ use pyo3::prelude::*;
 ///
 /// 每个具体节点类型实现此 trait，然后通过 `enum_dispatch` 在 [`Node`] 枚举上
 /// 自动生成静态分派的 `match` 代码。
+///
+/// # enum_dispatch 用法说明
+///
+/// `#[enum_dispatch]` 必须同时标注在 trait 和 enum 上：trait 上的标注让宏缓存
+/// trait 定义，enum 上的 `#[enum_dispatch(Construct)]` 引用缓存生成 match 分派。
+/// 若 trait 上缺少标注，enum 端的宏会静默不生成 impl（无编译错误，但运行时分派失败）。
+#[enum_dispatch]
 pub trait Construct {
     /// 从流中解析，直接构造并返回 Python 对象。
     ///
@@ -98,10 +109,10 @@ pub trait Construct {
 ///
 /// 新增节点类型需在此枚举添加变体（Phase 2+ 扩展时修改）。
 ///
-/// # Phase 1.3 变体
+/// # Phase 1.4 变体
 ///
-/// 仅含 3 个原子节点。Phase 1.4 将添加 `Struct(StructNode)` 和
-/// `StructRef(StructRefNode)` 复合节点。
+/// - 3 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`
+/// - 2 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）
 #[enum_dispatch(Construct)]
 pub enum Node {
     /// 整数读写节点：`Int8ub` / `Int16ul` / ... （对应 Python construct `FormatField`）
@@ -110,7 +121,8 @@ pub enum Node {
     Bytes(BytesNode),
     /// 剩余字节读写节点：`GreedyBytes` （对应 Python construct `GreedyBytes`）
     GreedyBytes(GreedyBytesNode),
-    // Phase 1.4 将添加：
-    // Struct(StructNode),
-    // StructRef(StructRefNode),
+    /// 字段序列根节点：`StructMixin` 子类的根（对应 Python construct `Struct`）
+    Struct(StructNode),
+    /// 嵌套引用节点：引用另一个 `StructMixin` 子类的执行树
+    StructRef(StructRefNode),
 }
