@@ -403,12 +403,11 @@ def _compile_schema_for_class(cls):
         # Rust 侧该错误消息含 "unresolved" 或 "未解析"。
         err_str = str(e)
         if "unresolved" in err_str.lower() or "未解析" in err_str:
+            # SF-1 修复：在安装延迟桩前注入 dataclass 字段配置。
+            # Phase 2 的 _FieldDescriptor 有 __hash__=None（表达式系统），
+            # 若不替换为 dataclasses.field()，@dataclass 会拒绝。
+            _apply_dataclass_field_config(cls, descriptors)
             _install_lazy_stubs(cls)
-            # 延迟桩路径：不调用 _apply_dataclass_field_config，
-            # 保留原始 _FieldDescriptor 以便 _retry_compile 重新收集。
-            # @dataclass 此时生成临时 __init__（所有字段 positional），
-            # 成功重编译后由 _retry_compile 注入配置。
-            return
         else:
             raise
 

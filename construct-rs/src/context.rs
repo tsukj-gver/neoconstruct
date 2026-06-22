@@ -98,6 +98,26 @@ impl<'py> Context<'py> {
         }
     }
 
+    /// 用 interned `PyString` key 写入字段（build 方向 context 更新，设计 §5.4）。
+    ///
+    /// 与 [`Context::set_field`] 的区别：接收 `&Py<PyString>`（interned key）而非 `&str`，
+    /// 避免 `PyDict_SetItem` 内部重复创建临时 str + hash 计算。
+    /// StructNode.build 的 RW 字段在取值后调用此方法写入 context，
+    /// 供后续字段的表达式引用。
+    ///
+    /// 占位 context（`fields = None`）上为无操作。
+    pub fn set_field_interned(
+        &self,
+        name: &Py<PyString>,
+        value: &Bound<'_, PyAny>,
+        _py: Python<'_>,
+    ) -> PyResult<()> {
+        match &self.fields {
+            Some(fields) => fields.set_item(name.bind(_py), value),
+            None => Ok(()),
+        }
+    }
+
     /// 读取当前层字段（Phase 2 的 this.xxx 引用使用）。
     ///
     /// Phase 1 不调用此方法（无 this 表达式）。Phase 2 表达式系统会通过此方法
@@ -391,6 +411,55 @@ mod tests {
             let value = py.eval_bound("0", None, None).expect("eval");
             ctx.set_field("", &value).expect("set empty");
             assert!(ctx.get_field("").expect("get").is_some());
+        });
+    }
+
+    // ======================================================================
+    // set_field_interned（Phase 2 表达式系统 build 方向使用）
+    // ======================================================================
+
+    #[test]
+    fn set_field_interned_stores_value() {
+        with_python(|py| {
+            let ctx = Context::new_root(py).expect("root");
+            let key = PyString::new_bound(py, "count").unbind();
+            let value = py.eval_bound("42", None, None).expect("eval 42");
+            ctx.set_field_interned(&key, &value, py)
+                .expect("set_field_interned");
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            // 验证值正确
+            let retrieved = ctx.get_field("count").expect("get").expect("exist");
+            let n: i64 = retrieved.extract().expect("extract");
+            assert_eq!(n, 42);
+        });
+    }
+
+    #[test]
+    fn set_field_interned_on_placeholder_is_noop() {
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let key = PyString::new_bound(py, "x").unbind();
+            let value = py.eval_bound("1", None, None).expect("eval 1");
+            // 占位 context 上 set_field_interned 为无操作，不报错。
+            ctx.set_field_interned(&key, &value, py)
+                .expect("noop on placeholder");
+            assert!(ctx.fields().is_none());
+        });
+    }
+
+    #[test]
+    fn set_field_interned_overrides_existing() {
+        with_python(|py| {
+            let ctx = Context::new_root(py).expect("root");
+            let key = PyString::new_bound(py, "x").unbind();
+            let v1 = py.eval_bound("1", None, None).expect("eval 1");
+            ctx.set_field_interned(&key, &v1, py).expect("set v1");
+            let v2 = py.eval_bound("2", None, None).expect("eval 2");
+            ctx.set_field_interned(&key, &v2, py).expect("set v2");
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            let retrieved = ctx.get_field("x").expect("get").expect("exist");
+            let n: i64 = retrieved.extract().expect("extract");
+            assert_eq!(n, 2);
         });
     }
 }

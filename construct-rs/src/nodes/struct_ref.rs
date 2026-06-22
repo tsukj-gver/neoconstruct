@@ -272,12 +272,22 @@ class {name}:
         cls: &Py<PyType>,
         fields: Vec<(String, Node)>,
     ) -> Py<CompiledSchema> {
-        // 将 String 字段名转换为 FieldName（interned），并传入 cls + has_post_init=false。
-        let interned_fields = fields
+        // 将 String 字段名转换为 StructField（interned + mode=Rw）。
+        use crate::nodes::struct_node::{FieldMode, StructField};
+        let struct_fields = fields
             .into_iter()
-            .map(|(name, node)| (crate::nodes::struct_node::FieldName::new(py, name), node))
+            .map(|(name, node)| StructField {
+                name: crate::nodes::struct_node::FieldName::new(py, name),
+                node,
+                mode: FieldMode::Rw,
+            })
             .collect();
-        let root = Node::Struct(StructNode::new(interned_fields, cls.clone_ref(py), false));
+        let root = Node::Struct(StructNode::new(
+            struct_fields,
+            cls.clone_ref(py),
+            false,
+            false,
+        ));
         let schema = CompiledSchema::new(root, cls.clone_ref(py));
         let schema_py = Py::new(py, schema).expect("Py::new schema");
         cls.bind(py)

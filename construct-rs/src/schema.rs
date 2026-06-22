@@ -79,6 +79,19 @@ impl CompiledSchema {
     pub fn cls(&self) -> &Py<PyType> {
         &self.cls
     }
+
+    /// 判断根节点（StructNode）是否含有表达式字段。
+    ///
+    /// 决定 `_parse_raw` / `_build_raw` 入口使用 `Context::new_root`（有表达式）
+    /// 还是 `Context::placeholder`（无表达式，Phase 1 性能优化保留）。
+    ///
+    /// 非 Struct 根节点视为无表达式。
+    fn root_has_expressions(&self) -> bool {
+        match &self.root {
+            Node::Struct(s) => s.has_expressions(),
+            _ => false,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -97,13 +110,14 @@ impl CompiledSchema {
     /// # 内部流程（方案 B'）
     ///
     /// 1. 从 `PyBytes` 提取 `&[u8]`，创建 `ParseStream`（纯 Rust）。
-    /// 2. 创建占位 `Context`（Phase 1 不读写 context，不分配 `PyDict`，P0-2 优化）
-    ///    与根 `Path`。
+    /// 2. 根据 root 是否含表达式选择 Context：
+    ///    - 有表达式 → `Context::new_root`（创建 PyDict，供表达式求值）
+    ///    - 无表达式 → `Context::placeholder`（零开销，Phase 1 优化保留）
     /// 3. 调用 `self.root.parse(...)`——进入执行树遍历。
     /// 4. StructNode.parse 内部完整构造用户类实例（create_class + force_setattr）。
     /// 5. 直接返回实例（不再跨 FFI 返回 dict 到 Python）。
     ///
-    /// 详见 `docs/设计修订-parse路径优化.md` §3.1。
+    /// 详见 `docs/设计修订-parse路径优化.md` §3.1、`docs/模块设计-表达式系统.md` §5.5。
     #[pyo3(signature = (data))]
     pub fn _parse_raw<'py>(
         &self,
@@ -112,8 +126,13 @@ impl CompiledSchema {
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = data.as_bytes();
         let mut stream = ParseStream::new(bytes);
-        // P0-2：Phase 1 不读写 context，使用占位 context 避免创建空 PyDict。
-        let mut ctx = Context::placeholder(py);
+        // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
+        let mut ctx = if self.root_has_expressions() {
+            Context::new_root(py)?
+        } else {
+            // P0-2：无表达式时使用占位 context（不分配 PyDict）。
+            Context::placeholder(py)
+        };
         let mut path = Path::new();
         // root.parse 返回用户类实例（StructNode 内部 create_class + force_setattr）
         let result = self.root.parse(py, &mut stream, &mut ctx, &mut path)?;
@@ -130,7 +149,7 @@ impl CompiledSchema {
     /// # 内部流程
     ///
     /// 1. 创建 `BuildStream`（纯 Rust 输出缓冲）。
-    /// 2. 创建占位 `Context`（Phase 1 不读写 context，P0-2 优化）与根 `Path`。
+    /// 2. 根据 root 是否含表达式选择 Context（同 `_parse_raw`）。
     /// 3. 调用 `self.root.build(obj, ...)`——遍历执行树，通过 C API 读取属性。
     /// 4. 将 `BuildStream` 的字节缓冲转为 `PyBytes` 返回。
     pub fn _build_raw<'py>(
@@ -139,8 +158,12 @@ impl CompiledSchema {
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let mut stream = BuildStream::new();
-        // P0-2：Phase 1 不读写 context，使用占位 context。
-        let mut ctx = Context::placeholder(py);
+        // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
+        let mut ctx = if self.root_has_expressions() {
+            Context::new_root(py)?
+        } else {
+            Context::placeholder(py)
+        };
         let mut path = Path::new();
         self.root.build(py, obj, &mut stream, &mut ctx, &mut path)?;
         Ok(PyBytes::new_bound(py, &stream.into_bytes()))
@@ -178,7 +201,7 @@ mod tests {
             .expect("get object")
             .extract::<Py<PyType>>()
             .expect("extract type");
-        Node::Struct(StructNode::new(Vec::new(), cls, false))
+        Node::Struct(StructNode::new(Vec::new(), cls, false, false))
     }
 
     #[test]

@@ -34,7 +34,7 @@ use crate::error::ConstructError;
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
-use crate::nodes::struct_node::{FieldName, StructNode};
+use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
@@ -108,18 +108,29 @@ pub fn compile_schema(
     let has_post_init = check_has_post_init(cls);
 
     // 4. 逐字段构建节点（FieldName 含 interned PyString）
-    let mut fields: Vec<(FieldName, Node)> = Vec::with_capacity(field_names.len());
+    let mut fields: Vec<StructField> = Vec::with_capacity(field_names.len());
     for (name, desc) in field_names.iter().zip(descriptors.iter()) {
         let desc_bound = desc.bind(py);
         let node =
             build_node_from_descriptor(py, desc_bound).map_err(|e| with_field_context(e, name))?;
-        // FieldName::new 创建 interned PyString 缓存
-        let field_name = FieldName::new(py, name.clone());
-        fields.push((field_name, node));
+        // FieldName::new 创建 interned PyString 缓存。
+        // 当前所有字段 mode 默认为 Rw（子任务 2.3 将传入实际 mode）。
+        let field = StructField {
+            name: crate::nodes::struct_node::FieldName::new(py, name.clone()),
+            node,
+            mode: FieldMode::Rw,
+        };
+        fields.push(field);
     }
 
-    // 5. 组装根 Struct 节点（含 cls + has_post_init）
-    let root = Node::Struct(StructNode::new(fields, cls.clone().unbind(), has_post_init));
+    // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
+    //    has_expressions 暂时为 false（子任务 2.3 将根据表达式编译结果设置）。
+    let root = Node::Struct(StructNode::new(
+        fields,
+        cls.clone().unbind(),
+        has_post_init,
+        false,
+    ));
 
     // 6. 包装为 CompiledSchema
     Ok(CompiledSchema::new(root, cls.clone().unbind()))
@@ -339,8 +350,8 @@ class {name}:
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 1);
                     let fields = s.fields();
-                    assert_eq!(fields[0].0.rust_name(), "address");
-                    match &fields[0].1 {
+                    assert_eq!(fields[0].name.rust_name(), "address");
+                    match &fields[0].node {
                         Node::FormatField(ff) => {
                             assert_eq!(ff.format(), PythonFormat::UnsignedInt8Big);
                             assert_eq!(ff.length(), 1);
@@ -394,10 +405,10 @@ class {name}:
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 4);
                     let fields = s.fields();
-                    assert!(matches!(fields[0].1, Node::FormatField(_)));
-                    assert!(matches!(fields[1].1, Node::FormatField(_)));
-                    assert!(matches!(fields[2].1, Node::Bytes(_)));
-                    assert!(matches!(fields[3].1, Node::GreedyBytes(_)));
+                    assert!(matches!(fields[0].node, Node::FormatField(_)));
+                    assert!(matches!(fields[1].node, Node::FormatField(_)));
+                    assert!(matches!(fields[2].node, Node::Bytes(_)));
+                    assert!(matches!(fields[3].node, Node::GreedyBytes(_)));
                 }
                 other => panic!("expected Node::Struct, got {:?}", other),
             }
@@ -421,9 +432,9 @@ class {name}:
             match schema.root() {
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 1);
-                    match &s.fields()[0].1 {
+                    match &s.fields()[0].node {
                         Node::StructRef(sr) => {
-                            assert_eq!(s.fields()[0].0.rust_name(), "inner");
+                            assert_eq!(s.fields()[0].name.rust_name(), "inner");
                             // cls 应指向 Inner 类
                             let inner_name = sr.cls().bind(py).name().expect("name");
                             assert_eq!(inner_name.to_string(), "Inner");

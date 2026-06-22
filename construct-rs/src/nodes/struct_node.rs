@@ -82,16 +82,52 @@ impl FieldName {
     }
 }
 
+/// 字段模式：RW（读写）、RO（只读）、WO（只写）。
+///
+/// 设计依据：`docs/模块设计-表达式系统.md` §5.2。
+///
+/// - `Rw`：读写——build 从实例取值，parse 存入实例。
+/// - `Ro`：只读——build 自动计算（不从实例取值），parse 存入实例。
+///   （RO 节点 Tell/Computed 在子任务 2.6 实现。）
+/// - `Wo`：只写——build 从实例取值，parse 不存入实例（丢弃）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FieldMode {
+    /// 读写：build 从实例取值，parse 存入实例。
+    Rw,
+    /// 只读：build 自动计算（不从实例取值），parse 存入实例。
+    Ro,
+    /// 只写：build 从实例取值，parse 不存入实例（丢弃）。
+    Wo,
+}
+
+/// StructNode 的单个字段：携带模式信息。
+///
+/// 设计依据：`docs/模块设计-表达式系统.md` §5.2。
+///
+/// 将 Phase 1 的 `(FieldName, Node)` 元组扩展为携带 `mode`（RW/RO/WO）的结构体，
+/// 供 parse/build 路径按模式分支处理。
+#[derive(Debug)]
+pub struct StructField {
+    /// 字段名（interned PyString + Rust String）。
+    pub name: FieldName,
+    /// 子节点。
+    pub node: Node,
+    /// 字段模式（RW/RO/WO）。
+    pub mode: FieldMode,
+}
+
 /// StructMixin 子类的根节点：按顺序解析/构建一组命名字段。
 ///
 /// 对应 Python construct 的 `Struct`。
 ///
 /// # parse 行为（方案 B'）
 ///
-/// 1. 创建 `PyDict`（C API `PyDict_New`）。
-/// 2. 对每个字段 `(FieldName, node)`：
-///    - `node.parse(...)` —— 递归解析子节点
-///    - `dict.set_item(py_name, value)` —— 用 interned key 写入 dict（裸 `?`）
+/// 1. 创建/复用 `PyDict`（见下方 `has_expressions` 分支）。
+/// 2. 对每个 `StructField`：
+///    - `field.node.parse(...)` —— 递归解析子节点
+///    - 根据 `field.mode` 分支：
+///      - `Rw`/`Ro`：`dict.set_item(py_name, value)` —— 存入 dict
+///      - `Wo`：`drop(value)` —— 仅消费字节，不存入 dict
 ///    - 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）
 /// 3. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例。
 /// 4. [`force_setattr`]：`PyObject_GenericSetAttr(instance, "__dict__", dict)`
@@ -99,31 +135,41 @@ impl FieldName {
 /// 5. 若 `has_post_init`：调用 `instance.__post_init__()`。
 /// 6. 返回实例（用户类对象，不是 dict）。
 ///
-/// Phase 1 **不调用 `ctx.set_field`**（无 this 表达式，context 不被读取）。
+/// `has_expressions` 控制 context/dict 模式：
+/// - `false`：新建独立 `PyDict`（Phase 1 行为，使用 `placeholder` context）。
+/// - `true`：复用 ctx 的 `PyDict` 作为 instance dict（`new_root` context）。
+///   parse 结束时 `clone_ref` dict 给实例，ctx 的 dict 引用随 ctx 丢弃。
+///
 /// 成功路径**不维护 Path**（P0-3 优化，零 String 分配）。
 ///
 /// parse **不要求消费全部输入**：多余字节被忽略（对齐 Python construct Struct 语义）。
 ///
 /// # build 行为
 ///
-/// 对每个字段 `(FieldName, node)`：
-/// - `obj.getattr(py_name)` —— 用 interned key 读取属性（命中 method cache）
-/// - `node.build(value, ...)` —— 递归构建子节点
-/// - 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）
+/// 对每个 `StructField`，根据 `field.mode` 分支：
+/// - `Rw`：`obj.getattr(py_name)` 取值 → `ctx.set_field_interned`（若 has_expressions）
+///   → `node.build(value, ...)`
+/// - `Wo`：`obj.getattr(py_name)` 取值 → `node.build(value, ...)`（不写 context）
+/// - `Ro`：当前返回 `Err`（RO 节点 Tell/Computed 在 2.6 实现）
 ///
-/// Phase 1 **不调用 `ctx.set_field`**。
+/// 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）。
 ///
 /// # sizeof
 ///
 /// 累加所有字段 sizeof；任一字段返回 Err（如 `GreedyBytes`）则整体返回 Err。
 #[derive(Debug)]
 pub struct StructNode {
-    /// 有序字段列表：`(字段名缓存, 子节点)`。
-    fields: Vec<(FieldName, Node)>,
+    /// 有序字段列表（携带模式信息）。
+    fields: Vec<StructField>,
     /// 用户类引用（parse 时 `create_class` 构造实例 + 错误信息中报告类名）。
     cls: Py<PyType>,
     /// 编译期检测：用户类是否定义了 `__post_init__`。
     has_post_init: bool,
+    /// 该 Struct 是否含有表达式（决定 parse/build 入口用 `new_root` 还是 `placeholder`）。
+    ///
+    /// - `false` → `placeholder`（Phase 1 性能优化保留）
+    /// - `true` → `new_root`（恢复 context 使用）
+    has_expressions: bool,
 }
 
 impl StructNode {
@@ -131,22 +177,29 @@ impl StructNode {
     ///
     /// # 参数
     ///
-    /// - `fields`：有序字段列表（`FieldName` 已含 interned PyString）。
+    /// - `fields`：有序字段列表（`StructField` 已含 interned PyString + mode）。
     /// - `cls`：用户类 Python 引用（`@dataclass` 装饰的 StructMixin 子类）。
     /// - `has_post_init`：编译期检测用户类是否定义了 `__post_init__`。
-    pub fn new(fields: Vec<(FieldName, Node)>, cls: Py<PyType>, has_post_init: bool) -> Self {
+    /// - `has_expressions`：该 Struct 是否含有表达式字段（决定 context 模式）。
+    pub fn new(
+        fields: Vec<StructField>,
+        cls: Py<PyType>,
+        has_post_init: bool,
+        has_expressions: bool,
+    ) -> Self {
         Self {
             fields,
             cls,
             has_post_init,
+            has_expressions,
         }
     }
 
     /// 测试专用构造器：用给定的字段名（非 interned）与默认 mock 类创建 StructNode。
     ///
     /// 自动 intern 传入的字段名，并创建一个最小 Python `object` 子类作为 `cls`，
-    /// `has_post_init = false`。供单元测试无需手工构造 `Py<PyType>` 与
-    /// `FieldName`（设计修订 §5.7.2 N6-R3 建议）。
+    /// `has_post_init = false`，`has_expressions = false`，所有字段 `mode = Rw`。
+    /// 供单元测试无需手工构造 `Py<PyType>` 与 `FieldName`（设计修订 §5.7.2 N6-R3 建议）。
     ///
     /// # 参数
     ///
@@ -154,16 +207,20 @@ impl StructNode {
     /// - `fields`：`(字段名字符串, 子节点)` 列表。
     #[cfg(test)]
     pub fn new_for_test(py: Python<'_>, fields: Vec<(String, Node)>) -> Self {
-        let interned_fields = fields
+        let struct_fields = fields
             .into_iter()
-            .map(|(name, node)| (FieldName::new(py, name), node))
+            .map(|(name, node)| StructField {
+                name: FieldName::new(py, name),
+                node,
+                mode: FieldMode::Rw,
+            })
             .collect();
         let cls = py
             .eval_bound("type('MockStruct', (), {})", None, None)
             .expect("create mock class")
             .extract::<Py<PyType>>()
             .expect("extract Py<PyType>");
-        Self::new(interned_fields, cls, false)
+        Self::new(struct_fields, cls, false, false)
     }
 
     /// 返回字段数量。
@@ -179,13 +236,18 @@ impl StructNode {
     }
 
     /// 返回字段列表的只读切片。
-    pub fn fields(&self) -> &[(FieldName, Node)] {
+    pub fn fields(&self) -> &[StructField] {
         &self.fields
     }
 
     /// 返回用户类引用。
     pub fn cls(&self) -> &Py<PyType> {
         &self.cls
+    }
+
+    /// 返回该 Struct 是否含有表达式字段（决定 context 模式）。
+    pub fn has_expressions(&self) -> bool {
+        self.has_expressions
     }
 }
 
@@ -197,25 +259,74 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 方案 B' 步骤 1：创建独立 dict（PyDict_New，ABI3 兼容）。
-        let dict = PyDict::new_bound(py);
+        // 方案 B' 步骤 1-2：获取 dict 并逐字段解析。
+        //
+        // has_expressions=false（Phase 1 路径）：新建独立 PyDict，写入此 dict。
+        //   ctx 为 placeholder（无 PyDict），不写 context。WO 字段仍按 mode 丢弃。
+        //
+        // has_expressions=true（Phase 2 路径）：复用 ctx 的 PyDict 作为 instance dict
+        //   （零额外 PyDict 创建，设计 §5.5.2）。通过 ctx.set_field_interned 写入
+        //   （每次调用独立借用 ctx.fields，与 node.parse 的 &mut ctx 不冲突——顺序调用）。
+        //   最后 clone_ref ctx 的 dict 给实例。
+        //
+        // **mode 分支在两条路径中都生效**：WO 字段无论是否有表达式都仅消费字节。
 
-        // 方案 B' 步骤 2：逐字段解析 + set_item 到独立 dict（使用 interned key）。
-        // P0-3：成功路径不 push/pop Path（零 String 分配）；
-        //       子节点 Err 时通过 push_path_segment 重建路径（仅错误路径）。
-        // P0-4：set_item 用裸 `?`（From<PyErr>），移除 map_err 闭包。
-        for (field_name, node) in &self.fields {
-            let value = match node.parse(py, stream, ctx, path) {
-                Ok(v) => v,
-                Err(mut e) => {
-                    e.push_path_segment(field_name.rust_name());
-                    return Err(e);
+        // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
+        let dict_for_instance: Py<PyAny> = if self.has_expressions {
+            // Phase 2 表达式路径：使用 ctx 的 dict。
+            for field in &self.fields {
+                let value = match field.node.parse(py, stream, ctx, path) {
+                    Ok(v) => v,
+                    Err(mut e) => {
+                        e.push_path_segment(field.name.rust_name());
+                        return Err(e);
+                    }
+                };
+                match field.mode {
+                    FieldMode::Rw | FieldMode::Ro => {
+                        // 写入 ctx 的 dict（同时充当 context 与 instance dict）。
+                        ctx.set_field_interned(field.name.py_name(), value.bind(py), py)?;
+                    }
+                    FieldMode::Wo => {
+                        // WO：仅消费字节，不写入 dict/context。
+                        drop(value);
+                    }
                 }
-            };
-            // set_item 接收 &Bound<PyAny>；用 interned py_name 避免 str 重建。
-            // 裸 `?`：PyErr → ConstructError::Generic（From<PyErr>），错误路径由上层重建。
-            dict.set_item(field_name.py_name().bind(py), value.bind(py))?;
-        }
+            }
+            // clone_ref ctx 的 dict 给实例（ctx 仍持有引用，parse 结束后随 ctx 丢弃）。
+            // SAFETY: ctx.fields() 返回有效的 Bound<PyDict> 引用，as_ptr() 是有效的
+            // Python 对象指针。from_borrowed_ptr 递增引用计数（等价于 clone_ref 语义）。
+            // 持有 GIL（由 py 参数保证）。
+            let dict_ptr = ctx
+                .fields()
+                .expect("context must have dict for expression struct")
+                .as_ptr();
+            unsafe { Py::<PyAny>::from_borrowed_ptr(py, dict_ptr) }
+        } else {
+            // Phase 1 路径：新建独立 PyDict。
+            let dict = PyDict::new_bound(py);
+            for field in &self.fields {
+                let value = match field.node.parse(py, stream, ctx, path) {
+                    Ok(v) => v,
+                    Err(mut e) => {
+                        e.push_path_segment(field.name.rust_name());
+                        return Err(e);
+                    }
+                };
+                match field.mode {
+                    FieldMode::Rw | FieldMode::Ro => {
+                        // RW/RO：存入 instance dict。
+                        // 裸 `?`：PyErr → ConstructError::Generic（From<PyErr>）。
+                        dict.set_item(field.name.py_name().bind(py), value.bind(py))?;
+                    }
+                    FieldMode::Wo => {
+                        // WO：仅消费字节，不存入 dict。
+                        drop(value);
+                    }
+                }
+            }
+            dict.into_any().unbind()
+        };
 
         // 方案 B' 步骤 3：tp_new 创建空实例（直接读 tp_new 槽位）。
         let instance = create_class(self.cls.bind(py)).map_err(|e| ConstructError::Generic {
@@ -225,7 +336,7 @@ impl Construct for StructNode {
 
         // 方案 B' 步骤 4：整体替换 __dict__（绕过自定义 __setattr__）。
         // 错误时附加 slots 提示（设计修订 §5.7.1 N4-R3 运行期兜底）。
-        force_setattr(py, &instance, "__dict__", dict.into_any().unbind()).map_err(|e| {
+        force_setattr(py, &instance, "__dict__", dict_for_instance).map_err(|e| {
             ConstructError::Generic {
                 message: format!(
                     "failed to set __dict__ on instance: {}. \
@@ -258,24 +369,62 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        for (field_name, node) in &self.fields {
-            // 用 interned py_name getattr（命中 method cache）。
-            let value = obj.getattr(field_name.py_name().bind(py)).map_err(|e| {
-                ConstructError::Generic {
-                    message: format!(
-                        "object has no attribute '{}' (required for build): {}",
-                        field_name.rust_name(),
-                        e
-                    ),
-                    path: path.to_string(),
+        for field in &self.fields {
+            match field.mode {
+                FieldMode::Rw => {
+                    // RW：从实例 getattr 取值，写入 context（若有表达式），递归 build。
+                    let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
+                        ConstructError::Generic {
+                            message: format!(
+                                "object has no attribute '{}' (required for build): {}",
+                                field.name.rust_name(),
+                                e
+                            ),
+                            path: path.to_string(),
+                        }
+                    })?;
+                    // 写入 context（供后续表达式引用）。
+                    if self.has_expressions {
+                        ctx.set_field_interned(field.name.py_name(), &value, py)?;
+                    }
+                    // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
+                    match field.node.build(py, &value, stream, ctx, path) {
+                        Ok(()) => {}
+                        Err(mut e) => {
+                            e.push_path_segment(field.name.rust_name());
+                            return Err(e);
+                        }
+                    }
                 }
-            })?;
-            // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
-            match node.build(py, &value, stream, ctx, path) {
-                Ok(()) => {}
-                Err(mut e) => {
-                    e.push_path_segment(field_name.rust_name());
-                    return Err(e);
+                FieldMode::Wo => {
+                    // WO：从实例 getattr 取值，递归 build。
+                    // 不写入 context（编译期已禁止表达式引用 WO 字段，§3.4.4）。
+                    let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
+                        ConstructError::Generic {
+                            message: format!(
+                                "object has no attribute '{}' (required for build): {}",
+                                field.name.rust_name(),
+                                e
+                            ),
+                            path: path.to_string(),
+                        }
+                    })?;
+                    match field.node.build(py, &value, stream, ctx, path) {
+                        Ok(()) => {}
+                        Err(mut e) => {
+                            e.push_path_segment(field.name.rust_name());
+                            return Err(e);
+                        }
+                    }
+                }
+                FieldMode::Ro => {
+                    // RO：不从实例取值，通过节点自身逻辑计算（Tell/Computed/Const/ContextParam）。
+                    // 当前没有 RO 节点（Tell/Computed 在子任务 2.6 实现），
+                    // 此分支不会被触发。代码结构已准备好。
+                    return Err(ConstructError::Generic {
+                        message: "RO fields not yet supported (Tell/Computed in 2.6)".to_string(),
+                        path: path.to_string(),
+                    });
                 }
             }
         }
@@ -284,14 +433,13 @@ impl Construct for StructNode {
 
     fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
         let mut total = 0usize;
-        for (_, node) in &self.fields {
-            total =
-                total
-                    .checked_add(node.sizeof(ctx)?)
-                    .ok_or_else(|| ConstructError::Generic {
-                        message: "struct size overflowed usize".to_string(),
-                        path: String::new(),
-                    })?;
+        for field in &self.fields {
+            total = total.checked_add(field.node.sizeof(ctx)?).ok_or_else(|| {
+                ConstructError::Generic {
+                    message: "struct size overflowed usize".to_string(),
+                    path: String::new(),
+                }
+            })?;
         }
         Ok(total)
     }
@@ -329,6 +477,15 @@ mod tests {
     /// 构造 Int16ub 节点的便捷函数。
     fn u16_node() -> Node {
         Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big))
+    }
+
+    /// 构造 Rw StructField 的便捷函数（测试专用）。
+    fn rw_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        StructField {
+            name: FieldName::new(py, name),
+            node,
+            mode: FieldMode::Rw,
+        }
     }
 
     // ======================================================================
@@ -851,8 +1008,8 @@ mod tests {
             );
             let fields = node.fields();
             assert_eq!(fields.len(), 2);
-            assert_eq!(fields[0].0.rust_name(), "a");
-            assert_eq!(fields[1].0.rust_name(), "b");
+            assert_eq!(fields[0].name.rust_name(), "a");
+            assert_eq!(fields[1].name.rust_name(), "b");
         });
     }
 
@@ -916,7 +1073,7 @@ mod tests {
         with_py(|py| {
             let node = StructNode::new_for_test(py, vec![("count".to_string(), u8_node())]);
             // 提取 field_name 的 py_name 用于后续比较
-            let expected_key = node.fields()[0].0.py_name().clone_ref(py);
+            let expected_key = node.fields()[0].name.py_name().clone_ref(py);
 
             let mut stream = ParseStream::new(&[0x10]);
             let mut ctx = Context::new_root(py).expect("ctx");
@@ -955,8 +1112,8 @@ mod tests {
                 .extract::<Py<PyType>>()
                 .expect("extract Py<PyType>");
 
-            let fields = vec![(FieldName::new(py, "x"), u8_node())];
-            let node = StructNode::new(fields, cls, true);
+            let fields = vec![rw_field(py, "x", u8_node())];
+            let node = StructNode::new(fields, cls, true, false);
             let mut stream = ParseStream::new(&[0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -996,8 +1153,8 @@ mod tests {
                 .extract::<Py<PyType>>()
                 .expect("extract Py<PyType>");
 
-            let fields = vec![(FieldName::new(py, "x"), u8_node())];
-            let node = StructNode::new(fields, cls, false);
+            let fields = vec![rw_field(py, "x", u8_node())];
+            let node = StructNode::new(fields, cls, false, false);
             let mut stream = ParseStream::new(&[0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1034,11 +1191,8 @@ mod tests {
                 .extract::<Py<PyType>>()
                 .expect("extract");
 
-            let fields = vec![
-                (FieldName::new(py, "x"), u8_node()),
-                (FieldName::new(py, "y"), u8_node()),
-            ];
-            let node = StructNode::new(fields, cls, false);
+            let fields = vec![rw_field(py, "x", u8_node()), rw_field(py, "y", u8_node())];
+            let node = StructNode::new(fields, cls, false, false);
             let mut stream = ParseStream::new(&[0xAA, 0xBB]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1059,6 +1213,267 @@ mod tests {
                 .expect("extract");
             assert_eq!(x, 0xAA);
             assert_eq!(y, 0xBB);
+        });
+    }
+
+    // ======================================================================
+    // FieldMode 分支测试（Phase 2 子任务 2.4）
+    // ======================================================================
+
+    /// 构造 WO StructField 的便捷函数（测试专用）。
+    fn wo_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        StructField {
+            name: FieldName::new(py, name),
+            node,
+            mode: FieldMode::Wo,
+        }
+    }
+
+    /// 构造 RO StructField 的便捷函数（测试专用）。
+    fn ro_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        StructField {
+            name: FieldName::new(py, name),
+            node,
+            mode: FieldMode::Ro,
+        }
+    }
+
+    /// 创建 mock 类的便捷函数。
+    fn mock_cls(py: Python<'_>) -> Py<PyType> {
+        py.eval_bound("type('MockStruct', (), {})", None, None)
+            .expect("create mock class")
+            .extract::<Py<PyType>>()
+            .expect("extract Py<PyType>")
+    }
+
+    #[test]
+    fn wo_field_parse_consumes_bytes_but_not_stored_in_instance() {
+        // WO 字段 parse 时消费字节，但不存入实例 dict。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                wo_field(py, "pad", u8_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x01, 0xFF, 0x02]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0x01);
+            assert_eq!(b, 0x02);
+            // pad 字段不应存在于实例中
+            assert!(
+                inst.getattr("pad").is_err(),
+                "WO field 'pad' should not be in instance"
+            );
+            // 所有 3 字节都被消费
+            assert_eq!(stream.tell(), 3);
+        });
+    }
+
+    #[test]
+    fn wo_field_build_reads_from_instance_and_writes_bytes() {
+        // WO 字段 build 时从实例 getattr 取值并写字节（与 RW 行为一致）。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), wo_field(py, "pad", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x01, 'pad': 0xFF})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0x01, 0xFF]);
+        });
+    }
+
+    #[test]
+    fn ro_field_build_returns_error() {
+        // RO 字段 build 暂时不支持（Tell/Computed 在 2.6 实现）。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "computed", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 1, 'computed': 0})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            match err {
+                ConstructError::Generic { message, .. } => {
+                    assert!(
+                        message.contains("RO"),
+                        "error should mention RO: {}",
+                        message
+                    );
+                }
+                other => panic!("expected Generic error, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn ro_field_parse_stores_value_in_instance() {
+        // RO 字段 parse 时正常解析并存入实例（与 RW 相同）。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "c", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x10, 0x20]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let c: i64 = inst.getattr("c").unwrap().extract().unwrap();
+            assert_eq!(a, 0x10);
+            assert_eq!(c, 0x20);
+        });
+    }
+
+    // ======================================================================
+    // has_expressions 标志测试
+    // ======================================================================
+
+    #[test]
+    fn has_expressions_getter_returns_false_by_default() {
+        with_py(|py| {
+            let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
+            assert!(!node.has_expressions());
+        });
+    }
+
+    #[test]
+    fn has_expressions_true_uses_new_root_context_for_parse() {
+        // has_expressions=true 时，parse 路径使用 ctx 的 dict（new_root 创建）。
+        // 验证：parse 结果正确 + ctx 的 dict 被填充（表达式求值可用）。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let mut stream = ParseStream::new(&[0x01, 0x02]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // 验证实例属性正确
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0x01);
+            assert_eq!(b, 0x02);
+            // 验证 ctx 的 dict 也被填充（表达式求值可用）
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            assert_eq!(ctx_dict.len(), 2);
+            let ctx_a: i64 = ctx_dict.get_item("a").unwrap().unwrap().extract().unwrap();
+            assert_eq!(ctx_a, 0x01);
+        });
+    }
+
+    #[test]
+    fn has_expressions_true_with_wo_field_skips_context_write() {
+        // has_expressions=true + WO 字段：WO 不写入 ctx dict。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                wo_field(py, "pad", u8_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let mut stream = ParseStream::new(&[0x01, 0xFF, 0x02]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            // pad 不在实例中
+            assert!(inst.getattr("pad").is_err());
+            // ctx dict 只包含 RW 字段（a, b），不含 WO（pad）
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            assert_eq!(ctx_dict.len(), 2);
+            assert!(ctx_dict.contains("a").unwrap());
+            assert!(ctx_dict.contains("b").unwrap());
+            assert!(!ctx_dict.contains("pad").unwrap());
+        });
+    }
+
+    #[test]
+    fn has_expressions_true_build_writes_to_context() {
+        // has_expressions=true 时，build 的 RW 字段写入 ctx dict。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x01, 'b': 0x02})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0x01, 0x02]);
+            // ctx dict 应被填充
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            assert_eq!(ctx_dict.len(), 2);
+        });
+    }
+
+    #[test]
+    fn has_expressions_false_build_does_not_write_context() {
+        // has_expressions=false 时，build 不写入 ctx（placeholder 为 no-op）。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 42})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[42]);
+            // placeholder ctx 无 dict
+            assert!(ctx.fields().is_none());
+        });
+    }
+
+    #[test]
+    fn wo_field_with_expressions_does_not_write_context_on_build() {
+        // has_expressions=true + WO 字段 build：不写入 ctx dict。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), wo_field(py, "pad", u8_node())];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 1, 'pad': 0xFF})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[1, 0xFF]);
+            // ctx dict 只含 RW 字段（a），不含 WO（pad）
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            assert_eq!(ctx_dict.len(), 1);
+            assert!(ctx_dict.contains("a").unwrap());
+            assert!(!ctx_dict.contains("pad").unwrap());
         });
     }
 }
