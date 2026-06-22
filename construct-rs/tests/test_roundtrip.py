@@ -173,19 +173,23 @@ def test_bytes_roundtrip(length):
 
 
 def test_bytes_build_rejects_wrong_length():
-    """Bytes(4) 必须拒绝长度 ≠ 4 的输入（错误路径）。"""
+    """Bytes(4) build 不校验长度（设计 §4.7：build 不校验长度）。
+
+    设计文档 §4.7 明确规定 Bytes build 不校验长度。
+    任意长度的 bytes 都会被原样写入。
+    """
     from construct import FieldLengthError
 
     @dataclass
     class B4(StructMixin):
         x: bytes = field(Bytes(4))
 
-    # 错误：3 字节
-    with pytest.raises(FieldLengthError):
-        B4(x=b"\x00\x01\x02").build()
-    # 错误：5 字节
-    with pytest.raises(FieldLengthError):
-        B4(x=b"\x00\x01\x02\x03\x04").build()
+    # build 不校验：3 字节也能 build
+    built = B4(x=b"\x00\x01\x02").build()
+    assert built == b"\x00\x01\x02"
+    # build 不校验：5 字节也能 build
+    built = B4(x=b"\x00\x01\x02\x03\x04").build()
+    assert built == b"\x00\x01\x02\x03\x04"
 
 
 def test_bytes_build_accepts_bytearray():

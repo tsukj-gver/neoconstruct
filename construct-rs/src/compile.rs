@@ -31,6 +31,7 @@
 
 use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
 use crate::error::ConstructError;
+use crate::expr::{ExprOp, ExprProgram};
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
@@ -39,7 +40,7 @@ use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
 use pyo3::prelude::*;
-use pyo3::types::PyType;
+use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 
 /// StructMixin 子类通过此属性标识自身（由纯 Python 的 StructMixin 设置）。
 const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
@@ -157,11 +158,12 @@ pub fn compile_schema(
     let has_post_init = check_has_post_init(cls);
 
     // 4. 逐字段构建节点（FieldName 含 interned PyString）
+    let expr_programs_slice: &[Option<Py<PyAny>>] = expr_programs.as_deref().unwrap_or(&[]);
     let mut fields: Vec<StructField> = Vec::with_capacity(field_names.len());
     for (i, (name, desc)) in field_names.iter().zip(descriptors.iter()).enumerate() {
         let desc_bound = desc.bind(py);
-        let node =
-            build_node_from_descriptor(py, desc_bound).map_err(|e| with_field_context(e, name))?;
+        let node = build_node_from_descriptor(py, desc_bound, i, expr_programs_slice)
+            .map_err(|e| with_field_context(e, name))?;
         // FieldName::new 创建 interned PyString 缓存。
         // mode 从解析后的 modes_resolved 取（Phase 2 扩展）。
         let field = StructField {
@@ -209,9 +211,18 @@ fn check_has_post_init(cls: &Bound<'_, PyType>) -> bool {
 /// 将单个描述符转换为执行树节点。
 ///
 /// 按优先级尝试 `extract` 为具体描述符类型。详见模块级文档。
+///
+/// # 参数
+///
+/// - `py`：GIL token
+/// - `desc`：描述符的 Python 引用
+/// - `field_index`：当前字段在 fields 列表中的索引（用于从 `expr_programs` 取表达式）
+/// - `expr_programs`：每字段的表达式程序切片（与字段数等长，None 表示无表达式）
 fn build_node_from_descriptor(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
 ) -> Result<Node, ConstructError> {
     // 1. FormatFieldDescriptor → Node::FormatField
     if let Ok(fmt) = desc.extract::<Py<FormatFieldDescriptor>>() {
@@ -222,7 +233,45 @@ fn build_node_from_descriptor(
     // 2. BytesDescriptor → Node::Bytes
     if let Ok(b) = desc.extract::<Py<BytesDescriptor>>() {
         let b_ref = b.bind(py).get();
-        return Ok(Node::Bytes(BytesNode::new(b_ref.length)));
+        let length_obj = b_ref.length.bind(py);
+
+        // 尝试 extract 为 usize（常量长度，向后兼容 Phase 1）
+        if let Ok(n) = length_obj.extract::<usize>() {
+            return Ok(Node::Bytes(BytesNode::new_const(n)));
+        }
+
+        // 表达式长度：从 expr_programs 取该字段的 "length" 参数
+        let field_exprs = expr_programs.get(field_index).and_then(Option::as_ref).ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "Bytes field has non-constant length but no expression program was provided (field index {})",
+                    field_index
+                ),
+            })?;
+
+        // field_exprs 是一个 dict {param_name: [op_tuples]}
+        let field_exprs_dict =
+            field_exprs
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| ConstructError::Compilation {
+                    message: "expression program must be a dict".to_string(),
+                })?;
+        let ops_list_opt =
+            field_exprs_dict
+                .get_item("length")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("failed to get 'length' from expression programs: {}", e),
+                })?;
+        let ops_list = ops_list_opt.ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "Bytes field has non-constant length but 'length' key missing in expression program (field index {})",
+                    field_index
+                ),
+            })?;
+
+        let ops = parse_expr_ops_from_py(&ops_list)?;
+        let program = ExprProgram::new(ops);
+        return Ok(Node::Bytes(BytesNode::new_expr(program)));
     }
 
     // 3. GreedyBytesDescriptor → Node::GreedyBytes
@@ -250,6 +299,112 @@ fn build_node_from_descriptor(
     Err(ConstructError::Compilation {
         message: format!("未知的字段描述符类型: {}", repr_str),
     })
+}
+
+/// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
+///
+/// Python 侧编译器（`_compile_expr_tree`）将表达式树翻译为后序遍历的元组列表，
+/// 通过 FFI 传入 Rust。本函数将每个元组转换为对应的 [`ExprOp`] 枚举变体。
+///
+/// # 元组格式
+///
+/// 每个元组为 `(op_name, optional_arg)`：
+/// - `("getint", idx)` → [`ExprOp::GetInt`]（idx 是字段索引）
+/// - `("const", value)` → [`ExprOp::Const`]（value 是 i64）
+/// - `("add",)` / `("sub",)` / ... → 对应的二元/一元运算 [`ExprOp`]
+///
+/// # 错误
+///
+/// [`ConstructError::Compilation`]：ops_list 不是列表、元素不是元组、
+/// op_name 不在已知列表中、或参数类型不匹配。
+fn parse_expr_ops_from_py(ops_list: &Bound<'_, PyAny>) -> Result<Vec<ExprOp>, ConstructError> {
+    let list = ops_list
+        .downcast::<PyList>()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "expression ops must be a list, got {}",
+                ops_list
+                    .get_type()
+                    .name()
+                    .map(|n| n.to_string())
+                    .unwrap_or_default()
+            ),
+        })?;
+
+    let mut ops = Vec::with_capacity(list.len());
+    for item in list.iter() {
+        let tuple = item
+            .downcast::<PyTuple>()
+            .map_err(|_| ConstructError::Compilation {
+                message: format!(
+                    "each ExprOp must be a tuple, got {}",
+                    item.get_type()
+                        .name()
+                        .map(|n| n.to_string())
+                        .unwrap_or_default()
+                ),
+            })?;
+        let op_name: String = tuple
+            .get_item(0)
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("ExprOp tuple missing op name: {}", e),
+            })?
+            .extract()
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("ExprOp op name must be a string: {}", e),
+            })?;
+        let op = match op_name.as_str() {
+            "getint" => {
+                let idx: usize = tuple
+                    .get_item(1)
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("getint missing index: {}", e),
+                    })?
+                    .extract()
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("getint index must be int: {}", e),
+                    })?;
+                ExprOp::GetInt(idx)
+            }
+            "const" => {
+                let val: i64 = tuple
+                    .get_item(1)
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("const missing value: {}", e),
+                    })?
+                    .extract()
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("const value must be int: {}", e),
+                    })?;
+                ExprOp::Const(val)
+            }
+            "add" => ExprOp::Add,
+            "sub" => ExprOp::Sub,
+            "mul" => ExprOp::Mul,
+            "floordiv" => ExprOp::FloorDiv,
+            "mod" => ExprOp::Mod,
+            "bitand" => ExprOp::BitAnd,
+            "bitor" => ExprOp::BitOr,
+            "bitxor" => ExprOp::BitXor,
+            "shl" => ExprOp::Shl,
+            "shr" => ExprOp::Shr,
+            "neg" => ExprOp::Neg,
+            "not" => ExprOp::Not,
+            "eq" => ExprOp::Eq,
+            "ne" => ExprOp::Ne,
+            "lt" => ExprOp::Lt,
+            "le" => ExprOp::Le,
+            "gt" => ExprOp::Gt,
+            "ge" => ExprOp::Ge,
+            other => {
+                return Err(ConstructError::Compilation {
+                    message: format!("unknown ExprOp: {}", other),
+                });
+            }
+        };
+        ops.push(op);
+    }
+    Ok(ops)
 }
 
 /// 判断给定的 Python 类型对象是否为 StructMixin 子类。
@@ -438,7 +593,7 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let bytes4 = Py::new(py, BytesDescriptor { length: 4 })
+            let bytes4 = Py::new(py, BytesDescriptor::new(4.into_py(py)))
                 .expect("Py::new")
                 .into_any();
             let greedy = Py::new(py, GreedyBytesDescriptor)
@@ -780,7 +935,7 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let bytes2 = Py::new(py, BytesDescriptor { length: 2 })
+            let bytes2 = Py::new(py, BytesDescriptor::new(2.into_py(py)))
                 .expect("Py::new")
                 .into_any();
 
@@ -871,7 +1026,7 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let bytes2 = Py::new(py, BytesDescriptor { length: 2 })
+            let bytes2 = Py::new(py, BytesDescriptor::new(2.into_py(py)))
                 .expect("Py::new")
                 .into_any();
             let greedy = Py::new(py, GreedyBytesDescriptor)
@@ -1463,6 +1618,395 @@ class {name}:
                 }
                 other => panic!("expected Node::Struct, got {:?}", other),
             }
+        });
+    }
+
+    // ======================================================================
+    // Phase 2 子任务 2.5：parse_expr_ops_from_py
+    // ======================================================================
+
+    fn make_ops_list<'py>(py: Python<'py>, code: &str) -> Bound<'py, PyAny> {
+        py.eval_bound(code, None, None).expect("eval ops list")
+    }
+
+    #[test]
+    fn parse_expr_ops_simple_getint() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('getint', 0)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(ops, vec![ExprOp::GetInt(0)]);
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_const_value() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('const', 42)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(ops, vec![ExprOp::Const(42)]);
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_binary_mul() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('getint', 0), ('const', 2), ('mul',)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(ops, vec![ExprOp::GetInt(0), ExprOp::Const(2), ExprOp::Mul]);
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_addition() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('getint', 0), ('const', 1), ('add',)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(ops, vec![ExprOp::GetInt(0), ExprOp::Const(1), ExprOp::Add]);
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_all_comparison_ops() {
+        with_py(|py| {
+            for (code, expected) in [
+                ("[('eq',)]", ExprOp::Eq),
+                ("[('ne',)]", ExprOp::Ne),
+                ("[('lt',)]", ExprOp::Lt),
+                ("[('le',)]", ExprOp::Le),
+                ("[('gt',)]", ExprOp::Gt),
+                ("[('ge',)]", ExprOp::Ge),
+            ] {
+                let ops_list = make_ops_list(py, code);
+                let ops = parse_expr_ops_from_py(&ops_list)
+                    .unwrap_or_else(|e| panic!("parse '{}' failed: {:?}", code, e));
+                assert_eq!(ops, vec![expected], "mismatch for {}", code);
+            }
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_all_bitwise_ops() {
+        with_py(|py| {
+            for (code, expected) in [
+                ("[('bitand',)]", ExprOp::BitAnd),
+                ("[('bitor',)]", ExprOp::BitOr),
+                ("[('bitxor',)]", ExprOp::BitXor),
+                ("[('shl',)]", ExprOp::Shl),
+                ("[('shr',)]", ExprOp::Shr),
+            ] {
+                let ops_list = make_ops_list(py, code);
+                let ops = parse_expr_ops_from_py(&ops_list)
+                    .unwrap_or_else(|e| panic!("parse '{}' failed: {:?}", code, e));
+                assert_eq!(ops, vec![expected], "mismatch for {}", code);
+            }
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_unary_neg_and_not() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('getint', 0), ('neg',), ('not',)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(ops, vec![ExprOp::GetInt(0), ExprOp::Neg, ExprOp::Not]);
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_floordiv_and_mod() {
+        with_py(|py| {
+            let ops_list =
+                make_ops_list(py, "[('getint', 0), ('const', 3), ('floordiv',), ('mod',)]");
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(
+                ops,
+                vec![
+                    ExprOp::GetInt(0),
+                    ExprOp::Const(3),
+                    ExprOp::FloorDiv,
+                    ExprOp::Mod
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_chained_addition() {
+        with_py(|py| {
+            // count + 1 + 1
+            let ops_list = make_ops_list(
+                py,
+                "[('getint', 0), ('const', 1), ('add',), ('const', 1), ('add',)]",
+            );
+            let ops = parse_expr_ops_from_py(&ops_list).expect("parse");
+            assert_eq!(
+                ops,
+                vec![
+                    ExprOp::GetInt(0),
+                    ExprOp::Const(1),
+                    ExprOp::Add,
+                    ExprOp::Const(1),
+                    ExprOp::Add,
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_rejects_non_list() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "('getint', 0)");
+            let err = parse_expr_ops_from_py(&ops_list).expect_err("should fail");
+            match err {
+                ConstructError::Compilation { message } => {
+                    assert!(message.contains("must be a list"), "got: {}", message);
+                }
+                other => panic!("expected Compilation, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_rejects_non_tuple_element() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[42]");
+            let err = parse_expr_ops_from_py(&ops_list).expect_err("should fail");
+            match err {
+                ConstructError::Compilation { message } => {
+                    assert!(message.contains("must be a tuple"), "got: {}", message);
+                }
+                other => panic!("expected Compilation, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_expr_ops_rejects_unknown_op() {
+        with_py(|py| {
+            let ops_list = make_ops_list(py, "[('bogus',)]");
+            let err = parse_expr_ops_from_py(&ops_list).expect_err("should fail");
+            match err {
+                ConstructError::Compilation { message } => {
+                    assert!(message.contains("unknown"), "got: {}", message);
+                }
+                other => panic!("expected Compilation, got {:?}", other),
+            }
+        });
+    }
+
+    // ======================================================================
+    // Phase 2 子任务 2.5：compile_schema 表达式 Bytes 集成
+    // ======================================================================
+
+    /// 创建一个非 int 的 Py<PyAny>，用于模拟表达式对象。
+    fn make_non_int_marker(py: Python<'_>) -> Py<PyAny> {
+        py.eval_bound("'expr_marker'", None, None)
+            .expect("eval marker string")
+            .unbind()
+    }
+
+    #[test]
+    fn compile_bytes_expr_produces_expr_length_node() {
+        // BytesDescriptor(length=<非 int>) + expr_programs[1]=Some({"length": [...]})
+        // → BytesNode 使用 BytesLength::Expr
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ExprBytes");
+            let count_desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let bytes_desc = Py::new(py, BytesDescriptor::new(make_non_int_marker(py)))
+                .expect("Py::new")
+                .into_any();
+
+            let prog = make_expr_program(py); // {"length": [("getint", 0), ("const", 2), ("mul",)]}
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["count".to_string(), "data".to_string()],
+                vec![count_desc, bytes_desc],
+                None,
+                Some(vec![None, Some(prog)]),
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(s.has_expressions(), "should have expressions");
+                    let fields = s.fields();
+                    match &fields[1].node {
+                        Node::Bytes(b) => {
+                            assert!(
+                                b.length().is_expr(),
+                                "expected BytesLength::Expr, got {:?}",
+                                b.length()
+                            );
+                        }
+                        other => panic!("expected Node::Bytes, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bytes_const_with_none_expr_still_const() {
+        // BytesDescriptor(length=4) + expr_programs=None
+        // → BytesNode 使用 BytesLength::Const（向后兼容）
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ConstBytes");
+            let bytes_desc = Py::new(py, BytesDescriptor::new(4.into_py(py)))
+                .expect("Py::new")
+                .into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["data".to_string()],
+                vec![bytes_desc],
+                None,
+                None,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(
+                        !s.has_expressions(),
+                        "const Bytes should not set has_expressions"
+                    );
+                    let fields = s.fields();
+                    match &fields[0].node {
+                        Node::Bytes(b) => {
+                            assert!(
+                                b.length().is_const(),
+                                "expected BytesLength::Const, got {:?}",
+                                b.length()
+                            );
+                            assert_eq!(b.length().as_const(), Some(&4));
+                        }
+                        other => panic!("expected Node::Bytes, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bytes_non_int_without_expr_returns_error() {
+        // BytesDescriptor(length=<非 int>) + expr_programs=None
+        // → 应返回编译错误
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MissingExpr");
+            let bytes_desc = Py::new(py, BytesDescriptor::new(make_non_int_marker(py)))
+                .expect("Py::new")
+                .into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["data".to_string()],
+                vec![bytes_desc],
+                None,
+                None,
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("no expression program") || msg.contains("non-constant"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_bytes_expr_missing_length_key_returns_error() {
+        // BytesDescriptor(length=<非 int>) + expr_programs[0]=Some({})（缺少 "length" 键）
+        // → 应返回编译错误
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MissingKey");
+            let bytes_desc = Py::new(py, BytesDescriptor::new(make_non_int_marker(py)))
+                .expect("Py::new")
+                .into_any();
+            let empty_prog = py
+                .eval_bound("{}", None, None)
+                .expect("eval empty dict")
+                .unbind();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["data".to_string()],
+                vec![bytes_desc],
+                None,
+                Some(vec![Some(empty_prog)]),
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("'length'") || msg.contains("missing"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_bytes_expr_end_to_end_round_trip() {
+        // 完整的编译 + parse + build 回环
+        // Struct { count: Int8ub, data: Bytes(count * 2) }
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "RoundTripExpr");
+            let count_desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let bytes_desc = Py::new(py, BytesDescriptor::new(make_non_int_marker(py)))
+                .expect("Py::new")
+                .into_any();
+            // {"length": [("getint", 0), ("const", 2), ("mul",)]}
+            let prog = make_expr_program(py);
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["count".to_string(), "data".to_string()],
+                vec![count_desc, bytes_desc],
+                None,
+                Some(vec![None, Some(prog)]),
+            )
+            .expect("compile");
+
+            // --- parse ---
+            // count=3 → data=Bytes(3*2=6) → "ABCDEF"
+            let parse_data = b"\x03ABCDEF";
+            let data_binding = PyBytes::new_bound(py, parse_data);
+            let parsed = schema._parse_raw(py, &data_binding).expect("parse");
+            let count_val: i64 = parsed
+                .getattr("count")
+                .expect("getattr count")
+                .extract()
+                .expect("extract count");
+            assert_eq!(count_val, 3);
+            let data_binding2 = parsed.getattr("data").expect("getattr data");
+            let data_val: &[u8] = data_binding2
+                .downcast::<PyBytes>()
+                .expect("is PyBytes")
+                .as_bytes();
+            assert_eq!(data_val, b"ABCDEF");
+
+            // --- build ---
+            // Use cls directly to create the instance (avoid NameError)
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("count", 3).expect("set count");
+            kwargs
+                .set_item("data", PyBytes::new_bound(py, b"ABCDEF"))
+                .expect("set data");
+            let obj = cls.call((), Some(&kwargs)).expect("create obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), parse_data);
         });
     }
 }

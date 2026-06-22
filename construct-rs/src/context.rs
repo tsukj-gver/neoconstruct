@@ -44,6 +44,12 @@ pub struct Context<'py> {
     ///
     /// 顶层 context 的 `parent` 为 `None`。
     parent: Option<&'py Context<'py>>,
+    /// 字段名列表（interned PyString），供子节点表达式求值使用。
+    ///
+    /// 由 StructNode.parse/build 在开始遍历字段前设置（仅 `has_expressions=true` 时）。
+    /// [`crate::expr::eval_expr_int`] 的 `GetInt(idx)` 通过此列表索引取字段名，
+    /// 再从 `fields` PyDict 取值。`None` 表示未设置（无表达式的 Struct）。
+    field_names: Option<Vec<Py<PyString>>>,
 }
 
 impl<'py> Context<'py> {
@@ -57,6 +63,7 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: None,
+            field_names: None,
         })
     }
 
@@ -72,6 +79,7 @@ impl<'py> Context<'py> {
         Self {
             fields: None,
             parent: None,
+            field_names: None,
         }
     }
 
@@ -83,6 +91,7 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
+            field_names: None,
         })
     }
 
@@ -198,6 +207,25 @@ impl<'py> Context<'py> {
                 message: "context is placeholder, cannot get field object".to_string(),
             }),
         }
+    }
+
+    /// 设置当前 StructNode 的字段名列表（供表达式求值使用）。
+    ///
+    /// 由 StructNode.parse/build 在 `has_expressions=true` 分支的开头调用一次，
+    /// 在遍历字段之前设置。列表顺序与 StructNode.fields 对齐，
+    /// [`crate::expr::ExprOp::GetInt`] 的索引基于此列表。
+    ///
+    /// 对占位 context 也安全（虽然占位 context 不会触发表达式求值）。
+    pub fn set_field_names(&mut self, names: Vec<Py<PyString>>) {
+        self.field_names = Some(names);
+    }
+
+    /// 返回字段名列表的切片引用（供 [`crate::expr::eval_expr_int`] 使用）。
+    ///
+    /// `None` 表示未设置（无表达式的 Struct）。表达式求值时若为 `None`，
+    /// 调用方应视为内部错误（编译期保证有表达式的 Struct 会设置此字段）。
+    pub fn field_names(&self) -> Option<&[Py<PyString>]> {
+        self.field_names.as_deref()
     }
 
     /// 借用当前层的字段字典（用于测试与调试）。
@@ -460,6 +488,54 @@ mod tests {
             let retrieved = ctx.get_field("x").expect("get").expect("exist");
             let n: i64 = retrieved.extract().expect("extract");
             assert_eq!(n, 2);
+        });
+    }
+
+    // ======================================================================
+    // set_field_names / field_names（Phase 2 子任务 2.5）
+    // ======================================================================
+
+    #[test]
+    fn set_field_names_stores_and_returns_slice() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            assert!(ctx.field_names().is_none(), "default should be None");
+            let names = vec![
+                PyString::new_bound(py, "count").into(),
+                PyString::new_bound(py, "data").into(),
+            ];
+            ctx.set_field_names(names);
+            let slice = ctx.field_names().expect("should be set");
+            assert_eq!(slice.len(), 2);
+            assert_eq!(slice[0].bind(py).to_str().expect("to_str"), "count");
+            assert_eq!(slice[1].bind(py).to_str().expect("to_str"), "data");
+        });
+    }
+
+    #[test]
+    fn field_names_none_by_default_for_all_context_kinds() {
+        with_python(|py| {
+            let root = Context::new_root(py).expect("root");
+            assert!(root.field_names().is_none());
+
+            let placeholder = Context::placeholder(py);
+            assert!(placeholder.field_names().is_none());
+
+            let child = Context::new_child(&root, py).expect("child");
+            assert!(
+                child.field_names().is_none(),
+                "child should not inherit field_names from parent"
+            );
+        });
+    }
+
+    #[test]
+    fn set_field_names_empty_vec_is_valid() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.set_field_names(Vec::new());
+            let slice = ctx.field_names().expect("should be set");
+            assert!(slice.is_empty());
         });
     }
 }

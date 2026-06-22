@@ -274,6 +274,13 @@ impl Construct for StructNode {
         // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
         let dict_for_instance: Py<PyAny> = if self.has_expressions {
             // Phase 2 表达式路径：使用 ctx 的 dict。
+            // 先设置 field_names，供子节点（如 BytesNode 表达式长度）求值表达式使用。
+            let names: Vec<Py<PyString>> = self
+                .fields
+                .iter()
+                .map(|f| f.name.py_name().clone_ref(py))
+                .collect();
+            ctx.set_field_names(names);
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
@@ -369,6 +376,15 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
+        // 有表达式时：先设置 field_names，供子节点表达式求值使用。
+        if self.has_expressions {
+            let names: Vec<Py<PyString>> = self
+                .fields
+                .iter()
+                .map(|f| f.name.py_name().clone_ref(py))
+                .collect();
+            ctx.set_field_names(names);
+        }
         for field in &self.fields {
             match field.mode {
                 FieldMode::Rw => {
@@ -644,7 +660,7 @@ mod tests {
                 vec![
                     ("a".to_string(), u8_node()),
                     ("b".to_string(), u16_node()),
-                    ("c".to_string(), Node::Bytes(BytesNode::new(2))),
+                    ("c".to_string(), Node::Bytes(BytesNode::new_const(2))),
                 ],
             );
             // a=0x01, b=0x0203, c=0x0405
@@ -674,7 +690,7 @@ mod tests {
                 vec![
                     ("a".to_string(), u8_node()),
                     ("b".to_string(), u16_node()),
-                    ("c".to_string(), Node::Bytes(BytesNode::new(2))),
+                    ("c".to_string(), Node::Bytes(BytesNode::new_const(2))),
                 ],
             );
             let obj = py
@@ -957,9 +973,9 @@ mod tests {
             let node = StructNode::new_for_test(
                 py,
                 vec![
-                    ("a".to_string(), u8_node()),                      // 1
-                    ("b".to_string(), u16_node()),                     // 2
-                    ("c".to_string(), Node::Bytes(BytesNode::new(4))), // 4
+                    ("a".to_string(), u8_node()),                            // 1
+                    ("b".to_string(), u16_node()),                           // 2
+                    ("c".to_string(), Node::Bytes(BytesNode::new_const(4))), // 4
                 ],
             );
             assert_eq!(node.sizeof(&ctx).unwrap(), 7);

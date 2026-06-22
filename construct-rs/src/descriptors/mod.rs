@@ -84,34 +84,57 @@ impl FormatFieldDescriptor {
 
 /// 可实例化字节描述符：对应 Python 侧的 `Bytes(n)`。
 ///
-/// 用户在 Python 中通过 `Bytes(4)` 创建实例，传入 `field(Bytes(4))`。
-/// 编译器读取 `length` 字段构建 [`crate::nodes::bytes::BytesNode`]。
+/// 用户在 Python 中通过 `Bytes(4)` 或 `Bytes(count)` 创建实例，传入 `field(Bytes(4))`。
+/// 编译器读取 `length` 字段，若为 Python int 则构建常量 BytesNode，若为表达式对象
+/// 则结合 `expr_programs` 构建表达式 BytesNode（详见 `compile_schema`）。
 ///
-/// # Phase 1
+/// # Phase 2 扩展
 ///
-/// `length` 仅支持编译期常量正整数。
-/// `Bytes(this.length)` 等上下文 lambda 推迟到 Phase 2（需表达式系统）。
+/// `length` 类型从 `usize` 改为 `Py<PyAny>`，可接受：
+/// - Python int（常量长度）→ [`crate::nodes::bytes::BytesNode::new_const`]
+/// - 表达式对象（FieldRef/ExprRef，编译后为 ExprProgram）→
+///   [`crate::nodes::bytes::BytesNode::new_expr`]
+///
+/// 失去 `Copy` trait（`Py<PyAny>` 非 Copy），但不影响 frozen 语义——不可变性
+/// 通过 `#[pyclass(frozen)]` 保证。
 #[pyclass(frozen, name = "BytesDescriptor", module = "construct")]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct BytesDescriptor {
-    /// Python 可见属性：固定字节长度。
+    /// Python 可见属性：长度参数（int 或表达式对象）。
     #[pyo3(get)]
-    pub length: usize,
+    pub length: Py<PyAny>,
 }
 
 #[pymethods]
 impl BytesDescriptor {
-    /// 创建一个读取/写入 `length` 字节的 `Bytes` 描述符。
+    /// 创建一个 `Bytes` 描述符。
     ///
-    /// Python 用法：`Bytes(4)`
+    /// Python 用法：
+    /// - `Bytes(4)` → 常量长度
+    /// - `Bytes(count)` → 表达式长度（count 是 FieldRef）
+    /// - `Bytes(count + 1)` → 表达式长度（count + 1 是 ExprRef）
+    ///
+    /// pyo3 `#[new]` 接受 `Py<PyAny>`，Python 侧传入 int 或表达式对象均可。
     #[new]
-    fn new(length: usize) -> Self {
+    pub fn new(length: Py<PyAny>) -> Self {
         Self { length }
     }
 
+    /// 暴露表达式参数供编译器检测。
+    ///
+    /// compile_schema 的 Python 包装层（`_extract_and_compile_exprs`）通过
+    /// `getattr(subcon, "_expr_params")` 读取此属性，检测其中是否含 FieldRef/ExprRef。
+    /// 返回 `{"length": <length 对象>}`。
+    #[getter]
+    fn _expr_params(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let dict = pyo3::types::PyDict::new_bound(py);
+        dict.set_item("length", self.length.bind(py))?;
+        Ok(dict.into_any().unbind())
+    }
+
     /// 返回描述符的 Python 可读表示。
-    fn __repr__(&self) -> String {
-        format!("BytesDescriptor(length={})", self.length)
+    fn __repr__(&self, py: Python<'_>) -> String {
+        format!("BytesDescriptor(length={:?})", self.length.bind(py))
     }
 }
 
@@ -252,30 +275,44 @@ mod tests {
     // BytesDescriptor
     // ======================================================================
 
+    /// 构造一个 Python int 对象（用于 BytesDescriptor::new）。
+    fn py_int(py: Python<'_>, n: i64) -> Py<PyAny> {
+        n.into_py(py)
+    }
+
     #[test]
     fn bytes_descriptor_new_stores_length() {
-        let desc = BytesDescriptor { length: 4 };
-        assert_eq!(desc.length, 4);
+        with_py(|py| {
+            let desc = BytesDescriptor::new(py_int(py, 4));
+            let n: i64 = desc.length.bind(py).extract().expect("extract int");
+            assert_eq!(n, 4);
+        });
     }
 
     #[test]
     fn bytes_descriptor_zero_length() {
-        let desc = BytesDescriptor { length: 0 };
-        assert_eq!(desc.length, 0);
+        with_py(|py| {
+            let desc = BytesDescriptor::new(py_int(py, 0));
+            let n: i64 = desc.length.bind(py).extract().expect("extract int");
+            assert_eq!(n, 0);
+        });
     }
 
     #[test]
     fn bytes_descriptor_large_length() {
-        let desc = BytesDescriptor { length: 65535 };
-        assert_eq!(desc.length, 65535);
+        with_py(|py| {
+            let desc = BytesDescriptor::new(py_int(py, 65535));
+            let n: i64 = desc.length.bind(py).extract().expect("extract int");
+            assert_eq!(n, 65535);
+        });
     }
 
     #[test]
     fn bytes_descriptor_length_accessible_from_python() {
         with_py(|py| {
-            let desc = BytesDescriptor { length: 7 };
+            let desc = BytesDescriptor::new(py_int(py, 7));
             let desc_py = Py::new(py, desc).expect("Py::new");
-            let length: usize = desc_py
+            let length: i64 = desc_py
                 .bind(py)
                 .getattr("length")
                 .expect("getattr")
@@ -287,22 +324,44 @@ mod tests {
 
     #[test]
     fn bytes_descriptor_repr_includes_length() {
-        let desc = BytesDescriptor { length: 4 };
-        assert_eq!(desc.__repr__(), "BytesDescriptor(length=4)");
+        with_py(|py| {
+            let desc = BytesDescriptor::new(py_int(py, 4));
+            let repr = desc.__repr__(py);
+            assert!(repr.contains("4"), "repr should contain length 4: {}", repr);
+            assert!(repr.contains("BytesDescriptor"), "got: {}", repr);
+        });
     }
 
     #[test]
     fn bytes_descriptor_instantiable_from_python() {
         // 验证 BytesDescriptor 可通过 Python 调用 BytesDescriptor(4) 构造
         with_py(|py| {
-            // 先获取类型对象
-            let desc = BytesDescriptor { length: 4 };
+            let desc = BytesDescriptor::new(py_int(py, 4));
             let desc_py = Py::new(py, desc).expect("Py::new");
             let ty = desc_py.bind(py).get_type();
-            // 用类型对象调用构造（args 需为元组）
-            let instance = ty.call((1,), None).expect("call BytesDescriptor(1)");
-            let length: usize = instance.getattr("length").unwrap().extract().unwrap();
-            assert_eq!(length, 1);
+            let instance = ty.call((4,), None).expect("call BytesDescriptor(4)");
+            let length: i64 = instance.getattr("length").unwrap().extract().unwrap();
+            assert_eq!(length, 4);
+        });
+    }
+
+    #[test]
+    fn bytes_descriptor_expr_params_returns_length() {
+        // _expr_params getter 应返回 {"length": <length 对象>}
+        with_py(|py| {
+            let desc = BytesDescriptor::new(py_int(py, 4));
+            let desc_py = Py::new(py, desc).expect("Py::new");
+            let params = desc_py
+                .bind(py)
+                .getattr("_expr_params")
+                .expect("getattr _expr_params");
+            let dict = params
+                .downcast::<pyo3::types::PyDict>()
+                .expect("should be dict");
+            assert_eq!(dict.len(), 1);
+            let length_val = dict.get_item("length").expect("get_item").expect("exists");
+            let n: i64 = length_val.extract().expect("extract int");
+            assert_eq!(n, 4);
         });
     }
 

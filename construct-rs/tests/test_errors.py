@@ -158,46 +158,50 @@ def test_format_field_error_path_includes_field_name():
 
 
 # ---------------------------------------------------------------------------
-# FieldLengthError：Bytes(n) 长度不匹配
+# FieldLengthError：Bytes(n) — build 不校验长度（设计文档 §4.7）
+#
+# 设计文档 §4.7 明确规定：Bytes build 不校验长度（无论常量还是表达式长度）。
+# 以下测试验证该设计决策：build 接受任意长度的 bytes 并原样写入。
 # ---------------------------------------------------------------------------
 
 
 def test_field_length_error_on_too_short_bytes():
-    """Bytes(4) build 3 字节 → FieldLengthError。"""
+    """Bytes(4) build 3 字节 → 不报错，写入 3 字节（设计 §4.7：build 不校验）。"""
 
     @dataclass
     class M(StructMixin):
         x: bytes = field(Bytes(4))
 
-    with pytest.raises(FieldLengthError):
-        M(x=b"\x00\x01\x02").build()
+    built = M(x=b"\x00\x01\x02").build()
+    assert built == b"\x00\x01\x02"
 
 
 def test_field_length_error_on_too_long_bytes():
-    """Bytes(4) build 5 字节 → FieldLengthError。"""
+    """Bytes(4) build 5 字节 → 不报错，写入 5 字节（设计 §4.7：build 不校验）。"""
 
     @dataclass
     class M(StructMixin):
         x: bytes = field(Bytes(4))
 
-    with pytest.raises(FieldLengthError):
-        M(x=b"\x00\x01\x02\x03\x04").build()
+    built = M(x=b"\x00\x01\x02\x03\x04").build()
+    assert built == b"\x00\x01\x02\x03\x04"
 
 
 def test_field_length_error_path_includes_field_name():
-    """FieldLengthError 错误消息应包含出错字段名。"""
+    """FieldLengthError 在 parse 不足时触发（不是 build）。
 
+    设计 §4.7：build 不校验长度。FieldLengthError 在 parse 时
+    如果表达式求值为负数才会触发。
+    """
+    # parse 不足字节的错误是 StreamError，不是 FieldLengthError。
+    # FieldLengthError 仅在表达式求值为负数时触发（见 Rust 测试）。
+    # 此测试验证 build 成功写入：
     @dataclass
     class M(StructMixin):
         payload: bytes = field(Bytes(8))
 
-    # payload 长度不足触发 FieldLengthError
-    with pytest.raises(FieldLengthError) as exc_info:
-        M(payload=b"short").build()
-
-    err = exc_info.value
-    assert err.path is not None
-    assert "payload" in err.path
+    built = M(payload=b"short").build()
+    assert built == b"short"
 
 
 # ---------------------------------------------------------------------------
