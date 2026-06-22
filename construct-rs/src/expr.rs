@@ -57,9 +57,11 @@ pub enum ExprOp {
     Sub,
     /// 栈顶弹出 b、a，压入 `a * b`（[`i64::wrapping_mul`]）。
     Mul,
-    /// 栈顶弹出 b、a，压入 `a / b`（整除，`b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
+    /// 栈顶弹出 b、a，压入 `a // b`（向负无穷取整，对齐 Python `//` 语义；
+    /// `b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
     FloorDiv,
-    /// 栈顶弹出 b、a，压入 `a % b`（`b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
+    /// 栈顶弹出 b、a，压入 `a % b`（结果符号与除数一致，对齐 Python `%` 语义；
+    /// `b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
     Mod,
 
     // --- 位运算（二元）---
@@ -219,7 +221,7 @@ fn compute_max_stack(ops: &[ExprOp]) -> usize {
 /// - [`ConstructError::ExprContext`]：`ctx` 为 placeholder（无 PyDict），无法求值
 /// - [`ConstructError::ExprDivByZero`]：`FloorDiv` / `Mod` 除数为 0
 /// - [`ConstructError::ExprStackUnderflow`]：栈下溢（指令序列不合法，编译期保证不会发生）
-/// - [`ConstructError::Generic`]：传入空程序
+/// - [`ConstructError::Generic`]：传入空程序，或 `GetInt` 索引越界（编译期保证不发生）
 pub fn eval_expr_int(
     program: &ExprProgram,
     names: &[Py<PyString>],
@@ -238,7 +240,15 @@ pub fn eval_expr_int(
     for op in program.ops() {
         match op {
             ExprOp::GetInt(idx) => {
-                let val = ctx.get_int_by_name(names[*idx].bind(py), py)?;
+                let name = names.get(*idx).ok_or_else(|| ConstructError::Generic {
+                    message: format!(
+                        "expression GetInt index {} out of bounds (names has {} entries)",
+                        idx,
+                        names.len()
+                    ),
+                    path: String::new(),
+                })?;
+                let val = ctx.get_int_by_name(name.bind(py), py)?;
                 stack.push(val);
             }
             ExprOp::Const(v) => {
@@ -255,7 +265,10 @@ pub fn eval_expr_int(
                         message: "expression division by zero".to_string(),
                     });
                 }
-                stack.push(a.wrapping_div(b));
+                // Python `//` 语义：向负无穷取整（floor division）。
+                // div_euclid 不匹配（欧几里得余数恒非负，Python 余数符号同除数）。
+                // 用 wrapping_* 实现真 floor division，永不 panic。
+                stack.push(floor_div(a, b));
             }
             ExprOp::Mod => {
                 let (a, b) = pop2(&mut stack)?;
@@ -264,7 +277,8 @@ pub fn eval_expr_int(
                         message: "expression modulo by zero".to_string(),
                     });
                 }
-                stack.push(a.wrapping_rem(b));
+                // Python `%` 语义：结果符号与除数一致（floor modulo）。
+                stack.push(floor_rem(a, b));
             }
             // 位运算
             ExprOp::BitAnd => binop(&mut stack, |a, b| a & b)?,
@@ -302,6 +316,39 @@ fn pop2(stack: &mut Vec<i64>) -> Result<(i64, i64), ConstructError> {
     let b = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
     let a = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
     Ok((a, b))
+}
+
+/// Python 风格的向下取整除法（`//`），对齐 Python `int.__floordiv__`。
+///
+/// 使用 `wrapping_*` 算术，永不 panic（即使 `i64::MIN / -1` 也不触发硬件异常）。
+/// 向负无穷取整，区别于 Rust `/` 的向零取整。
+///
+/// 示例（与 Python 一致）：`floor_div(-7, 2) = -4`，`floor_div(7, -2) = -4`。
+fn floor_div(a: i64, b: i64) -> i64 {
+    debug_assert!(b != 0, "division by zero must be checked by caller");
+    let q = a.wrapping_div(b);
+    let r = a.wrapping_rem(b);
+    if r != 0 && ((r < 0) != (b < 0)) {
+        q.wrapping_sub(1)
+    } else {
+        q
+    }
+}
+
+/// Python 风格的取模（`%`），对齐 Python `int.__mod__`。
+///
+/// 使用 `wrapping_*` 算术，永不 panic。结果符号与除数一致，
+/// 区别于 Rust `%` 的结果符号与被除数一致。
+///
+/// 示例（与 Python 一致）：`floor_rem(-7, 2) = 1`，`floor_rem(7, -2) = -1`。
+fn floor_rem(a: i64, b: i64) -> i64 {
+    debug_assert!(b != 0, "modulo by zero must be checked by caller");
+    let r = a.wrapping_rem(b);
+    if r != 0 && ((r < 0) != (b < 0)) {
+        r.wrapping_add(b)
+    } else {
+        r
+    }
 }
 
 /// 二元运算辅助：弹出 `(a, b)`，压入 `f(a, b)`。
@@ -612,6 +659,97 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
             let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod");
             assert_eq!(result, 2);
+        });
+    }
+
+    #[test]
+    fn eval_floor_div_negative_dividend() {
+        // Python: -7 // 2 = -4（向负无穷取整，不是 truncating 的 -3）
+        with_python(|py| {
+            let ctx = make_context(py, &[("a", -7), ("b", 2)]);
+            let names = make_names(py, &["a", "b"]);
+            let prog =
+                ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
+            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv neg dividend");
+            assert_eq!(result, -4);
+        });
+    }
+
+    #[test]
+    fn eval_mod_negative_dividend() {
+        // Python: -7 % 2 = 1（结果符号与除数一致）
+        with_python(|py| {
+            let ctx = make_context(py, &[("a", -7), ("b", 2)]);
+            let names = make_names(py, &["a", "b"]);
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
+            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod neg dividend");
+            assert_eq!(result, 1);
+        });
+    }
+
+    #[test]
+    fn eval_floor_div_negative_divisor() {
+        // Python: 7 // -2 = -4（向负无穷取整，不是 truncating 的 -3）
+        with_python(|py| {
+            let ctx = make_context(py, &[("a", 7), ("b", -2)]);
+            let names = make_names(py, &["a", "b"]);
+            let prog =
+                ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
+            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv neg divisor");
+            assert_eq!(result, -4);
+        });
+    }
+
+    #[test]
+    fn eval_floor_div_both_negative() {
+        // Python: -7 // -1 = 7（负负得正，无取整差异）
+        with_python(|py| {
+            let ctx = make_context(py, &[("a", -7), ("b", -1)]);
+            let names = make_names(py, &["a", "b"]);
+            let prog =
+                ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
+            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv both neg");
+            assert_eq!(result, 7);
+        });
+    }
+
+    #[test]
+    fn eval_mod_negative_divisor() {
+        // Python: 7 % -2 = -1（结果符号与除数一致）
+        with_python(|py| {
+            let ctx = make_context(py, &[("a", 7), ("b", -2)]);
+            let names = make_names(py, &["a", "b"]);
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
+            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod neg divisor");
+            assert_eq!(result, -1);
+        });
+    }
+
+    #[test]
+    fn eval_floor_div_mod_i64_min_div_minus_one() {
+        // i64::MIN / -1 和 i64::MIN % -1：数学结果分别为 9223372036854775808 和 0。
+        // Python 不会报错（任意精度），i64 VM 中 FloorDiv wrapping，Mod 为 0。
+        // 确保此边界场景不 panic。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let names: Vec<Py<PyString>> = vec![];
+            // i64::MIN / -1
+            let prog_div = ExprProgram::new(vec![
+                ExprOp::Const(i64::MIN),
+                ExprOp::Const(-1),
+                ExprOp::FloorDiv,
+            ]);
+            let result_div = eval_expr_int(&prog_div, &names, &ctx, py).expect("min div -1");
+            assert_eq!(result_div, i64::MIN); // wrapping: 9223372036854775808 mod 2^64
+
+            // i64::MIN % -1
+            let prog_mod = ExprProgram::new(vec![
+                ExprOp::Const(i64::MIN),
+                ExprOp::Const(-1),
+                ExprOp::Mod,
+            ]);
+            let result_mod = eval_expr_int(&prog_mod, &names, &ctx, py).expect("min mod -1");
+            assert_eq!(result_mod, 0);
         });
     }
 
@@ -951,6 +1089,31 @@ mod tests {
                     assert!(expected.contains("integer"));
                 }
                 other => panic!("expected ExprType, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn eval_getint_index_out_of_bounds_returns_generic_error() {
+        // names 只有 1 个条目，GetInt(5) 越界 → 应返回 Generic 错误而非 panic
+        with_python(|py| {
+            let ctx = make_context(py, &[("count", 1)]);
+            let names = make_names(py, &["count"]);
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(5)]);
+            let result = eval_expr_int(&prog, &names, &ctx, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::Generic { message, .. }) => {
+                    assert!(
+                        message.contains("5"),
+                        "error message should contain idx 5, got: {message}"
+                    );
+                    assert!(
+                        message.contains("1"),
+                        "error message should contain names len 1, got: {message}"
+                    );
+                }
+                other => panic!("expected Generic, got {:?}", other),
             }
         });
     }
