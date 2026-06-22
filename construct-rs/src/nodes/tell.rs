@@ -279,10 +279,9 @@ mod tests {
     }
 
     #[test]
-    fn default_equals_new() {
-        let _new = TellNode::new();
-        let _default = TellNode::default();
-        // 两者都是 unit-like struct，无需等值比较
+    fn new_creates_unit_struct() {
+        let _node = TellNode::new();
+        // TellNode 是单元结构体，new() 和直接构造等价
     }
 
     // ======================================================================
