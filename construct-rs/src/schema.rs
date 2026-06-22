@@ -97,7 +97,8 @@ impl CompiledSchema {
     /// # 内部流程（方案 B'）
     ///
     /// 1. 从 `PyBytes` 提取 `&[u8]`，创建 `ParseStream`（纯 Rust）。
-    /// 2. 创建根 `Context` 与 `Path`。
+    /// 2. 创建占位 `Context`（Phase 1 不读写 context，不分配 `PyDict`，P0-2 优化）
+    ///    与根 `Path`。
     /// 3. 调用 `self.root.parse(...)`——进入执行树遍历。
     /// 4. StructNode.parse 内部完整构造用户类实例（create_class + force_setattr）。
     /// 5. 直接返回实例（不再跨 FFI 返回 dict 到 Python）。
@@ -111,7 +112,8 @@ impl CompiledSchema {
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = data.as_bytes();
         let mut stream = ParseStream::new(bytes);
-        let mut ctx = Context::new_root(py)?;
+        // P0-2：Phase 1 不读写 context，使用占位 context 避免创建空 PyDict。
+        let mut ctx = Context::placeholder(py);
         let mut path = Path::new();
         // root.parse 返回用户类实例（StructNode 内部 create_class + force_setattr）
         let result = self.root.parse(py, &mut stream, &mut ctx, &mut path)?;
@@ -128,7 +130,7 @@ impl CompiledSchema {
     /// # 内部流程
     ///
     /// 1. 创建 `BuildStream`（纯 Rust 输出缓冲）。
-    /// 2. 创建根 `Context` 与 `Path`。
+    /// 2. 创建占位 `Context`（Phase 1 不读写 context，P0-2 优化）与根 `Path`。
     /// 3. 调用 `self.root.build(obj, ...)`——遍历执行树，通过 C API 读取属性。
     /// 4. 将 `BuildStream` 的字节缓冲转为 `PyBytes` 返回。
     pub fn _build_raw<'py>(
@@ -137,7 +139,8 @@ impl CompiledSchema {
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         let mut stream = BuildStream::new();
-        let mut ctx = Context::new_root(py)?;
+        // P0-2：Phase 1 不读写 context，使用占位 context。
+        let mut ctx = Context::placeholder(py);
         let mut path = Path::new();
         self.root.build(py, obj, &mut stream, &mut ctx, &mut path)?;
         Ok(PyBytes::new_bound(py, &stream.into_bytes()))

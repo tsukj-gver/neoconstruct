@@ -10,9 +10,11 @@
 //!
 //! ## Phase 1 范围
 //!
-//! Phase 1 仅存储已解析/已读取的字段值，不支持 this 表达式求值。
-//! `set_field` 由 Struct 节点在每字段处理完成后调用；
-//! `get_field` 预留给 Phase 2 表达式系统使用（当前 Phase 1 不调用）。
+//! Phase 1 **不读取也不写入** context（无 this 表达式）。parse/build 入口
+//! 使用 [`Context::placeholder`] 创建不持有 `PyDict` 的占位 context，避免每次
+//! parse 白白创建一个空 dict（P0-2 优化，节省 80-150 ns 固定开销）。
+//!
+//! `new_root` / `new_child` 仍保留，Phase 2 恢复 context 使用时改回在入口调用。
 //!
 //! ## 为什么持有 PyDict 而非 Rust HashMap
 //!
@@ -23,15 +25,20 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 
-/// 解析/构建上下文。Rust 内部持有 Python dict 引用。
+/// 解析/构建上下文。Rust 内部持有 Python dict 引用（按需创建）。
 ///
 /// 字段值存入 `PyDict`（C API `PyDict_SetItem`），无 Rust 中间类型。
 /// 嵌套 Struct 节点通过 `new_child` 创建子 context，`parent` 指向外层。
+///
+/// `fields` 为 `Option`：Phase 1 的 parse/build 入口使用 [`Context::placeholder`]
+/// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；Phase 2 恢复
+/// context 使用时入口改用 [`Context::new_root`]。
 pub struct Context<'py> {
-    /// 当前层字段字典（PyDict 引用）。
+    /// 当前层字段字典（`PyDict` 引用），按需创建。
     ///
     /// parse 时存入已解析字段；build 时存入从对象读取的字段值。
-    fields: Bound<'py, PyDict>,
+    /// `None` 表示占位 context（Phase 1 入口使用，不分配 `PyDict`）。
+    fields: Option<Bound<'py, PyDict>>,
     /// 外层上下文（嵌套 Struct 时指向父 Context），对应 Python construct 的 `_`。
     ///
     /// 顶层 context 的 `parent` 为 `None`。
@@ -42,11 +49,29 @@ impl<'py> Context<'py> {
     /// 创建顶层 context（parse/build 入口处调用）。
     ///
     /// 创建一个空的 `PyDict` 作为字段存储容器，`parent` 为 `None`。
+    ///
+    /// Phase 2 恢复 context 使用后，入口改用此方法。Phase 1 入口使用
+    /// [`Context::placeholder`] 以避免白白创建空 dict。
     pub fn new_root(py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
-            fields: PyDict::new_bound(py),
+            fields: Some(PyDict::new_bound(py)),
             parent: None,
         })
+    }
+
+    /// 创建不持有 `PyDict` 的占位 context（Phase 1 parse/build 入口使用）。
+    ///
+    /// Phase 1 不读取也不写入 context，每次 parse 创建空 `PyDict` 是纯浪费
+    /// （80-150 ns 固定开销，P0-2 优化）。此方法返回 `fields = None` 的占位
+    /// context，[`Context::set_field`] / [`Context::get_field`] 在占位 context 上
+    /// 为无操作 / 返回 `None`。
+    ///
+    /// Phase 2 恢复 context 使用后，入口改回 [`Context::new_root`]。
+    pub fn placeholder(_py: Python<'py>) -> Self {
+        Self {
+            fields: None,
+            parent: None,
+        }
     }
 
     /// 创建嵌套 context（Struct 节点进入时调用）。
@@ -55,7 +80,7 @@ impl<'py> Context<'py> {
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
-            fields: PyDict::new_bound(py),
+            fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
         })
     }
@@ -63,8 +88,13 @@ impl<'py> Context<'py> {
     /// 存入字段（parse/build 每个字段完成后调用）。
     ///
     /// 对齐 Python construct `Struct._parse` 中的 `context[sc.name] = subobj`。
+    ///
+    /// 占位 context（`fields = None`）上为无操作（Phase 1 不写入）。
     pub fn set_field(&self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
-        self.fields.set_item(name, value)
+        match &self.fields {
+            Some(fields) => fields.set_item(name, value),
+            None => Ok(()),
+        }
     }
 
     /// 读取当前层字段（Phase 2 的 this.xxx 引用使用）。
@@ -74,8 +104,13 @@ impl<'py> Context<'py> {
     ///
     /// 返回 `None` 表示当前层无此字段。注意：此方法**不**递归查找 parent。
     /// 读取父层字段应通过 `parent()` 显式获取父 context 后调用。
+    ///
+    /// 占位 context（`fields = None`）始终返回 `Ok(None)`。
     pub fn get_field(&self, name: &str) -> PyResult<Option<Bound<'_, PyAny>>> {
-        self.fields.get_item(name)
+        match &self.fields {
+            Some(fields) => fields.get_item(name),
+            None => Ok(None),
+        }
     }
 
     /// 返回父 context 的引用（若有）。
@@ -87,8 +122,10 @@ impl<'py> Context<'py> {
     }
 
     /// 借用当前层的字段字典（用于测试与调试）。
-    pub fn fields(&self) -> &Bound<'py, PyDict> {
-        &self.fields
+    ///
+    /// 占位 context（`fields = None`）返回 `None`。
+    pub fn fields(&self) -> Option<&Bound<'py, PyDict>> {
+        self.fields.as_ref()
     }
 }
 
@@ -127,7 +164,30 @@ mod tests {
         with_python(|py| {
             let ctx = Context::new_root(py).expect("new_root should succeed");
             assert!(ctx.parent().is_none());
-            assert_eq!(ctx.fields().len(), 0);
+            assert_eq!(ctx.fields().expect("fields").len(), 0);
+        });
+    }
+
+    #[test]
+    fn placeholder_has_no_dict_and_no_parent() {
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            assert!(ctx.parent().is_none());
+            assert!(
+                ctx.fields().is_none(),
+                "placeholder should not allocate PyDict"
+            );
+        });
+    }
+
+    #[test]
+    fn placeholder_set_field_is_noop() {
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let value = py.eval_bound("42", None, None).expect("eval 42");
+            // set_field 在占位 context 上为无操作，不报错。
+            ctx.set_field("count", &value).expect("set_field noop");
+            assert!(ctx.get_field("count").expect("get").is_none());
         });
     }
 
@@ -138,7 +198,10 @@ mod tests {
             let child = Context::new_child(&root, py).expect("child");
             assert!(child.parent().is_some());
             let parent_ref = child.parent().expect("parent should exist");
-            assert_eq!(parent_ref.fields().len(), root.fields().len());
+            assert_eq!(
+                parent_ref.fields().expect("fields").len(),
+                root.fields().expect("fields").len()
+            );
         });
     }
 
@@ -148,7 +211,7 @@ mod tests {
             let ctx = Context::new_root(py).expect("root");
             let value = py.eval_bound("42", None, None).expect("eval 42");
             ctx.set_field("count", &value).expect("set_field");
-            assert_eq!(ctx.fields().len(), 1);
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
         });
     }
 
@@ -182,7 +245,7 @@ mod tests {
             ctx.set_field("x", &v1).expect("set v1");
             let v2 = py.eval_bound("2", None, None).expect("eval 2");
             ctx.set_field("x", &v2).expect("set v2");
-            assert_eq!(ctx.fields().len(), 1);
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
             let retrieved = ctx.get_field("x").expect("get").expect("exist");
             let n: i64 = retrieved.extract().expect("extract");
             assert_eq!(n, 2);
@@ -199,7 +262,7 @@ mod tests {
             ctx.set_field("a", &a).expect("set a");
             ctx.set_field("b", &b).expect("set b");
             ctx.set_field("c", &c).expect("set c");
-            assert_eq!(ctx.fields().len(), 3);
+            assert_eq!(ctx.fields().expect("fields").len(), 3);
             let got_a: i64 = ctx
                 .get_field("a")
                 .expect("get")
@@ -230,8 +293,8 @@ mod tests {
                 missing.is_none(),
                 "child should not see parent fields directly"
             );
-            assert_eq!(child.fields().len(), 0);
-            assert_eq!(root.fields().len(), 1);
+            assert_eq!(child.fields().expect("fields").len(), 0);
+            assert_eq!(root.fields().expect("fields").len(), 1);
         });
     }
 
@@ -255,7 +318,7 @@ mod tests {
             let ctx = Context::new_root(py).expect("root");
             let value = py.eval_bound("1", None, None).expect("eval");
             ctx.set_field("字段", &value).expect("set unicode");
-            assert_eq!(ctx.fields().len(), 1);
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
             let retrieved = ctx.get_field("字段").expect("get").expect("exist");
             let n: i64 = retrieved.extract().expect("extract");
             assert_eq!(n, 1);

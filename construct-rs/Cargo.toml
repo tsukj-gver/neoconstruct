@@ -30,3 +30,12 @@ enum_dispatch = "0.3"
 # 默认不启用 extension-module，使 cargo test 能初始化 Python 解释器（嵌入模式）。
 # maturin 在 pyproject.toml 中显式启用 pyo3/extension-module。
 default = []
+
+# Release 构建优化（P0-1，参照 pydantic-core Cargo.toml）：
+# - lto = "fat"：跨 crate 全量内联，使 pyo3 小函数（set_item、bind 等）内联进 validator。
+# - codegen-units = 1：单编译单元，最大化优化空间。
+# - strip = true：剥离符号，减小二进制体积。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

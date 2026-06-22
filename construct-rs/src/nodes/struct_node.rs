@@ -21,10 +21,17 @@
 //! - `set_model_attrs`（model.rs:367-379）：构造独立 dict 并整体替换 `__dict__`。
 //! - `force_setattr`（model.rs:381-394）：`PyObject_GenericSetAttr` 绕过自定义 `__setattr__`。
 //!
+//! ## 路径追踪（P0-3 优化：成功路径零成本）
+//!
+//! 成功路径**不**调用 `path.push_field`/`path.pop`（消除每字段 `String` 堆分配）。
+//! 子节点返回 `Err` 时，通过 [`ConstructError::push_path_segment`] 将当前字段名
+//! 插入错误路径，重建完整路径（仅错误路径开销，对齐 pydantic-core 的
+//! `validation_state.rs` 设计）。
+//!
 //! ## 关于 Context 的嵌套
 //!
 //! Phase 1 不支持 this 表达式，context 不会被读取。因此 StructNode.parse/build
-//! **不调用 `ctx.set_field`**（设计修订 §3.5），减少每字段 ~40-70ns 开销。
+//! **不调用 `ctx.set_field`**（设计修订 §3.5）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -83,10 +90,9 @@ impl FieldName {
 ///
 /// 1. 创建 `PyDict`（C API `PyDict_New`）。
 /// 2. 对每个字段 `(FieldName, node)`：
-///    - `path.push_field(rust_name)` —— 进入字段路径
 ///    - `node.parse(...)` —— 递归解析子节点
-///    - `dict.set_item(py_name, value)` —— 用 interned key 写入 dict
-///    - `path.pop()` —— 离开字段路径
+///    - `dict.set_item(py_name, value)` —— 用 interned key 写入 dict（裸 `?`）
+///    - 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）
 /// 3. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例。
 /// 4. [`force_setattr`]：`PyObject_GenericSetAttr(instance, "__dict__", dict)`
 ///    整体替换实例 `__dict__`。
@@ -94,6 +100,7 @@ impl FieldName {
 /// 6. 返回实例（用户类对象，不是 dict）。
 ///
 /// Phase 1 **不调用 `ctx.set_field`**（无 this 表达式，context 不被读取）。
+/// 成功路径**不维护 Path**（P0-3 优化，零 String 分配）。
 ///
 /// parse **不要求消费全部输入**：多余字节被忽略（对齐 Python construct Struct 语义）。
 ///
@@ -101,9 +108,8 @@ impl FieldName {
 ///
 /// 对每个字段 `(FieldName, node)`：
 /// - `obj.getattr(py_name)` —— 用 interned key 读取属性（命中 method cache）
-/// - `path.push_field(rust_name)`
 /// - `node.build(value, ...)` —— 递归构建子节点
-/// - `path.pop()`
+/// - 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）
 ///
 /// Phase 1 **不调用 `ctx.set_field`**。
 ///
@@ -195,21 +201,20 @@ impl Construct for StructNode {
         let dict = PyDict::new_bound(py);
 
         // 方案 B' 步骤 2：逐字段解析 + set_item 到独立 dict（使用 interned key）。
-        // Phase 1 不调用 ctx.set_field（context 不被读取）。
+        // P0-3：成功路径不 push/pop Path（零 String 分配）；
+        //       子节点 Err 时通过 push_path_segment 重建路径（仅错误路径）。
+        // P0-4：set_item 用裸 `?`（From<PyErr>），移除 map_err 闭包。
         for (field_name, node) in &self.fields {
-            path.push_field(field_name.rust_name());
-            let value = node.parse(py, stream, ctx, path)?;
+            let value = match node.parse(py, stream, ctx, path) {
+                Ok(v) => v,
+                Err(mut e) => {
+                    e.push_path_segment(field_name.rust_name());
+                    return Err(e);
+                }
+            };
             // set_item 接收 &Bound<PyAny>；用 interned py_name 避免 str 重建。
-            dict.set_item(field_name.py_name().bind(py), value.bind(py))
-                .map_err(|e| ConstructError::Generic {
-                    message: format!(
-                        "failed to set dict item for field '{}': {}",
-                        field_name.rust_name(),
-                        e
-                    ),
-                    path: path.to_string(),
-                })?;
-            path.pop();
+            // 裸 `?`：PyErr → ConstructError::Generic（From<PyErr>），错误路径由上层重建。
+            dict.set_item(field_name.py_name().bind(py), value.bind(py))?;
         }
 
         // 方案 B' 步骤 3：tp_new 创建空实例（直接读 tp_new 槽位）。
@@ -265,11 +270,14 @@ impl Construct for StructNode {
                     path: path.to_string(),
                 }
             })?;
-            path.push_field(field_name.rust_name());
-            // Phase 1 不调用 ctx.set_field（context 不被读取）。
-            let _ = ctx; // 静默 unused 警告，保留 trait 签名一致性。
-            node.build(py, &value, stream, ctx, path)?;
-            path.pop();
+            // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
+            match node.build(py, &value, stream, ctx, path) {
+                Ok(()) => {}
+                Err(mut e) => {
+                    e.push_path_segment(field_name.rust_name());
+                    return Err(e);
+                }
+            }
         }
         Ok(())
     }

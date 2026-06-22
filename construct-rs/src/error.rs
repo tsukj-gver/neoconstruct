@@ -151,6 +151,52 @@ impl ConstructError {
             ConstructError::Generic { .. } => "Generic",
         }
     }
+
+    /// 在错误路径中插入一个字段段（P0-3 优化：错误路径延迟构建路径）。
+    ///
+    /// 成功路径不再维护 `Path` 栈（无 `push_field`/`pop`），因此叶节点产生的
+    /// 错误路径只含根（`"root"`）。父 `StructNode` 在子节点返回 `Err` 时调用此方法，
+    /// 将自己的字段名插入到 `"root"` 之后，重建完整路径。
+    ///
+    /// # 路径重建规则
+    ///
+    /// - 错误路径为 `None` / `""` / `"root"`（叶节点基线）→ `"root.{segment}"`。
+    /// - 错误路径形如 `"root.x.y"`（内层 StructNode 已重建）→
+    ///   `"root.{segment}.x.y"`（segment 插入 root 之后）。
+    /// - 编译期错误（无 path）→ 不变。
+    ///
+    /// 仅在错误路径调用（成功路径零成本），开销可接受。
+    pub fn push_path_segment(&mut self, segment: &str) {
+        let new_path = match self.path() {
+            Some(p) if p.is_empty() || p == "root" => format!("root.{}", segment),
+            Some(p) => {
+                if let Some(suffix) = p.strip_prefix("root") {
+                    // suffix 为 ""（"root"）或 ".x.y"（"root.x.y"）。
+                    format!("root.{}{}", segment, suffix)
+                } else {
+                    // 非标准根，退化为追加（仅防御性，正常路径不触发）。
+                    format!("{}.{}", p, segment)
+                }
+            }
+            None => format!("root.{}", segment),
+        };
+        self.set_path(new_path);
+    }
+
+    /// 设置错误路径（内部辅助，仅供 [`push_path_segment`] 使用）。
+    ///
+    /// 编译期错误（`Compilation` / `UnresolvedReference`）无 path 字段，此方法对其无操作。
+    ///
+    /// [`push_path_segment`]: ConstructError::push_path_segment
+    fn set_path(&mut self, new_path: String) {
+        match self {
+            ConstructError::Stream { path, .. }
+            | ConstructError::FormatField { path, .. }
+            | ConstructError::FieldLength { path, .. }
+            | ConstructError::Generic { path, .. } => *path = new_path,
+            ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -299,6 +345,22 @@ impl From<ConstructError> for PyErr {
             }
             None => PyValueError::new_err(full_message),
         })
+    }
+}
+
+/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（P0-4 优化）。
+///
+/// 使 `dict.set_item(...)?` 等返回 `PyResult` 的 C API 调用能通过 `?` 直接传播，
+/// 无需在每个调用点写 `map_err` 闭包。错误上下文（字段名、路径）由上层
+/// `StructNode` 通过 [`ConstructError::push_path_segment`] 统一补充。
+///
+/// 对齐 pydantic-core 的 `ValResult: From<PyErr>`（model_fields.rs:363）。
+impl From<PyErr> for ConstructError {
+    fn from(e: PyErr) -> Self {
+        ConstructError::Generic {
+            message: e.to_string(),
+            path: String::new(),
+        }
     }
 }
 
@@ -651,6 +713,113 @@ mod tests {
                 !pyerr.is_instance_bound(py, classes.format_field_error.bind(py)),
                 "should not be FormatFieldError"
             );
+        });
+    }
+
+    // ======================================================================
+    // push_path_segment（P0-3：错误路径延迟重建）
+    // ======================================================================
+
+    #[test]
+    fn push_path_segment_on_root_base() {
+        // 叶节点错误路径为 "root"，父 StructNode 插入字段名。
+        let mut err = ConstructError::Stream {
+            message: "expected 4".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_segment("b");
+        assert_eq!(err.path(), Some("root.b"));
+    }
+
+    #[test]
+    fn push_path_segment_on_empty_base() {
+        // 占位路径（set_item 的 From<PyErr> 路径为空）。
+        let mut err = ConstructError::Generic {
+            message: "x".to_string(),
+            path: String::new(),
+        };
+        err.push_path_segment("b");
+        assert_eq!(err.path(), Some("root.b"));
+    }
+
+    #[test]
+    fn push_path_segment_nested_rebuilds_correct_order() {
+        // 内层 StructNode 已重建 "root.c"，外层插入 "inner" → "root.inner.c"。
+        let mut err = ConstructError::Stream {
+            message: "expected 4".to_string(),
+            path: "root.c".to_string(),
+        };
+        err.push_path_segment("inner");
+        assert_eq!(err.path(), Some("root.inner.c"));
+    }
+
+    #[test]
+    fn push_path_segment_deeply_nested() {
+        // 模拟三层嵌套：root → outer → inner → leaf
+        let mut err = ConstructError::Stream {
+            message: "x".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_segment("leaf"); // 最内层 StructNode
+        assert_eq!(err.path(), Some("root.leaf"));
+        err.push_path_segment("inner"); // 中间 StructNode
+        assert_eq!(err.path(), Some("root.inner.leaf"));
+        err.push_path_segment("outer"); // 最外层 StructNode
+        assert_eq!(err.path(), Some("root.outer.inner.leaf"));
+    }
+
+    #[test]
+    fn push_path_segment_preserves_message() {
+        let mut err = ConstructError::FormatField {
+            message: "struct '>I' error".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_segment("value");
+        assert_eq!(err.message(), "struct '>I' error");
+        assert_eq!(err.path(), Some("root.value"));
+    }
+
+    #[test]
+    fn push_path_segment_on_compilation_error_is_noop() {
+        // 编译期错误无 path，push_path_segment 仍写入 root.segment（不丢失信息）。
+        let mut err = ConstructError::Compilation {
+            message: "bad schema".to_string(),
+        };
+        err.push_path_segment("field");
+        // 编译期错误 path() 返回 None，set_path 对其无操作。
+        assert_eq!(err.path(), None);
+    }
+
+    // ======================================================================
+    // From<PyErr> for ConstructError（P0-4：set_item 裸 ?）
+    // ======================================================================
+
+    #[test]
+    fn from_pyerr_produces_generic_with_empty_path() {
+        ensure_python();
+        Python::with_gil(|_py| {
+            let pyerr = PyValueError::new_err("something went wrong");
+            let err: ConstructError = pyerr.into();
+            match err {
+                ConstructError::Generic { message, path } => {
+                    assert!(message.contains("something went wrong"));
+                    assert!(path.is_empty(), "From<PyErr> path should start empty");
+                }
+                other => panic!("expected Generic, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn from_pyerr_then_push_path_segment_full_chain() {
+        // 模拟 set_item 失败：From<PyErr> → path=""，然后 StructNode push_path_segment。
+        ensure_python();
+        Python::with_gil(|_py| {
+            let pyerr = PyValueError::new_err("dict error");
+            let mut err: ConstructError = pyerr.into();
+            assert_eq!(err.path(), Some(""));
+            err.push_path_segment("myfield");
+            assert_eq!(err.path(), Some("root.myfield"));
         });
     }
 }

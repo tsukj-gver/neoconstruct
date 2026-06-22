@@ -8,7 +8,7 @@ construct-rs parse 分阶段计时（根因验证）
   处理器         : Intel64 Family 6 Model 183 Stepping 1, GenuineIntel
   timeit number  : 50000
   repeat (中位数): 5
-  测量时间       : 2026-06-22 02:40:48
+  测量时间       : 2026-06-22 03:49:58
 
 测量阶段（方案 B'）：
   - Full parse           : Flat.parse(data) [Rust 内完整构造实例]
@@ -16,57 +16,57 @@ construct-rs parse 分阶段计时（根因验证）
   - Python construct     : pc.Struct(...).parse(data) [绝对基线]
 
 === B1 (3 fields) ===
-Full parse (Flat.parse):          1797.5 ns
-Rust _parse_raw:                  1732.4 ns  (方案 B'：raw == full，实例在 Rust 内构造)
-Python construct:                 3055.4 ns
-Full 加速比:                   1.70x
-Rust-only 加速比:              1.76x
+Full parse (Flat.parse):           386.0 ns
+Rust _parse_raw:                   319.9 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Python construct:                 3123.2 ns
+Full 加速比:                   8.09x
+Rust-only 加速比:              9.76x
 
 === B2 (10 fields) ===
-Full parse (Flat.parse):          3424.0 ns
-Rust _parse_raw:                  3325.0 ns  (方案 B'：raw == full，实例在 Rust 内构造)
-Python construct:                 5933.0 ns
-Full 加速比:                   1.73x
-Rust-only 加速比:              1.78x
+Full parse (Flat.parse):           628.2 ns
+Rust _parse_raw:                   557.6 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Python construct:                 6068.0 ns
+Full 加速比:                   9.66x
+Rust-only 加速比:             10.88x
 
 === B3 (50 fields) ===
-Full parse (Flat.parse):         12805.9 ns
-Rust _parse_raw:                 12657.7 ns  (方案 B'：raw == full，实例在 Rust 内构造)
-Python construct:                22894.4 ns
-Full 加速比:                   1.79x
-Rust-only 加速比:              1.81x
+Full parse (Flat.parse):          2020.3 ns
+Rust _parse_raw:                  1963.0 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Python construct:                23314.2 ns
+Full 加速比:                  11.54x
+Rust-only 加速比:             11.88x
 
 === B4 (100 fields) ===
-Full parse (Flat.parse):         23513.8 ns
-Rust _parse_raw:                 23410.1 ns  (方案 B'：raw == full，实例在 Rust 内构造)
-Python construct:                43088.8 ns
-Full 加速比:                   1.83x
-Rust-only 加速比:              1.84x
+Full parse (Flat.parse):          3656.3 ns
+Rust _parse_raw:                  3570.1 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Python construct:                44097.1 ns
+Full 加速比:                  12.06x
+Rust-only 加速比:             12.35x
 
 === 汇总 ===
 | 用例   |   N |  Rust raw |      Full |    Python | Full x |  Raw x |
 |------------------------------------------------------------------|
-| B1   |   3 |    1732.4 |    1797.5 |    3055.4 |  1.70x |  1.76x |
-| B2   |  10 |    3325.0 |    3424.0 |    5933.0 |  1.73x |  1.78x |
-| B3   |  50 |   12657.7 |   12805.9 |   22894.4 |  1.79x |  1.81x |
-| B4   | 100 |   23410.1 |   23513.8 |   43088.8 |  1.83x |  1.84x |
+| B1   |   3 |     319.9 |     386.0 |    3123.2 |  8.09x |  9.76x |
+| B2   |  10 |     557.6 |     628.2 |    6068.0 |  9.66x | 10.88x |
+| B3   |  50 |    1963.0 |    2020.3 |   23314.2 | 11.54x | 11.88x |
+| B4   | 100 |    3570.1 |    3656.3 |   44097.1 | 12.06x | 12.35x |
 
 === Rust _parse_raw 增长模型 ===
   _parse_raw / N（应为常数，证明线性）：
-    B1 (N=  3):  577.46 ns/N  (raw=1732.4 ns)
-    B2 (N= 10):  332.50 ns/N  (raw=3325.0 ns)
-    B3 (N= 50):  253.15 ns/N  (raw=12657.7 ns)
-    B4 (N=100):  234.10 ns/N  (raw=23410.1 ns)
+    B1 (N=  3):  106.64 ns/N  (raw=319.9 ns)
+    B2 (N= 10):   55.76 ns/N  (raw=557.6 ns)
+    B3 (N= 50):   39.26 ns/N  (raw=1963.0 ns)
+    B4 (N=100):   35.70 ns/N  (raw=3570.1 ns)
 
 === 加速比 vs Python construct ===
-    B1 (N=  3):  1.70x  [~ smoke]  (4x target, 0.5x smoke gate)
-    B2 (N= 10):  1.73x  [~ smoke]  (4x target, 0.5x smoke gate)
-    B3 (N= 50):  1.79x  [~ smoke]  (4x target, 0.5x smoke gate)
-    B4 (N=100):  1.83x  [~ smoke]  (4x target, 0.5x smoke gate)
+    B1 (N=  3):  8.09x  [✓ PASS]  (4x target, 0.5x smoke gate)
+    B2 (N= 10):  9.66x  [✓ PASS]  (4x target, 0.5x smoke gate)
+    B3 (N= 50): 11.54x  [✓ PASS]  (4x target, 0.5x smoke gate)
+    B4 (N=100): 12.06x  [✓ PASS]  (4x target, 0.5x smoke gate)
 
 
 原始 JSON：
-  {"case": "B1", "n": 3, "full_parse_ns": 1797.5260003004223, "parse_raw_ns": 1732.3940002825111, "py_parse_ns": 3055.363999446854}
-  {"case": "B2", "n": 10, "full_parse_ns": 3423.971999436617, "parse_raw_ns": 3325.0220003537834, "py_parse_ns": 5933.033999754116}
-  {"case": "B3", "n": 50, "full_parse_ns": 12805.88599969633, "parse_raw_ns": 12657.715999521315, "py_parse_ns": 22894.411999732256}
-  {"case": "B4", "n": 100, "full_parse_ns": 23513.75599973835, "parse_raw_ns": 23410.0820007734, "py_parse_ns": 43088.84800062515}
+  {"case": "B1", "n": 3, "full_parse_ns": 385.9839995857328, "parse_raw_ns": 319.9219994712621, "py_parse_ns": 3123.229999328032}
+  {"case": "B2", "n": 10, "full_parse_ns": 628.2419990748167, "parse_raw_ns": 557.5840000528842, "py_parse_ns": 6067.96000036411}
+  {"case": "B3", "n": 50, "full_parse_ns": 2020.3299995046111, "parse_raw_ns": 1962.9580003675076, "py_parse_ns": 23314.214000711218}
+  {"case": "B4", "n": 100, "full_parse_ns": 3656.286000041291, "parse_raw_ns": 3570.1140004675835, "py_parse_ns": 44097.058000043035}
