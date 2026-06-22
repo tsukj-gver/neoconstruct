@@ -301,6 +301,99 @@ def wfield(subcon, *, default=_MISSING, context=None):
 
 
 # ---------------------------------------------------------------------------
+# Tell / Computed 描述符（§3.7.4）
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到对应的 Node 变体（详见 §3.7.5）。
+# ---------------------------------------------------------------------------
+
+
+class TellDescriptor:
+    """记录当前流位置的描述符。无参数。
+
+    使用方式：``rfield(Tell())``。
+
+    对应 Python construct 的 ``Tell``。parse 时返回当前流位置，
+    build 时位置由 StructNode 的 ``compute_ro_value`` 处理（不入流）。
+
+    ``_expr_params`` 协议返回空 dict：Tell 无表达式参数。
+    """
+
+    __slots__ = ()
+
+    # 类级别常量（协议实现：无表达式参数）。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Tell()"
+
+
+def Tell():
+    """创建一个 Tell 描述符。
+
+    使用方式::
+
+        @dataclass
+        class Packet(StructMixin):
+            start: int = rfield(Tell())
+            count: int = field(Int8ub)
+            end: int = rfield(Tell())
+
+    :return: ``TellDescriptor`` 实例。
+    """
+    return TellDescriptor()
+
+
+class ComputedDescriptor:
+    """从表达式计算值的描述符。
+
+    使用方式：``rfield(Computed(end - start))``。
+
+    对应 Python construct 的 ``Computed``。parse 时通过表达式 VM 求值，
+    build 时由 StructNode 的 ``compute_ro_value`` 调用同样的求值逻辑。
+
+    ``_expr_params`` 协议返回 ``{"func": <expr>}``：编译期将 expr
+    （``_FieldDescriptor`` / ``_ExprRef``）翻译为 ExprOp 指令列表，
+    存入 expr_programs 的 "func" 键。
+    """
+
+    __slots__ = ("expr",)
+
+    def __init__(self, expr):
+        """初始化 Computed 描述符。
+
+        :param expr: 计算表达式（``_FieldDescriptor`` / ``_ExprRef``）。
+            必须是引用当前 Struct 前序字段的表达式，求值结果为整数。
+        """
+        self.expr = expr
+
+    @property
+    def _expr_params(self):
+        return {"func": self.expr}
+
+    def __repr__(self):
+        return "Computed({!r})".format(self.expr)
+
+
+def Computed(expr):
+    """创建一个 Computed 描述符。
+
+    使用方式::
+
+        @dataclass
+        class Packet(StructMixin):
+            start: int = rfield(Tell())
+            end: int = rfield(Tell())
+            size: int = rfield(Computed(end - start))
+
+    :param expr: 计算表达式（FieldRef/ExprRef）。
+    :return: ``ComputedDescriptor`` 实例。
+    """
+    return ComputedDescriptor(expr)
+
+
+# ---------------------------------------------------------------------------
 # 字段信息收集（§E.2）
 # ---------------------------------------------------------------------------
 
@@ -877,4 +970,4 @@ class StructMixin:
         return schema._build_raw(self)
 
 
-__all__ = ["StructMixin", "field", "rfield", "wfield"]
+__all__ = ["StructMixin", "field", "rfield", "wfield", "Tell", "Computed"]

@@ -150,7 +150,8 @@ pub struct StructField {
 /// - `Rw`：`obj.getattr(py_name)` 取值 → `ctx.set_field_interned`（若 has_expressions）
 ///   → `node.build(value, ...)`
 /// - `Wo`：`obj.getattr(py_name)` 取值 → `node.build(value, ...)`（不写 context）
-/// - `Ro`：当前返回 `Err`（RO 节点 Tell/Computed 在 2.6 实现）
+/// - `Ro`：通过 `compute_ro_value` 从节点逻辑计算（不从实例取值），写入 context
+///   （若有表达式），然后 `node.build`（对 Tell/Computed 是 no-op）
 ///
 /// 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）。
 ///
@@ -435,12 +436,27 @@ impl Construct for StructNode {
                 }
                 FieldMode::Ro => {
                     // RO：不从实例取值，通过节点自身逻辑计算（Tell/Computed/Const/ContextParam）。
-                    // 当前没有 RO 节点（Tell/Computed 在子任务 2.6 实现），
-                    // 此分支不会被触发。代码结构已准备好。
-                    return Err(ConstructError::Generic {
-                        message: "RO fields not yet supported (Tell/Computed in 2.6)".to_string(),
-                        path: path.to_string(),
-                    });
+                    // compute_ro_value 根据节点类型取值：
+                    // - Tell：stream.tell()
+                    // - Computed：eval_expr_int(expr, ctx)
+                    // - Const/ContextParam：见 compute_ro_value 实现（Phase 3 扩展）
+                    let value = compute_ro_value(py, &field.node, stream, ctx, path)?;
+                    let value_bound = value.bind(py);
+
+                    // 写入 context（供后续表达式引用）
+                    if self.has_expressions {
+                        ctx.set_field_interned(field.name.py_name(), value_bound, py)?;
+                    }
+
+                    // build（对 sizeof=0 的节点如 Tell/Computed 是 no-op；
+                    // 其他可能写字节，仍递归调用以处理）
+                    match field.node.build(py, value_bound, stream, ctx, path) {
+                        Ok(()) => {}
+                        Err(mut e) => {
+                            e.push_path_segment(field.name.rust_name());
+                            return Err(e);
+                        }
+                    }
                 }
             }
         }
@@ -458,6 +474,61 @@ impl Construct for StructNode {
             })?;
         }
         Ok(total)
+    }
+}
+
+/// 为 RO 字段在 build 方向计算值。
+///
+/// RO 字段不从实例取值，而是通过节点自身的逻辑计算。
+/// 设计依据：`docs/模块设计-表达式系统.md` §5.4。
+///
+/// 当前支持的 RO 节点：
+/// - [`Node::Tell`]：返回当前 `BuildStream` 的写入位置（`usize → PyLong`）。
+/// - [`Node::Computed`]：通过 [`crate::expr::eval_expr_int`] 求值表达式。
+///
+/// 其他节点（如 `Const`、`ContextParam`）将在 Phase 3 扩展时添加分支。
+///
+/// # 参数
+///
+/// - `py`：GIL token。
+/// - `node`：RO 字段的节点。
+/// - `stream`：当前 `BuildStream`（用于 Tell 取位置）。
+/// - `ctx`：当前上下文（用于 Computed 求值表达式，不可变借用）。
+/// - `path`：错误追踪路径栈。
+///
+/// # 错误
+///
+/// - [`ConstructError::Generic`]：节点类型不支持作为 RO（如 `FormatField`、`Bytes`）。
+///   编译期校验（§5.6）应保证此分支不被触发，此处为运行时兜底。
+/// - 其他错误由 `Computed` 求值向上传播（`ExprContext` / `ExprFieldMissing` 等）。
+fn compute_ro_value(
+    py: Python<'_>,
+    node: &Node,
+    stream: &BuildStream,
+    ctx: &Context<'_>,
+    path: &mut Path,
+) -> Result<Py<PyAny>, ConstructError> {
+    match node {
+        // Tell：返回当前写入位置（usize → PyLong）
+        Node::Tell(_) => Ok(stream.tell().into_py(py)),
+        // Computed：求值表达式（i64 → PyLong）
+        Node::Computed(c) => {
+            let names = ctx.field_names().ok_or(ConstructError::ExprContext {
+                message: "compute_ro_value: context has no field_names (placeholder context)"
+                    .to_string(),
+            })?;
+            let v = crate::expr::eval_expr_int(c.expr(), names, ctx, py)?;
+            Ok(v.into_py(py))
+        }
+        // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
+        _ => Err(ConstructError::Generic {
+            message: format!(
+                "compute_ro_value: node type {:?} is not a valid RO node. \
+                 RO fields must be Tell, Computed (Const/ContextParam in Phase 3).",
+                node
+            ),
+            path: path.to_string(),
+        }),
     }
 }
 
@@ -1312,8 +1383,10 @@ mod tests {
     }
 
     #[test]
-    fn ro_field_build_returns_error() {
-        // RO 字段 build 暂时不支持（Tell/Computed 在 2.6 实现）。
+    fn ro_field_build_with_unsupported_node_returns_error() {
+        // RO 字段使用不支持的节点（FormatField）→ compute_ro_value 返回 Generic error。
+        // 编译期校验（§5.6）应保证 RO 只用 Tell/Computed/Const/ContextParam，
+        // 此测试模拟运行时兜底场景。
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -1332,8 +1405,8 @@ mod tests {
             match err {
                 ConstructError::Generic { message, .. } => {
                     assert!(
-                        message.contains("RO"),
-                        "error should mention RO: {}",
+                        message.contains("compute_ro_value") || message.contains("RO"),
+                        "error should mention compute_ro_value/RO: {}",
                         message
                     );
                 }
@@ -1490,6 +1563,213 @@ mod tests {
             assert_eq!(ctx_dict.len(), 1);
             assert!(ctx_dict.contains("a").unwrap());
             assert!(!ctx_dict.contains("pad").unwrap());
+        });
+    }
+
+    // ======================================================================
+    // RO 字段 build（Tell/Computed）：compute_ro_value 路径（Phase 2.6）
+    // ======================================================================
+
+    /// 构造 Tell 节点的便捷函数。
+    fn tell_node() -> Node {
+        Node::Tell(crate::nodes::tell::TellNode::new())
+    }
+
+    /// 构造 Computed 节点的便捷函数。
+    fn computed_node(expr: crate::expr::ExprProgram) -> Node {
+        Node::Computed(crate::nodes::computed::ComputedNode::new(expr))
+    }
+
+    #[test]
+    fn ro_tell_field_build_records_stream_position() {
+        // RO Tell 字段 build：不在实例中取值，从 stream.tell() 计算。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "pos", tell_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            // 对象只有 RW 字段
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0xAA, 'b': 0xBB})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            // 写入两个字节 a, b（Tell 不写字节）
+            assert_eq!(stream.as_bytes(), &[0xAA, 0xBB]);
+        });
+    }
+
+    #[test]
+    fn ro_tell_field_build_writes_to_context_when_has_expressions() {
+        // has_expressions=true + RO Tell：build 时位置写入 ctx dict（供后续表达式引用）。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "pos", tell_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x42})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            // ctx dict 应包含 a=0x42 和 pos=1（写完 a 字节后的位置）
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            assert_eq!(ctx_dict.len(), 2);
+            let pos: i64 = ctx_dict
+                .get_item("pos")
+                .expect("get pos")
+                .expect("pos exists")
+                .extract()
+                .expect("extract i64");
+            assert_eq!(pos, 1);
+        });
+    }
+
+    #[test]
+    fn ro_computed_field_build_evaluates_expression() {
+        // RO Computed 字段 build：求值表达式，不从实例取值。
+        // Computed(a * 2) → [GetInt(0), Const(2), Mul]
+        with_py(|py| {
+            use crate::expr::{ExprOp, ExprProgram};
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(2), ExprOp::Mul]);
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "doubled", computed_node(prog)),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 21})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[21]); // Computed 不写字节
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            let doubled: i64 = ctx_dict
+                .get_item("doubled")
+                .expect("get doubled")
+                .expect("doubled exists")
+                .extract()
+                .expect("extract i64");
+            assert_eq!(doubled, 42);
+        });
+    }
+
+    #[test]
+    fn ro_tell_and_computed_round_trip_build_parse() {
+        // 完整往返：{ a: Int8ub, pos: Tell(), b: Int8ub }
+        // build 不写字节给 RO 字段；parse 时 Tell 返回流位置。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "pos", tell_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+
+            // build
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x11, 'b': 0x22})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+            assert_eq!(bytes, &[0x11, 0x22]);
+
+            // parse
+            let mut pstream = ParseStream::new(&bytes);
+            let mut pctx = Context::placeholder(py);
+            let mut ppath = Path::new();
+            let result = node
+                .parse(py, &mut pstream, &mut pctx, &mut ppath)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let pos: i64 = inst.getattr("pos").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0x11);
+            assert_eq!(pos, 1); // 在读完 a 之后，pos = 1
+            assert_eq!(b, 0x22);
+        });
+    }
+
+    #[test]
+    fn ro_computed_referencing_other_ro_field_build() {
+        // 表达式引用前序 RO 字段（如 Computed(pos) 引用 Tell）。
+        // 在 build 方向：Tell 先写入 ctx，然后 Computed 从 ctx 读取 pos。
+        with_py(|py| {
+            use crate::expr::{ExprOp, ExprProgram};
+            // pos_at_b = pos (GetInt(1)，pos 是 field index 1)
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(1)]);
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "pos", tell_node()),
+                ro_field(py, "pos_at_b", computed_node(prog)),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 7, 'b': 9})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[7, 9]);
+            let ctx_dict = ctx.fields().expect("ctx has dict");
+            // pos 应为 1（a 写完后），pos_at_b 应等于 pos=1
+            let pos: i64 = ctx_dict
+                .get_item("pos")
+                .expect("get pos")
+                .expect("exists")
+                .extract()
+                .expect("i64");
+            let pos_at_b: i64 = ctx_dict
+                .get_item("pos_at_b")
+                .expect("get pos_at_b")
+                .expect("exists")
+                .extract()
+                .expect("i64");
+            assert_eq!(pos, 1);
+            assert_eq!(pos_at_b, 1);
+        });
+    }
+
+    #[test]
+    fn ro_field_does_not_read_from_instance_on_build() {
+        // RO 字段 build：不应从实例 getattr。
+        // 即使实例没有该字段属性，build 也不应失败。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "pos", tell_node()),
+            ];
+            let node = StructNode::new(fields, mock_cls(py), false, false);
+            // 对象没有 'pos' 属性
+            let obj = py
+                .eval_bound("type('O', (), {'a': 5})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed without 'pos' attribute");
+            assert_eq!(stream.as_bytes(), &[5]);
         });
     }
 }

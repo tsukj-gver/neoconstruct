@@ -11,12 +11,15 @@
 //!
 //! ## 描述符类型识别策略
 //!
-//! 依赖 pyo3 的 `extract`（基于 `PyTypeInfo`），无字符串标识。按优先级：
+//! 依赖 pyo3 的 `extract`（基于 `PyTypeInfo`）和 Python type name 识别。按优先级：
 //! 1. `FormatFieldDescriptor` → [`Node::FormatField`]
 //! 2. `BytesDescriptor` → [`Node::Bytes`]
 //! 3. `GreedyBytesDescriptor` → [`Node::GreedyBytes`]
 //! 4. StructMixin 子类（`hasattr("_construct_compiled")`）→ [`Node::StructRef`]
-//! 5. 全部失败 → `ConstructError::Compilation`
+//! 5. 纯 Python 描述符（按 type name）：
+//!    - `TellDescriptor` → [`Node::Tell`]
+//!    - `ComputedDescriptor` → [`Node::Computed`]
+//! 6. 全部失败 → `ConstructError::Compilation`
 //!
 //! ## 前向引用处理
 //!
@@ -33,10 +36,12 @@ use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDesc
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
 use crate::nodes::bytes::BytesNode;
+use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
+use crate::nodes::tell::TellNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
 use pyo3::prelude::*;
@@ -290,7 +295,71 @@ fn build_node_from_descriptor(
         }
     }
 
-    // 5. 全部失败 → Compilation error
+    // 5. 纯 Python 描述符（按类型名识别，§3.7.4-§3.7.5）。
+    //    这些描述符定义在 Python 侧（_mixin.py 或 _constructors.py），
+    //    不需要 Rust pyclass，通过 duck typing（type name）识别。
+    let type_name = desc
+        .get_type()
+        .name()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("failed to get descriptor type name: {}", e),
+        })?
+        .to_str()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("descriptor type name is not valid UTF-8: {}", e),
+        })?
+        .to_string();
+    match type_name.as_str() {
+        // TellDescriptor（无参数）→ TellNode。
+        // TellDescriptor._expr_params 返回 {}（无表达式参数），expr_programs 对应位置为 None。
+        "TellDescriptor" => return Ok(Node::Tell(TellNode::new())),
+        // ComputedDescriptor（带表达式）→ ComputedNode { expr: program }。
+        // ComputedDescriptor._expr_params 返回 {"func": <expr>}，编译期生成 "func" 键的 ExprOp 列表。
+        "ComputedDescriptor" => {
+            // 从 expr_programs 取该字段的 "func" 参数
+            let field_exprs = expr_programs.get(field_index).and_then(Option::as_ref);
+            // expr_programs 中可能为 None：ComputedDescriptor 应总是有 "func" 表达式。
+            // 但若用户传入了常量（非 FieldRef/ExprRef），_extract_and_compile_exprs 不编译，
+            // 此时 expr_programs 对应位置为 None。理论上 Computed 总需要表达式，
+            // 但为防御性，若为 None 视为编译错误。
+            let field_exprs_dict =
+                match field_exprs {
+                    Some(d) => d.bind(py).downcast::<PyDict>().map_err(|_| {
+                        ConstructError::Compilation {
+                            message: "ComputedDescriptor expression program must be a dict"
+                                .to_string(),
+                        }
+                    })?,
+                    None => {
+                        return Err(ConstructError::Compilation {
+                            message: format!(
+                                "ComputedDescriptor requires an expression program ('func'), \
+                             but no expression was provided for field index {}. \
+                             Use Computed(expr) with a FieldRef/ExprRef expression.",
+                                field_index
+                            ),
+                        });
+                    }
+                };
+            let ops_list = field_exprs_dict
+                .get_item("func")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("failed to get 'func' from ComputedDescriptor: {}", e),
+                })?
+                .ok_or_else(|| ConstructError::Compilation {
+                    message: format!(
+                        "ComputedDescriptor expression program is missing 'func' key (field index {})",
+                        field_index
+                    ),
+                })?;
+            let ops = parse_expr_ops_from_py(&ops_list)?;
+            let program = ExprProgram::new(ops);
+            return Ok(Node::Computed(ComputedNode::new(program)));
+        }
+        _ => {}
+    }
+
+    // 6. 全部失败 → Compilation error
     let repr_str = desc
         .repr()
         .ok()
@@ -2007,6 +2076,277 @@ class {name}:
             let obj = cls.call((), Some(&kwargs)).expect("create obj");
             let built = schema._build_raw(py, &obj).expect("build");
             assert_eq!(built.as_bytes(), parse_data);
+        });
+    }
+
+    // ======================================================================
+    // Phase 2 子任务 2.6：TellDescriptor / ComputedDescriptor 识别
+    // ======================================================================
+
+    /// 创建一个 TellDescriptor Python 实例（模拟 Python 侧 Tell()）。
+    ///
+    /// 使用 `type()` 动态创建类（避免 `eval_bound` 无法执行 `class` 语句的限制）。
+    /// 类名为 "TellDescriptor"，含 `_expr_params = {}` 类属性。
+    fn make_tell_descriptor(py: Python<'_>) -> Py<PyAny> {
+        // type("TellDescriptor", (object,), {"_expr_params": {}})()
+        py.eval_bound(
+            "type('TellDescriptor', (), {'_expr_params': {}})()",
+            None,
+            None,
+        )
+        .expect("create TellDescriptor")
+        .unbind()
+    }
+
+    /// 创建一个 ComputedDescriptor Python 实例，携带 expr 引用。
+    ///
+    /// 使用 `run_bound` 定义 ComputedDescriptor 类（带 property），然后实例化。
+    /// `expr` 参数可以是任意对象（None 即可，因为实际表达式通过 expr_programs 传入）。
+    fn make_computed_descriptor(py: Python<'_>) -> Py<PyAny> {
+        // 先用 run_bound 定义 ComputedDescriptor 类（带 property），然后实例化。
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class ComputedDescriptor:\n",
+            "    def __init__(self, expr):\n",
+            "        self.expr = expr\n",
+            "    @property\n",
+            "    def _expr_params(self):\n",
+            "        return {'func': self.expr}\n",
+            "    def __repr__(self):\n",
+            "        return 'Computed({!r})'.format(self.expr)\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define ComputedDescriptor");
+        let cls = globals
+            .get_item("ComputedDescriptor")
+            .expect("get_item ok")
+            .expect("class exists");
+        // expr=None 是占位值，实际表达式通过 expr_programs 的 "func" 键传入。
+        cls.call((Option::<Py<PyAny>>::None,), None)
+            .expect("instantiate")
+            .unbind()
+    }
+
+    /// 构造一个 "func" 表达式程序 dict：{"func": [(op_tuple), ...]}。
+    fn make_func_program(py: Python<'_>, ops_code: &str) -> Py<PyAny> {
+        let code = format!("{{'func': {}}}", ops_code);
+        py.eval_bound(&code, None, None)
+            .expect("eval func program")
+            .unbind()
+    }
+
+    #[test]
+    fn compile_tell_descriptor_produces_tell_node() {
+        // TellDescriptor → Node::Tell
+        with_py(|py| {
+            let cls = make_dummy_class(py, "TellTest");
+            let tell_desc = make_tell_descriptor(py).into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["pos".to_string()],
+                vec![tell_desc],
+                Some(vec!["ro".to_string()]),
+                None, // TellDescriptor 无表达式参数
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    match &s.fields()[0].node {
+                        Node::Tell(_) => {}
+                        other => panic!("expected Node::Tell, got {:?}", other),
+                    }
+                    assert_eq!(s.fields()[0].mode, FieldMode::Ro);
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_computed_descriptor_produces_computed_node() {
+        // ComputedDescriptor + expr_programs["func"] → Node::Computed { expr }
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ComputedTest");
+            let count_desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let computed_desc = make_computed_descriptor(py).into_any();
+            // func = count * 2 → [getint 0, const 2, mul]
+            let prog = make_func_program(py, "[('getint', 0), ('const', 2), ('mul',)]");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["count".to_string(), "doubled".to_string()],
+                vec![count_desc, computed_desc],
+                Some(vec!["rw".to_string(), "ro".to_string()]),
+                Some(vec![None, Some(prog)]),
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 2);
+                    match &s.fields()[1].node {
+                        Node::Computed(c) => {
+                            assert_eq!(
+                                c.expr().ops(),
+                                &[ExprOp::GetInt(0), ExprOp::Const(2), ExprOp::Mul]
+                            );
+                        }
+                        other => panic!("expected Node::Computed, got {:?}", other),
+                    }
+                    assert_eq!(s.fields()[1].mode, FieldMode::Ro);
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_computed_descriptor_without_expr_program_returns_error() {
+        // ComputedDescriptor + expr_programs=None → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MissingExpr");
+            let computed_desc = make_computed_descriptor(py).into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![computed_desc],
+                Some(vec!["ro".to_string()]),
+                None,
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("ComputedDescriptor")
+                    || msg.contains("func")
+                    || msg.contains("expression"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_computed_descriptor_missing_func_key_returns_error() {
+        // ComputedDescriptor + expr_programs={}（空 dict，缺 "func"）→ Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MissingFunc");
+            let computed_desc = make_computed_descriptor(py).into_any();
+            let empty_prog = py
+                .eval_bound("{}", None, None)
+                .expect("empty dict")
+                .unbind();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![computed_desc],
+                Some(vec!["ro".to_string()]),
+                Some(vec![Some(empty_prog)]),
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("func") || msg.contains("missing"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_tell_and_computed_mixed_end_to_end() {
+        // 完整端到端：Tell + Computed 混合使用。
+        // Struct { start: Tell(), count: Int8ub, end: Tell(), size: Computed(end - start) }
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "Packet");
+            let tell_desc = make_tell_descriptor(py).into_any();
+            let count_desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let computed_desc = make_computed_descriptor(py).into_any();
+            // size = end - start → [getint 2 (end), getint 0 (start), sub]
+            let prog = make_func_program(py, "[('getint', 2), ('getint', 0), ('sub',)]");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec![
+                    "start".to_string(),
+                    "count".to_string(),
+                    "end".to_string(),
+                    "size".to_string(),
+                ],
+                vec![
+                    tell_desc.clone_ref(py),
+                    count_desc,
+                    tell_desc,
+                    computed_desc,
+                ],
+                Some(vec![
+                    "ro".to_string(),
+                    "rw".to_string(),
+                    "ro".to_string(),
+                    "ro".to_string(),
+                ]),
+                Some(vec![None, None, None, Some(prog)]),
+            )
+            .expect("compile");
+
+            // parse: b'\x05' → start=0, count=5, end=1, size=1
+            let parse_data = b"\x05";
+            let data = PyBytes::new_bound(py, parse_data);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let start: i64 = parsed.getattr("start").unwrap().extract().unwrap();
+            let count: i64 = parsed.getattr("count").unwrap().extract().unwrap();
+            let end: i64 = parsed.getattr("end").unwrap().extract().unwrap();
+            let size: i64 = parsed.getattr("size").unwrap().extract().unwrap();
+            assert_eq!(start, 0);
+            assert_eq!(count, 5);
+            assert_eq!(end, 1);
+            assert_eq!(size, 1); // end - start = 1 - 0
+
+            // build: 实例只提供 RW 字段（count），RO 字段自动计算
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("count", 5).expect("set count");
+            let obj = cls.call((), Some(&kwargs)).expect("create obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), parse_data);
+        });
+    }
+
+    #[test]
+    fn compile_tell_descriptor_in_rw_mode_still_compiles() {
+        // Tell 字段理论上应使用 RO 模式，但编译器不强制拒绝其他模式。
+        // （mode 校验推迟到 Phase 3 的 validate_field_combinations）
+        with_py(|py| {
+            let cls = make_dummy_class(py, "TellRw");
+            let tell_desc = make_tell_descriptor(py).into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["pos".to_string()],
+                vec![tell_desc],
+                Some(vec!["rw".to_string()]),
+                None,
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(matches!(s.fields()[0].node, Node::Tell(_)));
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
         });
     }
 }

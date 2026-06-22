@@ -8,32 +8,38 @@
 //! 三个方法。节点类型用封闭 [`Node`] 枚举列举，通过 `enum_dispatch` 宏自动生成
 //! `match` 分派代码，无 `Box<dyn>` 动态分派开销。
 //!
-//! ## Phase 1.4 范围
+//! ## 当前范围
 //!
-//! 当前含 5 个节点变体：
+//! 当前含 7 个节点变体：
 //! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
-//!   [`BytesNode`](bytes::BytesNode)（固定长度字节）、
+//!   [`BytesNode`](bytes::BytesNode)（固定/表达式长度字节）、
 //!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）
 //! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
 //!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）
+//! - RO 节点：[`TellNode`](tell::TellNode)（流位置）、
+//!   [`ComputedNode`](computed::ComputedNode)（表达式计算值）
 
 pub mod bytes;
+pub mod computed;
 pub mod format_field;
 pub mod greedy_bytes;
 pub mod struct_node;
 pub mod struct_ref;
+pub mod tell;
 
 use crate::context::Context;
 use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use bytes::BytesNode;
+use computed::ComputedNode;
 use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use pyo3::prelude::*;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
+use tell::TellNode;
 
 /// 所有构造器节点实现的统一接口。
 ///
@@ -109,16 +115,17 @@ pub trait Construct {
 ///
 /// 新增节点类型需在此枚举添加变体（Phase 2+ 扩展时修改）。
 ///
-/// # Phase 1.4 变体
+/// # 当前变体
 ///
 /// - 3 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`
 /// - 2 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）
+/// - 2 个 RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
 #[derive(Debug)]
 #[enum_dispatch(Construct)]
 pub enum Node {
     /// 整数读写节点：`Int8ub` / `Int16ul` / ... （对应 Python construct `FormatField`）
     FormatField(FormatFieldNode),
-    /// 固定长度字节读写节点：`Bytes(n)` （对应 Python construct `Bytes`）
+    /// 固定/表达式长度字节读写节点：`Bytes(n)` / `Bytes(count)` （对应 Python construct `Bytes`）
     Bytes(BytesNode),
     /// 剩余字节读写节点：`GreedyBytes` （对应 Python construct `GreedyBytes`）
     GreedyBytes(GreedyBytesNode),
@@ -126,4 +133,8 @@ pub enum Node {
     Struct(StructNode),
     /// 嵌套引用节点：引用另一个 `StructMixin` 子类的执行树
     StructRef(StructRefNode),
+    /// RO 节点：记录当前流位置（对应 Python construct `Tell`）
+    Tell(TellNode),
+    /// RO 节点：从表达式计算值（对应 Python construct `Computed`）
+    Computed(ComputedNode),
 }
