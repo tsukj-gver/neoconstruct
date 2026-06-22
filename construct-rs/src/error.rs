@@ -96,6 +96,59 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    // --- 表达式求值错误（Phase 2，§4.5）---
+    // 这些变体不携带 `path` 字段。`push_path_segment` 对这些变体为无操作
+    // （`set_path` 不写入）。调用方（如 BytesNode）需自行将 Expr* 错误转换
+    // 为带 path 的错误（如 Generic），以向用户暴露出错字段位置。
+    /// 表达式求值：字段值类型不匹配（期望 i64，实际为 str/bytes 等）。
+    ///
+    /// 触发场景：[`crate::expr::ExprOp::GetInt`] 从 context 取到的值无法 extract 为 `i64`。
+    #[error("expression field {field:?} has wrong type, expected {expected}")]
+    ExprType {
+        /// 出错字段名。
+        field: String,
+        /// 期望的类型描述（如 `"integer (i64)"`）。
+        expected: String,
+    },
+
+    /// 表达式求值：引用的字段不存在于 context 中。
+    ///
+    /// 触发场景：[`crate::expr::ExprOp::GetInt`] 取值时 `PyDict::get_item` 返回 `None`。
+    /// 编译期应通过字段存在性检查避免，运行时触发属于内部错误。
+    #[error("expression field {field:?} missing in context")]
+    ExprFieldMissing {
+        /// 缺失的字段名。
+        field: String,
+    },
+
+    /// 表达式求值：context 为 placeholder（无 PyDict），无法求值。
+    ///
+    /// 触发场景：在 [`crate::context::Context::placeholder`] 上调用表达式求值。
+    /// 理论上不会发生——有表达式的 Struct 使用 [`crate::context::Context::new_root`]，
+    /// 而非 placeholder。
+    #[error("expression context error: {message}")]
+    ExprContext {
+        /// 错误详情。
+        message: String,
+    },
+
+    /// 表达式求值：除以零。
+    ///
+    /// 触发场景：[`crate::expr::ExprOp::FloorDiv`] 或 [`crate::expr::ExprOp::Mod`]
+    /// 的除数（栈顶值）为 0。
+    #[error("expression error: {message}")]
+    ExprDivByZero {
+        /// 错误详情（如 `"expression division by zero"`）。
+        message: String,
+    },
+
+    /// 表达式求值：栈下溢（指令序列不合法，编译期应保证不发生）。
+    ///
+    /// 触发场景：[`crate::expr::eval_expr_int`] 内 `pop2` 或 `pop` 时栈为空。
+    /// 仅作为防御性错误，正常路径不应触发。
+    #[error("expression stack underflow")]
+    ExprStackUnderflow,
 }
 
 impl ConstructError {
@@ -109,7 +162,14 @@ impl ConstructError {
             | ConstructError::FieldLength { message, .. }
             | ConstructError::Compilation { message }
             | ConstructError::UnresolvedReference { message }
-            | ConstructError::Generic { message, .. } => message,
+            | ConstructError::Generic { message, .. }
+            | ConstructError::ExprContext { message }
+            | ConstructError::ExprDivByZero { message } => message,
+            // 这些变体没有单一 message 字段，Display 实现包含完整信息。
+            // message() 返回空串仅用于静态分发；完整错误信息通过 to_string() / full_message() 获取。
+            ConstructError::ExprType { .. }
+            | ConstructError::ExprFieldMissing { .. }
+            | ConstructError::ExprStackUnderflow => "",
         }
     }
 
@@ -122,7 +182,13 @@ impl ConstructError {
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
             | ConstructError::Generic { path, .. } => Some(path),
-            ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
+            ConstructError::Compilation { .. }
+            | ConstructError::UnresolvedReference { .. }
+            | ConstructError::ExprType { .. }
+            | ConstructError::ExprFieldMissing { .. }
+            | ConstructError::ExprContext { .. }
+            | ConstructError::ExprDivByZero { .. }
+            | ConstructError::ExprStackUnderflow => None,
         }
     }
 
@@ -133,10 +199,20 @@ impl ConstructError {
     /// "Error in path {path}\n{message}"
     /// ```
     /// 若无 path（编译期错误），仅返回 `{message}`。
+    ///
+    /// 对于无单一 `message` 字段的结构化变体（`ExprType` / `ExprFieldMissing` /
+    /// `ExprStackUnderflow`），使用 `Display` 实现作为完整消息。
     pub fn full_message(&self) -> String {
-        match self.path() {
-            Some(p) => format!("Error in path {}\n{}", p, self.message()),
-            None => self.message().to_string(),
+        match self {
+            // 结构化变体：无单一 message 字段，Display 已包含完整信息。
+            ConstructError::ExprType { .. }
+            | ConstructError::ExprFieldMissing { .. }
+            | ConstructError::ExprStackUnderflow => self.to_string(),
+            // 其他变体：按 path 拼接。
+            _ => match self.path() {
+                Some(p) => format!("Error in path {}\n{}", p, self.message()),
+                None => self.message().to_string(),
+            },
         }
     }
 
@@ -149,6 +225,11 @@ impl ConstructError {
             ConstructError::Compilation { .. } => "Compilation",
             ConstructError::UnresolvedReference { .. } => "UnresolvedReference",
             ConstructError::Generic { .. } => "Generic",
+            ConstructError::ExprType { .. } => "ExprType",
+            ConstructError::ExprFieldMissing { .. } => "ExprFieldMissing",
+            ConstructError::ExprContext { .. } => "ExprContext",
+            ConstructError::ExprDivByZero { .. } => "ExprDivByZero",
+            ConstructError::ExprStackUnderflow => "ExprStackUnderflow",
         }
     }
 
@@ -194,7 +275,13 @@ impl ConstructError {
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
             | ConstructError::Generic { path, .. } => *path = new_path,
-            ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
+            ConstructError::Compilation { .. }
+            | ConstructError::UnresolvedReference { .. }
+            | ConstructError::ExprType { .. }
+            | ConstructError::ExprFieldMissing { .. }
+            | ConstructError::ExprContext { .. }
+            | ConstructError::ExprDivByZero { .. }
+            | ConstructError::ExprStackUnderflow => {}
         }
     }
 }
@@ -225,6 +312,12 @@ struct ExceptionClasses {
     unresolved_reference_error: Py<PyType>,
     /// 对应 `ConstructError::Generic`。
     generic_construct_error: Py<PyType>,
+    /// `ConstructError` 基类，用于 Phase 2 新增的 Expr* 变体
+    /// （ExprType / ExprFieldMissing / ExprContext / ExprDivByZero / ExprStackUnderflow）。
+    ///
+    /// Phase 2 暂无专门的 ExprError Python 类，统一映射到基类。
+    /// 后续子任务可增加专门的 ExprError 类并在此缓存。
+    construct_error_base: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -266,6 +359,7 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         compilation_error: get("CompilationError")?,
         unresolved_reference_error: get("UnresolvedReferenceError")?,
         generic_construct_error: get("GenericConstructError")?,
+        construct_error_base: get("ConstructError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -290,6 +384,12 @@ fn select_exception_class<'py>(
         ConstructError::Compilation { .. } => &classes.compilation_error,
         ConstructError::UnresolvedReference { .. } => &classes.unresolved_reference_error,
         ConstructError::Generic { .. } => &classes.generic_construct_error,
+        // Phase 2 Expr* 变体暂无专门的 Python 异常类，统一映射到基类 ConstructError。
+        ConstructError::ExprType { .. }
+        | ConstructError::ExprFieldMissing { .. }
+        | ConstructError::ExprContext { .. }
+        | ConstructError::ExprDivByZero { .. }
+        | ConstructError::ExprStackUnderflow => &classes.construct_error_base,
     };
     cls.bind(py).clone()
 }
@@ -331,8 +431,16 @@ fn build_exception_instance<'py>(
 impl From<ConstructError> for PyErr {
     fn from(err: ConstructError) -> Self {
         // 预先提取 message/path（避免在 with_gil 闭包中持有 err 的引用）。
-        let message = err.message().to_string();
         let path_owned: Option<String> = err.path().map(|s| s.to_string());
+        // 对于带 path 的变体，message 是裸消息（Python 侧会拼接 "Error in path"）。
+        // 对于无 path 的变体，message 使用 full_message()（含完整 Display 信息，
+        // 覆盖 ExprType/ExprFieldMissing/ExprStackUnderflow 等结构化变体）。
+        let message = if path_owned.is_some() {
+            err.message().to_string()
+        } else {
+            err.full_message()
+        };
+        // fallback 专用（EXCEPTIONS 未初始化时使用），始终用 full_message。
         let full_message = err.full_message();
 
         Python::with_gil(|py| match EXCEPTIONS.get(py) {
@@ -621,6 +729,7 @@ mod tests {
             compilation_error: get("CompilationError"),
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),
+            construct_error_base: get("ConstructError"),
         }
     }
 

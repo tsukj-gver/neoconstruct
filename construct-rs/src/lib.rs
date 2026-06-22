@@ -22,6 +22,7 @@ pub mod compile;
 pub mod context;
 pub mod descriptors;
 pub mod error;
+pub mod expr;
 pub mod instance;
 pub mod nodes;
 pub mod path;
@@ -32,6 +33,9 @@ use descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor}
 use nodes::format_field::PythonFormat;
 use pyo3::prelude::*;
 use schema::CompiledSchema;
+
+// Phase 2 表达式系统核心类型，re-export 供 crate 内其他模块直接使用。
+pub use expr::{eval_expr_int, ExprOp, ExprProgram};
 
 /// 返回 construct-rs Rust 内核的版本号字符串。
 ///

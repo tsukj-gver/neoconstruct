@@ -22,8 +22,9 @@
 //! （`PyDict_SetItem`），无需 Rust→Python 转换。this 引用读取时直接返回
 //! Python 对象，无中间类型（FFI 设计 §5）。与 Python construct 的 Container 语义一致。
 
+use crate::error::ConstructError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyString};
 
 /// 解析/构建上下文。Rust 内部持有 Python dict 引用（按需创建）。
 ///
@@ -119,6 +120,64 @@ impl<'py> Context<'py> {
     /// Phase 1 不使用，预留给 Phase 2 表达式系统。
     pub fn parent(&self) -> Option<&'py Context<'py>> {
         self.parent
+    }
+
+    /// 按 interned `PyString` name 取整数值（VM `GetInt` 指令使用）。
+    ///
+    /// 从当前层 `PyDict` `get_item` 取值，`extract` 为 `i64`。
+    ///
+    /// # 错误
+    ///
+    /// - [`ConstructError::ExprContext`]：占位 context（`fields = None`），无法求值。
+    ///   理论上不会发生——有表达式的 Struct 使用 [`Context::new_root`]，不是 placeholder。
+    /// - [`ConstructError::ExprFieldMissing`]：字段不存在于 context。
+    /// - [`ConstructError::ExprType`]：值无法 `extract` 为 `i64`（如 str/bytes）。
+    /// - [`ConstructError::Generic`]：底层 Python C API 调用失败（如 `to_str` 失败）。
+    pub fn get_int_by_name(
+        &self,
+        name: &Bound<'_, PyString>,
+        _py: Python<'_>,
+    ) -> Result<i64, ConstructError> {
+        let name_str = name.to_str()?;
+        match &self.fields {
+            Some(fields) => {
+                let val =
+                    fields
+                        .get_item(name_str)?
+                        .ok_or_else(|| ConstructError::ExprFieldMissing {
+                            field: name_str.to_string(),
+                        })?;
+                val.extract::<i64>().map_err(|_| ConstructError::ExprType {
+                    field: name_str.to_string(),
+                    expected: "integer (i64)".to_string(),
+                })
+            }
+            None => Err(ConstructError::ExprContext {
+                message: "context is placeholder (no PyDict), cannot evaluate expression"
+                    .to_string(),
+            }),
+        }
+    }
+
+    /// 按 interned `PyString` name 取 Python 对象（Switch selector 等非整数引用使用）。
+    ///
+    /// 返回 `Bound<'_, PyAny>` 引用，不做类型转换。字段不存在时返回 `Ok(None)`。
+    ///
+    /// # 错误
+    ///
+    /// - [`ConstructError::ExprContext`]：占位 context（`fields = None`），无法取值。
+    /// - [`ConstructError::Generic`]：底层 Python C API 调用失败。
+    pub fn get_obj_by_name(
+        &self,
+        name: &Bound<'_, PyString>,
+    ) -> Result<Option<Bound<'_, PyAny>>, ConstructError> {
+        let name_str = name.to_str()?;
+        match &self.fields {
+            Some(fields) => Ok(fields.get_item(name_str)?),
+            None => Err(ConstructError::ExprContext {
+                message: "context is placeholder, cannot get field object".to_string(),
+            }),
+        }
     }
 
     /// 借用当前层的字段字典（用于测试与调试）。
