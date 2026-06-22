@@ -32,7 +32,7 @@ from ._errors import (
     StreamError,
     UnresolvedReferenceError,
 )
-from ._mixin import StructMixin, field
+from ._mixin import StructMixin, field, rfield, wfield
 
 # ---------------------------------------------------------------------------
 # Rust 扩展导入
@@ -87,6 +87,8 @@ __all__ = [
     # 核心 API
     "StructMixin",
     "field",
+    "rfield",
+    "wfield",
     # 类型描述符
     "Bytes",
     "GreedyBytes",
