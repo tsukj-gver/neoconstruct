@@ -1,0 +1,51 @@
+======================================================================
+construct-rs vs Python construct 2.10.70 表达式场景性能测试结果
+======================================================================
+
+环境信息：
+  Python 版本    : 3.14.2
+  平台           : Windows-11-10.0.26200-SP0
+  处理器         : Intel64 Family 6 Model 183 Stepping 1, GenuineIntel
+  machine        : AMD64
+  timeit number  : 100000
+  repeat (中位数): 5
+  测量时间       : 2026-06-23 02:52:42
+
+通过标准（§8.7）：
+  - E1-E3 parse ≥8.0x（硬目标）
+  - E1-E3 build ≥7.0x（CONFIRM-1 决定）
+  - <4.0x 视为设计失败，暂停后续开发
+
+对比表：
+用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定          
+-----------------------------------------------------------------------------
+E1   parse  506.3              2844.1                 5.62      x [WARN]
+E1   build  319.4              2909.9                 9.11      x [PASS]
+E2   parse  669.7              4150.8                 6.20      x [WARN]
+E2   build  365.5              3682.3                 10.07     x [PASS]
+E3   parse  939.9              5825.6                 6.20      x [WARN]
+E3   build  631.4              4435.5                 7.03      x [PASS]
+
+用例说明：
+  E1: 字段引用 + 表达式长度 (count + Bytes(count))
+  E2: 算术表达式 (count + flag + Bytes(count+flag))
+  E3: Tell + Computed (6 字段: Tell, Bytes(4), Int16ub, Bytes(len), Tell, Computed)
+
+门禁检查：
+  [FAIL] 硬目标失败：E1 parse 加速比 5.62x < 8.0x
+  [FAIL] 硬目标失败：E2 parse 加速比 6.20x < 8.0x
+  [FAIL] 硬目标失败：E3 parse 加速比 6.20x < 8.0x
+
+原始数据（per_call_ns = 每次调用纳秒数）：
+  E1 parse rs: median=506.3ns  min=488.5ns
+  E1 parse py: median=2844.1ns  min=2822.2ns
+  E1 build rs: median=319.4ns  min=313.5ns
+  E1 build py: median=2909.9ns  min=2837.6ns
+  E2 parse rs: median=669.7ns  min=581.4ns
+  E2 parse py: median=4150.8ns  min=3862.4ns
+  E2 build rs: median=365.5ns  min=362.0ns
+  E2 build py: median=3682.3ns  min=3588.1ns
+  E3 parse rs: median=939.9ns  min=887.3ns
+  E3 parse py: median=5825.6ns  min=4880.9ns
+  E3 build rs: median=631.4ns  min=627.1ns
+  E3 build py: median=4435.5ns  min=4350.2ns
