@@ -26,7 +26,7 @@ import dataclasses
 import operator
 import threading
 
-from ._errors import ConstructError
+from ._errors import CompilationError, ConstructError
 
 # ---------------------------------------------------------------------------
 # Rust 扩展导入
@@ -326,6 +326,248 @@ def _collect_field_descriptors(cls):
 
 
 # ---------------------------------------------------------------------------
+# 表达式编译（§3.2-§3.4）
+# ---------------------------------------------------------------------------
+
+# operator 模块函数 → ExprOp 指令名称的映射（§3.3）。
+#
+# 编译期将 _ExprRef.op（operator.add 等）翻译为对应的 ExprOp 名称字符串，
+# Rust 侧根据字符串构建 ExprOp 枚举变体。
+#
+# 不在此映射中的 operator 函数（如 operator.truediv）→ 编译期 CompilationError。
+_OP_TO_EXPROP = {
+    operator.add: "add",
+    operator.sub: "sub",
+    operator.mul: "mul",
+    operator.floordiv: "floordiv",
+    operator.mod: "mod",
+    operator.and_: "bitand",
+    operator.or_: "bitor",
+    operator.xor: "bitxor",
+    operator.lshift: "shl",
+    operator.rshift: "shr",
+    operator.neg: "neg",
+    operator.invert: "not",
+    operator.eq: "eq",
+    operator.ne: "ne",
+    operator.lt: "lt",
+    operator.le: "le",
+    operator.gt: "gt",
+    operator.ge: "ge",
+}
+
+
+def _compile_expr_tree(node, field_index_map, referencing_field_name):
+    """将 FieldRef/ExprRef 树翻译为 ExprOp 指令列表（后序遍历，§3.3）。
+
+    递归遍历表达式树，按后序（left → right → op）发射指令：
+
+    - ``_FieldDescriptor`` → ``("getint", field_index)``
+    - ``int`` → ``("const", value)``
+    - ``_ExprRef`` 二元运算 → 递归 lhs、递归 rhs，然后 ``("op_name",)``
+    - ``_ExprRef`` 一元运算（neg/invert）→ 递归 lhs，然后 ``("op_name",)``
+
+    :param node: 表达式树根节点（``_FieldDescriptor`` / ``_ExprRef`` / ``int``）。
+    :param field_index_map: ``{id(descriptor): field_index}``，编译期建立的映射。
+    :param referencing_field_name: 引用方字段名（用于错误信息）。
+    :return: ExprOp 指令元组列表，如 ``[("getint", 0), ("getint", 1), ("add",)]``。
+    :raises CompilationError: 字段引用未找到 / 不支持的节点类型 / 浮点常量。
+    """
+    ops = []
+    _emit_expr_ops(node, field_index_map, referencing_field_name, ops)
+    return ops
+
+
+def _emit_expr_ops(node, field_index_map, ref_name, ops):
+    """递归遍历表达式树，后序发射 ExprOp 指令（§3.3）。
+
+    纯整数 VM 栈：只接受 ``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 节点。
+    ``float`` 与其他类型直接 CompilationError。
+    """
+    if isinstance(node, _FieldDescriptor):
+        # 字段引用：查 field_index_map（通过对象 identity）
+        idx = field_index_map.get(id(node))
+        if idx is None:
+            raise CompilationError(
+                "字段引用未找到：字段 '{}' 引用了未知字段 '{}'。"
+                "请检查拼写或确保被引用的字段在当前 Struct 中声明。".format(
+                    ref_name, node.name or "<unnamed>"
+                )
+            )
+        ops.append(("getint", idx))
+
+    elif isinstance(node, _ExprRef):
+        # 表达式节点：递归 lhs、rhs，然后发射操作符
+        if node.op in (operator.neg, operator.invert):
+            # 一元运算：只有 lhs
+            _emit_expr_ops(node.lhs, field_index_map, ref_name, ops)
+            ops.append((_OP_TO_EXPROP[node.op],))
+        else:
+            # 二元运算：lhs、rhs、op
+            _emit_expr_ops(node.lhs, field_index_map, ref_name, ops)
+            _emit_expr_ops(node.rhs, field_index_map, ref_name, ops)
+            op_name = _OP_TO_EXPROP.get(node.op)
+            if op_name is None:
+                raise CompilationError(
+                    "不支持的表达式运算符：{}（在字段 '{}' 中）。"
+                    "VM 栈为 i64，不支持浮点除法或未实现的运算。".format(node.op, ref_name)
+                )
+            ops.append((op_name,))
+
+    elif isinstance(node, bool):
+        # bool 是 int 的子类，但显式拒绝以避免歧义（表达式应使用整数）
+        raise CompilationError(
+            "不支持的表达式节点类型 bool：{!r}（在字段 '{}' 中）。"
+            "请使用整数 0/1 替代。".format(node, ref_name)
+        )
+
+    elif isinstance(node, int):
+        # 整数常量（排除 bool，已在上分支处理）
+        ops.append(("const", node))
+
+    elif isinstance(node, float):
+        raise CompilationError(
+            "浮点常量不支持（VM 栈为 i64）。"
+            "请使用整数表达式（在字段 '{}' 中）".format(ref_name)
+        )
+
+    else:
+        raise CompilationError(
+            "不支持的表达式节点类型 {}：{!r}（在字段 '{}' 中）".format(
+                type(node).__name__, node, ref_name
+            )
+        )
+
+
+def _check_forward_reference(expr_ops, current_field_index, ref_name):
+    """检查表达式中是否引用了后序字段（前向引用，§3.4.2）。
+
+    parse 方向只能引用已解析的前序字段（声明顺序在当前字段之前）。
+    引用后序字段（``getint idx >= current_field_index``）是逻辑错误。
+
+    :param expr_ops: 编译后的 ExprOp 指令列表。
+    :param current_field_index: 当前字段在 descriptors 列表中的索引。
+    :param ref_name: 当前字段名（用于错误信息）。
+    :raises CompilationError: 引用了后序字段。
+    """
+    for op in expr_ops:
+        if op[0] == "getint" and op[1] >= current_field_index:
+            raise CompilationError(
+                "字段 '{}' 的表达式引用了后序字段（索引 {} >= {}）。"
+                "表达式只能引用在当前字段之前声明的字段。".format(
+                    ref_name, op[1], current_field_index
+                )
+            )
+
+
+def _check_wo_reference(expr_ops, descriptors, ref_name):
+    """检查表达式中是否引用了 WO 字段（§3.4.4）。
+
+    WO 字段（padding/reserved）不写入 context（方案 A），表达式运行时无法取到其值。
+    编译期检测到 ``getint`` 引用 WO 字段时立即抛 ``CompilationError``。
+
+    :param expr_ops: 编译后的 ExprOp 指令列表。
+    :param descriptors: ``[(name, _FieldDescriptor), ...]`` 完整字段列表。
+    :param ref_name: 引用方字段名（用于错误信息）。
+    :raises CompilationError: 引用了 WO 字段。
+    """
+    wo_indices = {
+        idx for idx, (_, desc) in enumerate(descriptors) if desc.mode == "wo"
+    }
+    for op in expr_ops:
+        if op[0] == "getint" and op[1] in wo_indices:
+            wo_name = descriptors[op[1]][0]
+            raise CompilationError(
+                "字段 '{}' 的表达式引用了 WO 字段 '{}'。"
+                "WO 字段（padding/reserved）不写入 context，"
+                "表达式无法引用。如需引用，请将该字段改为 field() 或 rfield()。".format(
+                    ref_name, wo_name
+                )
+            )
+
+
+def _extract_and_compile_exprs(subcon, field_index_map, field_name):
+    """从 subcon 提取含表达式的参数，编译为 ExprProgram（§3.2 / §3.7.2）。
+
+    通过 ``_expr_params`` 协议检测描述符中的表达式参数。每个实现了
+    ``_expr_params`` 的描述符返回 ``{param_name: value}`` 字典，
+    其中 value 可以是 int/常量（不编译）或 FieldRef/ExprRef（编译）。
+
+    :param subcon: 字段的类型描述符（可能含 ``_expr_params`` 属性）。
+    :param field_index_map: ``{id(descriptor): field_index}``。
+    :param field_name: 字段名（用于错误信息）。
+    :return: ``{param_name: [expr_ops]}`` 或空 dict（无表达式参数）。
+    :raises CompilationError: 表达式编译失败（前向引用、WO 引用、未知类型等）。
+    """
+    result = {}
+
+    # 通过 _expr_params 协议统一检测（覆盖所有描述符类型）
+    # BytesDescriptor: {"length": <value>}
+    # ComputedDescriptor: {"func": <expr>}
+    # SwitchDescriptor: {"keyfunc": <expr>}
+    # IfThenElseDescriptor: {"condfunc": <expr>}
+    # ConstDescriptor/TellDescriptor/ContextParam: {} （无表达式参数）
+    # FormatFieldDescriptor: 无此属性（hasattr 返回 False）
+    expr_params = getattr(subcon, "_expr_params", None)
+    if expr_params is None:
+        return result
+
+    for param_name, param_value in expr_params.items():
+        if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
+            ops = _compile_expr_tree(param_value, field_index_map, field_name)
+            result[param_name] = ops
+        # 常量值（int/bytes/str）不编译（留在描述符中供 Rust 侧读取）
+
+    return result
+
+
+def _compile_expressions(descriptors, field_index_map):
+    """遍历所有字段的 subcon，编译其中的表达式（§3.2）。
+
+    对每个字段：
+    1. 从 subcon 提取表达式参数（``_extract_and_compile_exprs``）
+    2. 对每个表达式执行编译期验证（前向引用、WO 引用）
+    3. 收集到 ``{field_index: {param_name: [expr_ops]}}`` 结构
+
+    :param descriptors: ``[(name, _FieldDescriptor), ...]`` 有序列表。
+    :param field_index_map: ``{id(descriptor): field_index}``。
+    :return: ``{field_index: {param_name: [expr_ops]}}`` 嵌套字典，空 dict 表示无表达式。
+    :raises CompilationError: 任何表达式编译或验证失败。
+    """
+    expr_programs = {}
+    for idx, (name, desc) in enumerate(descriptors):
+        subcon = desc.subcon
+        field_exprs = _extract_and_compile_exprs(subcon, field_index_map, name)
+        if field_exprs:
+            # 对每个表达式的 expr_ops 执行编译期验证
+            for param_name, ops in field_exprs.items():
+                _check_forward_reference(ops, idx, name)
+                _check_wo_reference(ops, descriptors, name)
+            expr_programs[idx] = field_exprs
+    return expr_programs
+
+
+def _expr_programs_to_list(expr_programs, field_count):
+    """将 ``{field_index: {param_name: [ops]}}`` 转换为 ``Vec<Option<dict>>`` 格式。
+
+    Rust 侧 ``compile_schema`` 接收 ``expr_programs: Option<Vec<Option<PyObject>>>``，
+    长度与字段数一致。每个元素为 ``None``（该字段无表达式）或 Python dict
+    （``{param_name: [expr_ops]}``）。
+
+    :param expr_programs: ``{field_index: {param_name: [ops]}}`` 嵌套字典。
+    :param field_count: 字段总数。
+    :return: 长度为 ``field_count`` 的列表，每项为 ``None`` 或 dict。
+    """
+    result = []
+    for i in range(field_count):
+        if i in expr_programs:
+            result.append(expr_programs[i])
+        else:
+            result.append(None)
+    return result
+
+
+# ---------------------------------------------------------------------------
 # dataclass 字段配置注入（§2.2.1）
 # ---------------------------------------------------------------------------
 
@@ -380,15 +622,39 @@ def _apply_dataclass_field_config(cls, descriptors):
 def _compile_schema_for_class(cls):
     """为 StructMixin 子类编译 schema。
 
-    在 ``__init_subclass__`` 中调用。收集字段 → 调用 Rust ``compile_schema`` →
-    注入 dataclass 配置 → 存储编译产物。前向引用未解析时安装延迟桩（§E.6），
-    其他错误 fail fast。
+    在 ``__init_subclass__`` 中调用。收集字段 → 编译表达式 → 调用 Rust
+    ``compile_schema`` → 注入 dataclass 配置 → 存储编译产物。前向引用未解析时
+    安装延迟桩（§E.6），其他错误 fail fast。
+
+    Phase 2 扩展（§3.1）：
+    1. 收集 descriptors（已有）
+    2. 构建 field_index_map: ``{id(desc): idx}``
+    3. 调用 ``_compile_expressions`` 获取 expr_programs
+    4. 提取 modes 列表
+    5. 传入 compile_schema（扩展后的签名，含 modes + expr_programs）
+    6. 调用 ``_apply_dataclass_field_config``（已有）
 
     :param cls: 刚创建的 StructMixin 子类。
     """
     descriptors = _collect_field_descriptors(cls)
     field_names = [name for name, _ in descriptors]
     subcons = [desc.subcon for _, desc in descriptors]
+    modes = [desc.mode for _, desc in descriptors]
+
+    # 构建 field_index_map：{id(descriptor): field_index}。
+    # 表达式中的 FieldRef 通过 id() 查找对应字段索引（§3.1 步骤 2）。
+    field_index_map = {id(desc): idx for idx, (_, desc) in enumerate(descriptors)}
+
+    # 编译表达式：遍历每个字段的 subcon，提取 _expr_params 中的表达式参数，
+    # 翻译为 ExprOp 指令列表。同时执行编译期验证（前向引用、WO 引用）。
+    # 返回 {field_index: {param_name: [expr_ops]}}。
+    expr_programs = _compile_expressions(descriptors, field_index_map)
+
+    # 转换为 Rust 侧期望的 Vec<Option<dict>> 格式。
+    expr_programs_list = _expr_programs_to_list(expr_programs, len(descriptors))
+
+    # 缓存 descriptors 供延迟桩重试编译使用（SF-1 修复，§3.1 步骤 6）。
+    cls._cached_descriptors = descriptors
 
     if _compile_schema is None:
         raise ConstructError(
@@ -397,7 +663,13 @@ def _compile_schema_for_class(cls):
         )
 
     try:
-        cls._construct_compiled = _compile_schema(cls, field_names, subcons)
+        cls._construct_compiled = _compile_schema(
+            cls,
+            field_names,
+            subcons,
+            modes=modes,
+            expr_programs=expr_programs_list,
+        )
     except Exception as e:
         # 检查是否为前向引用未解析（UnresolvedReference）。
         # Rust 侧该错误消息含 "unresolved" 或 "未解析"。
@@ -430,6 +702,13 @@ def _install_lazy_stubs(cls):
     当编译因前向引用失败时，将 ``parse``/``build`` 替换为桩方法。首次调用时
     在锁保护下重试编译，成功后删除桩（回退到 ``StructMixin`` 继承的方法）。
 
+    SF-1 修复（§3.1 步骤 6）：使用 ``cls._cached_descriptors``（由
+    ``_compile_schema_for_class`` 缓存），而非重新收集。原因：
+    1. ``_apply_dataclass_field_config`` 已将类属性上的 ``_FieldDescriptor``
+       替换为 ``dataclasses.field()`` 返回值，``_collect_field_descriptors``
+       此刻无法再识别它们（isinstance 检查失败）。
+    2. 重新收集会得到空列表，导致延迟桩阶段编译出空 schema，丢失所有字段。
+
     线程安全（§E.6）：``threading.Lock`` + 双重检查确保编译只发生一次。
 
     :param cls: 需要安装延迟桩的 StructMixin 子类。
@@ -445,10 +724,34 @@ def _install_lazy_stubs(cls):
         with lock:
             if cls._construct_compiled is not None:
                 return
-            descriptors = _collect_field_descriptors(cls)
+            # SF-1 修复：使用缓存的 descriptors，而非重新收集。
+            # _apply_dataclass_field_config 已替换类属性，重新收集会失败。
+            descriptors = getattr(cls, "_cached_descriptors", None)
+            if descriptors is None:
+                # 兜底：理论上不会发生（_compile_schema_for_class 总会缓存）。
+                # 若确实缺失，尝试重新收集（可能在 _apply_dataclass_field_config
+                # 之前被调用）。
+                descriptors = _collect_field_descriptors(cls)
             field_names = [name for name, _ in descriptors]
             subcons = [desc.subcon for _, desc in descriptors]
-            schema = _compile_schema(cls, field_names, subcons)
+            modes = [desc.mode for _, desc in descriptors]
+
+            # 构建 field_index_map 并编译表达式（与首次编译路径一致）。
+            field_index_map = {
+                id(desc): idx for idx, (_, desc) in enumerate(descriptors)
+            }
+            expr_programs = _compile_expressions(descriptors, field_index_map)
+            expr_programs_list = _expr_programs_to_list(
+                expr_programs, len(descriptors)
+            )
+
+            schema = _compile_schema(
+                cls,
+                field_names,
+                subcons,
+                modes=modes,
+                expr_programs=expr_programs_list,
+            )
             # 编译成功：注入 dataclass 配置，存储产物，删除桩
             _apply_dataclass_field_config(cls, descriptors)
             cls._construct_compiled = schema

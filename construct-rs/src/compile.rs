@@ -46,10 +46,16 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 
 /// 编译 Schema 为执行树（一次 FFI 穿越）。
 ///
-/// Python 可见签名：
+/// Python 可见签名（Phase 2 扩展，向后兼容）：
 ///
 /// ```python
-/// compile_schema(cls: type, field_names: list[str], descriptors: list) -> CompiledSchema
+/// compile_schema(
+///     cls: type,
+///     field_names: list[str],
+///     descriptors: list,
+///     modes: list[str] | None = None,             # ["rw", "ro", "wo", ...]
+///     expr_programs: list[dict | None] | None = None,  # 每字段的表达式程序
+/// ) -> CompiledSchema
 /// ```
 ///
 /// # 参数
@@ -57,6 +63,11 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// - `cls`：用户类对象（StructMixin 子类）。用于关联编译产物与错误信息中报类名。
 /// - `field_names`：字段名列表，按字段声明顺序排列。
 /// - `descriptors`：字段描述符列表，与 `field_names` 按位置对应。
+/// - `modes`：可选的字段模式列表（`"rw"` / `"ro"` / `"wo"`）。`None` 时所有字段
+///   默认为 `"rw"`（Phase 1 兼容）。
+/// - `expr_programs`：可选的每字段表达式程序列表。长度与 `field_names` 一致，
+///   每个元素为 `None`（该字段无表达式）或 Python dict（`{param_name: [expr_ops]}`）。
+///   当前 2.3 阶段仅用于计算 `has_expressions` 标志，具体程序解析推迟到 2.5/2.6。
 ///
 /// # 返回
 ///
@@ -65,13 +76,16 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// # 错误
 ///
 /// - [`ConstructError::Compilation`]：`field_names` 与 `descriptors` 长度不一致、
-///   描述符类型未知、`cls` 不是类型、或类定义了 `__slots__`（Phase 1 不支持）。
+///   未知 mode 字符串、描述符类型未知、`cls` 不是类型、或类定义了 `__slots__`。
 #[pyfunction]
+#[pyo3(signature = (cls, field_names, descriptors, modes=None, expr_programs=None))]
 pub fn compile_schema(
     py: Python<'_>,
     cls: &Bound<'_, PyType>,
     field_names: Vec<String>,
     descriptors: Vec<Py<PyAny>>,
+    modes: Option<Vec<String>>,
+    expr_programs: Option<Vec<Option<Py<PyAny>>>>,
 ) -> PyResult<CompiledSchema> {
     // 1. 校验 field_names 与 descriptors 长度一致
     if field_names.len() != descriptors.len() {
@@ -84,6 +98,41 @@ pub fn compile_schema(
         }
         .into());
     }
+
+    // 1b. 解析 modes：None → 全 Rw（Phase 1 兼容）；Some → 逐字段解析为 FieldMode。
+    //     长度必须与 field_names 一致。
+    let modes_resolved: Vec<FieldMode> = match &modes {
+        None => vec![FieldMode::Rw; field_names.len()],
+        Some(m) => {
+            if m.len() != field_names.len() {
+                return Err(ConstructError::Compilation {
+                    message: format!(
+                        "modes ({}) 与 field_names ({}) 长度不一致",
+                        m.len(),
+                        field_names.len()
+                    ),
+                }
+                .into());
+            }
+            m.iter()
+                .map(|s| match s.as_str() {
+                    "rw" => Ok(FieldMode::Rw),
+                    "ro" => Ok(FieldMode::Ro),
+                    "wo" => Ok(FieldMode::Wo),
+                    other => Err(ConstructError::Compilation {
+                        message: format!("unknown field mode: {}", other),
+                    }),
+                })
+                .collect::<Result<_, _>>()?
+        }
+    };
+
+    // 1c. 计算 has_expressions：expr_programs 中任一字段为 Some → true。
+    //     当前 2.3 阶段不解析表达式内容，仅设置标志（具体解析在 2.5/2.6）。
+    let has_expressions = expr_programs
+        .as_ref()
+        .map(|progs| progs.iter().any(|p| p.is_some()))
+        .unwrap_or(false);
 
     // 2. 检测 __slots__（设计修订 §3.6 + §5.7.1 N4-R3）
     //    手写 __slots__ 在 __init_subclass__ 时已可见，编译期报错（fail fast）。
@@ -109,27 +158,26 @@ pub fn compile_schema(
 
     // 4. 逐字段构建节点（FieldName 含 interned PyString）
     let mut fields: Vec<StructField> = Vec::with_capacity(field_names.len());
-    for (name, desc) in field_names.iter().zip(descriptors.iter()) {
+    for (i, (name, desc)) in field_names.iter().zip(descriptors.iter()).enumerate() {
         let desc_bound = desc.bind(py);
         let node =
             build_node_from_descriptor(py, desc_bound).map_err(|e| with_field_context(e, name))?;
         // FieldName::new 创建 interned PyString 缓存。
-        // 当前所有字段 mode 默认为 Rw（子任务 2.3 将传入实际 mode）。
+        // mode 从解析后的 modes_resolved 取（Phase 2 扩展）。
         let field = StructField {
             name: crate::nodes::struct_node::FieldName::new(py, name.clone()),
             node,
-            mode: FieldMode::Rw,
+            mode: modes_resolved[i],
         };
         fields.push(field);
     }
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
-    //    has_expressions 暂时为 false（子任务 2.3 将根据表达式编译结果设置）。
     let root = Node::Struct(StructNode::new(
         fields,
         cls.clone().unbind(),
         has_post_init,
-        false,
+        has_expressions,
     ));
 
     // 6. 包装为 CompiledSchema
@@ -318,7 +366,7 @@ class {name}:
     fn compile_empty_schema_produces_empty_struct_node() {
         with_py(|py| {
             let cls = make_dummy_class(py, "Empty");
-            let schema = compile_schema(py, &cls, vec![], vec![]).expect("compile");
+            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert!(s.is_empty(), "expected empty struct");
@@ -342,9 +390,15 @@ class {name}:
                 FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
             )
             .expect("Py::new");
-            let schema =
-                compile_schema(py, &cls, vec!["address".to_string()], vec![desc.into_any()])
-                    .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["address".to_string()],
+                vec![desc.into_any()],
+                None,
+                None,
+            )
+            .expect("compile");
 
             match schema.root() {
                 Node::Struct(s) => {
@@ -399,7 +453,7 @@ class {name}:
             ];
             let descs = vec![int8ub, int16ub, bytes4, greedy];
 
-            let schema = compile_schema(py, &cls, names, descs).expect("compile");
+            let schema = compile_schema(py, &cls, names, descs, None, None).expect("compile");
 
             match schema.root() {
                 Node::Struct(s) => {
@@ -426,8 +480,15 @@ class {name}:
             let inner_cls = make_structmixin_like_class(py, "Inner");
             let inner_cls_py = inner_cls.clone().unbind().into_any();
 
-            let schema = compile_schema(py, &cls, vec!["inner".to_string()], vec![inner_cls_py])
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["inner".to_string()],
+                vec![inner_cls_py],
+                None,
+                None,
+            )
+            .expect("compile");
 
             match schema.root() {
                 Node::Struct(s) => {
@@ -455,7 +516,14 @@ class {name}:
     fn compile_length_mismatch_returns_error() {
         with_py(|py| {
             let cls = make_dummy_class(py, "Bad");
-            let result = compile_schema(py, &cls, vec!["a".to_string(), "b".to_string()], vec![]);
+            let result = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![],
+                None,
+                None,
+            );
             let err = result.expect_err("should fail");
             let pyerr: PyErr = err;
             let msg = format!("{}", pyerr);
@@ -477,7 +545,7 @@ class {name}:
             let cls = make_dummy_class(py, "Bad");
             // 传入 Python int 作为描述符（非已知类型，也非 StructMixin）
             let bad_desc = py.eval_bound("42", None, None).expect("eval").unbind();
-            let err = compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc])
+            let err = compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc], None, None)
                 .expect_err("should fail");
             let pyerr: PyErr = err;
             let msg = format!("{}", pyerr);
@@ -507,7 +575,8 @@ class {name}:
                 .eval_bound("'not a descriptor'", None, None)
                 .expect("eval")
                 .unbind();
-            let result = compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc]);
+            let result =
+                compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc], None, None);
             assert!(result.is_err(), "should fail");
         });
     }
@@ -549,7 +618,7 @@ class {name}:
                 })
                 .collect();
 
-            let schema = compile_schema(py, &cls, names, descs).expect("compile");
+            let schema = compile_schema(py, &cls, names, descs, None, None).expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 16);
@@ -574,8 +643,8 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema =
-                compile_schema(py, &cls, vec!["x".to_string()], vec![desc]).expect("compile");
+            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
+                .expect("compile");
 
             // _parse_raw 现在返回用户类实例（方案 B'）
             let data = PyBytes::new_bound(py, &[0x42u8]);
@@ -617,6 +686,8 @@ class {name}:
                 &cls,
                 vec!["a".to_string(), "b".to_string()],
                 vec![int8ub, int16ub],
+                None,
+                None,
             )
             .expect("compile");
 
@@ -642,8 +713,8 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema =
-                compile_schema(py, &cls, vec!["v".to_string()], vec![int32ub]).expect("compile");
+            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![int32ub], None, None)
+                .expect("compile");
 
             // 只提供 2 字节，但 Int32ub 需要 4 字节
             let data = PyBytes::new_bound(py, &[0x01, 0x02]);
@@ -677,8 +748,8 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema =
-                compile_schema(py, &cls, vec!["x".to_string()], vec![desc]).expect("compile");
+            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
+                .expect("compile");
 
             // 构造 Python 对象 {x: 0x42}
             let obj = py
@@ -718,6 +789,8 @@ class {name}:
                 &cls,
                 vec!["a".to_string(), "b".to_string(), "c".to_string()],
                 vec![int8ub, int16ub, bytes2],
+                None,
+                None,
             )
             .expect("compile");
 
@@ -754,7 +827,7 @@ class {name}:
     fn end_to_end_empty_schema_parse_returns_empty_instance() {
         with_py(|py| {
             let cls = make_dummy_class(py, "E2EEmpty");
-            let schema = compile_schema(py, &cls, vec![], vec![]).expect("compile");
+            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
 
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse");
@@ -776,7 +849,7 @@ class {name}:
     fn end_to_end_empty_schema_build_returns_empty_bytes() {
         with_py(|py| {
             let cls = make_dummy_class(py, "E2EEmptyB");
-            let schema = compile_schema(py, &cls, vec![], vec![]).expect("compile");
+            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
 
             let obj = py.eval_bound("object()", None, None).expect("obj");
             let result = schema._build_raw(py, &obj).expect("build");
@@ -814,6 +887,8 @@ class {name}:
                     "rest".to_string(),
                 ],
                 vec![int8ub, bytes2, greedy],
+                None,
+                None,
             )
             .expect("compile");
 
@@ -868,6 +943,8 @@ class {name}:
                 inner_cls_py.bind(py),
                 vec!["x".to_string()],
                 vec![inner_desc],
+                None,
+                None,
             )
             .expect("compile inner");
             let inner_schema_py = Py::new(py, inner_schema).expect("Py::new schema");
@@ -891,6 +968,8 @@ class {name}:
                 &outer_cls,
                 vec!["tag".to_string(), "inner".to_string()],
                 vec![tag_desc, inner_cls_py.clone_ref(py).into_any()],
+                None,
+                None,
             )
             .expect("compile outer");
 
@@ -974,7 +1053,8 @@ class {name}:
                 .expect("create slotted class")
                 .downcast_into::<PyType>()
                 .expect("is PyType");
-            let err = compile_schema(py, &cls_bound, vec![], vec![]).expect_err("should fail");
+            let err = compile_schema(py, &cls_bound, vec![], vec![], None, None)
+                .expect_err("should fail");
             let msg = format!("{}", err);
             assert!(
                 msg.contains("__slots__") || msg.contains("slots"),
@@ -995,7 +1075,7 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let result = compile_schema(py, &cls, vec!["x".to_string()], vec![desc]);
+            let result = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None);
             assert!(result.is_ok(), "compile should succeed: {:?}", result);
         });
     }
@@ -1063,12 +1143,323 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let schema = compile_schema(py, cls.bind(py), vec!["x".to_string()], vec![desc])
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                cls.bind(py),
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     // 通过 round-trip 验证 __post_init__ 被调用——这里仅检查编译成功。
                     let _ = s;
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    // ======================================================================
+    // Phase 2 子任务 2.3：modes 参数（FieldMode 解析）
+    // ======================================================================
+
+    /// 创建一个 Python dict，模拟表达式程序 `{param_name: [(op_tuple), ...]}`。
+    fn make_expr_program(py: Python<'_>) -> Py<PyAny> {
+        // 创建一个简单的 Python dict 模拟表达式程序。
+        // 内容不重要（2.3 阶段 Rust 仅检查是否 Some），但用合法结构以便后续扩展。
+        let code = "{'length': [('getint', 0), ('const', 2), ('mul',)]}";
+        py.eval_bound(code, None, None)
+            .expect("eval expr program")
+            .unbind()
+    }
+
+    #[test]
+    fn compile_modes_none_defaults_all_rw() {
+        // modes=None 时所有字段默认 Rw（Phase 1 兼容）。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "DefaultRw");
+            let int8ub = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let int16ub = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int16ub", PythonFormat::UnsignedInt16Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![int8ub, int16ub],
+                None,
+                None,
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    let fields = s.fields();
+                    assert_eq!(fields[0].mode, FieldMode::Rw);
+                    assert_eq!(fields[1].mode, FieldMode::Rw);
+                    assert!(!s.has_expressions());
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_modes_rw_ro_wo_parsed_correctly() {
+        // modes=["rw", "ro", "wo"] 正确映射到 FieldMode。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MixedModes");
+            let mk_desc = || {
+                Py::new(
+                    py,
+                    FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+                )
+                .expect("Py::new")
+                .into_any()
+            };
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec![
+                    "rw_field".to_string(),
+                    "ro_field".to_string(),
+                    "wo_field".to_string(),
+                ],
+                vec![mk_desc(), mk_desc(), mk_desc()],
+                Some(vec!["rw".to_string(), "ro".to_string(), "wo".to_string()]),
+                None,
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    let fields = s.fields();
+                    assert_eq!(fields[0].mode, FieldMode::Rw, "field 0 should be Rw");
+                    assert_eq!(fields[1].mode, FieldMode::Ro, "field 1 should be Ro");
+                    assert_eq!(fields[2].mode, FieldMode::Wo, "field 2 should be Wo");
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_modes_unknown_string_returns_error() {
+        // 未知 mode 字符串 → Compilation error。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BadMode");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                Some(vec!["invalid".to_string()]),
+                None,
+            )
+            .expect_err("should fail");
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("unknown field mode") || msg.contains("invalid"),
+                "message should mention unknown mode: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_modes_length_mismatch_returns_error() {
+        // modes 长度与 field_names 不一致 → Compilation error。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ModeLenMismatch");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![desc.clone_ref(py), desc],
+                Some(vec!["rw".to_string()]),
+                None,
+            )
+            .expect_err("should fail");
+            let msg = format!("{}", err);
+            assert!(
+                msg.contains("长度不一致") || msg.contains("length"),
+                "message should mention length mismatch: {}",
+                msg
+            );
+        });
+    }
+
+    // ======================================================================
+    // Phase 2 子任务 2.3：expr_programs 参数（has_expressions 计算）
+    // ======================================================================
+
+    #[test]
+    fn compile_expr_programs_none_has_expressions_false() {
+        // expr_programs=None → has_expressions=false（Phase 1 兼容）。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "NoExpr");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(!s.has_expressions(), "should have no expressions");
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_expr_programs_all_none_has_expressions_false() {
+        // expr_programs=[None, None] → 所有字段无表达式 → has_expressions=false。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "AllNoneExpr");
+            let mk_desc = || {
+                Py::new(
+                    py,
+                    FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+                )
+                .expect("Py::new")
+                .into_any()
+            };
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![mk_desc(), mk_desc()],
+                None,
+                Some(vec![None, None]),
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(!s.has_expressions(), "should have no expressions");
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_expr_programs_with_some_sets_has_expressions_true() {
+        // expr_programs 中任一字段为 Some → has_expressions=true。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "HasExpr");
+            let mk_desc = || {
+                Py::new(
+                    py,
+                    FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+                )
+                .expect("Py::new")
+                .into_any()
+            };
+            let prog = make_expr_program(py);
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["count".to_string(), "data".to_string()],
+                vec![mk_desc(), mk_desc()],
+                None,
+                Some(vec![None, Some(prog)]),
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(
+                        s.has_expressions(),
+                        "should have expressions when any field has program"
+                    );
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_expr_programs_with_modes_combined() {
+        // modes + expr_programs 同时传入：mode 正确解析 + has_expressions 正确。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "Combined");
+            let mk_desc = || {
+                Py::new(
+                    py,
+                    FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+                )
+                .expect("Py::new")
+                .into_any()
+            };
+            let prog = make_expr_program(py);
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec![
+                    "count".to_string(),
+                    "computed".to_string(),
+                    "pad".to_string(),
+                ],
+                vec![mk_desc(), mk_desc(), mk_desc()],
+                Some(vec!["rw".to_string(), "ro".to_string(), "wo".to_string()]),
+                Some(vec![None, Some(prog), None]),
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    let fields = s.fields();
+                    assert_eq!(fields[0].mode, FieldMode::Rw);
+                    assert_eq!(fields[1].mode, FieldMode::Ro);
+                    assert_eq!(fields[2].mode, FieldMode::Wo);
+                    assert!(s.has_expressions());
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_backward_compatible_with_none_none() {
+        // Phase 1 兼容：传入 None, None 等价于 Phase 1 行为。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BackCompat");
+            let desc = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    assert_eq!(s.fields()[0].mode, FieldMode::Rw);
+                    assert!(!s.has_expressions());
                 }
                 other => panic!("expected Node::Struct, got {:?}", other),
             }
