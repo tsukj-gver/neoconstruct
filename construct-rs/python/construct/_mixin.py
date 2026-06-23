@@ -25,6 +25,7 @@
 import dataclasses
 import operator
 import threading
+import weakref
 
 from ._errors import CompilationError, ConstructError
 
@@ -785,8 +786,9 @@ def _compile_schema_for_class(cls):
 # ---------------------------------------------------------------------------
 
 # 每个延迟桩类对应的编译锁，确保多线程下编译只发生一次。
-# 使用 cls -> Lock 字典（cls 是 hashable）。
-_lazy_compile_locks: "dict" = {}
+# SF-5 修复：使用 WeakKeyDictionary 避免类被删除后锁对象仍被引用（内存泄漏）。
+# WeakKeyDictionary 在 cls 被 GC 回收时自动移除对应条目。
+_lazy_compile_locks = weakref.WeakKeyDictionary()
 
 
 def _install_lazy_stubs(cls):

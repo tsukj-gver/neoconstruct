@@ -98,28 +98,31 @@ pub enum ConstructError {
     },
 
     // --- 表达式求值错误（Phase 2，§4.5）---
-    // 这些变体不携带 `path` 字段。`push_path_segment` 对这些变体为无操作
-    // （`set_path` 不写入）。调用方（如 BytesNode）需自行将 Expr* 错误转换
-    // 为带 path 的错误（如 Generic），以向用户暴露出错字段位置。
+    // SF-2 修复：所有 Expr* 变体携带 `path` 字段，支持 `push_path_segment`
+    // 重建路径，与 Stream/FormatField/Generic 等变体行为一致。
     /// 表达式求值：字段值类型不匹配（期望 i64，实际为 str/bytes 等）。
     ///
     /// 触发场景：[`crate::expr::ExprOp::GetInt`] 从 context 取到的值无法 extract 为 `i64`。
-    #[error("expression field {field:?} has wrong type, expected {expected}")]
+    #[error("expression field {field:?} has wrong type, expected {expected} at {path}")]
     ExprType {
         /// 出错字段名。
         field: String,
         /// 期望的类型描述（如 `"integer (i64)"`）。
         expected: String,
+        /// 错误发生的路径。
+        path: String,
     },
 
     /// 表达式求值：引用的字段不存在于 context 中。
     ///
     /// 触发场景：[`crate::expr::ExprOp::GetInt`] 取值时 `PyDict::get_item` 返回 `None`。
     /// 编译期应通过字段存在性检查避免，运行时触发属于内部错误。
-    #[error("expression field {field:?} missing in context")]
+    #[error("expression field {field:?} missing in context at {path}")]
     ExprFieldMissing {
         /// 缺失的字段名。
         field: String,
+        /// 错误发生的路径。
+        path: String,
     },
 
     /// 表达式求值：context 为 placeholder（无 PyDict），无法求值。
@@ -127,28 +130,35 @@ pub enum ConstructError {
     /// 触发场景：在 [`crate::context::Context::placeholder`] 上调用表达式求值。
     /// 理论上不会发生——有表达式的 Struct 使用 [`crate::context::Context::new_root`]，
     /// 而非 placeholder。
-    #[error("expression context error: {message}")]
+    #[error("expression context error: {message} at {path}")]
     ExprContext {
         /// 错误详情。
         message: String,
+        /// 错误发生的路径。
+        path: String,
     },
 
     /// 表达式求值：除以零。
     ///
     /// 触发场景：[`crate::expr::ExprOp::FloorDiv`] 或 [`crate::expr::ExprOp::Mod`]
     /// 的除数（栈顶值）为 0。
-    #[error("expression error: {message}")]
+    #[error("expression error: {message} at {path}")]
     ExprDivByZero {
         /// 错误详情（如 `"expression division by zero"`）。
         message: String,
+        /// 错误发生的路径。
+        path: String,
     },
 
     /// 表达式求值：栈下溢（指令序列不合法，编译期应保证不发生）。
     ///
     /// 触发场景：[`crate::expr::eval_expr_int`] 内 `pop2` 或 `pop` 时栈为空。
     /// 仅作为防御性错误，正常路径不应触发。
-    #[error("expression stack underflow")]
-    ExprStackUnderflow,
+    #[error("expression stack underflow at {path}")]
+    ExprStackUnderflow {
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -163,13 +173,13 @@ impl ConstructError {
             | ConstructError::Compilation { message }
             | ConstructError::UnresolvedReference { message }
             | ConstructError::Generic { message, .. }
-            | ConstructError::ExprContext { message }
-            | ConstructError::ExprDivByZero { message } => message,
+            | ConstructError::ExprContext { message, .. }
+            | ConstructError::ExprDivByZero { message, .. } => message,
             // 这些变体没有单一 message 字段，Display 实现包含完整信息。
             // message() 返回空串仅用于静态分发；完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprStackUnderflow => "",
+            | ConstructError::ExprStackUnderflow { .. } => "",
         }
     }
 
@@ -181,14 +191,13 @@ impl ConstructError {
             ConstructError::Stream { path, .. }
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
-            | ConstructError::Generic { path, .. } => Some(path),
-            ConstructError::Compilation { .. }
-            | ConstructError::UnresolvedReference { .. }
-            | ConstructError::ExprType { .. }
-            | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprContext { .. }
-            | ConstructError::ExprDivByZero { .. }
-            | ConstructError::ExprStackUnderflow => None,
+            | ConstructError::Generic { path, .. }
+            | ConstructError::ExprType { path, .. }
+            | ConstructError::ExprFieldMissing { path, .. }
+            | ConstructError::ExprContext { path, .. }
+            | ConstructError::ExprDivByZero { path, .. }
+            | ConstructError::ExprStackUnderflow { path } => Some(path),
+            ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
 
@@ -204,10 +213,10 @@ impl ConstructError {
     /// `ExprStackUnderflow`），使用 `Display` 实现作为完整消息。
     pub fn full_message(&self) -> String {
         match self {
-            // 结构化变体：无单一 message 字段，Display 已包含完整信息。
+            // 结构化变体：无单一 message 字段，Display 已包含完整信息（含 path）。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprStackUnderflow => self.to_string(),
+            | ConstructError::ExprStackUnderflow { .. } => self.to_string(),
             // 其他变体：按 path 拼接。
             _ => match self.path() {
                 Some(p) => format!("Error in path {}\n{}", p, self.message()),
@@ -229,7 +238,7 @@ impl ConstructError {
             ConstructError::ExprFieldMissing { .. } => "ExprFieldMissing",
             ConstructError::ExprContext { .. } => "ExprContext",
             ConstructError::ExprDivByZero { .. } => "ExprDivByZero",
-            ConstructError::ExprStackUnderflow => "ExprStackUnderflow",
+            ConstructError::ExprStackUnderflow { .. } => "ExprStackUnderflow",
         }
     }
 
@@ -274,14 +283,13 @@ impl ConstructError {
             ConstructError::Stream { path, .. }
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
-            | ConstructError::Generic { path, .. } => *path = new_path,
-            ConstructError::Compilation { .. }
-            | ConstructError::UnresolvedReference { .. }
-            | ConstructError::ExprType { .. }
-            | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprContext { .. }
-            | ConstructError::ExprDivByZero { .. }
-            | ConstructError::ExprStackUnderflow => {}
+            | ConstructError::Generic { path, .. }
+            | ConstructError::ExprType { path, .. }
+            | ConstructError::ExprFieldMissing { path, .. }
+            | ConstructError::ExprContext { path, .. }
+            | ConstructError::ExprDivByZero { path, .. }
+            | ConstructError::ExprStackUnderflow { path } => *path = new_path,
+            ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
 }
@@ -389,7 +397,7 @@ fn select_exception_class<'py>(
         | ConstructError::ExprFieldMissing { .. }
         | ConstructError::ExprContext { .. }
         | ConstructError::ExprDivByZero { .. }
-        | ConstructError::ExprStackUnderflow => &classes.construct_error_base,
+        | ConstructError::ExprStackUnderflow { .. } => &classes.construct_error_base,
     };
     cls.bind(py).clone()
 }
@@ -432,13 +440,14 @@ impl From<ConstructError> for PyErr {
     fn from(err: ConstructError) -> Self {
         // 预先提取 message/path（避免在 with_gil 闭包中持有 err 的引用）。
         let path_owned: Option<String> = err.path().map(|s| s.to_string());
-        // 对于带 path 的变体，message 是裸消息（Python 侧会拼接 "Error in path"）。
-        // 对于无 path 的变体，message 使用 full_message()（含完整 Display 信息，
-        // 覆盖 ExprType/ExprFieldMissing/ExprStackUnderflow 等结构化变体）。
-        let message = if path_owned.is_some() {
-            err.message().to_string()
+        let bare_message = err.message();
+        // 对于无单一 message 字段的结构化变体（ExprType / ExprFieldMissing /
+        // ExprStackUnderflow），bare_message 为 ""。此时使用 Display（to_string）
+        // 作为完整消息（已包含 path），且不再单独传递 path（避免重复）。
+        let (message, effective_path): (String, Option<&str>) = if bare_message.is_empty() {
+            (err.to_string(), None)
         } else {
-            err.full_message()
+            (bare_message.to_string(), path_owned.as_deref())
         };
         // fallback 专用（EXCEPTIONS 未初始化时使用），始终用 full_message。
         let full_message = err.full_message();
@@ -446,7 +455,7 @@ impl From<ConstructError> for PyErr {
         Python::with_gil(|py| match EXCEPTIONS.get(py) {
             Some(classes) => {
                 let cls = select_exception_class(&err, classes, py);
-                match build_exception_instance(py, &cls, &message, path_owned.as_deref()) {
+                match build_exception_instance(py, &cls, &message, effective_path) {
                     Ok(instance) => PyErr::from_value_bound(instance),
                     Err(_) => PyValueError::new_err(full_message),
                 }
@@ -897,6 +906,30 @@ mod tests {
         err.push_path_segment("field");
         // 编译期错误 path() 返回 None，set_path 对其无操作。
         assert_eq!(err.path(), None);
+    }
+
+    #[test]
+    fn push_path_segment_on_expr_errors_sets_path() {
+        // SF-2 修复：Expr* 变体现在携带 path 字段，push_path_segment 能正确写入。
+        let mut err = ConstructError::ExprFieldMissing {
+            field: "count".to_string(),
+            path: String::new(),
+        };
+        err.push_path_segment("data");
+        assert_eq!(err.path(), Some("root.data"));
+
+        let mut err2 = ConstructError::ExprDivByZero {
+            message: "division by zero".to_string(),
+            path: String::new(),
+        };
+        err2.push_path_segment("ratio");
+        assert_eq!(err2.path(), Some("root.ratio"));
+
+        let mut err3 = ConstructError::ExprStackUnderflow {
+            path: String::new(),
+        };
+        err3.push_path_segment("computed");
+        assert_eq!(err3.path(), Some("root.computed"));
     }
 
     // ======================================================================

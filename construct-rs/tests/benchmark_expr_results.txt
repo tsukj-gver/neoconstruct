@@ -9,7 +9,7 @@ construct-rs vs Python construct 2.10.70 表达式场景性能测试结果
   machine        : AMD64
   timeit number  : 100000
   repeat (中位数): 5
-  测量时间       : 2026-06-23 12:55:52
+  测量时间       : 2026-06-24 01:40:18
 
 通过标准（§8.7）：
   - E1-E3 parse ≥8.0x（硬目标）
@@ -19,12 +19,12 @@ construct-rs vs Python construct 2.10.70 表达式场景性能测试结果
 对比表：
 用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定          
 -----------------------------------------------------------------------------
-E1   parse  382.1              2717.1                 7.11      x [WARN]
-E1   build  276.2              2633.6                 9.54      x [PASS]
-E2   parse  423.2              3603.5                 8.51      x [PASS]
-E2   build  311.9              3452.5                 11.07     x [PASS]
-E3   parse  572.8              4720.8                 8.24      x [PASS]
-E3   build  493.8              4272.7                 8.65      x [PASS]
+E1   parse  383.4              2753.8                 7.18      x [WARN]
+E1   build  292.4              2625.2                 8.98      x [PASS]
+E2   parse  423.7              3635.0                 8.58      x [PASS]
+E2   build  342.1              3455.3                 10.10     x [PASS]
+E3   parse  587.8              4685.8                 7.97      x [WARN]
+E3   build  538.2              4337.6                 8.06      x [PASS]
 
 用例说明：
   E1: 字段引用 + 表达式长度 (count + Bytes(count))
@@ -32,18 +32,19 @@ E3   build  493.8              4272.7                 8.65      x [PASS]
   E3: Tell + Computed (6 字段: Tell, Bytes(4), Int16ub, Bytes(len), Tell, Computed)
 
 门禁检查：
-  [FAIL] 硬目标失败：E1 parse 加速比 7.11x < 8.0x
+  [FAIL] 硬目标失败：E1 parse 加速比 7.18x < 8.0x
+  [FAIL] 硬目标失败：E3 parse 加速比 7.97x < 8.0x
 
 原始数据（per_call_ns = 每次调用纳秒数）：
-  E1 parse rs: median=382.1ns  min=381.4ns
-  E1 parse py: median=2717.1ns  min=2700.2ns
-  E1 build rs: median=276.2ns  min=275.7ns
-  E1 build py: median=2633.6ns  min=2596.6ns
-  E2 parse rs: median=423.2ns  min=421.9ns
-  E2 parse py: median=3603.5ns  min=3579.1ns
-  E2 build rs: median=311.9ns  min=310.2ns
-  E2 build py: median=3452.5ns  min=3427.5ns
-  E3 parse rs: median=572.8ns  min=567.2ns
-  E3 parse py: median=4720.8ns  min=4668.0ns
-  E3 build rs: median=493.8ns  min=493.0ns
-  E3 build py: median=4272.7ns  min=4266.6ns
+  E1 parse rs: median=383.4ns  min=382.2ns
+  E1 parse py: median=2753.8ns  min=2746.1ns
+  E1 build rs: median=292.4ns  min=290.8ns
+  E1 build py: median=2625.2ns  min=2617.1ns
+  E2 parse rs: median=423.7ns  min=422.2ns
+  E2 parse py: median=3635.0ns  min=3626.7ns
+  E2 build rs: median=342.1ns  min=339.8ns
+  E2 build py: median=3455.3ns  min=3442.7ns
+  E3 parse rs: median=587.8ns  min=580.0ns
+  E3 parse py: median=4685.8ns  min=4665.6ns
+  E3 build rs: median=538.2ns  min=536.5ns
+  E3 build py: median=4337.6ns  min=4321.5ns

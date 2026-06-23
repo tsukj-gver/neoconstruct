@@ -157,7 +157,17 @@ impl CompiledSchema {
         py: Python<'py>,
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        let mut stream = BuildStream::new();
+        // PERF-1 优化：对无表达式的结构（sizeof 可计算），预分配 BuildStream 容量
+        // 避免 Vec 扩容 realloc。含表达式的结构 sizeof 必然失败（Bytes(Expr) 无法静态求值），
+        // 直接用 new() 跳过无用的 sizeof 调用 + String 堆分配。
+        let mut stream = if !self.root_has_expressions() {
+            match self.root.sizeof(&Context::placeholder(py)) {
+                Ok(cap) => BuildStream::with_capacity(cap),
+                Err(_) => BuildStream::new(),
+            }
+        } else {
+            BuildStream::new()
+        };
         // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
         let mut ctx = if self.root_has_expressions() {
             Context::new_root(py)?

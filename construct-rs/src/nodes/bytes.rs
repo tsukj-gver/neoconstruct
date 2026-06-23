@@ -77,8 +77,10 @@ impl BytesLength {
 ///
 /// # build 行为
 ///
-/// 校验输入对象为 `bytes` 类型，直接写入流。不校验长度是否匹配 length
-/// （对齐设计文档 §4.7：无论常量还是表达式长度，build 都不校验）。
+/// 校验输入对象为 `bytes` 类型，并校验数据长度是否匹配声明的 `length`
+/// （SF-3 修复：对齐 Python construct `stream_write` 的长度校验行为）。
+/// 长度不匹配时返回 `FieldLength` 错误。表达式长度通过 `ctx.field_names()`
+/// 求值表达式获取期望长度。
 ///
 /// # sizeof
 ///
@@ -158,10 +160,10 @@ impl super::Construct for BytesNode {
 
     fn build(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         obj: &Bound<'_, PyAny>,
         stream: &mut BuildStream,
-        _ctx: &mut Context<'_>,
+        ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
         // REV 约束：仅接受 bytes（int/bytearray 转换推迟到后续阶段）
@@ -178,7 +180,42 @@ impl super::Construct for BytesNode {
                 path: path.to_string(),
             })?;
         let data = py_bytes.as_bytes();
-        // 设计文档 §4.7：build 不校验长度（无论常量还是表达式长度）。
+
+        // SF-3 修复：校验长度（对齐 Python construct 的 stream_write 行为）。
+        let expected = match &self.length {
+            BytesLength::Const(n) => *n,
+            BytesLength::Expr(prog) => {
+                let names = ctx.field_names().ok_or_else(|| ConstructError::Generic {
+                    message: "Bytes expression build requires context with field_names".to_string(),
+                    path: path.to_string(),
+                })?;
+                let n =
+                    eval_expr_int(prog, names, ctx, py).map_err(|e| ConstructError::Generic {
+                        message: format!(
+                            "Bytes length expression evaluation failed during build: {}",
+                            e.full_message()
+                        ),
+                        path: path.to_string(),
+                    })?;
+                if n < 0 {
+                    return Err(ConstructError::FieldLength {
+                        message: format!("Bytes length expression evaluated to negative: {}", n),
+                        path: path.to_string(),
+                    });
+                }
+                n as usize
+            }
+        };
+        if data.len() != expected {
+            return Err(ConstructError::FieldLength {
+                message: format!(
+                    "Bytes build length mismatch: expected {}, got {}",
+                    expected,
+                    data.len()
+                ),
+                path: path.to_string(),
+            });
+        }
         stream.write(data);
         Ok(())
     }
@@ -480,7 +517,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build（Const + Expr 共用，不校验长度）
+    // build（Const + Expr：校验长度，SF-3 修复）
     // ======================================================================
 
     #[test]
@@ -512,50 +549,73 @@ mod tests {
     }
 
     #[test]
-    fn build_does_not_validate_length_mismatch() {
-        // 设计文档 §4.7：build 不校验长度。长度不匹配时直接写入实际数据。
-        // [设计质疑] Python construct 通过 stream_write 校验长度，此处行为不同。
+    fn build_validates_length_mismatch_too_short() {
+        // SF-3 修复：build 校验长度。传 2 字节但声明 4 字节 → FieldLength 错误。
         with_py(|py| {
             let node = BytesNode::new_const(4);
-            // 传 2 字节，声明长度 4，但 build 应成功并写入 2 字节
             let obj = py.eval_bound("b'ab'", None, None).expect("eval");
             let mut stream = BuildStream::new();
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
-            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
-                .expect("build should succeed (no length validation)");
-            assert_eq!(stream.as_bytes(), b"ab");
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail (length mismatch)");
+            match err {
+                ConstructError::FieldLength { message, .. } => {
+                    assert!(message.contains("expected 4"), "got: {}", message);
+                    assert!(message.contains("got 2"), "got: {}", message);
+                }
+                other => panic!("expected FieldLength, got {:?}", other),
+            }
         });
     }
 
     #[test]
-    fn build_too_long_data_succeeds_without_validation() {
-        // 声明 2 字节，传 5 字节 → build 成功，写入全部 5 字节
+    fn build_validates_length_mismatch_too_long() {
+        // SF-3 修复：声明 2 字节，传 5 字节 → FieldLength 错误。
         with_py(|py| {
             let node = BytesNode::new_const(2);
             let obj = py.eval_bound("b'hello'", None, None).expect("eval");
             let mut stream = BuildStream::new();
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
-            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
-                .expect("build should succeed");
-            assert_eq!(stream.as_bytes(), b"hello");
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail (length mismatch)");
+            assert!(matches!(err, ConstructError::FieldLength { .. }));
         });
     }
 
     #[test]
-    fn build_expr_writes_actual_data() {
-        // Expr 路径的 build 也不校验长度
+    fn build_expr_validates_length() {
+        // SF-3 修复：Expr 路径的 build 也校验长度。
+        with_py(|py| {
+            let prog = ExprProgram::new(vec![ExprOp::Const(3)]);
+            let node = BytesNode::new_expr(prog);
+            let obj = py.eval_bound("b'XYZ'", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build (matching length)");
+            assert_eq!(stream.as_bytes(), b"XYZ");
+        });
+    }
+
+    #[test]
+    fn build_expr_rejects_length_mismatch() {
+        // SF-3 修复：Expr 路径 build 长度不匹配 → FieldLength 错误。
         with_py(|py| {
             let prog = ExprProgram::new(vec![ExprOp::Const(10)]);
             let node = BytesNode::new_expr(prog);
             let obj = py.eval_bound("b'XYZ'", None, None).expect("eval");
             let mut stream = BuildStream::new();
-            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
             let mut path = Path::new();
-            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
-                .expect("build");
-            assert_eq!(stream.as_bytes(), b"XYZ");
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail (length mismatch)");
+            assert!(matches!(err, ConstructError::FieldLength { .. }));
         });
     }
 

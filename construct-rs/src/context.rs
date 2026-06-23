@@ -206,6 +206,7 @@ impl<'py> Context<'py> {
                     let name_str = name.to_str().unwrap_or("<invalid utf-8>");
                     return Err(ConstructError::ExprFieldMissing {
                         field: name_str.to_string(),
+                        path: String::new(),
                     });
                 }
                 // SAFETY: val_ptr 是 PyDict_GetItem 返回的 non-null borrowed reference。
@@ -217,12 +218,14 @@ impl<'py> Context<'py> {
                     ConstructError::ExprType {
                         field: name_str.to_string(),
                         expected: "integer (i64)".to_string(),
+                        path: String::new(),
                     }
                 })
             }
             None => Err(ConstructError::ExprContext {
                 message: "context is placeholder (no PyDict), cannot evaluate expression"
                     .to_string(),
+                path: String::new(),
             }),
         }
     }
@@ -244,6 +247,7 @@ impl<'py> Context<'py> {
             Some(fields) => Ok(fields.get_item(name_str)?),
             None => Err(ConstructError::ExprContext {
                 message: "context is placeholder, cannot get field object".to_string(),
+                path: String::new(),
             }),
         }
     }

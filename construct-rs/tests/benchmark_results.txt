@@ -9,7 +9,7 @@ construct-rs vs Python construct 2.10.70 性能基准测试结果
   machine        : AMD64
   timeit number  : 100000
   repeat (中位数): 5
-  测量时间       : 2026-06-23 02:58:50
+  测量时间       : 2026-06-24 01:32:56
 
 通过标准（§G.4.5）：
   - B1-B5 ≥ 4x（硬目标）
@@ -20,20 +20,20 @@ construct-rs vs Python construct 2.10.70 性能基准测试结果
 对比表：
 用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定      
 -------------------------------------------------------------------------
-B1   parse  406.1              3098.4                 7.63      x [PASS]
-B1   build  250.5              2934.5                 11.71     x [PASS]
-B2   parse  841.2              7429.7                 8.83      x [PASS]
-B2   build  464.9              6247.2                 13.44     x [PASS]
-B3   parse  2182.4             29811.1                13.66     x [PASS]
-B3   build  1448.0             25192.1                17.40     x [PASS]
-B4   parse  3951.3             53093.9                13.44     x [PASS]
-B4   build  3683.4             48511.7                13.17     x [PASS]
-B5   parse  743.2              8225.6                 11.07     x [PASS]
-B5   build  456.8              8695.0                 19.04     x [PASS]
-B6   parse  1274.9             12947.4                10.16     x [PASS]
-B6   build  536.0              12338.6                23.02     x [PASS]
-B7   parse  305.7              1676.9                 5.48      x [-]
-B7   build  229.5              1776.6                 7.74      x [-]
+B1   parse  382.5              2952.2                 7.72      x [PASS]
+B1   build  279.1              2796.6                 10.02     x [PASS]
+B2   parse  642.8              6006.6                 9.34      x [PASS]
+B2   build  374.1              5556.3                 14.85     x [PASS]
+B3   parse  2158.8             41589.8                19.27     x [PASS]
+B3   build  1257.2             37596.7                29.90     x [PASS]
+B4   parse  3660.7             79335.2                21.67     x [PASS]
+B4   build  3581.1             48788.4                13.62     x [PASS]
+B5   parse  719.1              7743.9                 10.77     x [PASS]
+B5   build  523.7              7341.5                 14.02     x [PASS]
+B6   parse  1236.6             11987.4                9.69      x [PASS]
+B6   build  620.5              11685.4                18.83     x [PASS]
+B7   parse  314.0              1647.2                 5.25      x [-]
+B7   build  219.5              1743.9                 7.94      x [-]
 
 用例说明：
   B1: ModbusRTUMessage (3 字段：Int8ub×2 + GreedyBytes)
@@ -48,31 +48,31 @@ B7   build  229.5              1776.6                 7.74      x [-]
   [PASS] 全部通过
 
 原始数据（per_call_ns = 每次调用纳秒数）：
-  B1 parse rs: median=406.1ns  min=402.1ns
-  B1 parse py: median=3098.4ns  min=3054.2ns
-  B1 build rs: median=250.5ns  min=247.7ns
-  B1 build py: median=2934.5ns  min=2831.8ns
-  B2 parse rs: median=841.2ns  min=671.7ns
-  B2 parse py: median=7429.7ns  min=6314.3ns
-  B2 build rs: median=464.9ns  min=460.9ns
-  B2 build py: median=6247.2ns  min=6162.4ns
-  B3 parse rs: median=2182.4ns  min=2119.2ns
-  B3 parse py: median=29811.1ns  min=24363.0ns
-  B3 build rs: median=1448.0ns  min=1428.6ns
-  B3 build py: median=25192.1ns  min=21045.4ns
-  B4 parse rs: median=3951.3ns  min=3914.6ns
-  B4 parse py: median=53093.9ns  min=50422.6ns
-  B4 build rs: median=3683.4ns  min=3653.3ns
-  B4 build py: median=48511.7ns  min=44405.5ns
-  B5 parse rs: median=743.2ns  min=715.0ns
-  B5 parse py: median=8225.6ns  min=7716.7ns
-  B5 build rs: median=456.8ns  min=435.4ns
-  B5 build py: median=8695.0ns  min=7465.1ns
-  B6 parse rs: median=1274.9ns  min=1221.3ns
-  B6 parse py: median=12947.4ns  min=11869.9ns
-  B6 build rs: median=536.0ns  min=500.7ns
-  B6 build py: median=12338.6ns  min=11510.2ns
-  B7 parse rs: median=305.7ns  min=304.1ns
-  B7 parse py: median=1676.9ns  min=1667.8ns
-  B7 build rs: median=229.5ns  min=225.2ns
-  B7 build py: median=1776.6ns  min=1657.6ns
+  B1 parse rs: median=382.5ns  min=381.3ns
+  B1 parse py: median=2952.2ns  min=2935.6ns
+  B1 build rs: median=279.1ns  min=277.9ns
+  B1 build py: median=2796.6ns  min=2789.5ns
+  B2 parse rs: median=642.8ns  min=641.3ns
+  B2 parse py: median=6006.6ns  min=5963.0ns
+  B2 build rs: median=374.1ns  min=372.7ns
+  B2 build py: median=5556.3ns  min=5488.5ns
+  B3 parse rs: median=2158.8ns  min=2093.4ns
+  B3 parse py: median=41589.8ns  min=24386.0ns
+  B3 build rs: median=1257.2ns  min=1250.8ns
+  B3 build py: median=37596.7ns  min=19898.6ns
+  B4 parse rs: median=3660.7ns  min=3645.9ns
+  B4 parse py: median=79335.2ns  min=56712.7ns
+  B4 build rs: median=3581.1ns  min=3576.4ns
+  B4 build py: median=48788.4ns  min=38616.0ns
+  B5 parse rs: median=719.1ns  min=718.4ns
+  B5 parse py: median=7743.9ns  min=7357.2ns
+  B5 build rs: median=523.7ns  min=517.6ns
+  B5 build py: median=7341.5ns  min=7298.7ns
+  B6 parse rs: median=1236.6ns  min=1173.5ns
+  B6 parse py: median=11987.4ns  min=11893.6ns
+  B6 build rs: median=620.5ns  min=611.0ns
+  B6 build py: median=11685.4ns  min=11617.7ns
+  B7 parse rs: median=314.0ns  min=301.6ns
+  B7 parse py: median=1647.2ns  min=1610.7ns
+  B7 build rs: median=219.5ns  min=210.0ns
+  B7 build py: median=1743.9ns  min=1731.3ns

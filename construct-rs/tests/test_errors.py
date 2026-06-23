@@ -158,50 +158,48 @@ def test_format_field_error_path_includes_field_name():
 
 
 # ---------------------------------------------------------------------------
-# FieldLengthError：Bytes(n) — build 不校验长度（设计文档 §4.7）
+# FieldLengthError：Bytes(n) — build 校验长度（对齐 Python construct stream_write）
 #
-# 设计文档 §4.7 明确规定：Bytes build 不校验长度（无论常量还是表达式长度）。
-# 以下测试验证该设计决策：build 接受任意长度的 bytes 并原样写入。
+# Python construct 的 stream_write 校验 len(data) == length，不匹配时抛 StreamError。
+# construct-rs 将该错误映射为 FieldLengthError。SF-3 恢复了该长度校验。
+# 以下测试验证：build 长度不匹配时抛 FieldLengthError，且 path 包含字段名。
 # ---------------------------------------------------------------------------
 
 
 def test_field_length_error_on_too_short_bytes():
-    """Bytes(4) build 3 字节 → 不报错，写入 3 字节（设计 §4.7：build 不校验）。"""
+    """Bytes(4) build 3 字节 → FieldLengthError（对齐 Python construct stream_write 校验）。"""
 
     @dataclass
     class M(StructMixin):
         x: bytes = field(Bytes(4))
 
-    built = M(x=b"\x00\x01\x02").build()
-    assert built == b"\x00\x01\x02"
+    with pytest.raises(FieldLengthError, match="expected 4, got 3"):
+        M(x=b"\x00\x01\x02").build()
 
 
 def test_field_length_error_on_too_long_bytes():
-    """Bytes(4) build 5 字节 → 不报错，写入 5 字节（设计 §4.7：build 不校验）。"""
+    """Bytes(4) build 5 字节 → FieldLengthError（对齐 Python construct stream_write 校验）。"""
 
     @dataclass
     class M(StructMixin):
         x: bytes = field(Bytes(4))
 
-    built = M(x=b"\x00\x01\x02\x03\x04").build()
-    assert built == b"\x00\x01\x02\x03\x04"
+    with pytest.raises(FieldLengthError, match="expected 4, got 5"):
+        M(x=b"\x00\x01\x02\x03\x04").build()
 
 
 def test_field_length_error_path_includes_field_name():
-    """FieldLengthError 在 parse 不足时触发（不是 build）。
+    """FieldLengthError 在 build 长度不匹配时触发，且 path 包含字段名。
 
-    设计 §4.7：build 不校验长度。FieldLengthError 在 parse 时
-    如果表达式求值为负数才会触发。
+    对齐 Python construct：stream_write 校验 len(data) == length，
+    不匹配时抛 StreamError（映射到 FieldLengthError）。
     """
-    # parse 不足字节的错误是 StreamError，不是 FieldLengthError。
-    # FieldLengthError 仅在表达式求值为负数时触发（见 Rust 测试）。
-    # 此测试验证 build 成功写入：
     @dataclass
     class M(StructMixin):
         payload: bytes = field(Bytes(8))
 
-    built = M(payload=b"short").build()
-    assert built == b"short"
+    with pytest.raises(FieldLengthError, match="root.payload"):
+        M(payload=b"short").build()
 
 
 # ---------------------------------------------------------------------------

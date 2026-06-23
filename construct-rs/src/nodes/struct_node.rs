@@ -319,9 +319,15 @@ impl Construct for StructNode {
             // SAFETY: ctx.fields() 返回有效的 Bound<PyDict> 引用，as_ptr() 是有效的
             // Python 对象指针。from_borrowed_ptr 递增引用计数（等价于 clone_ref 语义）。
             // 持有 GIL（由 py 参数保证）。
+            // MF-1 修复：不使用 expect()，而是返回 ExprContext 错误（防御性，
+            // has_expressions=true 时 ctx 必有 PyDict，此分支理论上不触发）。
             let dict_ptr = ctx
                 .fields()
-                .expect("context must have dict for expression struct")
+                .ok_or_else(|| ConstructError::ExprContext {
+                    message: "expression struct requires context with PyDict, but got placeholder"
+                        .to_string(),
+                    path: path.to_string(),
+                })?
                 .as_ptr();
             unsafe { Py::<PyAny>::from_borrowed_ptr(py, dict_ptr) }
         } else {
@@ -449,7 +455,7 @@ impl Construct for StructNode {
                     // - Tell：stream.tell()
                     // - Computed：eval_expr_int(expr, ctx)
                     // - Const/ContextParam：见 compute_ro_value 实现（Phase 3 扩展）
-                    let value = compute_ro_value(py, &field.node, stream, ctx, path)?;
+                    let value = field.node.compute_ro_value(py, stream, ctx, path)?;
                     let value_bound = value.bind(py);
 
                     // 写入 context（供后续表达式引用）
@@ -483,61 +489,6 @@ impl Construct for StructNode {
             })?;
         }
         Ok(total)
-    }
-}
-
-/// 为 RO 字段在 build 方向计算值。
-///
-/// RO 字段不从实例取值，而是通过节点自身的逻辑计算。
-/// 设计依据：`docs/模块设计-表达式系统.md` §5.4。
-///
-/// 当前支持的 RO 节点：
-/// - [`Node::Tell`]：返回当前 `BuildStream` 的写入位置（`usize → PyLong`）。
-/// - [`Node::Computed`]：通过 [`crate::expr::eval_expr_int`] 求值表达式。
-///
-/// 其他节点（如 `Const`、`ContextParam`）将在 Phase 3 扩展时添加分支。
-///
-/// # 参数
-///
-/// - `py`：GIL token。
-/// - `node`：RO 字段的节点。
-/// - `stream`：当前 `BuildStream`（用于 Tell 取位置）。
-/// - `ctx`：当前上下文（用于 Computed 求值表达式，不可变借用）。
-/// - `path`：错误追踪路径栈。
-///
-/// # 错误
-///
-/// - [`ConstructError::Generic`]：节点类型不支持作为 RO（如 `FormatField`、`Bytes`）。
-///   编译期校验（§5.6）应保证此分支不被触发，此处为运行时兜底。
-/// - 其他错误由 `Computed` 求值向上传播（`ExprContext` / `ExprFieldMissing` 等）。
-fn compute_ro_value(
-    py: Python<'_>,
-    node: &Node,
-    stream: &BuildStream,
-    ctx: &Context<'_>,
-    path: &mut Path,
-) -> Result<Py<PyAny>, ConstructError> {
-    match node {
-        // Tell：返回当前写入位置（usize → PyLong）
-        Node::Tell(_) => Ok(stream.tell().into_py(py)),
-        // Computed：求值表达式（i64 → PyLong）
-        Node::Computed(c) => {
-            let names = ctx.field_names().ok_or(ConstructError::ExprContext {
-                message: "compute_ro_value: context has no field_names (placeholder context)"
-                    .to_string(),
-            })?;
-            let v = crate::expr::eval_expr_int(c.expr(), names, ctx, py)?;
-            Ok(v.into_py(py))
-        }
-        // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
-        _ => Err(ConstructError::Generic {
-            message: format!(
-                "compute_ro_value: node type {:?} is not a valid RO node. \
-                 RO fields must be Tell, Computed (Const/ContextParam in Phase 3).",
-                node
-            ),
-            path: path.to_string(),
-        }),
     }
 }
 

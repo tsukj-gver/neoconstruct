@@ -138,3 +138,63 @@ pub enum Node {
     /// RO 节点：从表达式计算值（对应 Python construct `Computed`）
     Computed(ComputedNode),
 }
+
+impl Node {
+    /// 为 RO 字段在 build 方向计算值。
+    ///
+    /// RO 字段不从实例取值，而是通过节点自身的逻辑计算。
+    /// 设计依据：`docs/模块设计-表达式系统.md` §5.4。
+    ///
+    /// 当前支持的 RO 节点：
+    /// - [`Node::Tell`]：返回当前 `BuildStream` 的写入位置（`usize → PyLong`）。
+    /// - [`Node::Computed`]：通过 [`crate::expr::eval_expr_int`] 求值表达式。
+    ///
+    /// 其他节点（如 `Const`、`ContextParam`）将在 Phase 3 扩展时添加分支。
+    ///
+    /// NH-1 重构：从 struct_node.rs 的自由函数移至 `impl Node` 方法，
+    /// 使其成为 Node 的公共 API，未来添加 Const/ContextParam 时只需在此方法中增加分支。
+    ///
+    /// # 参数
+    ///
+    /// - `py`：GIL token。
+    /// - `stream`：当前 `BuildStream`（用于 Tell 取位置）。
+    /// - `ctx`：当前上下文（用于 Computed 求值表达式，不可变借用）。
+    /// - `path`：错误追踪路径栈。
+    ///
+    /// # 错误
+    ///
+    /// - [`ConstructError::Generic`]：节点类型不支持作为 RO（如 `FormatField`、`Bytes`）。
+    ///   编译期校验（§5.6）应保证此分支不被触发，此处为运行时兜底。
+    /// - 其他错误由 `Computed` 求值向上传播（`ExprContext` / `ExprFieldMissing` 等）。
+    pub fn compute_ro_value(
+        &self,
+        py: Python<'_>,
+        stream: &BuildStream,
+        ctx: &Context<'_>,
+        path: &mut Path,
+    ) -> Result<Py<PyAny>, ConstructError> {
+        match self {
+            // Tell：返回当前写入位置（usize → PyLong）
+            Node::Tell(_) => Ok(stream.tell().into_py(py)),
+            // Computed：求值表达式（i64 → PyLong）
+            Node::Computed(c) => {
+                let names = ctx.field_names().ok_or(ConstructError::ExprContext {
+                    message: "compute_ro_value: context has no field_names (placeholder context)"
+                        .to_string(),
+                    path: path.to_string(),
+                })?;
+                let v = crate::expr::eval_expr_int(c.expr(), names, ctx, py)?;
+                Ok(v.into_py(py))
+            }
+            // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
+            _ => Err(ConstructError::Generic {
+                message: format!(
+                    "compute_ro_value: node type {:?} is not a valid RO node. \
+                     RO fields must be Tell, Computed (Const/ContextParam in Phase 3).",
+                    self
+                ),
+                path: path.to_string(),
+            }),
+        }
+    }
+}

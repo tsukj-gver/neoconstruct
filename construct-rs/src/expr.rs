@@ -284,6 +284,10 @@ pub fn eval_expr_int(
                 stack_len += 1;
             }
             // 二元算术
+            // 注意：i64 wrapping 语义——溢出时静默回绕（如 i64::MAX + 1 = i64::MIN）。
+            // Python int 是任意精度，永不溢出。表达式 VM 用于字段长度计算（典型值 < 2^32），
+            // 实际场景不触及 i64 边界。如需精确对齐 Python，需引入 num_bigint（堆分配，
+            // 与性能目标冲突）。
             ExprOp::Add => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_add)?,
             ExprOp::Sub => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_sub)?,
             ExprOp::Mul => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_mul)?,
@@ -292,6 +296,7 @@ pub fn eval_expr_int(
                 if b == 0 {
                     return Err(ConstructError::ExprDivByZero {
                         message: "expression division by zero".to_string(),
+                        path: String::new(),
                     });
                 }
                 // Python `//` 语义：向负无穷取整（floor division）。
@@ -304,6 +309,7 @@ pub fn eval_expr_int(
                 if b == 0 {
                     return Err(ConstructError::ExprDivByZero {
                         message: "expression modulo by zero".to_string(),
+                        path: String::new(),
                     });
                 }
                 // Python `%` 语义：结果符号与除数一致（floor modulo）。
@@ -313,23 +319,42 @@ pub fn eval_expr_int(
             ExprOp::BitAnd => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a & b)?,
             ExprOp::BitOr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a | b)?,
             ExprOp::BitXor => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a ^ b)?,
-            ExprOp::Shl => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| {
-                a.wrapping_shl(b as u32)
-            })?,
-            ExprOp::Shr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| {
-                a.wrapping_shr(b as u32)
-            })?,
+            // SF-1 修复：Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
+            ExprOp::Shl => {
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
+                if b < 0 {
+                    return Err(ConstructError::Generic {
+                        message: format!("negative shift count: {}", b),
+                        path: String::new(),
+                    });
+                }
+                push_fixed(&mut stack_buf, &mut stack_len, a.wrapping_shl(b as u32));
+            }
+            ExprOp::Shr => {
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
+                if b < 0 {
+                    return Err(ConstructError::Generic {
+                        message: format!("negative shift count: {}", b),
+                        path: String::new(),
+                    });
+                }
+                push_fixed(&mut stack_buf, &mut stack_len, a.wrapping_shr(b as u32));
+            }
             // 一元
             ExprOp::Neg => {
                 if stack_len == 0 {
-                    return Err(ConstructError::ExprStackUnderflow);
+                    return Err(ConstructError::ExprStackUnderflow {
+                        path: String::new(),
+                    });
                 }
                 let i = stack_len - 1;
                 stack_buf[i] = stack_buf[i].wrapping_neg();
             }
             ExprOp::Not => {
                 if stack_len == 0 {
-                    return Err(ConstructError::ExprStackUnderflow);
+                    return Err(ConstructError::ExprStackUnderflow {
+                        path: String::new(),
+                    });
                 }
                 let i = stack_len - 1;
                 stack_buf[i] = !stack_buf[i];
@@ -345,7 +370,9 @@ pub fn eval_expr_int(
     }
 
     if stack_len == 0 {
-        return Err(ConstructError::ExprStackUnderflow);
+        return Err(ConstructError::ExprStackUnderflow {
+            path: String::new(),
+        });
     }
     stack_len -= 1;
     Ok(stack_buf[stack_len])
@@ -371,7 +398,9 @@ fn pop2_fixed(
     len: &mut usize,
 ) -> Result<(i64, i64), ConstructError> {
     if *len < 2 {
-        return Err(ConstructError::ExprStackUnderflow);
+        return Err(ConstructError::ExprStackUnderflow {
+            path: String::new(),
+        });
     }
     *len -= 2;
     let a = stack[*len];
@@ -1028,6 +1057,44 @@ mod tests {
         });
     }
 
+    #[test]
+    fn eval_shl_negative_shift_count_returns_error() {
+        // SF-1 修复：Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let names: Vec<Py<PyString>> = vec![];
+            // 1 << -1 → error
+            let prog = ExprProgram::new(vec![ExprOp::Const(1), ExprOp::Const(-1), ExprOp::Shl]);
+            let result = eval_expr_int(&prog, &names, &ctx, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::Generic { message, .. }) => {
+                    assert!(message.contains("negative shift count"), "got: {}", message);
+                }
+                other => panic!("expected Generic error, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn eval_shr_negative_shift_count_returns_error() {
+        // SF-1 修复：Python `a >> b` 当 b < 0 时抛 ValueError，此处对齐行为。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let names: Vec<Py<PyString>> = vec![];
+            // 256 >> -1 → error
+            let prog = ExprProgram::new(vec![ExprOp::Const(256), ExprOp::Const(-1), ExprOp::Shr]);
+            let result = eval_expr_int(&prog, &names, &ctx, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::Generic { message, .. }) => {
+                    assert!(message.contains("negative shift count"), "got: {}", message);
+                }
+                other => panic!("expected Generic error, got {:?}", other),
+            }
+        });
+    }
+
     // ======================================================================
     // eval_expr_int：错误路径
     // ======================================================================
@@ -1090,7 +1157,7 @@ mod tests {
             let result = eval_expr_int(&prog, &names, &ctx, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprStackUnderflow) => {}
+                Err(ConstructError::ExprStackUnderflow { .. }) => {}
                 other => panic!("expected ExprStackUnderflow, got {:?}", other),
             }
         });
@@ -1106,7 +1173,7 @@ mod tests {
             let result = eval_expr_int(&prog, &names, &ctx, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprStackUnderflow) => {}
+                Err(ConstructError::ExprStackUnderflow { .. }) => {}
                 other => panic!("expected ExprStackUnderflow, got {:?}", other),
             }
         });
@@ -1137,7 +1204,7 @@ mod tests {
             let result = eval_expr_int(&prog, &names, &ctx, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprFieldMissing { field }) => {
+                Err(ConstructError::ExprFieldMissing { field, .. }) => {
                     assert_eq!(field, "nonexistent");
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),
@@ -1157,7 +1224,9 @@ mod tests {
             let result = eval_expr_int(&prog, &names, &ctx, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprType { field, expected }) => {
+                Err(ConstructError::ExprType {
+                    field, expected, ..
+                }) => {
                     assert_eq!(field, "name");
                     assert!(expected.contains("integer"));
                 }
@@ -1269,7 +1338,7 @@ mod tests {
             let result = ctx.get_int_by_name(&name, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprFieldMissing { field }) => {
+                Err(ConstructError::ExprFieldMissing { field, .. }) => {
                     assert_eq!(field, "nonexistent");
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),
@@ -1287,7 +1356,9 @@ mod tests {
             let result = ctx.get_int_by_name(&name, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprType { field, expected }) => {
+                Err(ConstructError::ExprType {
+                    field, expected, ..
+                }) => {
                     assert_eq!(field, "name");
                     assert!(expected.contains("integer"));
                 }
@@ -1304,7 +1375,7 @@ mod tests {
             let result = ctx.get_int_by_name(&name, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprContext { message }) => {
+                Err(ConstructError::ExprContext { message, .. }) => {
                     assert!(message.contains("placeholder"));
                 }
                 other => panic!("expected ExprContext, got {:?}", other),
@@ -1367,7 +1438,7 @@ mod tests {
             let result = ctx.get_obj_by_name(&name);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprContext { message }) => {
+                Err(ConstructError::ExprContext { message, .. }) => {
                     assert!(message.contains("placeholder"));
                 }
                 other => panic!("expected ExprContext, got {:?}", other),

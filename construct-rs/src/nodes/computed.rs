@@ -64,6 +64,7 @@ impl Construct for ComputedNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         let names = ctx.field_names().ok_or(ConstructError::ExprContext {
             message: "Computed.parse: context has no field_names (placeholder context)".to_string(),
+            path: String::new(),
         })?;
         let value = eval_expr_int(&self.expr, names, ctx, py)?;
         Ok(value.into_py(py)) // i64 → PyLong
@@ -312,7 +313,7 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::ExprContext { message } => {
+                ConstructError::ExprContext { message, .. } => {
                     assert!(
                         message.contains("field_names") || message.contains("placeholder"),
                         "got: {}",
@@ -347,7 +348,7 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::ExprFieldMissing { field } => {
+                ConstructError::ExprFieldMissing { field, .. } => {
                     assert_eq!(field, "nonexistent");
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),

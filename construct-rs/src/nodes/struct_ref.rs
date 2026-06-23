@@ -25,6 +25,7 @@
 
 use crate::context::Context;
 use crate::error::ConstructError;
+use crate::nodes::Node;
 use crate::path::Path;
 use crate::schema::CompiledSchema;
 use crate::stream::{BuildStream, ParseStream};
@@ -158,10 +159,21 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // 方案 B' §3.4：直接委托对方 root.parse。
-        // 对方 StructNode.parse 内部已通过 create_class + force_setattr 构造实例，
-        // 返回的就是对方类的实例（不是 dict）。
-        root.parse(py, stream, ctx, path)
+        // MF-2 修复：当内层结构含表达式时，创建 child context 隔离 dict/field_names，
+        // 避免内层表达式污染外层的 context（field_names、PyDict 字段）。
+        // StructNode.parse 在 has_expressions=true 分支会自行调用
+        // ctx.set_field_names_ref()，所以 child_ctx 只需提供空 PyDict 即可。
+        let inner_has_expr = matches!(root, Node::Struct(s) if s.has_expressions());
+        if inner_has_expr {
+            let mut child_ctx =
+                Context::new_child(ctx, py).map_err(|e| ConstructError::Generic {
+                    message: format!("failed to create child context for nested StructRef: {}", e),
+                    path: path.to_string(),
+                })?;
+            root.parse(py, stream, &mut child_ctx, path)
+        } else {
+            root.parse(py, stream, ctx, path)
+        }
     }
 
     fn build(
@@ -176,8 +188,18 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // obj 已是对方类实例，直接传给对方执行树
-        root.build(py, obj, stream, ctx, path)
+        // MF-2 修复：同 parse 方向，内层含表达式时创建 child context。
+        let inner_has_expr = matches!(root, Node::Struct(s) if s.has_expressions());
+        if inner_has_expr {
+            let mut child_ctx =
+                Context::new_child(ctx, py).map_err(|e| ConstructError::Generic {
+                    message: format!("failed to create child context for nested StructRef: {}", e),
+                    path: path.to_string(),
+                })?;
+            root.build(py, obj, stream, &mut child_ctx, path)
+        } else {
+            root.build(py, obj, stream, ctx, path)
+        }
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
