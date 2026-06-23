@@ -1,6 +1,6 @@
 //! 解析/构建上下文。
 //!
-//! 设计依据：`docs/架构设计.md` §C.5。
+//! 设计依据：`docs/架构设计.md` §C.5、`docs/模块设计-Context-Vec优化.md`。
 //!
 //! ## 用途
 //!
@@ -8,69 +8,73 @@
 //! - 字段间引用（如 `Bytes(this.length)` 中 `this.length` 引用前序字段）。
 //! - 嵌套层传递（Python construct 的 `_` 指向外层 context）。
 //!
-//! ## Phase 1 范围
+//! ## Vec 化优化（Phase 2.5）
 //!
-//! Phase 1 **不读取也不写入** context（无 this 表达式）。parse/build 入口
-//! 使用 [`Context::placeholder`] 创建不持有 `PyDict` 的占位 context，避免每次
-//! parse 白白创建一个空 dict（P0-2 优化，节省 80-150 ns 固定开销）。
+//! `expr_values` 按编译期字段索引存储 borrowed PyObject 指针，供 GetInt 快速访问
+//! （跳过 PyDict hash 查找）。GetInt 从 ~36ns 降至 ~6ns。
 //!
-//! `new_root` / `new_child` 仍保留，Phase 2 恢复 context 使用时改回在入口调用。
-//!
-//! ## 为什么持有 PyDict 而非 Rust HashMap
-//!
-//! 字段值本身就是 Python 对象（`Py<PyAny>`），存入 `PyDict` 是 C API 调用
-//! （`PyDict_SetItem`），无需 Rust→Python 转换。this 引用读取时直接返回
-//! Python 对象，无中间类型（FFI 设计 §5）。与 Python construct 的 Container 语义一致。
+//! `expr_values` 为 `Option`：仅 `has_expressions=true` 的 Struct 通过
+//! [`Context::init_expr_values`] 初始化；无表达式的 Struct 保持 `None`，零分配开销。
 
 use crate::error::ConstructError;
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
 /// 解析/构建上下文。Rust 内部持有 Python dict 引用（按需创建）。
 ///
-/// 字段值存入 `PyDict`（C API `PyDict_SetItem`），无 Rust 中间类型。
-/// 嵌套 Struct 节点通过 `new_child` 创建子 context，`parent` 指向外层。
+/// 字段值存入 `PyDict`（C API `PyDict_SetItem`），同时按编译期字段索引
+/// 在 `expr_values` 中缓存 borrowed 指针，供 GetInt 快速访问（跳过 hash 查找）。
+///
+/// `expr_values` 为 `Option`：仅 `has_expressions=true` 的 Struct 通过
+/// [`Context::init_expr_values`] 初始化；无表达式的 Struct（placeholder）
+/// 保持 `None`，零分配开销。
 ///
 /// `fields` 为 `Option`：Phase 1 的 parse/build 入口使用 [`Context::placeholder`]
 /// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；Phase 2 恢复
 /// context 使用时入口改用 [`Context::new_root`]。
-///
-/// `field_names` 有两种存储模式：
-/// - **owned**（[`Context::set_field_names`]）：Context 拥有 `Vec<Py<PyString>>`，
-///   用于测试。每次调用需 clone，有堆分配开销。
-/// - **borrowed**（[`Context::set_field_names_ref`]）：Context 存储 raw pointer，
-///   指向 StructNode 预计算的 `field_names_cache`。零拷贝、零分配，用于生产路径。
-///   调用方（StructNode）保证切片在 Context 使用期间存活。
 pub struct Context<'py> {
     /// 当前层字段字典（`PyDict` 引用），按需创建。
     ///
     /// parse 时存入已解析字段；build 时存入从对象读取的字段值。
+    /// 同时充当 instance dict（has_expressions 路径）。
     /// `None` 表示占位 context（Phase 1 入口使用，不分配 `PyDict`）。
     fields: Option<Bound<'py, PyDict>>,
+
     /// 外层上下文（嵌套 Struct 时指向父 Context），对应 Python construct 的 `_`。
     ///
     /// 顶层 context 的 `parent` 为 `None`。
     parent: Option<&'py Context<'py>>,
-    /// 字段名（owned 版本，测试用 [`Context::set_field_names`] 设置）。
+
+    /// 按编译期字段索引存储的 borrowed PyObject 指针，供 GetInt 快速访问。
     ///
-    /// 生产路径不使用此字段（用 borrowed 指针代替，避免每次 parse 的堆分配）。
-    field_names_owned: Option<Vec<Py<PyString>>>,
-    /// 字段名切片指针（borrowed 版本，生产用 [`Context::set_field_names_ref`] 设置）。
+    /// `None` 表示未初始化（无表达式的 Struct 或 placeholder）。
+    /// `Some(vec)` 中每个槽位：
+    /// - 非 null：指向 `fields` PyDict 中对应字段的值对象（borrowed，不 incref）
+    /// - null：WO 字段（不写入值）或未设置的字段
     ///
-    /// 由 StructNode 的 `field_names_cache` 拥有，Context 借用。
-    /// 仅在 parse/build 调用链期间有效。`None` 表示未设置。
-    field_names_ptr: Option<*const Py<PyString>>,
-    /// borrowed field_names 切片长度（配合 `field_names_ptr`）。
-    field_names_len: usize,
+    /// GetInt(idx) 直接读 `vec[idx]` → `PyLong_AsLongLong`，跳过 PyDict hash 查找。
+    ///
+    /// # Safety（不变量）
+    ///
+    /// 1. 指针仅在 [`Context::set_field_at`] 中写入（与 dict 写入同步）
+    /// 2. 指针仅在 [`Context::get_int_at`] 中读取（fields dict 存活期间）
+    /// 3. `fields` 与 `expr_values` 同属 Context，生命周期一致
+    /// 4. dict 中的值不会被外部替换（Context API 是唯一写入路径）
+    /// 5. PyDict resize 时不移动值对象（PyObject 在堆上，dict 内部数组重分配
+    ///    不影响已存入值的对象指针）
+    expr_values: Option<Vec<*mut ffi::PyObject>>,
 }
 
-// SAFETY note: Context 包含 raw pointer (`field_names_ptr`)，这不会影响线程安全——
-// 指针指向 StructNode 拥有的不可变 `Vec<Py<PyString>>`，在 GIL 保护下单线程访问。
+// SAFETY note: Context 包含 raw pointer (`expr_values` 中的 `*mut ffi::PyObject`)，
+// 这不会影响线程安全——指针指向 fields PyDict 中的值对象，在 GIL 保护下单线程访问。
 // Context 本身因持有 `Bound<PyDict>` 而不可跨线程发送（pyo3 保证）。
 impl<'py> Context<'py> {
     /// 创建顶层 context（parse/build 入口处调用）。
     ///
     /// 创建一个空的 `PyDict` 作为字段存储容器，`parent` 为 `None`。
+    /// `expr_values` 初始化为 `None`——有表达式的 Struct 在 parse/build 入口
+    /// 通过 [`Context::init_expr_values`] 按需初始化。
     ///
     /// Phase 2 恢复 context 使用后，入口改用此方法。Phase 1 入口使用
     /// [`Context::placeholder`] 以避免白白创建空 dict。
@@ -78,9 +82,7 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: None,
-            field_names_owned: None,
-            field_names_ptr: None,
-            field_names_len: 0,
+            expr_values: None,
         })
     }
 
@@ -96,29 +98,99 @@ impl<'py> Context<'py> {
         Self {
             fields: None,
             parent: None,
-            field_names_owned: None,
-            field_names_ptr: None,
-            field_names_len: 0,
+            expr_values: None,
         }
     }
 
     /// 创建嵌套 context（Struct 节点进入时调用）。
     ///
     /// 新建一个空 `PyDict`，`parent` 指向传入的父 context。
+    /// `expr_values` 初始化为 `None`——内层 Struct 自行调用
+    /// [`Context::init_expr_values`] 按需初始化。
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
-            field_names_owned: None,
-            field_names_ptr: None,
-            field_names_len: 0,
+            expr_values: None,
         })
+    }
+
+    /// 初始化 expr_values 缓冲区（预分配 n 个 null 槽位）。
+    ///
+    /// 在 StructNode.parse/build 的 `has_expressions` 分支入口调用一次，
+    /// 在遍历字段之前。槽位数 = 当前 StructNode 的字段数。
+    ///
+    /// 后续 [`Context::set_field_at`] 按 idx 填充槽位（RW/RO 字段），
+    /// WO 字段的槽位保持 null（编译期保证 GetInt 不引用 WO 字段）。
+    ///
+    /// 对占位 context（`fields = None`）安全：仅记录 n，不分配（无表达式
+    /// 的 Struct 不会调用此方法，由编译期 `has_expressions` 标志保证）。
+    ///
+    /// # 性能
+    ///
+    /// `vec![ptr::null_mut(); n]` 零次 Py_INCREF，仅一次 Vec 堆分配
+    /// （n 个指针宽度 = 8n 字节，典型 n=2-4，单次 malloc ~5ns）。
+    pub fn init_expr_values(&mut self, n: usize) {
+        self.expr_values = Some(vec![std::ptr::null_mut(); n]);
+    }
+
+    /// 按索引写入字段值（同时写 PyDict + expr_values）。
+    ///
+    /// 替代原 `set_field_interned`，增加 `idx` 参数用于同步 expr_values。
+    /// 由 StructNode.parse/build 在每个 RW/RO 字段完成后调用。
+    ///
+    /// # 操作
+    ///
+    /// 1. `fields.set_item(name, value)` — 写入 PyDict（C API `PyDict_SetItem`，
+    ///    interned key 命中 fast path，~10-15ns）
+    /// 2. `expr_values[idx] = value.as_ptr()` — 写入 borrowed 指针（~1ns，不 incref）
+    ///
+    /// # 借用
+    ///
+    /// 需要 `&mut self`（写 expr_values）。StructNode.parse/build 中
+    /// `field.node.parse(...)` 与 `ctx.set_field_at(...)` 是**顺序调用**，
+    /// 不存在同时借用 ctx 的情况。
+    ///
+    /// 对占位 context（`fields = None`）为无操作（has_expressions=false 的
+    /// Struct 不调用此方法）。
+    ///
+    /// # 错误
+    ///
+    /// `PyDict_SetItem` 失败时返回 `PyErr`（转为 `ConstructError::Generic`）。
+    pub fn set_field_at(
+        &mut self,
+        idx: usize,
+        name: &Py<PyString>,
+        value: &Bound<'_, PyAny>,
+        py: Python<'_>,
+    ) -> PyResult<()> {
+        match (&self.fields, &mut self.expr_values) {
+            (Some(fields), Some(vals)) => {
+                fields.set_item(name.bind(py), value)?;
+                // 同步 borrowed 指针到 expr_values（不 incref，依赖 dict 持有引用）。
+                if let Some(slot) = vals.get_mut(idx) {
+                    *slot = value.as_ptr();
+                }
+                // idx 越界：编译期保证 idx < fields.len() == vals.len()。
+                // 防御性忽略（不 panic，符合编码红线）。
+                Ok(())
+            }
+            // 占位 context 或未 init_expr_values：仅写 dict（若存在），跳过 Vec。
+            (Some(fields), None) => fields.set_item(name.bind(py), value),
+            (None, _) => Ok(()),
+        }
     }
 
     /// 存入字段（parse/build 每个字段完成后调用）。
     ///
     /// 对齐 Python construct `Struct._parse` 中的 `context[sc.name] = subobj`。
+    ///
+    /// **注意**：此方法仅写 PyDict，**不**同步 `expr_values`。仅用于测试或
+    /// has_expressions=false 的路径。若在已调用 [`Context::init_expr_values`]
+    /// 的 context 上用此方法覆盖将被 GetInt 引用的字段，会导致 expr_values
+    /// 指针与 dict 不同步（GetInt 读取到旧值）。生产路径（has_expressions=true）
+    /// 必须使用 [`Context::set_field_at`]。
     ///
     /// 占位 context（`fields = None`）上为无操作（Phase 1 不写入）。
     pub fn set_field(&self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -128,30 +200,7 @@ impl<'py> Context<'py> {
         }
     }
 
-    /// 用 interned `PyString` key 写入字段（build 方向 context 更新，设计 §5.4）。
-    ///
-    /// 与 [`Context::set_field`] 的区别：接收 `&Py<PyString>`（interned key）而非 `&str`，
-    /// 避免 `PyDict_SetItem` 内部重复创建临时 str + hash 计算。
-    /// StructNode.build 的 RW 字段在取值后调用此方法写入 context，
-    /// 供后续字段的表达式引用。
-    ///
-    /// 占位 context（`fields = None`）上为无操作。
-    pub fn set_field_interned(
-        &self,
-        name: &Py<PyString>,
-        value: &Bound<'_, PyAny>,
-        _py: Python<'_>,
-    ) -> PyResult<()> {
-        match &self.fields {
-            Some(fields) => fields.set_item(name.bind(_py), value),
-            None => Ok(()),
-        }
-    }
-
     /// 读取当前层字段（Phase 2 的 this.xxx 引用使用）。
-    ///
-    /// Phase 1 不调用此方法（无 this 表达式）。Phase 2 表达式系统会通过此方法
-    /// 读取前序字段的值。
     ///
     /// 返回 `None` 表示当前层无此字段。注意：此方法**不**递归查找 parent。
     /// 读取父层字段应通过 `parent()` 显式获取父 context 后调用。
@@ -167,155 +216,75 @@ impl<'py> Context<'py> {
     /// 返回父 context 的引用（若有）。
     ///
     /// 对应 Python construct 中通过 `_` 访问外层 context 的能力。
-    /// Phase 1 不使用，预留给 Phase 2 表达式系统。
     pub fn parent(&self) -> Option<&'py Context<'py>> {
         self.parent
     }
 
-    /// 按 interned `PyString` name 取整数值（VM `GetInt` 指令使用）。
+    /// 按编译期字段索引取整数值（VM `GetInt` 指令使用）。
     ///
-    /// 使用 C API `PyDict_GetItem` 直接查找，绕过 pyo3 的 `get_item(&str)`：
-    /// - 不调用 `to_str()` 做 UTF-8 校验（interned PyString 无需校验）
-    /// - 不创建临时 Python str 对象（`get_item(&str)` 内部会创建）
-    /// - interned key 命中 CPython dict 的 fast path（直接指针比较）
+    /// 从 `expr_values[idx]` 取 borrowed PyObject 指针，直接调用
+    /// `PyLong_AsLongLong`（~5ns），跳过 `PyDict_GetItem` hash 查找（~24ns）。
     ///
-    /// 仅在错误路径（字段不存在/类型不匹配）上惰性调用 `to_str()` 获取字段名
-    /// 用于错误信息。
+    /// 完整路径：`vec[idx]`(~1ns) → `PyLong_AsLongLong`(~5ns) = **~6ns**
+    /// （vs 原 `get_int_by_name` ~36ns，节省 ~30ns）。
     ///
     /// # 错误
     ///
-    /// - [`ConstructError::ExprContext`]：占位 context（`fields = None`），无法求值。
-    ///   理论上不会发生——有表达式的 Struct 使用 [`Context::new_root`]，不是 placeholder。
-    /// - [`ConstructError::ExprFieldMissing`]：字段不存在于 context。
-    /// - [`ConstructError::ExprType`]：值无法 `extract` 为 `i64`（如 str/bytes）。
-    pub fn get_int_by_name(
-        &self,
-        name: &Bound<'_, PyString>,
-        _py: Python<'_>,
-    ) -> Result<i64, ConstructError> {
-        match &self.fields {
-            Some(fields) => {
-                // PyDict_GetItem：返回 borrowed pointer（不增引用计数），找不到返回 NULL。
-                // 比 pyo3 的 get_item(&str) 快，因为：
-                // 1. 不创建临时 Python str 对象
-                // 2. 不调用 to_str() 做 UTF-8 校验
-                // 3. interned key 命中 CPython dict 的 fast path（直接指针比较）
-                let val_ptr = unsafe { pyo3::ffi::PyDict_GetItem(fields.as_ptr(), name.as_ptr()) };
-                if val_ptr.is_null() {
-                    // 字段不存在——惰性获取错误信息中的字段名（仅错误路径开销）
-                    let name_str = name.to_str().unwrap_or("<invalid utf-8>");
-                    return Err(ConstructError::ExprFieldMissing {
-                        field: name_str.to_string(),
-                        path: String::new(),
-                    });
-                }
-                // SAFETY: val_ptr 是 PyDict_GetItem 返回的 non-null borrowed reference。
-                // PyDict_GetItem 返回 borrowed pointer（不增引用计数），只要 dict 存活就有效。
-                // dict 由 self.fields (Bound<'py, PyDict>) 保证存活。
-                let val = unsafe { Py::<PyAny>::from_borrowed_ptr(_py, val_ptr) };
-                val.extract::<i64>(_py).map_err(|_| {
-                    let name_str = name.to_str().unwrap_or("<invalid utf-8>");
-                    ConstructError::ExprType {
-                        field: name_str.to_string(),
-                        expected: "integer (i64)".to_string(),
-                        path: String::new(),
-                    }
-                })
-            }
-            None => Err(ConstructError::ExprContext {
-                message: "context is placeholder (no PyDict), cannot evaluate expression"
+    /// - [`ConstructError::ExprContext`]：expr_values 未初始化（占位 context，
+    ///   理论不发生——有表达式的 Struct 调用 init_expr_values）。
+    /// - [`ConstructError::ExprFieldMissing`]：槽位为 null（WO 字段或未设置）。
+    /// - [`ConstructError::ExprType`]：值无法 `PyLong_AsLongLong`（非整数类型）。
+    pub fn get_int_at(&self, idx: usize, _py: Python<'_>) -> Result<i64, ConstructError> {
+        let vals = self
+            .expr_values
+            .as_ref()
+            .ok_or(ConstructError::ExprContext {
+                message: "get_int_at: expr_values not initialized (placeholder context)"
                     .to_string(),
                 path: String::new(),
-            }),
-        }
-    }
-
-    /// 按 interned `PyString` name 取 Python 对象（Switch selector 等非整数引用使用）。
-    ///
-    /// 返回 `Bound<'_, PyAny>` 引用，不做类型转换。字段不存在时返回 `Ok(None)`。
-    ///
-    /// # 错误
-    ///
-    /// - [`ConstructError::ExprContext`]：占位 context（`fields = None`），无法取值。
-    /// - [`ConstructError::Generic`]：底层 Python C API 调用失败。
-    pub fn get_obj_by_name(
-        &self,
-        name: &Bound<'_, PyString>,
-    ) -> Result<Option<Bound<'_, PyAny>>, ConstructError> {
-        // 直接用 interned PyString 作为 key（pyo3 get_item 接受 &Bound<PyString>），
-        // 避免 name.to_str()? 的 UTF-8 校验 + 临时 str 分配。
-        match &self.fields {
-            Some(fields) => Ok(fields.get_item(name)?),
-            None => Err(ConstructError::ExprContext {
-                message: "context is placeholder, cannot get field object".to_string(),
+            })?;
+        let ptr = vals.get(idx).copied().unwrap_or(std::ptr::null_mut());
+        if ptr.is_null() {
+            return Err(ConstructError::ExprFieldMissing {
+                field: format!("<index {}>", idx),
                 path: String::new(),
-            }),
+            });
         }
+        // SAFETY: ptr 来自 set_field_at 写入的 value.as_ptr()，指向 fields dict
+        // 中的值对象。dict 由 self.fields (Bound<PyDict>) 保证存活，值对象因此存活。
+        // PyLong_AsLongLong 对非 PyLong 对象返回 -1 并设置 OverflowError/TypeError，
+        // 我们检查返回值区分错误类型。
+        let v = unsafe { ffi::PyLong_AsLongLong(ptr) };
+        if v == -1 {
+            // 区分"值为 -1"与"转换失败"：检查 PyErr_Occurred
+            // SAFETY: 持有 GIL，PyErr_Occurred 仅检查不取异常。
+            let err_occurred = unsafe { ffi::PyErr_Occurred() };
+            if !err_occurred.is_null() {
+                unsafe { ffi::PyErr_Clear() };
+                return Err(ConstructError::ExprType {
+                    field: format!("<index {}>", idx),
+                    expected: "integer (i64)".to_string(),
+                    path: String::new(),
+                });
+            }
+        }
+        Ok(v)
     }
 
-    /// 设置当前 StructNode 的字段名列表（owned 版本，测试用）。
+    /// 取出 fields dict 的所有权（parse 末尾将 dict 移交给实例）。
     ///
-    /// 由 StructNode.parse/build 在 `has_expressions=true` 分支的开头调用一次，
-    /// 在遍历字段之前设置。列表顺序与 StructNode.fields 对齐，
-    /// [`crate::expr::ExprOp::GetInt`] 的索引基于此列表。
+    /// 调用后 `self.fields = None`，后续访问 `fields()` 返回 `None`。
+    /// 仅在 parse/build 结束、ctx 不再使用时调用。
     ///
-    /// **注意**：此方法接收 `Vec` 的所有权，有堆分配开销。生产路径应使用
-    /// [`Context::set_field_names_ref`]（零拷贝借用 StructNode 预计算的缓存）。
-    ///
-    /// 对占位 context 也安全（虽然占位 context 不会触发表达式求值）。
-    pub fn set_field_names(&mut self, names: Vec<Py<PyString>>) {
-        self.field_names_ptr = None;
-        self.field_names_len = 0;
-        self.field_names_owned = Some(names);
-    }
-
-    /// 设置字段名引用（零拷贝，生产路径使用）。
-    ///
-    /// 与 [`Context::set_field_names`] 的区别：不接收 `Vec` 所有权，而是存储
-    /// 指向调用方切片的 raw pointer。避免每次 parse/build 的 `Vec` 分配 +
-    /// N 次 `clone_ref`（Py_INCREF），节省 ~10-20ns/parse。
-    ///
-    /// # Safety 责任
-    ///
-    /// `names` 切片必须在 Context 使用期间（即整个 parse/build 调用链）保持存活。
-    /// 生产路径由 StructNode 的 `field_names_cache`（编译期预计算，与 StructNode
-    /// 同生命周期）保证。空切片等同于未设置（`field_names()` 返回 `None`）。
-    pub fn set_field_names_ref(&mut self, names: &[Py<PyString>]) {
-        self.field_names_owned = None;
-        if names.is_empty() {
-            self.field_names_ptr = None;
-            self.field_names_len = 0;
-        } else {
-            self.field_names_ptr = Some(names.as_ptr());
-            self.field_names_len = names.len();
-        }
-    }
-
-    /// 返回字段名列表的切片引用（供 [`crate::expr::eval_expr_int`] 使用）。
-    ///
-    /// 优先返回 borrowed 指针（生产路径，由 [`Context::set_field_names_ref`] 设置），
-    /// 其次返回 owned Vec（测试路径，由 [`Context::set_field_names`] 设置）。
-    ///
-    /// `None` 表示未设置（无表达式的 Struct）。表达式求值时若为 `None`，
-    /// 调用方应视为内部错误（编译期保证有表达式的 Struct 会设置此字段）。
-    pub fn field_names(&self) -> Option<&[Py<PyString>]> {
-        // borrowed 优先（生产路径，零拷贝）
-        if self.field_names_len > 0 {
-            let ptr = self.field_names_ptr?;
-            // SAFETY: ptr 来自 set_field_names_ref 的 &[Py<PyString>]，
-            // 由调用方（StructNode）保证在 Context 使用期间切片存活。
-            // 生产路径中 StructNode 的 field_names_cache 在整个 parse/build
-            // 调用链期间保持存活（&self 借用覆盖调用链）。
-            Some(unsafe { std::slice::from_raw_parts(ptr, self.field_names_len) })
-        } else {
-            // owned（测试路径）
-            self.field_names_owned.as_deref()
-        }
+    /// 用于 has_expressions=true 的 parse 路径：将 ctx 的 dict 直接移交给
+    /// 实例（避免 clone 的 Py_INCREF 开销）。
+    pub fn take_fields(&mut self) -> Option<Bound<'py, PyDict>> {
+        self.fields.take()
     }
 
     /// 借用当前层的字段字典（用于测试与调试）。
     ///
-    /// 占位 context（`fields = None`）返回 `None`。
+    /// 占位 context（`fields = None`）或已 [`take_fields`] 的 context 返回 `None`。
     pub fn fields(&self) -> Option<&Bound<'py, PyDict>> {
         self.fields.as_ref()
     }
@@ -330,10 +299,6 @@ mod tests {
     /// pyo3 在 `extension-module` feature 关闭时仍然不会自动初始化解释器
     /// （`auto-initialize` feature 未启用）。`prepare_freethreaded_python` 是幂等的，
     /// 多次调用安全。使用 `Once` 保证只在第一次 `Python::with_gil` 前调用。
-    ///
-    /// 不启用 `pyo3/auto-initialize` 是因为：
-    /// 1. 避免在 maturin 打包时（通过 feature unification）误启用嵌入模式的初始化逻辑。
-    /// 2. `prepare_freethreaded_python` 在测试 helper 中显式调用更直观、更可控。
     fn ensure_python_initialized() {
         use std::sync::Once;
         static INIT: Once = Once::new();
@@ -528,99 +493,308 @@ mod tests {
     }
 
     // ======================================================================
-    // set_field_interned（Phase 2 表达式系统 build 方向使用）
+    // init_expr_values / set_field_at / get_int_at（Phase 2.5 Vec 化）
     // ======================================================================
 
     #[test]
-    fn set_field_interned_stores_value() {
+    fn init_expr_values_creates_null_slots() {
         with_python(|py| {
-            let ctx = Context::new_root(py).expect("root");
-            let key = PyString::new_bound(py, "count").unbind();
-            let value = py.eval_bound("42", None, None).expect("eval 42");
-            ctx.set_field_interned(&key, &value, py)
-                .expect("set_field_interned");
-            assert_eq!(ctx.fields().expect("fields").len(), 1);
-            // 验证值正确
-            let retrieved = ctx.get_field("count").expect("get").expect("exist");
-            let n: i64 = retrieved.extract().expect("extract");
-            assert_eq!(n, 42);
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(3);
+            // 验证 expr_values 已初始化（通过 get_int_at 返回 ExprFieldMissing
+            // 而非 ExprContext 来间接验证）。
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprFieldMissing { .. }) => {}
+                other => panic!("expected ExprFieldMissing for null slot, got {:?}", other),
+            }
         });
     }
 
     #[test]
-    fn set_field_interned_on_placeholder_is_noop() {
+    fn set_field_at_stores_value_in_dict_and_vec() {
         with_python(|py| {
-            let ctx = Context::placeholder(py);
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "count").unbind();
+            let value = py.eval_bound("42", None, None).expect("eval 42");
+            ctx.set_field_at(0, &key, &value, py).expect("set_field_at");
+            // 验证 dict 写入
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            // 验证 Vec 写入（通过 get_int_at）
+            assert_eq!(ctx.get_int_at(0, py).expect("get_int_at"), 42);
+        });
+    }
+
+    #[test]
+    fn set_field_at_on_placeholder_is_noop() {
+        with_python(|py| {
+            let mut ctx = Context::placeholder(py);
+            ctx.init_expr_values(1);
             let key = PyString::new_bound(py, "x").unbind();
             let value = py.eval_bound("1", None, None).expect("eval 1");
-            // 占位 context 上 set_field_interned 为无操作，不报错。
-            ctx.set_field_interned(&key, &value, py)
+            // 占位 context 上 set_field_at 为无操作，不报错。
+            ctx.set_field_at(0, &key, &value, py)
                 .expect("noop on placeholder");
+            assert!(ctx.fields().is_none());
+            // placeholder 的 fields=None，get_int_at 会因 expr_values 初始化但指针 null
+            // 返回 ExprFieldMissing（因为 set_field_at 在 (None, _) 分支不写 Vec）。
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+        });
+    }
+
+    #[test]
+    fn set_field_at_without_init_writes_dict_only() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            // 未调用 init_expr_values → expr_values = None
+            let key = PyString::new_bound(py, "x").unbind();
+            let value = py.eval_bound("5", None, None).expect("eval 5");
+            ctx.set_field_at(0, &key, &value, py).expect("set_field_at");
+            // dict 已写入
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            // 但 get_int_at 返回 ExprContext（expr_values 未初始化）
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprContext { .. }) => {}
+                other => panic!("expected ExprContext, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn set_field_at_overrides_existing() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "x").unbind();
+            let v1 = py.eval_bound("1", None, None).expect("eval 1");
+            ctx.set_field_at(0, &key, &v1, py).expect("set v1");
+            let v2 = py.eval_bound("2", None, None).expect("eval 2");
+            ctx.set_field_at(0, &key, &v2, py).expect("set v2");
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            assert_eq!(ctx.get_int_at(0, py).expect("get_int_at"), 2);
+        });
+    }
+
+    #[test]
+    fn get_int_at_returns_correct_value() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(3);
+            let values = [10i64, 20, 30];
+            let names = ["a", "b", "c"];
+            for (i, (&n, &v)) in names.iter().zip(values.iter()).enumerate() {
+                let key = PyString::new_bound(py, n).unbind();
+                let val = v.into_py(py);
+                ctx.set_field_at(i, &key, val.bind(py), py).expect("set");
+            }
+            assert_eq!(ctx.get_int_at(0, py).expect("idx 0"), 10);
+            assert_eq!(ctx.get_int_at(1, py).expect("idx 1"), 20);
+            assert_eq!(ctx.get_int_at(2, py).expect("idx 2"), 30);
+        });
+    }
+
+    #[test]
+    fn get_int_at_negative_value() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "offset").unbind();
+            let val = (-100i64).into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set");
+            // 值为 -1 边界场景的特殊验证（PyLong_AsLongLong 歧义）
+            assert_eq!(ctx.get_int_at(0, py).expect("get negative"), -100);
+        });
+    }
+
+    #[test]
+    fn get_int_at_minus_one_value() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "x").unbind();
+            let val = (-1i64).into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set");
+            // -1 是 PyLong_AsLongLong 的歧义值，必须正确区分"-1 合法值"与"转换失败"
+            assert_eq!(ctx.get_int_at(0, py).expect("get -1"), -1);
+        });
+    }
+
+    #[test]
+    fn get_int_at_i64_max() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "max").unbind();
+            let val = i64::MAX.into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set");
+            assert_eq!(ctx.get_int_at(0, py).expect("get max"), i64::MAX);
+        });
+    }
+
+    #[test]
+    fn get_int_at_null_slot_returns_field_missing() {
+        // WO 字段的槽位保持 null → ExprFieldMissing
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(3);
+            // 只写入 idx 0 和 2（跳过 idx 1，模拟 WO 字段）
+            let key_a = PyString::new_bound(py, "a").unbind();
+            let val_a = 1i64.into_py(py);
+            ctx.set_field_at(0, &key_a, val_a.bind(py), py)
+                .expect("set a");
+            let key_c = PyString::new_bound(py, "c").unbind();
+            let val_c = 3i64.into_py(py);
+            ctx.set_field_at(2, &key_c, val_c.bind(py), py)
+                .expect("set c");
+            // idx 1 为 null
+            let result = ctx.get_int_at(1, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprFieldMissing { field, .. }) => {
+                    assert!(
+                        field.contains("1"),
+                        "field should contain index 1: {}",
+                        field
+                    );
+                }
+                other => panic!("expected ExprFieldMissing, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_out_of_bounds_returns_field_missing() {
+        // idx 越界 → vals.get(idx) 返回 None → null → ExprFieldMissing
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "a").unbind();
+            let val = 1i64.into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set a");
+            // idx 5 越界（vec 只有 1 个槽位）
+            let result = ctx.get_int_at(5, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprFieldMissing { field, .. }) => {
+                    assert!(
+                        field.contains("5"),
+                        "field should contain index 5: {}",
+                        field
+                    );
+                }
+                other => panic!("expected ExprFieldMissing, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_on_placeholder_returns_expr_context() {
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprContext { message, .. }) => {
+                    assert!(message.contains("not initialized"));
+                }
+                other => panic!("expected ExprContext, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_uninitialized_returns_expr_context() {
+        with_python(|py| {
+            let ctx = Context::new_root(py).expect("root");
+            // 未调用 init_expr_values
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprContext { message, .. }) => {
+                    assert!(message.contains("not initialized"));
+                }
+                other => panic!("expected ExprContext, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_wrong_type_returns_expr_type() {
+        // 存入 str 值而非 int → PyLong_AsLongLong 失败 → ExprType
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "name").unbind();
+            let str_val = PyString::new_bound(py, "hello");
+            ctx.set_field_at(0, &key, &str_val, py).expect("set str");
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprType { expected, .. }) => {
+                    assert!(expected.contains("integer"));
+                }
+                other => panic!("expected ExprType, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_overflow_returns_expr_type() {
+        // 存入超大整数（超出 i64 范围）→ PyLong_AsLongLong 返回 -1 + OverflowError
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "big").unbind();
+            // 2**63 + 1 = 9223372036854775809，超出 i64::MAX
+            let val = py
+                .eval_bound("2**63 + 1", None, None)
+                .expect("eval big int");
+            ctx.set_field_at(0, &key, &val, py).expect("set big");
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprType { .. }) => {}
+                other => panic!("expected ExprType for overflow, got {:?}", other),
+            }
+        });
+    }
+
+    // ======================================================================
+    // take_fields
+    // ======================================================================
+
+    #[test]
+    fn take_fields_moves_dict_ownership() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            let value = py.eval_bound("42", None, None).expect("eval");
+            ctx.set_field("x", &value).expect("set");
+            let dict = ctx.take_fields().expect("should have dict");
+            assert_eq!(dict.len(), 1);
+            // take 后 fields() 返回 None
             assert!(ctx.fields().is_none());
         });
     }
 
     #[test]
-    fn set_field_interned_overrides_existing() {
+    fn take_fields_on_placeholder_returns_none() {
         with_python(|py| {
-            let ctx = Context::new_root(py).expect("root");
-            let key = PyString::new_bound(py, "x").unbind();
-            let v1 = py.eval_bound("1", None, None).expect("eval 1");
-            ctx.set_field_interned(&key, &v1, py).expect("set v1");
-            let v2 = py.eval_bound("2", None, None).expect("eval 2");
-            ctx.set_field_interned(&key, &v2, py).expect("set v2");
-            assert_eq!(ctx.fields().expect("fields").len(), 1);
-            let retrieved = ctx.get_field("x").expect("get").expect("exist");
-            let n: i64 = retrieved.extract().expect("extract");
-            assert_eq!(n, 2);
+            let mut ctx = Context::placeholder(py);
+            assert!(ctx.take_fields().is_none());
         });
     }
 
-    // ======================================================================
-    // set_field_names / field_names（Phase 2 子任务 2.5）
-    // ======================================================================
-
     #[test]
-    fn set_field_names_stores_and_returns_slice() {
+    fn take_fields_twice_second_returns_none() {
         with_python(|py| {
             let mut ctx = Context::new_root(py).expect("root");
-            assert!(ctx.field_names().is_none(), "default should be None");
-            let names = vec![
-                PyString::new_bound(py, "count").into(),
-                PyString::new_bound(py, "data").into(),
-            ];
-            ctx.set_field_names(names);
-            let slice = ctx.field_names().expect("should be set");
-            assert_eq!(slice.len(), 2);
-            assert_eq!(slice[0].bind(py).to_str().expect("to_str"), "count");
-            assert_eq!(slice[1].bind(py).to_str().expect("to_str"), "data");
-        });
-    }
-
-    #[test]
-    fn field_names_none_by_default_for_all_context_kinds() {
-        with_python(|py| {
-            let root = Context::new_root(py).expect("root");
-            assert!(root.field_names().is_none());
-
-            let placeholder = Context::placeholder(py);
-            assert!(placeholder.field_names().is_none());
-
-            let child = Context::new_child(&root, py).expect("child");
-            assert!(
-                child.field_names().is_none(),
-                "child should not inherit field_names from parent"
-            );
-        });
-    }
-
-    #[test]
-    fn set_field_names_empty_vec_is_valid() {
-        with_python(|py| {
-            let mut ctx = Context::new_root(py).expect("root");
-            ctx.set_field_names(Vec::new());
-            let slice = ctx.field_names().expect("should be set");
-            assert!(slice.is_empty());
+            let _first = ctx.take_fields().expect("first take");
+            assert!(ctx.take_fields().is_none(), "second take should be None");
         });
     }
 }

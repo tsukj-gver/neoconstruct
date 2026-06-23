@@ -158,10 +158,10 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // MF-2 修复：当内层结构含表达式时，创建 child context 隔离 dict/field_names，
-        // 避免内层表达式污染外层的 context（field_names、PyDict 字段）。
+        // MF-2 修复：当内层结构含表达式时，创建 child context 隔离 dict/expr_values，
+        // 避免内层表达式污染外层的 context（expr_values、PyDict 字段）。
         // StructNode.parse 在 has_expressions=true 分支会自行调用
-        // ctx.set_field_names_ref()，所以 child_ctx 只需提供空 PyDict 即可。
+        // ctx.init_expr_values()，所以 child_ctx 只需提供空 PyDict 即可。
         let inner_has_expr = root.has_expressions();
         if inner_has_expr {
             let mut child_ctx =

@@ -30,7 +30,6 @@
 use crate::context::Context;
 use crate::error::ConstructError;
 use pyo3::prelude::*;
-use pyo3::types::PyString;
 
 /// 表达式 VM 指令。编译期由 FieldRef/ExprRef 树后序遍历产生。
 ///
@@ -43,8 +42,8 @@ use pyo3::types::PyString;
 pub enum ExprOp {
     /// 从 context 取整数字段值，压入栈顶。
     ///
-    /// 参数是字段在当前 StructNode 的 interned 字段名列表中的索引（编译期确定）。
-    /// 执行：`ctx.get_int_by_name(names[idx], py)` → `stack.push(i64)`。
+    /// 参数是字段在当前 StructNode 的 `expr_values` Vec 中的索引（编译期确定）。
+    /// 执行：`ctx.get_int_at(idx, py)` → `stack.push(i64)`。
     GetInt(usize),
 
     /// 压入编译期常量整数。
@@ -215,10 +214,8 @@ const VM_STACK_SLOTS: usize = 32;
 /// # 参数
 ///
 /// - `program`：编译后的表达式程序（[`ExprProgram`]）
-/// - `names`：interned 字段名列表（与 StructNode 的字段顺序对齐），
-///   [`ExprOp::GetInt`] 的索引基于此列表取值
-/// - `ctx`：当前上下文（持有 `PyDict`），通过
-///   [`Context::get_int_by_name`] 取字段值
+/// - `ctx`：当前上下文（持有 `PyDict` 和 `expr_values`），通过
+///   [`Context::get_int_at`] 按索引取字段值
 /// - `py`：GIL token
 ///
 /// # 返回
@@ -227,16 +224,14 @@ const VM_STACK_SLOTS: usize = 32;
 ///
 /// # 错误
 ///
-/// - [`ConstructError::ExprType`]：`GetInt` 取到的值无法 extract 为 `i64`
-/// - [`ConstructError::ExprFieldMissing`]：`GetInt` 引用的字段不存在于 context
-/// - [`ConstructError::ExprContext`]：`ctx` 为 placeholder（无 PyDict），无法求值
+/// - [`ConstructError::ExprType`]：`GetInt` 取到的值无法转换为 `i64`
+/// - [`ConstructError::ExprFieldMissing`]：`GetInt` 引用的槽位为 null（未设置）
+/// - [`ConstructError::ExprContext`]：`ctx.expr_values` 未初始化（placeholder），无法求值
 /// - [`ConstructError::ExprDivByZero`]：`FloorDiv` / `Mod` 除数为 0
 /// - [`ConstructError::ExprStackUnderflow`]：栈下溢（指令序列不合法，编译期保证不会发生）
-/// - [`ConstructError::Generic`]：传入空程序，或 `GetInt` 索引越界，或
-///   `max_stack` 超过 [`VM_STACK_SLOTS`]（编译期保证不发生）
+/// - [`ConstructError::Generic`]：传入空程序，或 `max_stack` 超过 [`VM_STACK_SLOTS`]（编译期保证不发生）
 pub fn eval_expr_int(
     program: &ExprProgram,
-    names: &[Py<PyString>],
     ctx: &Context<'_>,
     py: Python<'_>,
 ) -> Result<i64, ConstructError> {
@@ -267,15 +262,7 @@ pub fn eval_expr_int(
     for op in program.ops() {
         match op {
             ExprOp::GetInt(idx) => {
-                let name = names.get(*idx).ok_or_else(|| ConstructError::Generic {
-                    message: format!(
-                        "expression GetInt index {} out of bounds (names has {} entries)",
-                        idx,
-                        names.len()
-                    ),
-                    path: String::new(),
-                })?;
-                let val = ctx.get_int_by_name(name.bind(py), py)?;
+                let val = ctx.get_int_at(*idx, py)?;
                 stack_buf[stack_len] = val;
                 stack_len += 1;
             }
@@ -506,23 +493,18 @@ mod tests {
 
     /// 构造一个含若干整数字段的 `Context`，用于表达式求值测试。
     ///
-    /// `entries` 为 `(字段名, i64 值)` 列表。返回的 `Context` 为 `new_root`，
-    /// 持有填充好的 `PyDict`。
+    /// 使用新 Vec 化 API：`init_expr_values` + `set_field_at`。
+    /// 返回的 `Context` 为 `new_root`，持有填充好的 `PyDict` 和 `expr_values`。
     fn make_context<'py>(py: Python<'py>, entries: &[(&str, i64)]) -> Context<'py> {
-        let ctx = Context::new_root(py).expect("new_root");
-        for (name, value) in entries {
+        let mut ctx = Context::new_root(py).expect("new_root");
+        ctx.init_expr_values(entries.len());
+        for (idx, (name, value)) in entries.iter().enumerate() {
+            let key = PyString::new_bound(py, name).unbind();
             let val = (*value).into_py(py);
-            ctx.set_field(name, val.bind(py)).expect("set_field");
+            ctx.set_field_at(idx, &key, val.bind(py), py)
+                .expect("set_field_at");
         }
         ctx
-    }
-
-    /// 构造 interned PyString 列表（模拟 StructNode 的字段名表）。
-    fn make_names<'py>(py: Python<'py>, names: &[&str]) -> Vec<Py<PyString>> {
-        names
-            .iter()
-            .map(|n| PyString::new_bound(py, n).into())
-            .collect()
     }
 
     // ======================================================================
@@ -644,9 +626,8 @@ mod tests {
     fn eval_const_returns_value() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             let prog = ExprProgram::new(vec![ExprOp::Const(42)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("const");
+            let result = eval_expr_int(&prog, &ctx, py).expect("const");
             assert_eq!(result, 42);
         });
     }
@@ -655,9 +636,8 @@ mod tests {
     fn eval_const_negative() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             let prog = ExprProgram::new(vec![ExprOp::Const(-100)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("neg const");
+            let result = eval_expr_int(&prog, &ctx, py).expect("neg const");
             assert_eq!(result, -100);
         });
     }
@@ -666,9 +646,8 @@ mod tests {
     fn eval_getint_returns_field_value() {
         with_python(|py| {
             let ctx = make_context(py, &[("count", 7)]);
-            let names = make_names(py, &["count"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("getint");
+            let result = eval_expr_int(&prog, &ctx, py).expect("getint");
             assert_eq!(result, 7);
         });
     }
@@ -677,9 +656,8 @@ mod tests {
     fn eval_getint_multiple_fields() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 10), ("b", 20), ("c", 30)]);
-            let names = make_names(py, &["a", "b", "c"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(2)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("getint idx 2");
+            let result = eval_expr_int(&prog, &ctx, py).expect("getint idx 2");
             assert_eq!(result, 30);
         });
     }
@@ -692,10 +670,9 @@ mod tests {
     fn eval_add_two_fields() {
         with_python(|py| {
             let ctx = make_context(py, &[("count", 3), ("flag", 5)]);
-            let names = make_names(py, &["count", "flag"]);
             // count + flag
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Add]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("add");
+            let result = eval_expr_int(&prog, &ctx, py).expect("add");
             assert_eq!(result, 8);
         });
     }
@@ -704,10 +681,9 @@ mod tests {
     fn eval_count_times_two() {
         with_python(|py| {
             let ctx = make_context(py, &[("count", 6)]);
-            let names = make_names(py, &["count"]);
             // count * 2
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(2), ExprOp::Mul]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mul");
+            let result = eval_expr_int(&prog, &ctx, py).expect("mul");
             assert_eq!(result, 12);
         });
     }
@@ -716,7 +692,6 @@ mod tests {
     fn eval_chained_addition_count_plus_flag_plus_one() {
         with_python(|py| {
             let ctx = make_context(py, &[("count", 3), ("flag", 5)]);
-            let names = make_names(py, &["count", "flag"]);
             // count + flag + 1 → [G(0), G(1), Add, Const(1), Add]
             let prog = ExprProgram::new(vec![
                 ExprOp::GetInt(0),
@@ -725,7 +700,7 @@ mod tests {
                 ExprOp::Const(1),
                 ExprOp::Add,
             ]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("chained add");
+            let result = eval_expr_int(&prog, &ctx, py).expect("chained add");
             assert_eq!(result, 9);
         });
     }
@@ -734,9 +709,8 @@ mod tests {
     fn eval_sub() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 10), ("b", 3)]);
-            let names = make_names(py, &["a", "b"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Sub]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("sub");
+            let result = eval_expr_int(&prog, &ctx, py).expect("sub");
             assert_eq!(result, 7);
         });
     }
@@ -745,10 +719,9 @@ mod tests {
     fn eval_floor_div() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 17), ("b", 5)]);
-            let names = make_names(py, &["a", "b"]);
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv");
+            let result = eval_expr_int(&prog, &ctx, py).expect("floordiv");
             assert_eq!(result, 3);
         });
     }
@@ -757,9 +730,8 @@ mod tests {
     fn eval_mod() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 17), ("b", 5)]);
-            let names = make_names(py, &["a", "b"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod");
+            let result = eval_expr_int(&prog, &ctx, py).expect("mod");
             assert_eq!(result, 2);
         });
     }
@@ -769,10 +741,9 @@ mod tests {
         // Python: -7 // 2 = -4（向负无穷取整，不是 truncating 的 -3）
         with_python(|py| {
             let ctx = make_context(py, &[("a", -7), ("b", 2)]);
-            let names = make_names(py, &["a", "b"]);
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv neg dividend");
+            let result = eval_expr_int(&prog, &ctx, py).expect("floordiv neg dividend");
             assert_eq!(result, -4);
         });
     }
@@ -782,9 +753,8 @@ mod tests {
         // Python: -7 % 2 = 1（结果符号与除数一致）
         with_python(|py| {
             let ctx = make_context(py, &[("a", -7), ("b", 2)]);
-            let names = make_names(py, &["a", "b"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod neg dividend");
+            let result = eval_expr_int(&prog, &ctx, py).expect("mod neg dividend");
             assert_eq!(result, 1);
         });
     }
@@ -794,10 +764,9 @@ mod tests {
         // Python: 7 // -2 = -4（向负无穷取整，不是 truncating 的 -3）
         with_python(|py| {
             let ctx = make_context(py, &[("a", 7), ("b", -2)]);
-            let names = make_names(py, &["a", "b"]);
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv neg divisor");
+            let result = eval_expr_int(&prog, &ctx, py).expect("floordiv neg divisor");
             assert_eq!(result, -4);
         });
     }
@@ -807,10 +776,9 @@ mod tests {
         // Python: -7 // -1 = 7（负负得正，无取整差异）
         with_python(|py| {
             let ctx = make_context(py, &[("a", -7), ("b", -1)]);
-            let names = make_names(py, &["a", "b"]);
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::FloorDiv]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("floordiv both neg");
+            let result = eval_expr_int(&prog, &ctx, py).expect("floordiv both neg");
             assert_eq!(result, 7);
         });
     }
@@ -820,9 +788,8 @@ mod tests {
         // Python: 7 % -2 = -1（结果符号与除数一致）
         with_python(|py| {
             let ctx = make_context(py, &[("a", 7), ("b", -2)]);
-            let names = make_names(py, &["a", "b"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Mod]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("mod neg divisor");
+            let result = eval_expr_int(&prog, &ctx, py).expect("mod neg divisor");
             assert_eq!(result, -1);
         });
     }
@@ -834,14 +801,13 @@ mod tests {
         // 确保此边界场景不 panic。
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // i64::MIN / -1
             let prog_div = ExprProgram::new(vec![
                 ExprOp::Const(i64::MIN),
                 ExprOp::Const(-1),
                 ExprOp::FloorDiv,
             ]);
-            let result_div = eval_expr_int(&prog_div, &names, &ctx, py).expect("min div -1");
+            let result_div = eval_expr_int(&prog_div, &ctx, py).expect("min div -1");
             assert_eq!(result_div, i64::MIN); // wrapping: 9223372036854775808 mod 2^64
 
             // i64::MIN % -1
@@ -850,7 +816,7 @@ mod tests {
                 ExprOp::Const(-1),
                 ExprOp::Mod,
             ]);
-            let result_mod = eval_expr_int(&prog_mod, &names, &ctx, py).expect("min mod -1");
+            let result_mod = eval_expr_int(&prog_mod, &ctx, py).expect("min mod -1");
             assert_eq!(result_mod, 0);
         });
     }
@@ -860,7 +826,6 @@ mod tests {
         // (a + b) * c → [G(0), G(1), Add, G(2), Mul]
         with_python(|py| {
             let ctx = make_context(py, &[("a", 2), ("b", 3), ("c", 4)]);
-            let names = make_names(py, &["a", "b", "c"]);
             let prog = ExprProgram::new(vec![
                 ExprOp::GetInt(0),
                 ExprOp::GetInt(1),
@@ -868,7 +833,7 @@ mod tests {
                 ExprOp::GetInt(2),
                 ExprOp::Mul,
             ]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("nested");
+            let result = eval_expr_int(&prog, &ctx, py).expect("nested");
             assert_eq!(result, 20); // (2+3)*4 = 20
         });
     }
@@ -881,9 +846,8 @@ mod tests {
     fn eval_neg() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 42)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Neg]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("neg");
+            let result = eval_expr_int(&prog, &ctx, py).expect("neg");
             assert_eq!(result, -42);
         });
     }
@@ -892,9 +856,8 @@ mod tests {
     fn eval_neg_negative_to_positive() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", -42)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Neg]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("neg");
+            let result = eval_expr_int(&prog, &ctx, py).expect("neg");
             assert_eq!(result, 42);
         });
     }
@@ -903,9 +866,8 @@ mod tests {
     fn eval_not_bitwise() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 0)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Not]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("not 0");
+            let result = eval_expr_int(&prog, &ctx, py).expect("not 0");
             assert_eq!(result, -1); // !0 = -1 in i64
         });
     }
@@ -914,9 +876,8 @@ mod tests {
     fn eval_not_all_ones() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", -1)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Not]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("not -1");
+            let result = eval_expr_int(&prog, &ctx, py).expect("not -1");
             assert_eq!(result, 0); // !(-1) = 0
         });
     }
@@ -929,10 +890,9 @@ mod tests {
     fn eval_gt_true() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 5)]);
-            let names = make_names(py, &["a"]);
             // a > 0
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(0), ExprOp::Gt]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("gt");
+            let result = eval_expr_int(&prog, &ctx, py).expect("gt");
             assert_eq!(result, 1);
         });
     }
@@ -941,9 +901,8 @@ mod tests {
     fn eval_gt_false() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 0)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(1), ExprOp::Gt]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("gt false");
+            let result = eval_expr_int(&prog, &ctx, py).expect("gt false");
             assert_eq!(result, 0);
         });
     }
@@ -952,9 +911,8 @@ mod tests {
     fn eval_eq_true() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 5)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Eq]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("eq");
+            let result = eval_expr_int(&prog, &ctx, py).expect("eq");
             assert_eq!(result, 1);
         });
     }
@@ -963,9 +921,8 @@ mod tests {
     fn eval_ne_true() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 5)]);
-            let names = make_names(py, &["a"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(6), ExprOp::Ne]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("ne");
+            let result = eval_expr_int(&prog, &ctx, py).expect("ne");
             assert_eq!(result, 1);
         });
     }
@@ -974,19 +931,18 @@ mod tests {
     fn eval_lt_le_ge() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 3)]);
-            let names = make_names(py, &["a"]);
 
             // a < 5 → 1
             let prog_lt = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Lt]);
-            assert_eq!(eval_expr_int(&prog_lt, &names, &ctx, py).expect("lt"), 1);
+            assert_eq!(eval_expr_int(&prog_lt, &ctx, py).expect("lt"), 1);
 
             // a <= 3 → 1
             let prog_le = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(3), ExprOp::Le]);
-            assert_eq!(eval_expr_int(&prog_le, &names, &ctx, py).expect("le"), 1);
+            assert_eq!(eval_expr_int(&prog_le, &ctx, py).expect("le"), 1);
 
             // a >= 5 → 0
             let prog_ge = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Ge]);
-            assert_eq!(eval_expr_int(&prog_ge, &names, &ctx, py).expect("ge"), 0);
+            assert_eq!(eval_expr_int(&prog_ge, &ctx, py).expect("ge"), 0);
         });
     }
 
@@ -998,11 +954,10 @@ mod tests {
     fn eval_bitand() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 0xAB)]);
-            let names = make_names(py, &["a"]);
             // a & 0xFF → 0xAB
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(0xFF), ExprOp::BitAnd]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("bitand");
+            let result = eval_expr_int(&prog, &ctx, py).expect("bitand");
             assert_eq!(result, 0xAB);
         });
     }
@@ -1011,11 +966,10 @@ mod tests {
     fn eval_bitor() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 0xF0)]);
-            let names = make_names(py, &["a"]);
             // a | 0x0F → 0xFF
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(0x0F), ExprOp::BitOr]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("bitor");
+            let result = eval_expr_int(&prog, &ctx, py).expect("bitor");
             assert_eq!(result, 0xFF);
         });
     }
@@ -1024,11 +978,10 @@ mod tests {
     fn eval_bitxor() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 0xFF)]);
-            let names = make_names(py, &["a"]);
             // a ^ 0x0F → 0xF0
             let prog =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(0x0F), ExprOp::BitXor]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("bitxor");
+            let result = eval_expr_int(&prog, &ctx, py).expect("bitxor");
             assert_eq!(result, 0xF0);
         });
     }
@@ -1037,10 +990,9 @@ mod tests {
     fn eval_shl() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 1)]);
-            let names = make_names(py, &["a"]);
             // a << 4 → 16
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(4), ExprOp::Shl]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("shl");
+            let result = eval_expr_int(&prog, &ctx, py).expect("shl");
             assert_eq!(result, 16);
         });
     }
@@ -1049,10 +1001,9 @@ mod tests {
     fn eval_shr() {
         with_python(|py| {
             let ctx = make_context(py, &[("a", 256)]);
-            let names = make_names(py, &["a"]);
             // a >> 4 → 16
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(4), ExprOp::Shr]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("shr");
+            let result = eval_expr_int(&prog, &ctx, py).expect("shr");
             assert_eq!(result, 16);
         });
     }
@@ -1062,10 +1013,9 @@ mod tests {
         // SF-1 修复：Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // 1 << -1 → error
             let prog = ExprProgram::new(vec![ExprOp::Const(1), ExprOp::Const(-1), ExprOp::Shl]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::Generic { message, .. }) => {
@@ -1081,10 +1031,9 @@ mod tests {
         // SF-1 修复：Python `a >> b` 当 b < 0 时抛 ValueError，此处对齐行为。
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // 256 >> -1 → error
             let prog = ExprProgram::new(vec![ExprOp::Const(256), ExprOp::Const(-1), ExprOp::Shr]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::Generic { message, .. }) => {
@@ -1103,9 +1052,8 @@ mod tests {
     fn eval_empty_program_returns_error() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             let prog = ExprProgram::empty();
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::Generic { .. }) => {}
@@ -1118,11 +1066,10 @@ mod tests {
     fn eval_floor_div_by_zero_returns_error() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // 10 / 0
             let prog =
                 ExprProgram::new(vec![ExprOp::Const(10), ExprOp::Const(0), ExprOp::FloorDiv]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprDivByZero { .. }) => {}
@@ -1135,10 +1082,9 @@ mod tests {
     fn eval_mod_by_zero_returns_error() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // 10 % 0
             let prog = ExprProgram::new(vec![ExprOp::Const(10), ExprOp::Const(0), ExprOp::Mod]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprDivByZero { .. }) => {}
@@ -1151,10 +1097,9 @@ mod tests {
     fn eval_stack_underflow_on_binary_op_with_empty_stack() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // [Add] with empty stack → stack underflow
             let prog = ExprProgram::new(vec![ExprOp::Add]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprStackUnderflow { .. }) => {}
@@ -1167,10 +1112,9 @@ mod tests {
     fn eval_stack_underflow_on_unary_op_with_empty_stack() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names: Vec<Py<PyString>> = vec![];
             // [Neg] with empty stack → stack underflow
             let prog = ExprProgram::new(vec![ExprOp::Neg]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprStackUnderflow { .. }) => {}
@@ -1183,9 +1127,8 @@ mod tests {
     fn eval_getint_on_placeholder_context_returns_expr_context_error() {
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            let names = make_names(py, &["count"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprContext { .. }) => {}
@@ -1197,15 +1140,24 @@ mod tests {
     #[test]
     fn eval_getint_missing_field_returns_expr_field_missing_error() {
         with_python(|py| {
-            let ctx = make_context(py, &[("a", 1)]);
-            let names = make_names(py, &["a", "nonexistent"]);
-            // 引用 names[1]="nonexistent"，context 中不存在
+            // init_expr_values(2)，但只 set_field_at(0, "a")。idx 1 为 null 槽位。
+            let mut ctx = Context::new_root(py).expect("new_root");
+            ctx.init_expr_values(2);
+            let key = PyString::new_bound(py, "a").unbind();
+            let val = 1i64.into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set a");
+            // idx 1 保持 null
+
             let prog = ExprProgram::new(vec![ExprOp::GetInt(1)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprFieldMissing { field, .. }) => {
-                    assert_eq!(field, "nonexistent");
+                    assert!(
+                        field.contains("1"),
+                        "field should contain index 1: {}",
+                        field
+                    );
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),
             }
@@ -1215,19 +1167,24 @@ mod tests {
     #[test]
     fn eval_getint_wrong_type_returns_expr_type_error() {
         with_python(|py| {
-            let ctx = Context::new_root(py).expect("root");
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
             // 存入 str 值而非 int
-            let str_val = PyString::new_bound(py, "hello");
-            ctx.set_field("name", &str_val).expect("set str");
-            let names = make_names(py, &["name"]);
+            let str_val = PyString::new_bound(py, "hello").into_any();
+            let key = PyString::new_bound(py, "name").unbind();
+            ctx.set_field_at(0, &key, &str_val, py).expect("set str");
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprType {
                     field, expected, ..
                 }) => {
-                    assert_eq!(field, "name");
+                    assert!(
+                        field.contains("0"),
+                        "field should contain index 0: {}",
+                        field
+                    );
                     assert!(expected.contains("integer"));
                 }
                 other => panic!("expected ExprType, got {:?}", other),
@@ -1236,26 +1193,18 @@ mod tests {
     }
 
     #[test]
-    fn eval_getint_index_out_of_bounds_returns_generic_error() {
-        // names 只有 1 个条目，GetInt(5) 越界 → 应返回 Generic 错误而非 panic
+    fn eval_getint_index_out_of_bounds_returns_field_missing_error() {
+        // expr_values 有 1 个槽位，GetInt(5) 越界 → ExprFieldMissing（null 槽位）
         with_python(|py| {
             let ctx = make_context(py, &[("count", 1)]);
-            let names = make_names(py, &["count"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(5)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py);
+            let result = eval_expr_int(&prog, &ctx, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::Generic { message, .. }) => {
-                    assert!(
-                        message.contains("5"),
-                        "error message should contain idx 5, got: {message}"
-                    );
-                    assert!(
-                        message.contains("1"),
-                        "error message should contain names len 1, got: {message}"
-                    );
+                Err(ConstructError::ExprFieldMissing { field, .. }) => {
+                    assert!(field.contains("5"), "field should contain idx 5: {}", field);
                 }
-                other => panic!("expected Generic, got {:?}", other),
+                other => panic!("expected ExprFieldMissing, got {:?}", other),
             }
         });
     }
@@ -1269,9 +1218,8 @@ mod tests {
         // 模拟 Bytes(count) → 仅引用 count
         with_python(|py| {
             let ctx = make_context(py, &[("count", 42)]);
-            let names = make_names(py, &["count"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("bytes len");
+            let result = eval_expr_int(&prog, &ctx, py).expect("bytes len");
             assert_eq!(result, 42);
         });
     }
@@ -1281,9 +1229,8 @@ mod tests {
         // 模拟 Bytes(count + flag)
         with_python(|py| {
             let ctx = make_context(py, &[("count", 10), ("flag", 2)]);
-            let names = make_names(py, &["count", "flag"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::GetInt(1), ExprOp::Add]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("bytes len");
+            let result = eval_expr_int(&prog, &ctx, py).expect("bytes len");
             assert_eq!(result, 12);
         });
     }
@@ -1293,13 +1240,12 @@ mod tests {
         // 模拟 Computed(end - start)
         with_python(|py| {
             let ctx = make_context(py, &[("start", 0), ("end", 4)]);
-            let names = make_names(py, &["start", "end"]);
             let prog = ExprProgram::new(vec![
                 ExprOp::GetInt(1), // end
                 ExprOp::GetInt(0), // start
                 ExprOp::Sub,
             ]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("computed");
+            let result = eval_expr_int(&prog, &ctx, py).expect("computed");
             assert_eq!(result, 4);
         });
     }
@@ -1309,37 +1255,49 @@ mod tests {
         // 模拟 Switch 条件: type_flag == 1
         with_python(|py| {
             let ctx = make_context(py, &[("type_flag", 1)]);
-            let names = make_names(py, &["type_flag"]);
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(1), ExprOp::Eq]);
-            let result = eval_expr_int(&prog, &names, &ctx, py).expect("switch cond");
+            let result = eval_expr_int(&prog, &ctx, py).expect("switch cond");
             assert_eq!(result, 1);
         });
     }
 
     // ======================================================================
-    // Context::get_int_by_name
+    // Context::get_int_at（Vec 化 API 集成测试）
     // ======================================================================
 
     #[test]
-    fn context_get_int_by_name_returns_value() {
+    fn get_int_at_returns_value() {
         with_python(|py| {
             let ctx = make_context(py, &[("count", 42)]);
-            let name = PyString::new_bound(py, "count");
-            let result = ctx.get_int_by_name(&name, py).expect("get int");
-            assert_eq!(result, 42);
+            assert_eq!(ctx.get_int_at(0, py).expect("get int"), 42);
         });
     }
 
     #[test]
-    fn context_get_int_by_name_missing_returns_error() {
+    fn get_int_at_multiple_fields() {
         with_python(|py| {
-            let ctx = make_context(py, &[("a", 1)]);
-            let name = PyString::new_bound(py, "nonexistent");
-            let result = ctx.get_int_by_name(&name, py);
+            let ctx = make_context(py, &[("a", 10), ("b", 20), ("c", 30)]);
+            assert_eq!(ctx.get_int_at(0, py).expect("a"), 10);
+            assert_eq!(ctx.get_int_at(1, py).expect("b"), 20);
+            assert_eq!(ctx.get_int_at(2, py).expect("c"), 30);
+        });
+    }
+
+    #[test]
+    fn get_int_at_null_slot_returns_field_missing_error() {
+        // init_expr_values(2) 但只设置 idx 0 → idx 1 为 null
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("new_root");
+            ctx.init_expr_values(2);
+            let key = PyString::new_bound(py, "a").unbind();
+            let val = 1i64.into_py(py);
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set a");
+
+            let result = ctx.get_int_at(1, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprFieldMissing { field, .. }) => {
-                    assert_eq!(field, "nonexistent");
+                    assert!(field.contains("1"), "field: {}", field);
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),
             }
@@ -1347,19 +1305,32 @@ mod tests {
     }
 
     #[test]
-    fn context_get_int_by_name_wrong_type_returns_error() {
+    fn get_int_at_on_placeholder_returns_expr_context_error() {
         with_python(|py| {
-            let ctx = Context::new_root(py).expect("root");
-            let str_val = PyString::new_bound(py, "hello");
-            ctx.set_field("name", &str_val).expect("set str");
-            let name = PyString::new_bound(py, "name");
-            let result = ctx.get_int_by_name(&name, py);
+            let ctx = Context::placeholder(py);
+            let result = ctx.get_int_at(0, py);
             assert!(result.is_err());
             match result {
-                Err(ConstructError::ExprType {
-                    field, expected, ..
-                }) => {
-                    assert_eq!(field, "name");
+                Err(ConstructError::ExprContext { message, .. }) => {
+                    assert!(message.contains("not initialized"), "message: {}", message);
+                }
+                other => panic!("expected ExprContext, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn get_int_at_wrong_type_returns_expr_type_error() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.init_expr_values(1);
+            let str_val = PyString::new_bound(py, "hello").into_any();
+            let key = PyString::new_bound(py, "name").unbind();
+            ctx.set_field_at(0, &key, &str_val, py).expect("set str");
+            let result = ctx.get_int_at(0, py);
+            assert!(result.is_err());
+            match result {
+                Err(ConstructError::ExprType { expected, .. }) => {
                     assert!(expected.contains("integer"));
                 }
                 other => panic!("expected ExprType, got {:?}", other),
@@ -1368,97 +1339,43 @@ mod tests {
     }
 
     #[test]
-    fn context_get_int_by_name_on_placeholder_returns_error() {
-        with_python(|py| {
-            let ctx = Context::placeholder(py);
-            let name = PyString::new_bound(py, "count");
-            let result = ctx.get_int_by_name(&name, py);
-            assert!(result.is_err());
-            match result {
-                Err(ConstructError::ExprContext { message, .. }) => {
-                    assert!(message.contains("placeholder"));
-                }
-                other => panic!("expected ExprContext, got {:?}", other),
-            }
-        });
-    }
-
-    #[test]
-    fn context_get_int_by_name_negative_value() {
+    fn get_int_at_negative_value() {
         with_python(|py| {
             let ctx = make_context(py, &[("offset", -100)]);
-            let name = PyString::new_bound(py, "offset");
-            let result = ctx.get_int_by_name(&name, py).expect("get negative");
-            assert_eq!(result, -100);
+            assert_eq!(ctx.get_int_at(0, py).expect("get negative"), -100);
         });
     }
 
     #[test]
-    fn context_get_int_by_name_i64_max() {
+    fn get_int_at_i64_max() {
         with_python(|py| {
             let ctx = make_context(py, &[("max", i64::MAX)]);
-            let name = PyString::new_bound(py, "max");
-            let result = ctx.get_int_by_name(&name, py).expect("get max");
-            assert_eq!(result, i64::MAX);
-        });
-    }
-
-    // ======================================================================
-    // Context::get_obj_by_name
-    // ======================================================================
-
-    #[test]
-    fn context_get_obj_by_name_returns_value() {
-        with_python(|py| {
-            let ctx = make_context(py, &[("count", 42)]);
-            let name = PyString::new_bound(py, "count");
-            let result = ctx.get_obj_by_name(&name).expect("get obj");
-            assert!(result.is_some());
-            let obj = result.expect("value");
-            let n: i64 = obj.extract().expect("extract i64");
-            assert_eq!(n, 42);
+            assert_eq!(ctx.get_int_at(0, py).expect("get max"), i64::MAX);
         });
     }
 
     #[test]
-    fn context_get_obj_by_name_missing_returns_none() {
+    fn get_int_at_minus_one_distinguished_from_error() {
+        // PyLong_AsLongLong(-1) 返回 -1 但 PyErr_Occurred 为 null → 正常返回 -1
         with_python(|py| {
-            let ctx = make_context(py, &[("a", 1)]);
-            let name = PyString::new_bound(py, "nonexistent");
-            let result = ctx.get_obj_by_name(&name).expect("get obj");
-            assert!(result.is_none());
+            let ctx = make_context(py, &[("val", -1)]);
+            assert_eq!(ctx.get_int_at(0, py).expect("get -1"), -1);
         });
     }
 
     #[test]
-    fn context_get_obj_by_name_on_placeholder_returns_error() {
+    fn get_int_at_without_init_returns_expr_context_error() {
+        // new_root 未调用 init_expr_values → expr_values = None
         with_python(|py| {
-            let ctx = Context::placeholder(py);
-            let name = PyString::new_bound(py, "count");
-            let result = ctx.get_obj_by_name(&name);
+            let ctx = Context::new_root(py).expect("root");
+            let result = ctx.get_int_at(0, py);
             assert!(result.is_err());
             match result {
                 Err(ConstructError::ExprContext { message, .. }) => {
-                    assert!(message.contains("placeholder"));
+                    assert!(message.contains("not initialized"));
                 }
                 other => panic!("expected ExprContext, got {:?}", other),
             }
-        });
-    }
-
-    #[test]
-    fn context_get_obj_by_name_returns_non_integer() {
-        // get_obj_by_name 不做类型转换，可以取 str 值
-        with_python(|py| {
-            let ctx = Context::new_root(py).expect("root");
-            let str_val = PyString::new_bound(py, "hello");
-            ctx.set_field("name", &str_val).expect("set str");
-            let name = PyString::new_bound(py, "name");
-            let result = ctx.get_obj_by_name(&name).expect("get obj");
-            assert!(result.is_some());
-            let obj = result.expect("value");
-            let s: String = obj.extract().expect("extract str");
-            assert_eq!(s, "hello");
         });
     }
 
@@ -1495,19 +1412,18 @@ mod tests {
     }
 
     // ======================================================================
-    // Context 辅助：确保 set_field/get_field 与新方法兼容
+    // 测试辅助函数验证
     // ======================================================================
 
     #[test]
     fn make_context_helper_works() {
-        // 验证测试辅助函数 make_context 正确填充 PyDict
+        // 验证测试辅助函数 make_context 正确填充 PyDict 和 expr_values
         with_python(|py| {
             let ctx = make_context(py, &[("a", 1), ("b", 2), ("c", 3)]);
             assert_eq!(ctx.fields().expect("fields").len(), 3);
-            let name_a = PyString::new_bound(py, "a");
-            assert_eq!(ctx.get_int_by_name(&name_a, py).expect("a"), 1);
-            let name_c = PyString::new_bound(py, "c");
-            assert_eq!(ctx.get_int_by_name(&name_c, py).expect("c"), 3);
+            assert_eq!(ctx.get_int_at(0, py).expect("a"), 1);
+            assert_eq!(ctx.get_int_at(1, py).expect("b"), 2);
+            assert_eq!(ctx.get_int_at(2, py).expect("c"), 3);
         });
     }
 }

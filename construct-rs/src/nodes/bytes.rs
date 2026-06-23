@@ -73,7 +73,7 @@ impl BytesLength {
 ///
 /// - [`BytesLength::Const(n)`]：从流中读取 `n` 字节。
 /// - [`BytesLength::Expr(prog)`]：求值表达式 → `i64` → 负数返回 `FieldLength` 错误，
-///   否则 `as usize` 后读取。求值使用 `ctx.field_names()` 作为字段名表。
+///   否则 `as usize` 后读取。求值通过 `ctx.get_int_at(idx)` 按索引取字段值。
 ///
 /// 读取后创建 `PyBytes` 返回。不足时返回 `Stream` 错误。
 ///
@@ -81,7 +81,7 @@ impl BytesLength {
 ///
 /// 校验输入对象为 `bytes` 类型，并校验数据长度是否匹配声明的 `length`
 /// （SF-3 修复：对齐 Python construct `stream_write` 的长度校验行为）。
-/// 长度不匹配时返回 `FieldLength` 错误。表达式长度通过 `ctx.field_names()`
+/// 长度不匹配时返回 `FieldLength` 错误。表达式长度通过 `ctx.get_int_at(idx)`
 /// 求值表达式获取期望长度。
 ///
 /// # sizeof
@@ -132,11 +132,7 @@ impl super::Construct for BytesNode {
         let length = match &self.length {
             BytesLength::Const(n) => *n,
             BytesLength::Expr(prog) => {
-                let names = ctx.field_names().ok_or_else(|| ConstructError::Generic {
-                    message: "Bytes expression length requires field_names in context".to_string(),
-                    path: path.to_string(),
-                })?;
-                let n = eval_expr_int(prog, names, ctx, py).map_err(|e| {
+                let n = eval_expr_int(prog, ctx, py).map_err(|e| {
                     // Expr* 错误不携带 path，转换为 Generic 以暴露出错位置。
                     ConstructError::Generic {
                         message: format!(
@@ -187,18 +183,13 @@ impl super::Construct for BytesNode {
         let expected = match &self.length {
             BytesLength::Const(n) => *n,
             BytesLength::Expr(prog) => {
-                let names = ctx.field_names().ok_or_else(|| ConstructError::Generic {
-                    message: "Bytes expression build requires context with field_names".to_string(),
+                let n = eval_expr_int(prog, ctx, py).map_err(|e| ConstructError::Generic {
+                    message: format!(
+                        "Bytes length expression evaluation failed during build: {}",
+                        e.full_message()
+                    ),
                     path: path.to_string(),
                 })?;
-                let n =
-                    eval_expr_int(prog, names, ctx, py).map_err(|e| ConstructError::Generic {
-                        message: format!(
-                            "Bytes length expression evaluation failed during build: {}",
-                            e.full_message()
-                        ),
-                        path: path.to_string(),
-                    })?;
                 if n < 0 {
                     return Err(ConstructError::FieldLength {
                         message: format!("Bytes length expression evaluated to negative: {}", n),
@@ -262,26 +253,18 @@ mod tests {
         Python::with_gil(f)
     }
 
-    /// 构造 interned PyString 列表（模拟 StructNode 的字段名表）。
-    fn make_names<'py>(py: Python<'py>, names: &[&str]) -> Vec<Py<PyString>> {
-        names
-            .iter()
-            .map(|n| PyString::new_bound(py, n).into())
-            .collect()
-    }
-
-    /// 在 ctx 中设置字段值 + field_names，模拟 StructNode parse 环境。
-    fn setup_ctx_for_expr<'py>(
-        py: Python<'py>,
-        field_values: &[(&str, i64)],
-        names: &[&str],
-    ) -> Context<'py> {
+    /// 在 ctx 中设置字段值 + expr_values，模拟 StructNode parse 环境。
+    ///
+    /// 使用 Vec 化 API：`init_expr_values(n)` + `set_field_at(idx, name, value, py)`。
+    fn setup_ctx_for_expr<'py>(py: Python<'py>, field_values: &[(&str, i64)]) -> Context<'py> {
         let mut ctx = Context::new_root(py).expect("ctx");
-        for (name, value) in field_values {
+        ctx.init_expr_values(field_values.len());
+        for (idx, (name, value)) in field_values.iter().enumerate() {
+            let key = PyString::new_bound(py, name).unbind();
             let val = (*value).into_py(py);
-            ctx.set_field(name, val.bind(py)).expect("set_field");
+            ctx.set_field_at(idx, &key, val.bind(py), py)
+                .expect("set_field_at");
         }
-        ctx.set_field_names(make_names(py, names));
         ctx
     }
 
@@ -403,7 +386,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"ABCDE");
-            let mut ctx = setup_ctx_for_expr(py, &[("count", 4)], &["count"]);
+            let mut ctx = setup_ctx_for_expr(py, &[("count", 4)]);
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -421,7 +404,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(1), ExprOp::Add]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"XYZAB");
-            let mut ctx = setup_ctx_for_expr(py, &[("count", 3)], &["count"]);
+            let mut ctx = setup_ctx_for_expr(py, &[("count", 3)]);
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -438,7 +421,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(2), ExprOp::Mul]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"ABCDEF123");
-            let mut ctx = setup_ctx_for_expr(py, &[("count", 3)], &["count"]);
+            let mut ctx = setup_ctx_for_expr(py, &[("count", 3)]);
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -455,7 +438,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::Const(0)]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"abc");
-            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -472,7 +455,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::Const(-1)]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"abc");
-            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
             let mut path = Path::new();
             let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -487,13 +470,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_expr_without_field_names_returns_error() {
-        // ctx.field_names() 为 None → Generic 错误
+    fn parse_expr_without_expr_values_returns_error() {
+        // ctx.expr_values 未初始化（new_root 未调用 init_expr_values）→ ExprContext → Generic
         with_py(|py| {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"abc");
-            let mut ctx = Context::new_root(py).expect("ctx"); // 未设置 field_names
+            let mut ctx = Context::new_root(py).expect("ctx"); // 未初始化 expr_values
             let mut path = Path::new();
             let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -509,7 +492,7 @@ mod tests {
             let prog = ExprProgram::new(vec![ExprOp::Const(5)]);
             let node = BytesNode::new_expr(prog);
             let mut stream = ParseStream::new(b"abc");
-            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
             let mut path = Path::new();
             let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -596,7 +579,7 @@ mod tests {
             let node = BytesNode::new_expr(prog);
             let obj = py.eval_bound("b'XYZ'", None, None).expect("eval");
             let mut stream = BuildStream::new();
-            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
             let mut path = Path::new();
             node.build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect("build (matching length)");
@@ -612,7 +595,7 @@ mod tests {
             let node = BytesNode::new_expr(prog);
             let obj = py.eval_bound("b'XYZ'", None, None).expect("eval");
             let mut stream = BuildStream::new();
-            let mut ctx = setup_ctx_for_expr(py, &[], &["unused"]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
             let mut path = Path::new();
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)

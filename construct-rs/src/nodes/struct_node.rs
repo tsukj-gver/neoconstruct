@@ -138,7 +138,7 @@ pub struct StructField {
 /// `has_expressions` 控制 context/dict 模式：
 /// - `false`：新建独立 `PyDict`（Phase 1 行为，使用 `placeholder` context）。
 /// - `true`：复用 ctx 的 `PyDict` 作为 instance dict（`new_root` context）。
-///   parse 结束时 `clone_ref` dict 给实例，ctx 的 dict 引用随 ctx 丢弃。
+///   parse 结束时 `take_fields` 将 dict 移交给实例，ctx 的 dict 引用随之清空。
 ///
 /// 成功路径**不维护 Path**（P0-3 优化，零 String 分配）。
 ///
@@ -147,7 +147,7 @@ pub struct StructField {
 /// # build 行为
 ///
 /// 对每个 `StructField`，根据 `field.mode` 分支：
-/// - `Rw`：`obj.getattr(py_name)` 取值 → `ctx.set_field_interned`（若 has_expressions）
+/// - `Rw`：`obj.getattr(py_name)` 取值 → `ctx.set_field_at`（若 has_expressions）
 ///   → `node.build(value, ...)`
 /// - `Wo`：`obj.getattr(py_name)` 取值 → `node.build(value, ...)`（不写 context）
 /// - `Ro`：通过 `compute_ro_value` 从节点逻辑计算（不从实例取值），写入 context
@@ -162,12 +162,6 @@ pub struct StructField {
 pub struct StructNode {
     /// 有序字段列表（携带模式信息）。
     fields: Vec<StructField>,
-    /// 预计算的字段名 PyString 列表（构造时一次性 `clone_ref`）。
-    ///
-    /// parse/build 时通过 [`Context::set_field_names_ref`] 零拷贝引用此 cache，
-    /// 避免每次 parse/build 的 `Vec` 分配 + N 次 `clone_ref`（节省 ~10-20ns/parse）。
-    /// 与 [`StructNode::fields`] 顺序对齐。
-    field_names_cache: Vec<Py<PyString>>,
     /// 用户类引用（parse 时 `create_class` 构造实例 + 错误信息中报告类名）。
     cls: Py<PyType>,
     /// 编译期检测：用户类是否定义了 `__post_init__`。
@@ -182,32 +176,22 @@ pub struct StructNode {
 impl StructNode {
     /// 创建一个 `StructNode`，包含给定的有序字段列表与用户类引用。
     ///
-    /// 在构造时一次性预计算 `field_names_cache`（所有字段的 interned PyString
-    /// `clone_ref`），parse/build 时通过 [`Context::set_field_names_ref`] 零拷贝引用，
-    /// 避免每次 parse/build 的堆分配开销。
-    ///
     /// # 参数
     ///
-    /// - `py`：GIL token（用于 `clone_ref` 预计算 cache）。
+    /// - `py`：GIL token。
     /// - `fields`：有序字段列表（`StructField` 已含 interned PyString + mode）。
     /// - `cls`：用户类 Python 引用（`@dataclass` 装饰的 StructMixin 子类）。
     /// - `has_post_init`：编译期检测用户类是否定义了 `__post_init__`。
     /// - `has_expressions`：该 Struct 是否含有表达式字段（决定 context 模式）。
     pub fn new(
-        py: Python<'_>,
+        _py: Python<'_>,
         fields: Vec<StructField>,
         cls: Py<PyType>,
         has_post_init: bool,
         has_expressions: bool,
     ) -> Self {
-        // 预计算 field_names_cache：一次性 clone_ref 所有字段的 interned PyString。
-        let field_names_cache = fields
-            .iter()
-            .map(|f| f.name.py_name().clone_ref(py))
-            .collect();
         Self {
             fields,
-            field_names_cache,
             cls,
             has_post_init,
             has_expressions,
@@ -284,19 +268,16 @@ impl Construct for StructNode {
         //   ctx 为 placeholder（无 PyDict），不写 context。WO 字段仍按 mode 丢弃。
         //
         // has_expressions=true（Phase 2 路径）：复用 ctx 的 PyDict 作为 instance dict
-        //   （零额外 PyDict 创建，设计 §5.5.2）。通过 ctx.set_field_interned 写入
-        //   （每次调用独立借用 ctx.fields，与 node.parse 的 &mut ctx 不冲突——顺序调用）。
-        //   最后 clone_ref ctx 的 dict 给实例。
-        //
-        // **mode 分支在两条路径中都生效**：WO 字段无论是否有表达式都仅消费字节。
+        //   （零额外 PyDict 创建，设计 §5.5.2）。通过 ctx.set_field_at 写入
+        //   （同时写 PyDict + expr_values，供 GetInt 按索引快速取值）。
+        //   最后 take_fields 将 dict 所有权移交给实例（零 clone_ref）。
 
         // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
         let dict_for_instance: Py<PyAny> = if self.has_expressions {
             // Phase 2 表达式路径：使用 ctx 的 dict。
-            // 设置 field_names 引用（零拷贝，引用预计算的 field_names_cache），
-            // 供子节点（如 BytesNode 表达式长度）求值表达式使用。
-            ctx.set_field_names_ref(&self.field_names_cache);
-            for field in &self.fields {
+            // 初始化 expr_values Vec（一次性堆分配，后续零分配写入）。
+            ctx.init_expr_values(self.fields.len());
+            for (idx, field) in self.fields.iter().enumerate() {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
                     Err(mut e) => {
@@ -306,28 +287,24 @@ impl Construct for StructNode {
                 };
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
-                        // 写入 ctx 的 dict（同时充当 context 与 instance dict）。
-                        ctx.set_field_interned(field.name.py_name(), value.bind(py), py)?;
+                        // 写入 ctx 的 dict + expr_values（同时充当 context 与 instance dict）。
+                        ctx.set_field_at(idx, field.name.py_name(), value.bind(py), py)?;
                     }
                     FieldMode::Wo => {
                         // WO：仅消费字节，不写入 dict/context。
+                        // expr_values[idx] 保持 null（GetInt 引用 WO 字段为编译期错误）。
                         drop(value);
                     }
                 }
             }
-            // clone_ref ctx 的 dict 给实例（ctx 仍持有引用，parse 结束后随 ctx 丢弃）。
-            // 使用 safe API：`.clone()` 在 `Bound<PyDict>` 上是 incref（不拷贝 dict 内容），
-            // `.into_any()` 转为 `Bound<PyAny>`，`.unbind()` 转为 `Py<PyAny>`。
-            // 完全等价于 from_borrowed_ptr 但无 unsafe。
-            // MF-1 修复：不使用 expect()，而是返回 ExprContext 错误（防御性，
-            // has_expressions=true 时 ctx 必有 PyDict，此分支理论上不触发）。
-            ctx.fields()
+            // take_fields 将 dict 所有权移交给实例（零 clone_ref）。
+            // parse 结束后 ctx 不再使用，dict 安全移出。
+            ctx.take_fields()
                 .ok_or_else(|| ConstructError::ExprContext {
                     message: "expression struct requires context with PyDict, but got placeholder"
                         .to_string(),
                     path: path.to_string(),
                 })?
-                .clone()
                 .into_any()
                 .unbind()
         } else {
@@ -397,11 +374,11 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 有表达式时：设置 field_names 引用（零拷贝），供子节点表达式求值使用。
+        // 有表达式时：初始化 expr_values（一次性堆分配），供子节点表达式求值使用。
         if self.has_expressions {
-            ctx.set_field_names_ref(&self.field_names_cache);
+            ctx.init_expr_values(self.fields.len());
         }
-        for field in &self.fields {
+        for (idx, field) in self.fields.iter().enumerate() {
             match field.mode {
                 FieldMode::Rw | FieldMode::Wo => {
                     // RW/WO：从实例 getattr 取值，递归 build。
@@ -419,7 +396,7 @@ impl Construct for StructNode {
                     })?;
                     // 仅 RW 字段写入 context（WO 字段不参与表达式引用）。
                     if matches!(field.mode, FieldMode::Rw) && self.has_expressions {
-                        ctx.set_field_interned(field.name.py_name(), &value, py)?;
+                        ctx.set_field_at(idx, field.name.py_name(), &value, py)?;
                     }
                     // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
                     match field.node.build(py, &value, stream, ctx, path) {
@@ -432,16 +409,12 @@ impl Construct for StructNode {
                 }
                 FieldMode::Ro => {
                     // RO：不从实例取值，通过节点自身逻辑计算（Tell/Computed/Const/ContextParam）。
-                    // compute_ro_value 根据节点类型取值：
-                    // - Tell：stream.tell()
-                    // - Computed：eval_expr_int(expr, ctx)
-                    // - Const/ContextParam：见 compute_ro_value 实现（Phase 3 扩展）
                     let value = field.node.compute_ro_value(py, stream, ctx, path)?;
                     let value_bound = value.bind(py);
 
                     // 写入 context（供后续表达式引用）
                     if self.has_expressions {
-                        ctx.set_field_interned(field.name.py_name(), value_bound, py)?;
+                        ctx.set_field_at(idx, field.name.py_name(), value_bound, py)?;
                     }
 
                     // build（对 sizeof=0 的节点如 Tell/Computed 是 no-op；
@@ -1391,7 +1364,8 @@ mod tests {
     #[test]
     fn has_expressions_true_uses_new_root_context_for_parse() {
         // has_expressions=true 时，parse 路径使用 ctx 的 dict（new_root 创建）。
-        // 验证：parse 结果正确 + ctx 的 dict 被填充（表达式求值可用）。
+        // take_fields 将 dict 移交给实例，parse 后 ctx.fields() 为 None。
+        // 验证：实例属性正确 + ctx.fields() 为 None（dict 已移出）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, true);
@@ -1407,17 +1381,15 @@ mod tests {
             let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 0x01);
             assert_eq!(b, 0x02);
-            // 验证 ctx 的 dict 也被填充（表达式求值可用）
-            let ctx_dict = ctx.fields().expect("ctx has dict");
-            assert_eq!(ctx_dict.len(), 2);
-            let ctx_a: i64 = ctx_dict.get_item("a").unwrap().unwrap().extract().unwrap();
-            assert_eq!(ctx_a, 0x01);
+            // take_fields 后 ctx.fields() 为 None（dict 所有权已移交给实例）
+            assert!(ctx.fields().is_none());
         });
     }
 
     #[test]
     fn has_expressions_true_with_wo_field_skips_context_write() {
-        // has_expressions=true + WO 字段：WO 不写入 ctx dict。
+        // has_expressions=true + WO 字段：WO 不写入 dict（不写入实例也不写入 expr_values）。
+        // take_fields 后 ctx.fields() 为 None，通过实例 __dict__ 验证。
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -1434,12 +1406,13 @@ mod tests {
             let inst = result.bind(py);
             // pad 不在实例中
             assert!(inst.getattr("pad").is_err());
-            // ctx dict 只包含 RW 字段（a, b），不含 WO（pad）
-            let ctx_dict = ctx.fields().expect("ctx has dict");
-            assert_eq!(ctx_dict.len(), 2);
-            assert!(ctx_dict.contains("a").unwrap());
-            assert!(ctx_dict.contains("b").unwrap());
-            assert!(!ctx_dict.contains("pad").unwrap());
+            // 实例 __dict__ 只包含 RW 字段（a, b），不含 WO（pad）
+            let inst_dict = inst.getattr("__dict__").unwrap();
+            let dict = inst_dict.downcast::<PyDict>().unwrap();
+            assert_eq!(dict.len(), 2);
+            assert!(dict.contains("a").unwrap());
+            assert!(dict.contains("b").unwrap());
+            assert!(!dict.contains("pad").unwrap());
         });
     }
 

@@ -62,11 +62,7 @@ impl Construct for ComputedNode {
         ctx: &mut Context<'_>,
         _path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        let names = ctx.field_names().ok_or(ConstructError::ExprContext {
-            message: "Computed.parse: context has no field_names (placeholder context)".to_string(),
-            path: String::new(),
-        })?;
-        let value = eval_expr_int(&self.expr, names, ctx, py)?;
+        let value = eval_expr_int(&self.expr, ctx, py)?;
         Ok(value.into_py(py)) // i64 → PyLong
     }
 
@@ -112,16 +108,16 @@ mod tests {
     }
 
     /// 构造一个含若干整数字段的 `Context`，用于表达式求值测试。
+    ///
+    /// 使用 Vec 化 API：`init_expr_values` + `set_field_at`。
     fn make_context<'py>(py: Python<'py>, entries: &[(&str, i64)]) -> Context<'py> {
         let mut ctx = Context::new_root(py).expect("new_root");
-        let names: Vec<Py<PyString>> = entries
-            .iter()
-            .map(|(n, _)| PyString::new_bound(py, n).into())
-            .collect();
-        ctx.set_field_names(names);
-        for (name, value) in entries {
+        ctx.init_expr_values(entries.len());
+        for (idx, (name, value)) in entries.iter().enumerate() {
+            let key = PyString::new_bound(py, name).unbind();
             let val = (*value).into_py(py);
-            ctx.set_field(name, val.bind(py)).expect("set_field");
+            ctx.set_field_at(idx, &key, val.bind(py), py)
+                .expect("set_field_at");
         }
         ctx
     }
@@ -303,8 +299,10 @@ mod tests {
 
     #[test]
     fn parse_on_placeholder_context_returns_expr_context_error() {
+        // GetInt(0) 需要 expr_values，但 placeholder 未调用 init_expr_values → ExprContext。
+        // （Const-only 表达式不需要 context，在 placeholder 上也能求值——这是正确行为。）
         with_py(|py| {
-            let prog = ExprProgram::new(vec![ExprOp::Const(42)]);
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
             let node = ComputedNode::new(prog);
             let mut ctx = Context::placeholder(py);
             let mut stream = ParseStream::new(b"");
@@ -314,11 +312,7 @@ mod tests {
                 .expect_err("should fail");
             match err {
                 ConstructError::ExprContext { message, .. } => {
-                    assert!(
-                        message.contains("field_names") || message.contains("placeholder"),
-                        "got: {}",
-                        message
-                    );
+                    assert!(message.contains("not initialized"), "got: {}", message);
                 }
                 other => panic!("expected ExprContext, got {:?}", other),
             }
@@ -327,20 +321,17 @@ mod tests {
 
     #[test]
     fn parse_missing_field_returns_expr_field_missing_error() {
-        // 引用 names[1]="nonexistent"，context 中不存在该字段值。
-        // 构造 names=[a, nonexistent]，但 context 只有 "a" 字段。
+        // 引用 idx 1（null 槽位，模拟 WO 字段未写入）→ ExprFieldMissing。
         with_py(|py| {
-            // 手动构造 ctx：names 有 2 个条目，但只设置 "a" 字段值。
+            // 手动构造 ctx：init_expr_values(2)，但只 set_field_at(0, "a")。
             let mut ctx = Context::new_root(py).expect("new_root");
-            let names: Vec<Py<PyString>> = vec![
-                PyString::new_bound(py, "a").into(),
-                PyString::new_bound(py, "nonexistent").into(),
-            ];
-            ctx.set_field_names(names);
+            ctx.init_expr_values(2);
+            let key = PyString::new_bound(py, "a").unbind();
             let val = 1i64.into_py(py);
-            ctx.set_field("a", val.bind(py)).expect("set a");
+            ctx.set_field_at(0, &key, val.bind(py), py).expect("set a");
+            // idx 1 保持 null（模拟 WO 或未设置的字段）
 
-            let prog = ExprProgram::new(vec![ExprOp::GetInt(1)]); // 引用 nonexistent
+            let prog = ExprProgram::new(vec![ExprOp::GetInt(1)]); // 引用 null 槽位
             let node = ComputedNode::new(prog);
             let mut stream = ParseStream::new(b"");
             let mut path = Path::new();
@@ -349,7 +340,11 @@ mod tests {
                 .expect_err("should fail");
             match err {
                 ConstructError::ExprFieldMissing { field, .. } => {
-                    assert_eq!(field, "nonexistent");
+                    assert!(
+                        field.contains("1"),
+                        "field should contain index 1: {}",
+                        field
+                    );
                 }
                 other => panic!("expected ExprFieldMissing, got {:?}", other),
             }

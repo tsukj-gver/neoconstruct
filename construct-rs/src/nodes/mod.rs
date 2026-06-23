@@ -192,12 +192,7 @@ impl Node {
             Node::Tell(_) => Ok(stream.tell().into_py(py)),
             // Computed：求值表达式（i64 → PyLong）
             Node::Computed(c) => {
-                let names = ctx.field_names().ok_or(ConstructError::ExprContext {
-                    message: "compute_ro_value: context has no field_names (placeholder context)"
-                        .to_string(),
-                    path: path.to_string(),
-                })?;
-                let v = crate::expr::eval_expr_int(c.expr(), names, ctx, py)?;
+                let v = crate::expr::eval_expr_int(c.expr(), ctx, py)?;
                 Ok(v.into_py(py))
             }
             // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
