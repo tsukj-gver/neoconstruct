@@ -240,7 +240,6 @@ impl super::Construct for FormatFieldNode {
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        let fmtstr = self.format.fmtstr();
         match self.format {
             // 8-bit
             PythonFormat::UnsignedInt8Big => {
@@ -311,16 +310,6 @@ impl super::Construct for FormatFieldNode {
                 Ok(i64::from_le_bytes(arr).into_py(py))
             }
         }
-        .map_err(|e| {
-            // 流读取失败已包含正确的 path 和消息，直接传播。
-            // from_X_bytes 不会失败（数组大小由 const generic 保证）。
-            // 此 map_err 仅为满足未来扩展（如解析后验证），当前实现下不会触发。
-            if matches!(e, ConstructError::FormatField { .. }) {
-                make_parse_error(fmtstr, path)
-            } else {
-                e
-            }
-        })
     }
 
     fn build(
@@ -454,16 +443,6 @@ fn make_build_error(fmtstr: &str, obj: &Bound<'_, PyAny>, path: &Path) -> Constr
             "struct '{}' error during building, given value {}",
             fmtstr, repr
         ),
-        path: path.to_string(),
-    }
-}
-
-/// 构造 parse 错误：字节解析失败。
-///
-/// 对齐 Python construct：`"struct '>B' error during parsing"`
-fn make_parse_error(fmtstr: &str, path: &Path) -> ConstructError {
-    ConstructError::FormatField {
-        message: format!("struct '{}' error during parsing", fmtstr),
         path: path.to_string(),
     }
 }

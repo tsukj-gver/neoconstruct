@@ -37,7 +37,7 @@ import time
 from pathlib import Path
 
 # 每次测量的最小调用次数（timeit number）
-NUMBER = 100_000
+NUMBER = 30_000
 # 重复测量次数（取中位数）
 REPEAT = 5
 

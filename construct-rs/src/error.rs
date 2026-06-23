@@ -162,10 +162,13 @@ pub enum ConstructError {
 }
 
 impl ConstructError {
-    /// 返回错误的简短消息（不含 path 前缀）。
+    /// 返回错误的简短消息（不含 path 前缀），若存在。
     ///
-    /// 用于构造 Python 异常的 `message` 部分。
-    pub fn message(&self) -> &str {
+    /// 用于构造 Python 异常的 `message` 部分。返回 `Option`：
+    /// - `Some(message)`：变体有单一 `message` 字段。
+    /// - `None`：结构化变体（`ExprType` / `ExprFieldMissing` / `ExprStackUnderflow`），
+    ///   无单一 message 字段，调用方应改用 `Display`（`to_string` / `full_message`）。
+    pub fn message(&self) -> Option<&str> {
         match self {
             ConstructError::Stream { message, .. }
             | ConstructError::FormatField { message, .. }
@@ -174,12 +177,11 @@ impl ConstructError {
             | ConstructError::UnresolvedReference { message }
             | ConstructError::Generic { message, .. }
             | ConstructError::ExprContext { message, .. }
-            | ConstructError::ExprDivByZero { message, .. } => message,
-            // 这些变体没有单一 message 字段，Display 实现包含完整信息。
-            // message() 返回空串仅用于静态分发；完整错误信息通过 to_string() / full_message() 获取。
+            | ConstructError::ExprDivByZero { message, .. } => Some(message),
+            // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprStackUnderflow { .. } => "",
+            | ConstructError::ExprStackUnderflow { .. } => None,
         }
     }
 
@@ -217,10 +219,10 @@ impl ConstructError {
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
             | ConstructError::ExprStackUnderflow { .. } => self.to_string(),
-            // 其他变体：按 path 拼接。
+            // 其他变体：按 path 拼接。此分支的变体均有 message 字段（message() 返回 Some）。
             _ => match self.path() {
-                Some(p) => format!("Error in path {}\n{}", p, self.message()),
-                None => self.message().to_string(),
+                Some(p) => format!("Error in path {}\n{}", p, self.message().unwrap_or("")),
+                None => self.message().unwrap_or("").to_string(),
             },
         }
     }
@@ -257,6 +259,11 @@ impl ConstructError {
     ///
     /// 仅在错误路径调用（成功路径零成本），开销可接受。
     pub fn push_path_segment(&mut self, segment: &str) {
+        // 编译期错误（Compilation / UnresolvedReference）无 path 字段，
+        // set_path 对其是 no-op。提前返回，跳过无用的 format! 路径计算。
+        if self.path().is_none() {
+            return;
+        }
         let new_path = match self.path() {
             Some(p) if p.is_empty() || p == "root" => format!("root.{}", segment),
             Some(p) => {
@@ -440,27 +447,24 @@ impl From<ConstructError> for PyErr {
     fn from(err: ConstructError) -> Self {
         // 预先提取 message/path（避免在 with_gil 闭包中持有 err 的引用）。
         let path_owned: Option<String> = err.path().map(|s| s.to_string());
-        let bare_message = err.message();
-        // 对于无单一 message 字段的结构化变体（ExprType / ExprFieldMissing /
-        // ExprStackUnderflow），bare_message 为 ""。此时使用 Display（to_string）
-        // 作为完整消息（已包含 path），且不再单独传递 path（避免重复）。
-        let (message, effective_path): (String, Option<&str>) = if bare_message.is_empty() {
-            (err.to_string(), None)
-        } else {
-            (bare_message.to_string(), path_owned.as_deref())
+        // message() 返回 Option：None 表示结构化变体（ExprType / ExprFieldMissing /
+        // ExprStackUnderflow），此时使用 Display（to_string）作为完整消息（已包含 path），
+        // 且不再单独传递 path（避免重复）。
+        let (message, effective_path): (String, Option<&str>) = match err.message() {
+            Some(msg) => (msg.to_string(), path_owned.as_deref()),
+            None => (err.to_string(), None),
         };
-        // fallback 专用（EXCEPTIONS 未初始化时使用），始终用 full_message。
-        let full_message = err.full_message();
 
         Python::with_gil(|py| match EXCEPTIONS.get(py) {
             Some(classes) => {
                 let cls = select_exception_class(&err, classes, py);
                 match build_exception_instance(py, &cls, &message, effective_path) {
                     Ok(instance) => PyErr::from_value_bound(instance),
-                    Err(_) => PyValueError::new_err(full_message),
+                    // fallback：异常实例构造失败，回退到 PyValueError + full_message。
+                    Err(_) => PyValueError::new_err(err.full_message()),
                 }
             }
-            None => PyValueError::new_err(full_message),
+            None => PyValueError::new_err(err.full_message()),
         })
     }
 }
@@ -893,7 +897,7 @@ mod tests {
             path: "root".to_string(),
         };
         err.push_path_segment("value");
-        assert_eq!(err.message(), "struct '>I' error");
+        assert_eq!(err.message(), Some("struct '>I' error"));
         assert_eq!(err.path(), Some("root.value"));
     }
 

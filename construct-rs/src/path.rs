@@ -34,9 +34,13 @@
 
 use std::fmt;
 
-/// 错误路径中的一个段：结构体字段名或数组索引。
+/// 错误路径中的一个段：根标记、结构体字段名或数组索引。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathSegment {
+    /// 根路径段（无 String payload，零分配）。
+    ///
+    /// 由 [`Path::new`] 预置，Display 输出为 `"root"`。
+    Root,
     /// 结构体字段名（如 `"address"`）。
     Field(String),
     /// 数组索引（如 `[2]`）。Phase 2 Array 节点会用到。
@@ -53,12 +57,15 @@ pub struct Path {
 }
 
 impl Path {
-    /// 创建新的路径栈，初始 segment 为 `(root)`。
+    /// 创建新的路径栈，初始 segment 为 `Root`。
     ///
     /// 进入执行树时调用一次（parse/build 入口）。
+    ///
+    /// 使用 [`PathSegment::Root`] 变体（无 payload），消除每次 parse/build 的
+    /// `String` 堆分配（仅保留一次 `Vec` 分配）。
     pub fn new() -> Self {
         Self {
-            segments: vec![PathSegment::Field("(root)".to_string())],
+            segments: vec![PathSegment::Root],
         }
     }
 
@@ -110,14 +117,15 @@ impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, seg) in self.segments.iter().enumerate() {
             match seg {
+                PathSegment::Root => {
+                    // 根段：输出 "root"（无 payload，零分配）。
+                    // 无论位置（i 是否为 0），Root 都输出 "root" 不加前缀点。
+                    f.write_str("root")?;
+                }
                 PathSegment::Field(name) => {
                     if i == 0 {
-                        // 初始 segment：若是 "(root)" 输出 "root"，否则原样输出。
-                        if name == "(root)" {
-                            f.write_str("root")?;
-                        } else {
-                            f.write_str(name)?;
-                        }
+                        // 非根的 Field 段出现在首位（如 pop 后重新 push）原样输出。
+                        f.write_str(name)?;
                     } else {
                         f.write_str(".")?;
                         f.write_str(name)?;

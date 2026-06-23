@@ -25,7 +25,6 @@
 
 use crate::context::Context;
 use crate::error::ConstructError;
-use crate::nodes::Node;
 use crate::path::Path;
 use crate::schema::CompiledSchema;
 use crate::stream::{BuildStream, ParseStream};
@@ -163,7 +162,7 @@ impl Construct for StructRefNode {
         // 避免内层表达式污染外层的 context（field_names、PyDict 字段）。
         // StructNode.parse 在 has_expressions=true 分支会自行调用
         // ctx.set_field_names_ref()，所以 child_ctx 只需提供空 PyDict 即可。
-        let inner_has_expr = matches!(root, Node::Struct(s) if s.has_expressions());
+        let inner_has_expr = root.has_expressions();
         if inner_has_expr {
             let mut child_ctx =
                 Context::new_child(ctx, py).map_err(|e| ConstructError::Generic {
@@ -189,7 +188,7 @@ impl Construct for StructRefNode {
         let root = schema_bound.get().root();
 
         // MF-2 修复：同 parse 方向，内层含表达式时创建 child context。
-        let inner_has_expr = matches!(root, Node::Struct(s) if s.has_expressions());
+        let inner_has_expr = root.has_expressions();
         if inner_has_expr {
             let mut child_ctx =
                 Context::new_child(ctx, py).map_err(|e| ConstructError::Generic {
@@ -311,7 +310,7 @@ class {name}:
             false,
             false,
         ));
-        let schema = CompiledSchema::new(root, cls.clone_ref(py));
+        let schema = CompiledSchema::new(root, cls.clone_ref(py), py);
         let schema_py = Py::new(py, schema).expect("Py::new schema");
         cls.bind(py)
             .setattr("_construct_compiled", schema_py.clone_ref(py))

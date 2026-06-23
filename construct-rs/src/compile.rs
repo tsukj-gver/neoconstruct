@@ -189,7 +189,7 @@ pub fn compile_schema(
     ));
 
     // 6. 包装为 CompiledSchema
-    Ok(CompiledSchema::new(root, cls.clone().unbind()))
+    Ok(CompiledSchema::new(root, cls.clone().unbind(), py))
 }
 
 /// 检查类是否定义了 `__slots__`（含 MRO 查找）。
@@ -304,13 +304,14 @@ fn build_node_from_descriptor(
         .name()
         .map_err(|e| ConstructError::Compilation {
             message: format!("failed to get descriptor type name: {}", e),
-        })?
+        })?;
+    // 直接 match to_str() 返回的 &str，避免一次性 String 分配。
+    // type_name（Bound<PyString>）在 match 期间保持存活，供 &str 借用。
+    match type_name
         .to_str()
         .map_err(|e| ConstructError::Compilation {
             message: format!("descriptor type name is not valid UTF-8: {}", e),
-        })?
-        .to_string();
-    match type_name.as_str() {
+        })? {
         // TellDescriptor（无参数）→ TellNode。
         // TellDescriptor._expr_params 返回 {}（无表达式参数），expr_programs 对应位置为 None。
         "TellDescriptor" => return Ok(Node::Tell(TellNode::new())),

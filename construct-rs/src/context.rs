@@ -242,9 +242,10 @@ impl<'py> Context<'py> {
         &self,
         name: &Bound<'_, PyString>,
     ) -> Result<Option<Bound<'_, PyAny>>, ConstructError> {
-        let name_str = name.to_str()?;
+        // 直接用 interned PyString 作为 key（pyo3 get_item 接受 &Bound<PyString>），
+        // 避免 name.to_str()? 的 UTF-8 校验 + 临时 str 分配。
         match &self.fields {
-            Some(fields) => Ok(fields.get_item(name_str)?),
+            Some(fields) => Ok(fields.get_item(name)?),
             None => Err(ConstructError::ExprContext {
                 message: "context is placeholder, cannot get field object".to_string(),
                 path: String::new(),

@@ -316,20 +316,20 @@ impl Construct for StructNode {
                 }
             }
             // clone_ref ctx 的 dict 给实例（ctx 仍持有引用，parse 结束后随 ctx 丢弃）。
-            // SAFETY: ctx.fields() 返回有效的 Bound<PyDict> 引用，as_ptr() 是有效的
-            // Python 对象指针。from_borrowed_ptr 递增引用计数（等价于 clone_ref 语义）。
-            // 持有 GIL（由 py 参数保证）。
+            // 使用 safe API：`.clone()` 在 `Bound<PyDict>` 上是 incref（不拷贝 dict 内容），
+            // `.into_any()` 转为 `Bound<PyAny>`，`.unbind()` 转为 `Py<PyAny>`。
+            // 完全等价于 from_borrowed_ptr 但无 unsafe。
             // MF-1 修复：不使用 expect()，而是返回 ExprContext 错误（防御性，
             // has_expressions=true 时 ctx 必有 PyDict，此分支理论上不触发）。
-            let dict_ptr = ctx
-                .fields()
+            ctx.fields()
                 .ok_or_else(|| ConstructError::ExprContext {
                     message: "expression struct requires context with PyDict, but got placeholder"
                         .to_string(),
                     path: path.to_string(),
                 })?
-                .as_ptr();
-            unsafe { Py::<PyAny>::from_borrowed_ptr(py, dict_ptr) }
+                .clone()
+                .into_any()
+                .unbind()
         } else {
             // Phase 1 路径：新建独立 PyDict。
             let dict = PyDict::new_bound(py);
@@ -403,8 +403,10 @@ impl Construct for StructNode {
         }
         for field in &self.fields {
             match field.mode {
-                FieldMode::Rw => {
-                    // RW：从实例 getattr 取值，写入 context（若有表达式），递归 build。
+                FieldMode::Rw | FieldMode::Wo => {
+                    // RW/WO：从实例 getattr 取值，递归 build。
+                    // 区别仅在于 RW 在 has_expressions 时额外写入 context（供后续表达式引用）。
+                    // WO 不写入 context（编译期已禁止表达式引用 WO 字段，§3.4.4）。
                     let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
                         ConstructError::Generic {
                             message: format!(
@@ -415,32 +417,11 @@ impl Construct for StructNode {
                             path: path.to_string(),
                         }
                     })?;
-                    // 写入 context（供后续表达式引用）。
-                    if self.has_expressions {
+                    // 仅 RW 字段写入 context（WO 字段不参与表达式引用）。
+                    if matches!(field.mode, FieldMode::Rw) && self.has_expressions {
                         ctx.set_field_interned(field.name.py_name(), &value, py)?;
                     }
                     // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
-                    match field.node.build(py, &value, stream, ctx, path) {
-                        Ok(()) => {}
-                        Err(mut e) => {
-                            e.push_path_segment(field.name.rust_name());
-                            return Err(e);
-                        }
-                    }
-                }
-                FieldMode::Wo => {
-                    // WO：从实例 getattr 取值，递归 build。
-                    // 不写入 context（编译期已禁止表达式引用 WO 字段，§3.4.4）。
-                    let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
-                        ConstructError::Generic {
-                            message: format!(
-                                "object has no attribute '{}' (required for build): {}",
-                                field.name.rust_name(),
-                                e
-                            ),
-                            path: path.to_string(),
-                        }
-                    })?;
                     match field.node.build(py, &value, stream, ctx, path) {
                         Ok(()) => {}
                         Err(mut e) => {

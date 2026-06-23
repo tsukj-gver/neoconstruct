@@ -46,11 +46,13 @@ impl BytesLength {
     }
 
     /// 是否为常量长度。
+    #[cfg(test)]
     pub fn is_const(&self) -> bool {
         matches!(self, BytesLength::Const(_))
     }
 
     /// 是否为表达式长度。
+    #[cfg(test)]
     pub fn is_expr(&self) -> bool {
         matches!(self, BytesLength::Expr(_))
     }

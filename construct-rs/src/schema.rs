@@ -54,17 +54,43 @@ pub struct CompiledSchema {
     /// 用于：调试与错误信息中报告类名。Rust 内部由 StructNode 持有独立的
     /// `cls` 引用（详见设计修订 §3.2 根节点关系说明），此字段为元数据。
     cls: Py<PyType>,
+    /// 缓存：根 StructNode 是否含表达式（创建时计算一次）。
+    ///
+    /// 决定 `_parse_raw` / `_build_raw` 入口使用 `Context::new_root`（有表达式）
+    /// 还是 `Context::placeholder`（无表达式）。缓存避免每次 parse/build 重新 match。
+    has_expressions: bool,
+    /// 缓存：静态大小（无表达式时为 `Some(n)`，有表达式时为 `None`）。
+    ///
+    /// 创建时调用一次 `root.sizeof(placeholder)`。`_build_raw` 直接读此缓存
+    /// 决定 `BuildStream::with_capacity` 预分配，消除每次 build 的 sizeof 递归遍历。
+    static_size: Option<usize>,
 }
 
 impl CompiledSchema {
     /// 创建一个新的编译产物。
     ///
+    /// 在创建时一次性计算并缓存 `has_expressions` 与 `static_size`，
+    /// 避免每次 parse/build 的重复计算（sizeof 递归遍历 + match）。
+    ///
     /// # 参数
     ///
     /// - `root`：执行树根节点（通常是 `Node::Struct(StructNode { ... })`）
     /// - `cls`：用户类（`StructMixin` 子类）的 Python 引用
-    pub fn new(root: Node, cls: Py<PyType>) -> Self {
-        Self { root, cls }
+    /// - `py`：GIL token（用于 sizeof 的 placeholder context）
+    pub fn new(root: Node, cls: Py<PyType>, py: Python<'_>) -> Self {
+        let has_expressions = root.has_expressions();
+        // 仅对无表达式结构尝试 sizeof（含表达式时 sizeof 必然失败，跳过无用计算）。
+        let static_size = if !has_expressions {
+            root.sizeof(&Context::placeholder(py)).ok()
+        } else {
+            None
+        };
+        Self {
+            root,
+            cls,
+            has_expressions,
+            static_size,
+        }
     }
 
     /// 获取根节点引用（供 [`crate::nodes::struct_ref::StructRefNode`] 递归调用）。
@@ -86,11 +112,10 @@ impl CompiledSchema {
     /// 还是 `Context::placeholder`（无表达式，Phase 1 性能优化保留）。
     ///
     /// 非 Struct 根节点视为无表达式。
+    ///
+    /// 此方法读取创建时缓存的 `has_expressions` 字段，避免每次调用的 match 开销。
     fn root_has_expressions(&self) -> bool {
-        match &self.root {
-            Node::Struct(s) => s.has_expressions(),
-            _ => false,
-        }
+        self.has_expressions
     }
 }
 
@@ -158,18 +183,16 @@ impl CompiledSchema {
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyBytes>> {
         // PERF-1 优化：对无表达式的结构（sizeof 可计算），预分配 BuildStream 容量
-        // 避免 Vec 扩容 realloc。含表达式的结构 sizeof 必然失败（Bytes(Expr) 无法静态求值），
-        // 直接用 new() 跳过无用的 sizeof 调用 + String 堆分配。
-        let mut stream = if !self.root_has_expressions() {
-            match self.root.sizeof(&Context::placeholder(py)) {
-                Ok(cap) => BuildStream::with_capacity(cap),
-                Err(_) => BuildStream::new(),
-            }
-        } else {
-            BuildStream::new()
+        // 避免 Vec 扩容 realloc。`static_size` 在创建时缓存（一次 sizeof 调用），
+        // 消除每次 build 的 sizeof 递归遍历。含表达式结构 static_size 为 None，
+        // 直接用 new()。
+        let mut stream = match self.static_size {
+            Some(cap) => BuildStream::with_capacity(cap),
+            None => BuildStream::new(),
         };
         // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
-        let mut ctx = if self.root_has_expressions() {
+        let has_expr = self.root_has_expressions();
+        let mut ctx = if has_expr {
             Context::new_root(py)?
         } else {
             Context::placeholder(py)
@@ -225,7 +248,7 @@ mod tests {
                 .expect("extract type");
 
             let root = empty_root(py);
-            let schema = CompiledSchema::new(root, object_cls.clone_ref(py));
+            let schema = CompiledSchema::new(root, object_cls.clone_ref(py), py);
 
             // root 返回的 Node 是 Struct 变体
             assert!(matches!(schema.root(), Node::Struct(s) if s.is_empty()));
@@ -242,7 +265,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(py), cls);
+            let schema = CompiledSchema::new(empty_root(py), cls, py);
             match schema.root() {
                 Node::Struct(s) => assert_eq!(s.len(), 0),
                 _ => panic!("expected Node::Struct"),
@@ -260,7 +283,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(py), cls.clone_ref(py));
+            let schema = CompiledSchema::new(empty_root(py), cls.clone_ref(py), py);
             let schema_py = Py::new(py, schema).expect("Py::new");
 
             // setattr 到 cls

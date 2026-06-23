@@ -140,6 +140,20 @@ pub enum Node {
 }
 
 impl Node {
+    /// 判断此节点（或其子树）是否含有表达式字段。
+    ///
+    /// 当前仅 [`Node::Struct`] 携带 `has_expressions` 标志（编译期计算），
+    /// 其他节点变体（原子节点、`StructRef`、`Tell`、`Computed`）返回 `false`。
+    ///
+    /// `struct_ref.rs` 与 `schema.rs` 通过此方法判断内层/根节点是否含表达式，
+    /// 决定是否创建带 `PyDict` 的 context（避免重复 `matches!(root, Node::Struct(s) if ...)`）。
+    pub fn has_expressions(&self) -> bool {
+        match self {
+            Node::Struct(s) => s.has_expressions(),
+            _ => false,
+        }
+    }
+
     /// 为 RO 字段在 build 方向计算值。
     ///
     /// RO 字段不从实例取值，而是通过节点自身的逻辑计算。
