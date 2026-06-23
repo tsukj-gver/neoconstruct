@@ -269,13 +269,13 @@ impl Construct for StructNode {
         //
         // has_expressions=true（Phase 2 路径）：复用 ctx 的 PyDict 作为 instance dict
         //   （零额外 PyDict 创建，设计 §5.5.2）。通过 ctx.set_field_at 写入
-        //   （同时写 PyDict + expr_values，供 GetInt 按索引快速取值）。
+        //   （同时写 PyDict + expr_values_buf，供 GetInt 按索引快速取值）。
         //   最后 take_fields 将 dict 所有权移交给实例（零 clone_ref）。
 
         // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
         let dict_for_instance: Py<PyAny> = if self.has_expressions {
             // Phase 2 表达式路径：使用 ctx 的 dict。
-            // 初始化 expr_values Vec（一次性堆分配，后续零分配写入）。
+            // 初始化 expr_values_buf（栈分配内联数组，零堆开销）。
             ctx.init_expr_values(self.fields.len());
             for (idx, field) in self.fields.iter().enumerate() {
                 let value = match field.node.parse(py, stream, ctx, path) {
@@ -287,12 +287,12 @@ impl Construct for StructNode {
                 };
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
-                        // 写入 ctx 的 dict + expr_values（同时充当 context 与 instance dict）。
+                        // 写入 ctx 的 dict + expr_values_buf（同时充当 context 与 instance dict）。
                         ctx.set_field_at(idx, field.name.py_name(), value.bind(py), py)?;
                     }
                     FieldMode::Wo => {
                         // WO：仅消费字节，不写入 dict/context。
-                        // expr_values[idx] 保持 null（GetInt 引用 WO 字段为编译期错误）。
+                        // expr_values_buf[idx] 保持 null（GetInt 引用 WO 字段为编译期错误）。
                         drop(value);
                     }
                 }
@@ -374,7 +374,7 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 有表达式时：初始化 expr_values（一次性堆分配），供子节点表达式求值使用。
+        // 有表达式时：初始化 expr_values_buf（栈分配内联数组，零堆开销），供子节点表达式求值使用。
         if self.has_expressions {
             ctx.init_expr_values(self.fields.len());
         }

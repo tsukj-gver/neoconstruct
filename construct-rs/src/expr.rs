@@ -42,7 +42,7 @@ use pyo3::prelude::*;
 pub enum ExprOp {
     /// 从 context 取整数字段值，压入栈顶。
     ///
-    /// 参数是字段在当前 StructNode 的 `expr_values` Vec 中的索引（编译期确定）。
+    /// 参数是字段在当前 StructNode 的 `expr_values_buf` 中的索引（编译期确定）。
     /// 执行：`ctx.get_int_at(idx, py)` → `stack.push(i64)`。
     GetInt(usize),
 
@@ -214,7 +214,7 @@ const VM_STACK_SLOTS: usize = 32;
 /// # 参数
 ///
 /// - `program`：编译后的表达式程序（[`ExprProgram`]）
-/// - `ctx`：当前上下文（持有 `PyDict` 和 `expr_values`），通过
+/// - `ctx`：当前上下文（持有 `PyDict` 和 `expr_values_buf`），通过
 ///   [`Context::get_int_at`] 按索引取字段值
 /// - `py`：GIL token
 ///
@@ -226,7 +226,7 @@ const VM_STACK_SLOTS: usize = 32;
 ///
 /// - [`ConstructError::ExprType`]：`GetInt` 取到的值无法转换为 `i64`
 /// - [`ConstructError::ExprFieldMissing`]：`GetInt` 引用的槽位为 null（未设置）
-/// - [`ConstructError::ExprContext`]：`ctx.expr_values` 未初始化（placeholder），无法求值
+/// - [`ConstructError::ExprContext`]：`ctx.expr_values_buf` 未初始化（placeholder），无法求值
 /// - [`ConstructError::ExprDivByZero`]：`FloorDiv` / `Mod` 除数为 0
 /// - [`ConstructError::ExprStackUnderflow`]：栈下溢（指令序列不合法，编译期保证不会发生）
 /// - [`ConstructError::Generic`]：传入空程序，或 `max_stack` 超过 [`VM_STACK_SLOTS`]（编译期保证不发生）

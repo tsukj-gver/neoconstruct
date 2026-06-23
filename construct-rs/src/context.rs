@@ -10,25 +10,36 @@
 //!
 //! ## Vec 化优化（Phase 2.5）
 //!
-//! `expr_values` 按编译期字段索引存储 borrowed PyObject 指针，供 GetInt 快速访问
+//! `expr_values_buf` 按编译期字段索引存储 borrowed PyObject 指针，供 GetInt 快速访问
 //! （跳过 PyDict hash 查找）。GetInt 从 ~36ns 降至 ~6ns。
 //!
-//! `expr_values` 为 `Option`：仅 `has_expressions=true` 的 Struct 通过
-//! [`Context::init_expr_values`] 初始化；无表达式的 Struct 保持 `None`，零分配开销。
+//! 使用**栈分配的内联数组**（`[*mut PyObject; MAX_INLINE_FIELDS]`）而非 `Vec`，
+//! 避免每次 parse/build 的堆分配开销（Windows 上小对象 malloc ~30-50ns）。
+//!
+//! `expr_values_len == 0` 表示未初始化（无表达式的 Struct 或 placeholder），
+//! 仅 `has_expressions=true` 的 Struct 通过 [`Context::init_expr_values`] 初始化。
 
 use crate::error::ConstructError;
 use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
+/// 内联 expr_values 缓冲区的最大槽位数。
+///
+/// 典型 Struct 有 2-8 个字段，16 覆盖绝大多数场景。
+/// 超过此数的 Struct 极少见——`init_expr_values` 会静默截断到
+/// 此上限，`get_int_at` 访问截断外的索引返回 `ExprFieldMissing`（防御性，
+/// 不 panic）。如需更多槽位，增大此常量重新编译即可。
+const MAX_INLINE_FIELDS: usize = 16;
+
 /// 解析/构建上下文。Rust 内部持有 Python dict 引用（按需创建）。
 ///
 /// 字段值存入 `PyDict`（C API `PyDict_SetItem`），同时按编译期字段索引
-/// 在 `expr_values` 中缓存 borrowed 指针，供 GetInt 快速访问（跳过 hash 查找）。
+/// 在 `expr_values_buf` 中缓存 borrowed 指针，供 GetInt 快速访问（跳过 hash 查找）。
 ///
-/// `expr_values` 为 `Option`：仅 `has_expressions=true` 的 Struct 通过
-/// [`Context::init_expr_values`] 初始化；无表达式的 Struct（placeholder）
-/// 保持 `None`，零分配开销。
+/// `expr_values_buf` 为**栈分配的内联数组**（零堆分配），`expr_values_len == 0`
+/// 表示未初始化。仅 `has_expressions=true` 的 Struct 通过 [`Context::init_expr_values`]
+/// 初始化；无表达式的 Struct（placeholder）保持 `len == 0`，零额外开销。
 ///
 /// `fields` 为 `Option`：Phase 1 的 parse/build 入口使用 [`Context::placeholder`]
 /// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；Phase 2 恢复
@@ -48,32 +59,40 @@ pub struct Context<'py> {
 
     /// 按编译期字段索引存储的 borrowed PyObject 指针，供 GetInt 快速访问。
     ///
-    /// `None` 表示未初始化（无表达式的 Struct 或 placeholder）。
-    /// `Some(vec)` 中每个槽位：
+    /// 栈分配的内联数组（[`MAX_INLINE_FIELDS`] 个槽位），零堆分配。
+    /// 有效范围为 `[0..expr_values_len)`；`expr_values_len == 0` 表示未初始化。
+    ///
+    /// 每个槽位：
     /// - 非 null：指向 `fields` PyDict 中对应字段的值对象（borrowed，不 incref）
     /// - null：WO 字段（不写入值）或未设置的字段
     ///
-    /// GetInt(idx) 直接读 `vec[idx]` → `PyLong_AsLongLong`，跳过 PyDict hash 查找。
+    /// GetInt(idx) 直接读 `buf[idx]` → `PyLong_AsLongLong`，跳过 PyDict hash 查找。
     ///
     /// # Safety（不变量）
     ///
     /// 1. 指针仅在 [`Context::set_field_at`] 中写入（与 dict 写入同步）
     /// 2. 指针仅在 [`Context::get_int_at`] 中读取（fields dict 存活期间）
-    /// 3. `fields` 与 `expr_values` 同属 Context，生命周期一致
+    /// 3. `fields` 与 `expr_values_buf` 同属 Context，生命周期一致
     /// 4. dict 中的值不会被外部替换（Context API 是唯一写入路径）
     /// 5. PyDict resize 时不移动值对象（PyObject 在堆上，dict 内部数组重分配
     ///    不影响已存入值的对象指针）
-    expr_values: Option<Vec<*mut ffi::PyObject>>,
+    expr_values_buf: [*mut ffi::PyObject; MAX_INLINE_FIELDS],
+
+    /// `expr_values_buf` 中有效槽位的数量。
+    ///
+    /// `0` 表示未初始化（placeholder 或未调用 `init_expr_values`）。
+    /// `> 0` 表示已初始化，`buf[0..len)` 为有效槽位。
+    expr_values_len: usize,
 }
 
-// SAFETY note: Context 包含 raw pointer (`expr_values` 中的 `*mut ffi::PyObject`)，
+// SAFETY note: Context 包含 raw pointer (`expr_values_buf` 中的 `*mut ffi::PyObject`)，
 // 这不会影响线程安全——指针指向 fields PyDict 中的值对象，在 GIL 保护下单线程访问。
 // Context 本身因持有 `Bound<PyDict>` 而不可跨线程发送（pyo3 保证）。
 impl<'py> Context<'py> {
     /// 创建顶层 context（parse/build 入口处调用）。
     ///
     /// 创建一个空的 `PyDict` 作为字段存储容器，`parent` 为 `None`。
-    /// `expr_values` 初始化为 `None`——有表达式的 Struct 在 parse/build 入口
+    /// `expr_values_len` 初始化为 `0`——有表达式的 Struct 在 parse/build 入口
     /// 通过 [`Context::init_expr_values`] 按需初始化。
     ///
     /// Phase 2 恢复 context 使用后，入口改用此方法。Phase 1 入口使用
@@ -82,7 +101,8 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: None,
-            expr_values: None,
+            expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
+            expr_values_len: 0,
         })
     }
 
@@ -98,66 +118,72 @@ impl<'py> Context<'py> {
         Self {
             fields: None,
             parent: None,
-            expr_values: None,
+            expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
+            expr_values_len: 0,
         }
     }
 
     /// 创建嵌套 context（Struct 节点进入时调用）。
     ///
     /// 新建一个空 `PyDict`，`parent` 指向传入的父 context。
-    /// `expr_values` 初始化为 `None`——内层 Struct 自行调用
+    /// `expr_values_len` 初始化为 `0`——内层 Struct 自行调用
     /// [`Context::init_expr_values`] 按需初始化。
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
-            expr_values: None,
+            expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
+            expr_values_len: 0,
         })
     }
 
     /// 初始化 expr_values 缓冲区（预分配 n 个 null 槽位）。
     ///
     /// 在 StructNode.parse/build 的 `has_expressions` 分支入口调用一次，
-    /// 在遍历字段之前。槽位数 = 当前 StructNode 的字段数。
+    /// 在遍历字段之前。槽位数 = 当前 StructNode 的字段数（截断到 [`MAX_INLINE_FIELDS`]）。
     ///
     /// 后续 [`Context::set_field_at`] 按 idx 填充槽位（RW/RO 字段），
     /// WO 字段的槽位保持 null（编译期保证 GetInt 不引用 WO 字段）。
     ///
-    /// 对占位 context（`fields = None`）安全：仅记录 n，不分配（无表达式
-    /// 的 Struct 不会调用此方法，由编译期 `has_expressions` 标志保证）。
+    /// 对占位 context（`fields = None`）安全：仅设置 len，不影响功能
+    /// （无表达式的 Struct 不调用此方法，由编译期 `has_expressions` 标志保证）。
     ///
     /// # 性能
     ///
-    /// `vec![ptr::null_mut(); n]` 零次 Py_INCREF，仅一次 Vec 堆分配
-    /// （n 个指针宽度 = 8n 字节，典型 n=2-4，单次 malloc ~5ns）。
+    /// 使用栈分配的内联数组，零堆分配。仅填充前 `n` 个槽位为 null
+    /// （`n` 个指针宽度 = 8n 字节，典型 n=2-4，~2-4ns）。
+    #[inline]
     pub fn init_expr_values(&mut self, n: usize) {
-        self.expr_values = Some(vec![std::ptr::null_mut(); n]);
+        let n = n.min(MAX_INLINE_FIELDS);
+        self.expr_values_buf[..n].fill(std::ptr::null_mut());
+        self.expr_values_len = n;
     }
 
-    /// 按索引写入字段值（同时写 PyDict + expr_values）。
+    /// 按索引写入字段值（同时写 PyDict + expr_values_buf）。
     ///
-    /// 替代原 `set_field_interned`，增加 `idx` 参数用于同步 expr_values。
+    /// 替代原 `set_field_interned`，增加 `idx` 参数用于同步 expr_values_buf。
     /// 由 StructNode.parse/build 在每个 RW/RO 字段完成后调用。
     ///
     /// # 操作
     ///
     /// 1. `fields.set_item(name, value)` — 写入 PyDict（C API `PyDict_SetItem`，
     ///    interned key 命中 fast path，~10-15ns）
-    /// 2. `expr_values[idx] = value.as_ptr()` — 写入 borrowed 指针（~1ns，不 incref）
+    /// 2. `expr_values_buf[idx] = value.as_ptr()` — 写入 borrowed 指针（~1ns，不 incref）
     ///
     /// # 借用
     ///
-    /// 需要 `&mut self`（写 expr_values）。StructNode.parse/build 中
+    /// 需要 `&mut self`（写 expr_values_buf）。StructNode.parse/build 中
     /// `field.node.parse(...)` 与 `ctx.set_field_at(...)` 是**顺序调用**，
     /// 不存在同时借用 ctx 的情况。
     ///
-    /// 对占位 context（`fields = None`）为无操作（has_expressions=false 的
-    /// Struct 不调用此方法）。
+    /// 对占位 context（`fields = None`）或未初始化 expr_values（`len == 0`）
+    /// 为无操作（has_expressions=false 的 Struct 不调用此方法）。
     ///
     /// # 错误
     ///
     /// `PyDict_SetItem` 失败时返回 `PyErr`（转为 `ConstructError::Generic`）。
+    #[inline]
     pub fn set_field_at(
         &mut self,
         idx: usize,
@@ -165,21 +191,17 @@ impl<'py> Context<'py> {
         value: &Bound<'_, PyAny>,
         py: Python<'_>,
     ) -> PyResult<()> {
-        match (&self.fields, &mut self.expr_values) {
-            (Some(fields), Some(vals)) => {
-                fields.set_item(name.bind(py), value)?;
-                // 同步 borrowed 指针到 expr_values（不 incref，依赖 dict 持有引用）。
-                if let Some(slot) = vals.get_mut(idx) {
-                    *slot = value.as_ptr();
-                }
-                // idx 越界：编译期保证 idx < fields.len() == vals.len()。
-                // 防御性忽略（不 panic，符合编码红线）。
-                Ok(())
+        if let Some(fields) = &self.fields {
+            fields.set_item(name.bind(py), value)?;
+            // 同步 borrowed 指针到 expr_values_buf（不 incref，依赖 dict 持有引用）。
+            if idx < self.expr_values_len {
+                self.expr_values_buf[idx] = value.as_ptr();
             }
-            // 占位 context 或未 init_expr_values：仅写 dict（若存在），跳过 Vec。
-            (Some(fields), None) => fields.set_item(name.bind(py), value),
-            (None, _) => Ok(()),
+            // idx >= expr_values_len：编译期保证 idx < fields.len() == init(n)。
+            // 防御性忽略（不 panic，符合编码红线）。
         }
+        // 占位 context（fields = None）：无操作。
+        Ok(())
     }
 
     /// 存入字段（parse/build 每个字段完成后调用）。
@@ -222,11 +244,16 @@ impl<'py> Context<'py> {
 
     /// 按编译期字段索引取整数值（VM `GetInt` 指令使用）。
     ///
-    /// 从 `expr_values[idx]` 取 borrowed PyObject 指针，直接调用
+    /// 从 `expr_values_buf[idx]` 取 borrowed PyObject 指针，直接调用
     /// `PyLong_AsLongLong`（~5ns），跳过 `PyDict_GetItem` hash 查找（~24ns）。
     ///
-    /// 完整路径：`vec[idx]`(~1ns) → `PyLong_AsLongLong`(~5ns) = **~6ns**
+    /// 完整路径：`buf[idx]`(~1ns) → `PyLong_AsLongLong`(~5ns) = **~6ns**
     /// （vs 原 `get_int_by_name` ~36ns，节省 ~30ns）。
+    ///
+    /// # 性能关键
+    ///
+    /// 成功路径（expr_values 已初始化且槽位非 null）零堆分配。
+    /// 错误消息的 `String` 构造仅在错误路径触发（惰性）。
     ///
     /// # 错误
     ///
@@ -234,16 +261,21 @@ impl<'py> Context<'py> {
     ///   理论不发生——有表达式的 Struct 调用 init_expr_values）。
     /// - [`ConstructError::ExprFieldMissing`]：槽位为 null（WO 字段或未设置）。
     /// - [`ConstructError::ExprType`]：值无法 `PyLong_AsLongLong`（非整数类型）。
+    #[inline]
     pub fn get_int_at(&self, idx: usize, _py: Python<'_>) -> Result<i64, ConstructError> {
-        let vals = self
-            .expr_values
-            .as_ref()
-            .ok_or(ConstructError::ExprContext {
+        // 直接检查 len 而非 ok_or —— 避免在成功路径上构造错误值（含 String 堆分配）。
+        if self.expr_values_len == 0 {
+            return Err(ConstructError::ExprContext {
                 message: "get_int_at: expr_values not initialized (placeholder context)"
                     .to_string(),
                 path: String::new(),
-            })?;
-        let ptr = vals.get(idx).copied().unwrap_or(std::ptr::null_mut());
+            });
+        }
+        let ptr = if idx < self.expr_values_len {
+            self.expr_values_buf[idx]
+        } else {
+            std::ptr::null_mut()
+        };
         if ptr.is_null() {
             return Err(ConstructError::ExprFieldMissing {
                 field: format!("<index {}>", idx),
@@ -278,6 +310,7 @@ impl<'py> Context<'py> {
     ///
     /// 用于 has_expressions=true 的 parse 路径：将 ctx 的 dict 直接移交给
     /// 实例（避免 clone 的 Py_INCREF 开销）。
+    #[inline]
     pub fn take_fields(&mut self) -> Option<Bound<'py, PyDict>> {
         self.fields.take()
     }
