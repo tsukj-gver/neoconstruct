@@ -34,6 +34,13 @@ use pyo3::types::{PyDict, PyString};
 /// `fields` 为 `Option`：Phase 1 的 parse/build 入口使用 [`Context::placeholder`]
 /// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；Phase 2 恢复
 /// context 使用时入口改用 [`Context::new_root`]。
+///
+/// `field_names` 有两种存储模式：
+/// - **owned**（[`Context::set_field_names`]）：Context 拥有 `Vec<Py<PyString>>`，
+///   用于测试。每次调用需 clone，有堆分配开销。
+/// - **borrowed**（[`Context::set_field_names_ref`]）：Context 存储 raw pointer，
+///   指向 StructNode 预计算的 `field_names_cache`。零拷贝、零分配，用于生产路径。
+///   调用方（StructNode）保证切片在 Context 使用期间存活。
 pub struct Context<'py> {
     /// 当前层字段字典（`PyDict` 引用），按需创建。
     ///
@@ -44,14 +51,22 @@ pub struct Context<'py> {
     ///
     /// 顶层 context 的 `parent` 为 `None`。
     parent: Option<&'py Context<'py>>,
-    /// 字段名列表（interned PyString），供子节点表达式求值使用。
+    /// 字段名（owned 版本，测试用 [`Context::set_field_names`] 设置）。
     ///
-    /// 由 StructNode.parse/build 在开始遍历字段前设置（仅 `has_expressions=true` 时）。
-    /// [`crate::expr::eval_expr_int`] 的 `GetInt(idx)` 通过此列表索引取字段名，
-    /// 再从 `fields` PyDict 取值。`None` 表示未设置（无表达式的 Struct）。
-    field_names: Option<Vec<Py<PyString>>>,
+    /// 生产路径不使用此字段（用 borrowed 指针代替，避免每次 parse 的堆分配）。
+    field_names_owned: Option<Vec<Py<PyString>>>,
+    /// 字段名切片指针（borrowed 版本，生产用 [`Context::set_field_names_ref`] 设置）。
+    ///
+    /// 由 StructNode 的 `field_names_cache` 拥有，Context 借用。
+    /// 仅在 parse/build 调用链期间有效。`None` 表示未设置。
+    field_names_ptr: Option<*const Py<PyString>>,
+    /// borrowed field_names 切片长度（配合 `field_names_ptr`）。
+    field_names_len: usize,
 }
 
+// SAFETY note: Context 包含 raw pointer (`field_names_ptr`)，这不会影响线程安全——
+// 指针指向 StructNode 拥有的不可变 `Vec<Py<PyString>>`，在 GIL 保护下单线程访问。
+// Context 本身因持有 `Bound<PyDict>` 而不可跨线程发送（pyo3 保证）。
 impl<'py> Context<'py> {
     /// 创建顶层 context（parse/build 入口处调用）。
     ///
@@ -63,7 +78,9 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: None,
-            field_names: None,
+            field_names_owned: None,
+            field_names_ptr: None,
+            field_names_len: 0,
         })
     }
 
@@ -79,7 +96,9 @@ impl<'py> Context<'py> {
         Self {
             fields: None,
             parent: None,
-            field_names: None,
+            field_names_owned: None,
+            field_names_ptr: None,
+            field_names_len: 0,
         }
     }
 
@@ -91,7 +110,9 @@ impl<'py> Context<'py> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
-            field_names: None,
+            field_names_owned: None,
+            field_names_ptr: None,
+            field_names_len: 0,
         })
     }
 
@@ -153,7 +174,13 @@ impl<'py> Context<'py> {
 
     /// 按 interned `PyString` name 取整数值（VM `GetInt` 指令使用）。
     ///
-    /// 从当前层 `PyDict` `get_item` 取值，`extract` 为 `i64`。
+    /// 使用 C API `PyDict_GetItem` 直接查找，绕过 pyo3 的 `get_item(&str)`：
+    /// - 不调用 `to_str()` 做 UTF-8 校验（interned PyString 无需校验）
+    /// - 不创建临时 Python str 对象（`get_item(&str)` 内部会创建）
+    /// - interned key 命中 CPython dict 的 fast path（直接指针比较）
+    ///
+    /// 仅在错误路径（字段不存在/类型不匹配）上惰性调用 `to_str()` 获取字段名
+    /// 用于错误信息。
     ///
     /// # 错误
     ///
@@ -161,24 +188,36 @@ impl<'py> Context<'py> {
     ///   理论上不会发生——有表达式的 Struct 使用 [`Context::new_root`]，不是 placeholder。
     /// - [`ConstructError::ExprFieldMissing`]：字段不存在于 context。
     /// - [`ConstructError::ExprType`]：值无法 `extract` 为 `i64`（如 str/bytes）。
-    /// - [`ConstructError::Generic`]：底层 Python C API 调用失败（如 `to_str` 失败）。
     pub fn get_int_by_name(
         &self,
         name: &Bound<'_, PyString>,
         _py: Python<'_>,
     ) -> Result<i64, ConstructError> {
-        let name_str = name.to_str()?;
         match &self.fields {
             Some(fields) => {
-                let val =
-                    fields
-                        .get_item(name_str)?
-                        .ok_or_else(|| ConstructError::ExprFieldMissing {
-                            field: name_str.to_string(),
-                        })?;
-                val.extract::<i64>().map_err(|_| ConstructError::ExprType {
-                    field: name_str.to_string(),
-                    expected: "integer (i64)".to_string(),
+                // PyDict_GetItem：返回 borrowed pointer（不增引用计数），找不到返回 NULL。
+                // 比 pyo3 的 get_item(&str) 快，因为：
+                // 1. 不创建临时 Python str 对象
+                // 2. 不调用 to_str() 做 UTF-8 校验
+                // 3. interned key 命中 CPython dict 的 fast path（直接指针比较）
+                let val_ptr = unsafe { pyo3::ffi::PyDict_GetItem(fields.as_ptr(), name.as_ptr()) };
+                if val_ptr.is_null() {
+                    // 字段不存在——惰性获取错误信息中的字段名（仅错误路径开销）
+                    let name_str = name.to_str().unwrap_or("<invalid utf-8>");
+                    return Err(ConstructError::ExprFieldMissing {
+                        field: name_str.to_string(),
+                    });
+                }
+                // SAFETY: val_ptr 是 PyDict_GetItem 返回的 non-null borrowed reference。
+                // PyDict_GetItem 返回 borrowed pointer（不增引用计数），只要 dict 存活就有效。
+                // dict 由 self.fields (Bound<'py, PyDict>) 保证存活。
+                let val = unsafe { Py::<PyAny>::from_borrowed_ptr(_py, val_ptr) };
+                val.extract::<i64>(_py).map_err(|_| {
+                    let name_str = name.to_str().unwrap_or("<invalid utf-8>");
+                    ConstructError::ExprType {
+                        field: name_str.to_string(),
+                        expected: "integer (i64)".to_string(),
+                    }
                 })
             }
             None => Err(ConstructError::ExprContext {
@@ -209,23 +248,64 @@ impl<'py> Context<'py> {
         }
     }
 
-    /// 设置当前 StructNode 的字段名列表（供表达式求值使用）。
+    /// 设置当前 StructNode 的字段名列表（owned 版本，测试用）。
     ///
     /// 由 StructNode.parse/build 在 `has_expressions=true` 分支的开头调用一次，
     /// 在遍历字段之前设置。列表顺序与 StructNode.fields 对齐，
     /// [`crate::expr::ExprOp::GetInt`] 的索引基于此列表。
     ///
+    /// **注意**：此方法接收 `Vec` 的所有权，有堆分配开销。生产路径应使用
+    /// [`Context::set_field_names_ref`]（零拷贝借用 StructNode 预计算的缓存）。
+    ///
     /// 对占位 context 也安全（虽然占位 context 不会触发表达式求值）。
     pub fn set_field_names(&mut self, names: Vec<Py<PyString>>) {
-        self.field_names = Some(names);
+        self.field_names_ptr = None;
+        self.field_names_len = 0;
+        self.field_names_owned = Some(names);
+    }
+
+    /// 设置字段名引用（零拷贝，生产路径使用）。
+    ///
+    /// 与 [`Context::set_field_names`] 的区别：不接收 `Vec` 所有权，而是存储
+    /// 指向调用方切片的 raw pointer。避免每次 parse/build 的 `Vec` 分配 +
+    /// N 次 `clone_ref`（Py_INCREF），节省 ~10-20ns/parse。
+    ///
+    /// # Safety 责任
+    ///
+    /// `names` 切片必须在 Context 使用期间（即整个 parse/build 调用链）保持存活。
+    /// 生产路径由 StructNode 的 `field_names_cache`（编译期预计算，与 StructNode
+    /// 同生命周期）保证。空切片等同于未设置（`field_names()` 返回 `None`）。
+    pub fn set_field_names_ref(&mut self, names: &[Py<PyString>]) {
+        self.field_names_owned = None;
+        if names.is_empty() {
+            self.field_names_ptr = None;
+            self.field_names_len = 0;
+        } else {
+            self.field_names_ptr = Some(names.as_ptr());
+            self.field_names_len = names.len();
+        }
     }
 
     /// 返回字段名列表的切片引用（供 [`crate::expr::eval_expr_int`] 使用）。
     ///
+    /// 优先返回 borrowed 指针（生产路径，由 [`Context::set_field_names_ref`] 设置），
+    /// 其次返回 owned Vec（测试路径，由 [`Context::set_field_names`] 设置）。
+    ///
     /// `None` 表示未设置（无表达式的 Struct）。表达式求值时若为 `None`，
     /// 调用方应视为内部错误（编译期保证有表达式的 Struct 会设置此字段）。
     pub fn field_names(&self) -> Option<&[Py<PyString>]> {
-        self.field_names.as_deref()
+        // borrowed 优先（生产路径，零拷贝）
+        if self.field_names_len > 0 {
+            let ptr = self.field_names_ptr?;
+            // SAFETY: ptr 来自 set_field_names_ref 的 &[Py<PyString>]，
+            // 由调用方（StructNode）保证在 Context 使用期间切片存活。
+            // 生产路径中 StructNode 的 field_names_cache 在整个 parse/build
+            // 调用链期间保持存活（&self 借用覆盖调用链）。
+            Some(unsafe { std::slice::from_raw_parts(ptr, self.field_names_len) })
+        } else {
+            // owned（测试路径）
+            self.field_names_owned.as_deref()
+        }
     }
 
     /// 借用当前层的字段字典（用于测试与调试）。

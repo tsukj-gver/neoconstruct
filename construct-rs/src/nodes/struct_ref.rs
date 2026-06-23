@@ -283,6 +283,7 @@ class {name}:
             })
             .collect();
         let root = Node::Struct(StructNode::new(
+            py,
             struct_fields,
             cls.clone_ref(py),
             false,

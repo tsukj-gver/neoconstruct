@@ -199,7 +199,18 @@ fn compute_max_stack(ops: &[ExprOp]) -> usize {
     max
 }
 
+/// 表达式 VM 栈槽位数（栈分配，避免每次求值的堆分配）。
+///
+/// 典型表达式的最大栈深度为 2-4（如 `a + b` 峰值 2，`(a+b)*(c+d)` 峰值 3）。
+/// 32 个槽位覆盖任何合理的构造表达式。若 `max_stack` 超过此值，
+/// [`eval_expr_int`] 返回错误（防御性，理论上编译期不会产生如此深的表达式）。
+const VM_STACK_SLOTS: usize = 32;
+
 /// 在 Rust 内部栈式求值表达式，零 FFI（[`ExprOp::GetInt`] 除外，需从 PyDict 取值）。
+///
+/// VM 栈使用栈分配的固定数组（[`VM_STACK_SLOTS`] 个 `i64` 槽位），避免每次求值
+/// 的堆分配（`Vec::with_capacity`）。对于典型表达式（峰值栈深 2-4），这消除
+/// 了 ~20-50ns/parse 的分配开销。
 ///
 /// # 参数
 ///
@@ -221,7 +232,8 @@ fn compute_max_stack(ops: &[ExprOp]) -> usize {
 /// - [`ConstructError::ExprContext`]：`ctx` 为 placeholder（无 PyDict），无法求值
 /// - [`ConstructError::ExprDivByZero`]：`FloorDiv` / `Mod` 除数为 0
 /// - [`ConstructError::ExprStackUnderflow`]：栈下溢（指令序列不合法，编译期保证不会发生）
-/// - [`ConstructError::Generic`]：传入空程序，或 `GetInt` 索引越界（编译期保证不发生）
+/// - [`ConstructError::Generic`]：传入空程序，或 `GetInt` 索引越界，或
+///   `max_stack` 超过 [`VM_STACK_SLOTS`]（编译期保证不发生）
 pub fn eval_expr_int(
     program: &ExprProgram,
     names: &[Py<PyString>],
@@ -235,7 +247,22 @@ pub fn eval_expr_int(
         });
     }
 
-    let mut stack: Vec<i64> = Vec::with_capacity(program.max_stack());
+    // 防御性检查：max_stack 超过栈缓冲区大小则返回错误。
+    // 理论上不会触发（构造表达式栈深极小），但避免 release 模式越界写入（UB）。
+    if program.max_stack() > VM_STACK_SLOTS {
+        return Err(ConstructError::Generic {
+            message: format!(
+                "expression max_stack {} exceeds VM_STACK_SLOTS {}",
+                program.max_stack(),
+                VM_STACK_SLOTS
+            ),
+            path: String::new(),
+        });
+    }
+
+    // 栈分配的 VM 栈：32 个 i64 槽位，零堆分配。
+    let mut stack_buf = [0i64; VM_STACK_SLOTS];
+    let mut stack_len = 0usize;
 
     for op in program.ops() {
         match op {
@@ -249,17 +276,19 @@ pub fn eval_expr_int(
                     path: String::new(),
                 })?;
                 let val = ctx.get_int_by_name(name.bind(py), py)?;
-                stack.push(val);
+                stack_buf[stack_len] = val;
+                stack_len += 1;
             }
             ExprOp::Const(v) => {
-                stack.push(*v);
+                stack_buf[stack_len] = *v;
+                stack_len += 1;
             }
             // 二元算术
-            ExprOp::Add => binop(&mut stack, i64::wrapping_add)?,
-            ExprOp::Sub => binop(&mut stack, i64::wrapping_sub)?,
-            ExprOp::Mul => binop(&mut stack, i64::wrapping_mul)?,
+            ExprOp::Add => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_add)?,
+            ExprOp::Sub => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_sub)?,
+            ExprOp::Mul => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_mul)?,
             ExprOp::FloorDiv => {
-                let (a, b) = pop2(&mut stack)?;
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
                 if b == 0 {
                     return Err(ConstructError::ExprDivByZero {
                         message: "expression division by zero".to_string(),
@@ -268,53 +297,85 @@ pub fn eval_expr_int(
                 // Python `//` 语义：向负无穷取整（floor division）。
                 // div_euclid 不匹配（欧几里得余数恒非负，Python 余数符号同除数）。
                 // 用 wrapping_* 实现真 floor division，永不 panic。
-                stack.push(floor_div(a, b));
+                push_fixed(&mut stack_buf, &mut stack_len, floor_div(a, b));
             }
             ExprOp::Mod => {
-                let (a, b) = pop2(&mut stack)?;
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
                 if b == 0 {
                     return Err(ConstructError::ExprDivByZero {
                         message: "expression modulo by zero".to_string(),
                     });
                 }
                 // Python `%` 语义：结果符号与除数一致（floor modulo）。
-                stack.push(floor_rem(a, b));
+                push_fixed(&mut stack_buf, &mut stack_len, floor_rem(a, b));
             }
             // 位运算
-            ExprOp::BitAnd => binop(&mut stack, |a, b| a & b)?,
-            ExprOp::BitOr => binop(&mut stack, |a, b| a | b)?,
-            ExprOp::BitXor => binop(&mut stack, |a, b| a ^ b)?,
-            ExprOp::Shl => binop(&mut stack, |a, b| a.wrapping_shl(b as u32))?,
-            ExprOp::Shr => binop(&mut stack, |a, b| a.wrapping_shr(b as u32))?,
+            ExprOp::BitAnd => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a & b)?,
+            ExprOp::BitOr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a | b)?,
+            ExprOp::BitXor => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a ^ b)?,
+            ExprOp::Shl => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| {
+                a.wrapping_shl(b as u32)
+            })?,
+            ExprOp::Shr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| {
+                a.wrapping_shr(b as u32)
+            })?,
             // 一元
             ExprOp::Neg => {
-                let a = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
-                stack.push(a.wrapping_neg());
+                if stack_len == 0 {
+                    return Err(ConstructError::ExprStackUnderflow);
+                }
+                let i = stack_len - 1;
+                stack_buf[i] = stack_buf[i].wrapping_neg();
             }
             ExprOp::Not => {
-                let a = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
-                stack.push(!a);
+                if stack_len == 0 {
+                    return Err(ConstructError::ExprStackUnderflow);
+                }
+                let i = stack_len - 1;
+                stack_buf[i] = !stack_buf[i];
             }
             // 比较
-            ExprOp::Eq => cmp(&mut stack, |a, b| a == b)?,
-            ExprOp::Ne => cmp(&mut stack, |a, b| a != b)?,
-            ExprOp::Lt => cmp(&mut stack, |a, b| a < b)?,
-            ExprOp::Le => cmp(&mut stack, |a, b| a <= b)?,
-            ExprOp::Gt => cmp(&mut stack, |a, b| a > b)?,
-            ExprOp::Ge => cmp(&mut stack, |a, b| a >= b)?,
+            ExprOp::Eq => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a == b)?,
+            ExprOp::Ne => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a != b)?,
+            ExprOp::Lt => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a < b)?,
+            ExprOp::Le => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a <= b)?,
+            ExprOp::Gt => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a > b)?,
+            ExprOp::Ge => cmp_fixed(&mut stack_buf, &mut stack_len, |a, b| a >= b)?,
         }
     }
 
-    stack.pop().ok_or(ConstructError::ExprStackUnderflow)
+    if stack_len == 0 {
+        return Err(ConstructError::ExprStackUnderflow);
+    }
+    stack_len -= 1;
+    Ok(stack_buf[stack_len])
 }
 
-/// 弹出栈顶两个元素 `(a, b)`。
+/// 压入一个值到固定大小 VM 栈顶。
 ///
-/// 弹出顺序：先弹出的是 rhs（`b`），后弹出的是 lhs（`a`）。
-/// 栈为空时返回 [`ConstructError::ExprStackUnderflow`]。
-fn pop2(stack: &mut Vec<i64>) -> Result<(i64, i64), ConstructError> {
-    let b = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
-    let a = stack.pop().ok_or(ConstructError::ExprStackUnderflow)?;
+/// 调用方需保证 `len < VM_STACK_SLOTS`（由 [`eval_expr_int`] 入口的
+/// `max_stack` 检查间接保证）。
+#[inline]
+fn push_fixed(stack: &mut [i64; VM_STACK_SLOTS], len: &mut usize, val: i64) {
+    stack[*len] = val;
+    *len += 1;
+}
+
+/// 从固定大小 VM 栈弹出栈顶两个元素 `(a, b)`。
+///
+/// 弹出顺序：栈顶是 rhs（`b`），其下是 lhs（`a`）。
+/// `len < 2` 时返回 [`ConstructError::ExprStackUnderflow`]（原子检查，不部分消费）。
+#[inline]
+fn pop2_fixed(
+    stack: &[i64; VM_STACK_SLOTS],
+    len: &mut usize,
+) -> Result<(i64, i64), ConstructError> {
+    if *len < 2 {
+        return Err(ConstructError::ExprStackUnderflow);
+    }
+    *len -= 2;
+    let a = stack[*len];
+    let b = stack[*len + 1];
     Ok((a, b))
 }
 
@@ -351,27 +412,39 @@ fn floor_rem(a: i64, b: i64) -> i64 {
     }
 }
 
-/// 二元运算辅助：弹出 `(a, b)`，压入 `f(a, b)`。
+/// 二元运算辅助（固定数组版）：弹出 `(a, b)`，压入 `f(a, b)`。
 ///
-/// 泛型 `F` 接收 `(i64, i64)` 返回 `i64`。栈下溢由 [`pop2`] 处理。
-fn binop<F>(stack: &mut Vec<i64>, f: F) -> Result<(), ConstructError>
+/// 泛型 `F` 接收 `(i64, i64)` 返回 `i64`。栈下溢由 [`pop2_fixed`] 处理。
+#[inline]
+fn binop_fixed<F>(
+    stack: &mut [i64; VM_STACK_SLOTS],
+    len: &mut usize,
+    f: F,
+) -> Result<(), ConstructError>
 where
     F: FnOnce(i64, i64) -> i64,
 {
-    let (a, b) = pop2(stack)?;
-    stack.push(f(a, b));
+    let (a, b) = pop2_fixed(stack, len)?;
+    stack[*len] = f(a, b);
+    *len += 1;
     Ok(())
 }
 
-/// 比较运算辅助：弹出 `(a, b)`，压入 `f(a, b) as i64`（0 或 1）。
+/// 比较运算辅助（固定数组版）：弹出 `(a, b)`，压入 `f(a, b) as i64`（0 或 1）。
 ///
 /// 泛型 `F` 接收 `(i64, i64)` 返回 `bool`，结果被 cast 为 `i64`（true→1, false→0）。
-fn cmp<F>(stack: &mut Vec<i64>, f: F) -> Result<(), ConstructError>
+#[inline]
+fn cmp_fixed<F>(
+    stack: &mut [i64; VM_STACK_SLOTS],
+    len: &mut usize,
+    f: F,
+) -> Result<(), ConstructError>
 where
     F: FnOnce(i64, i64) -> bool,
 {
-    let (a, b) = pop2(stack)?;
-    stack.push(if f(a, b) { 1 } else { 0 });
+    let (a, b) = pop2_fixed(stack, len)?;
+    stack[*len] = if f(a, b) { 1 } else { 0 };
+    *len += 1;
     Ok(())
 }
 

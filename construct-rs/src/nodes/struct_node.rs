@@ -162,6 +162,12 @@ pub struct StructField {
 pub struct StructNode {
     /// 有序字段列表（携带模式信息）。
     fields: Vec<StructField>,
+    /// 预计算的字段名 PyString 列表（构造时一次性 `clone_ref`）。
+    ///
+    /// parse/build 时通过 [`Context::set_field_names_ref`] 零拷贝引用此 cache，
+    /// 避免每次 parse/build 的 `Vec` 分配 + N 次 `clone_ref`（节省 ~10-20ns/parse）。
+    /// 与 [`StructNode::fields`] 顺序对齐。
+    field_names_cache: Vec<Py<PyString>>,
     /// 用户类引用（parse 时 `create_class` 构造实例 + 错误信息中报告类名）。
     cls: Py<PyType>,
     /// 编译期检测：用户类是否定义了 `__post_init__`。
@@ -176,20 +182,32 @@ pub struct StructNode {
 impl StructNode {
     /// 创建一个 `StructNode`，包含给定的有序字段列表与用户类引用。
     ///
+    /// 在构造时一次性预计算 `field_names_cache`（所有字段的 interned PyString
+    /// `clone_ref`），parse/build 时通过 [`Context::set_field_names_ref`] 零拷贝引用，
+    /// 避免每次 parse/build 的堆分配开销。
+    ///
     /// # 参数
     ///
+    /// - `py`：GIL token（用于 `clone_ref` 预计算 cache）。
     /// - `fields`：有序字段列表（`StructField` 已含 interned PyString + mode）。
     /// - `cls`：用户类 Python 引用（`@dataclass` 装饰的 StructMixin 子类）。
     /// - `has_post_init`：编译期检测用户类是否定义了 `__post_init__`。
     /// - `has_expressions`：该 Struct 是否含有表达式字段（决定 context 模式）。
     pub fn new(
+        py: Python<'_>,
         fields: Vec<StructField>,
         cls: Py<PyType>,
         has_post_init: bool,
         has_expressions: bool,
     ) -> Self {
+        // 预计算 field_names_cache：一次性 clone_ref 所有字段的 interned PyString。
+        let field_names_cache = fields
+            .iter()
+            .map(|f| f.name.py_name().clone_ref(py))
+            .collect();
         Self {
             fields,
+            field_names_cache,
             cls,
             has_post_init,
             has_expressions,
@@ -221,7 +239,7 @@ impl StructNode {
             .expect("create mock class")
             .extract::<Py<PyType>>()
             .expect("extract Py<PyType>");
-        Self::new(struct_fields, cls, false, false)
+        Self::new(py, struct_fields, cls, false, false)
     }
 
     /// 返回字段数量。
@@ -275,13 +293,9 @@ impl Construct for StructNode {
         // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
         let dict_for_instance: Py<PyAny> = if self.has_expressions {
             // Phase 2 表达式路径：使用 ctx 的 dict。
-            // 先设置 field_names，供子节点（如 BytesNode 表达式长度）求值表达式使用。
-            let names: Vec<Py<PyString>> = self
-                .fields
-                .iter()
-                .map(|f| f.name.py_name().clone_ref(py))
-                .collect();
-            ctx.set_field_names(names);
+            // 设置 field_names 引用（零拷贝，引用预计算的 field_names_cache），
+            // 供子节点（如 BytesNode 表达式长度）求值表达式使用。
+            ctx.set_field_names_ref(&self.field_names_cache);
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
@@ -377,14 +391,9 @@ impl Construct for StructNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 有表达式时：先设置 field_names，供子节点表达式求值使用。
+        // 有表达式时：设置 field_names 引用（零拷贝），供子节点表达式求值使用。
         if self.has_expressions {
-            let names: Vec<Py<PyString>> = self
-                .fields
-                .iter()
-                .map(|f| f.name.py_name().clone_ref(py))
-                .collect();
-            ctx.set_field_names(names);
+            ctx.set_field_names_ref(&self.field_names_cache);
         }
         for field in &self.fields {
             match field.mode {
@@ -1200,7 +1209,7 @@ mod tests {
                 .expect("extract Py<PyType>");
 
             let fields = vec![rw_field(py, "x", u8_node())];
-            let node = StructNode::new(fields, cls, true, false);
+            let node = StructNode::new(py, fields, cls, true, false);
             let mut stream = ParseStream::new(&[0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1241,7 +1250,7 @@ mod tests {
                 .expect("extract Py<PyType>");
 
             let fields = vec![rw_field(py, "x", u8_node())];
-            let node = StructNode::new(fields, cls, false, false);
+            let node = StructNode::new(py, fields, cls, false, false);
             let mut stream = ParseStream::new(&[0x42]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1279,7 +1288,7 @@ mod tests {
                 .expect("extract");
 
             let fields = vec![rw_field(py, "x", u8_node()), rw_field(py, "y", u8_node())];
-            let node = StructNode::new(fields, cls, false, false);
+            let node = StructNode::new(py, fields, cls, false, false);
             let mut stream = ParseStream::new(&[0xAA, 0xBB]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1342,7 +1351,7 @@ mod tests {
                 wo_field(py, "pad", u8_node()),
                 rw_field(py, "b", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let mut stream = ParseStream::new(&[0x01, 0xFF, 0x02]);
             let mut ctx = Context::placeholder(py);
             let mut path = Path::new();
@@ -1369,7 +1378,7 @@ mod tests {
         // WO 字段 build 时从实例 getattr 取值并写字节（与 RW 行为一致）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), wo_field(py, "pad", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let obj = py
                 .eval_bound("type('O', (), {'a': 0x01, 'pad': 0xFF})()", None, None)
                 .expect("obj");
@@ -1392,7 +1401,7 @@ mod tests {
                 rw_field(py, "a", u8_node()),
                 ro_field(py, "computed", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let obj = py
                 .eval_bound("type('O', (), {'a': 1, 'computed': 0})()", None, None)
                 .expect("obj");
@@ -1420,7 +1429,7 @@ mod tests {
         // RO 字段 parse 时正常解析并存入实例（与 RW 相同）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "c", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let mut stream = ParseStream::new(&[0x10, 0x20]);
             let mut ctx = Context::placeholder(py);
             let mut path = Path::new();
@@ -1453,7 +1462,7 @@ mod tests {
         // 验证：parse 结果正确 + ctx 的 dict 被填充（表达式求值可用）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let mut stream = ParseStream::new(&[0x01, 0x02]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1483,7 +1492,7 @@ mod tests {
                 wo_field(py, "pad", u8_node()),
                 rw_field(py, "b", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let mut stream = ParseStream::new(&[0x01, 0xFF, 0x02]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
@@ -1507,7 +1516,7 @@ mod tests {
         // has_expressions=true 时，build 的 RW 字段写入 ctx dict。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let obj = py
                 .eval_bound("type('O', (), {'a': 0x01, 'b': 0x02})()", None, None)
                 .expect("obj");
@@ -1528,7 +1537,7 @@ mod tests {
         // has_expressions=false 时，build 不写入 ctx（placeholder 为 no-op）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let obj = py
                 .eval_bound("type('O', (), {'a': 42})()", None, None)
                 .expect("obj");
@@ -1548,7 +1557,7 @@ mod tests {
         // has_expressions=true + WO 字段 build：不写入 ctx dict。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), wo_field(py, "pad", u8_node())];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let obj = py
                 .eval_bound("type('O', (), {'a': 1, 'pad': 0xFF})()", None, None)
                 .expect("obj");
@@ -1589,7 +1598,7 @@ mod tests {
                 ro_field(py, "pos", tell_node()),
                 rw_field(py, "b", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             // 对象只有 RW 字段
             let obj = py
                 .eval_bound("type('O', (), {'a': 0xAA, 'b': 0xBB})()", None, None)
@@ -1612,7 +1621,7 @@ mod tests {
                 rw_field(py, "a", u8_node()),
                 ro_field(py, "pos", tell_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let obj = py
                 .eval_bound("type('O', (), {'a': 0x42})()", None, None)
                 .expect("obj");
@@ -1645,7 +1654,7 @@ mod tests {
                 rw_field(py, "a", u8_node()),
                 ro_field(py, "doubled", computed_node(prog)),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let obj = py
                 .eval_bound("type('O', (), {'a': 21})()", None, None)
                 .expect("obj");
@@ -1676,7 +1685,7 @@ mod tests {
                 ro_field(py, "pos", tell_node()),
                 rw_field(py, "b", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
 
             // build
             let obj = py
@@ -1721,7 +1730,7 @@ mod tests {
                 ro_field(py, "pos_at_b", computed_node(prog)),
                 rw_field(py, "b", u8_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, true);
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let obj = py
                 .eval_bound("type('O', (), {'a': 7, 'b': 9})()", None, None)
                 .expect("obj");
@@ -1759,7 +1768,7 @@ mod tests {
                 rw_field(py, "a", u8_node()),
                 ro_field(py, "pos", tell_node()),
             ];
-            let node = StructNode::new(fields, mock_cls(py), false, false);
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
             // 对象没有 'pos' 属性
             let obj = py
                 .eval_bound("type('O', (), {'a': 5})()", None, None)

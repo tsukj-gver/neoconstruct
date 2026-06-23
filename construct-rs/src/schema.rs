@@ -201,7 +201,7 @@ mod tests {
             .expect("get object")
             .extract::<Py<PyType>>()
             .expect("extract type");
-        Node::Struct(StructNode::new(Vec::new(), cls, false, false))
+        Node::Struct(StructNode::new(py, Vec::new(), cls, false, false))
     }
 
     #[test]

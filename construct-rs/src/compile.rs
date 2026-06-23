@@ -181,6 +181,7 @@ pub fn compile_schema(
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
     let root = Node::Struct(StructNode::new(
+        py,
         fields,
         cls.clone().unbind(),
         has_post_init,
