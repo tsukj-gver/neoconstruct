@@ -65,14 +65,20 @@ pub trait Construct {
     /// - `ctx`：当前上下文（持有 Python dict 引用，供字段间引用）
     /// - `path`：错误追踪路径栈（如 `"root.header.flags"`），Struct 节点进入字段时 push
     ///
+    /// # 生命周期
+    ///
+    /// `py` 与 `ctx` 共享同一个生命周期 `'py`——两者均绑定到调用方的 GIL scope。
+    /// 这允许 StructNode.parse 将实例 `__dict__`（来自 `py` 的 GIL scope）
+    /// 注入到 ctx 中（R4 优化）。
+    ///
     /// # 返回
     ///
     /// 成功返回 `Py<PyAny>`（Python 对象引用），失败返回 [`ConstructError`]。
-    fn parse(
+    fn parse<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         stream: &mut ParseStream<'_>,
-        ctx: &mut Context<'_>,
+        ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError>;
 

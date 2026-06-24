@@ -18,10 +18,12 @@
 //!   [`StructRefNode::resolve_schema`] 通过 `cls._construct_compiled` 获取 NodeB 产物。
 //! - **缓存**：`OnceLock` 首次解析后缓存，后续调用零查找开销。
 //!
-//! ## parse 委托（方案 B'，§3.4）
+//! ## parse 委托（R4，§3.4）
 //!
 //! StructRefNode.parse 直接委托对方 root StructNode.parse——对方 root 内部已通过
-//! 方案 B' 流程构造实例（create_class + force_setattr）。无需 Rust→Python 回调。
+//! R4 流程构造实例（create_class → getattr `__dict__` → 填充 dict）。无需 Rust→Python 回调。
+//! 内层含表达式时创建 `new_child_placeholder`（零 PyDict 分配），内层 parse
+//! 自行 inject 实例 dict。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -39,12 +41,14 @@ use super::Construct;
 /// 存储类引用（`Py<PyType>`），运行时通过 `cls._construct_compiled` 动态获取对方的
 /// [`CompiledSchema`]。首次解析后缓存到 `schema_cache`，后续调用零查找开销。
 ///
-/// # parse 行为（方案 B' §3.4）
+/// # parse 行为（R4 §3.4）
 ///
 /// 1. [`StructRefNode::resolve_schema`] 获取对方执行树。
 /// 2. 委托对方 `root.parse(...)`——对方 StructNode.parse 内部已构造实例
-///    （create_class + force_setattr + 可选 __post_init__）。
-/// 3. 直接返回对方产出（用户类实例）。
+///    （create_class → getattr `__dict__` → 填充 dict → 可选 __post_init__）。
+/// 3. 内层含表达式时创建 `new_child_placeholder`（零 PyDict 分配），内层 parse
+///    自行 inject 实例 dict 到 child_ctx（parent 链用于嵌套 `_` 引用）。
+/// 4. 直接返回对方产出（用户类实例）。
 ///
 /// 全程 Rust 内部递归，无 Python 回调，严格一次 FFI。
 ///
@@ -147,11 +151,11 @@ impl StructRefNode {
 }
 
 impl Construct for StructRefNode {
-    fn parse(
+    fn parse<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         stream: &mut ParseStream<'_>,
-        ctx: &mut Context<'_>,
+        ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
         let schema = self.resolve_schema(py)?;
@@ -160,17 +164,16 @@ impl Construct for StructRefNode {
 
         // MF-2 修复：当内层结构含表达式时，创建 child context 隔离 dict/expr_values，
         // 避免内层表达式污染外层的 context（expr_values、PyDict 字段）。
-        // StructNode.parse 在 has_expressions=true 分支会自行调用
-        // ctx.init_expr_values()，所以 child_ctx 只需提供空 PyDict 即可。
+        //
+        // R4 优化：child_ctx 用 new_child_placeholder（零 PyDict 分配），内层
+        // StructNode.parse 会先创建实例并 inject 实例 dict 到 child_ctx。
+        // parent 链保持正确（用于嵌套 `_` 引用）。
         let inner_has_expr = root.has_expressions();
         if inner_has_expr {
-            let mut child_ctx =
-                Context::new_child(ctx, py).map_err(|e| ConstructError::Generic {
-                    message: format!("failed to create child context for nested StructRef: {}", e),
-                    path: path.to_string(),
-                })?;
+            let mut child_ctx = Context::new_child_placeholder(ctx);
             root.parse(py, stream, &mut child_ctx, path)
         } else {
+            // 无表达式的内层：直接用传入的 ctx（placeholder），内层不读写 ctx。
             root.parse(py, stream, ctx, path)
         }
     }

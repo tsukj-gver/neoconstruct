@@ -1,25 +1,28 @@
 //! StructNode：字段序列根节点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.4、`docs/设计修订-parse路径优化.md` §3.2（方案 B'）。
+//! 设计依据：`docs/架构设计.md` §C.3.4、`docs/设计修订-parse路径优化.md` §3.2（方案 B'）、
+//! `docs/设计修订-parse路径优化-借用实例dict.md`（R4 优化）。
 //! Python 参考：`construct/construct/core.py` `Struct._parse` / `_build`（L2162-2268）。
 //!
 //! ## 行为概述
 //!
 //! StructNode 是 StructMixin 子类执行树的根节点：按顺序解析/构建一组命名字段。
 //!
-//! - **parse（方案 B'）**：Rust 内完整构造用户类实例——创建独立 PyDict →
-//!   逐字段解析并 `set_item` → [`crate::instance::create_class`] 创建空实例 →
-//!   [`crate::instance::force_setattr`] 整体替换 `__dict__` → 可选调用 `__post_init__`。
-//!   返回最终的用户类实例（不是 dict），消除 Python 侧 `cls(**dict)` O(N²) 开销。
+//! - **parse（R4：借用实例 `__dict__`）**：Rust 内完整构造用户类实例——
+//!   [`crate::instance::create_class`] 创建空实例（实例自带空 `__dict__`）→
+//!   `instance.getattr("__dict__")` 借用实例的 dict → 逐字段解析并直接 `set_item`
+//!   写入实例 dict（不经过 `tp_setattro`，天然绕过 frozen 拦截）→ 可选调用
+//!   `__post_init__`。返回最终的用户类实例（不是 dict），消除 Python 侧
+//!   `cls(**dict)` O(N²) 开销，且无需 `force_setattr` 整体替换。
 //! - **build**：逐字段从 Python 对象 `getattr` 取值，递归子节点构建，写入 stream。
 //! - **sizeof**：累加所有字段 sizeof；任一字段返回 Err 则整体返回 Err。
 //!
-//! ## 方案 B' 与 pydantic-core 对齐
+//! ## R4 与方案 B' 的关系
 //!
-//! 实例构造策略与 `pydantic_core::validators::model` 一致：
-//! - `create_class`（model.rs:348-365）：`tp_new(cls, (), NULL)`。
-//! - `set_model_attrs`（model.rs:367-379）：构造独立 dict 并整体替换 `__dict__`。
-//! - `force_setattr`（model.rs:381-394）：`PyObject_GenericSetAttr` 绕过自定义 `__setattr__`。
+//! R4 是方案 B' 的增量优化：语义不变（parse 返回用户类实例、兼容 frozen dataclass、
+//! 绕过自定义 `__setattr__`），仅改变实例 dict 的来源——从"新建独立 dict +
+//! `force_setattr` 整体替换"改为"借用实例自带 `__dict__`"，消除中间 dict 创建
+//! 与 `force_setattr` 固定开销（合计 ~62-98ns/parse）。
 //!
 //! ## 路径追踪（P0-3 优化：成功路径零成本）
 //!
@@ -30,12 +33,15 @@
 //!
 //! ## 关于 Context 的嵌套
 //!
-//! Phase 1 不支持 this 表达式，context 不会被读取。因此 StructNode.parse/build
-//! **不调用 `ctx.set_field`**（设计修订 §3.5）。
+//! parse 路径中 StructNode 自行管理 dict（R4）：先创建实例，inject 实例 `__dict__`
+//! 到 ctx（has_expressions=true 时），随后 `set_field_at` 同时写 dict 与
+//! expr_values_buf。无表达式的 Struct 不读写 ctx（直接操作实例 dict）。
+//!
+//! build 方向不变：有表达式时 `new_root` 创建独立 dict 作为表达式求值的临时存储。
 
 use crate::context::Context;
 use crate::error::ConstructError;
-use crate::instance::{create_class, force_setattr, intern_pystring};
+use crate::instance::{create_class, intern_pystring};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
@@ -120,25 +126,27 @@ pub struct StructField {
 ///
 /// 对应 Python construct 的 `Struct`。
 ///
-/// # parse 行为（方案 B'）
+/// # parse 行为（R4：借用实例 `__dict__`）
 ///
-/// 1. 创建/复用 `PyDict`（见下方 `has_expressions` 分支）。
-/// 2. 对每个 `StructField`：
+/// 1. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例（实例自带空 `__dict__`）。
+/// 2. `instance.getattr(interned "__dict__")`：借用实例自带的 `__dict__`（非新建），
+///    downcast 为 `PyDict`。slots 类此处失败 → 返回错误。
+/// 3. 对每个 `StructField`：
 ///    - `field.node.parse(...)` —— 递归解析子节点
 ///    - 根据 `field.mode` 分支：
-///      - `Rw`/`Ro`：`dict.set_item(py_name, value)` —— 存入 dict
+///      - `Rw`/`Ro`：写入实例 dict（dict 即实例的 `__dict__`）
 ///      - `Wo`：`drop(value)` —— 仅消费字节，不存入 dict
 ///    - 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）
-/// 3. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例。
-/// 4. [`force_setattr`]：`PyObject_GenericSetAttr(instance, "__dict__", dict)`
-///    整体替换实例 `__dict__`。
-/// 5. 若 `has_post_init`：调用 `instance.__post_init__()`。
-/// 6. 返回实例（用户类对象，不是 dict）。
+/// 4. 若 `has_post_init`：调用 `instance.__post_init__()`（dict 填充之后）。
+/// 5. 返回实例（无需 `force_setattr`——dict 本就是实例的 `__dict__`）。
 ///
-/// `has_expressions` 控制 context/dict 模式：
-/// - `false`：新建独立 `PyDict`（Phase 1 行为，使用 `placeholder` context）。
-/// - `true`：复用 ctx 的 `PyDict` 作为 instance dict（`new_root` context）。
-///   parse 结束时 `take_fields` 将 dict 移交给实例，ctx 的 dict 引用随之清空。
+/// `has_expressions` 控制 dict 填充方式：
+/// - `false`：直接 `dict.set_item`（不经过 context）。
+/// - `true`：`ctx.inject_fields(dict)` 让 Context 使用此 dict，
+///   通过 `ctx.set_field_at` 同步写入 expr_values_buf（供 GetInt 按索引快速取值）。
+///
+/// `PyDict_SetItem` 直接操作 dict 的内部哈希表，不触发 `tp_setattro`（即不调用
+/// `__setattr__`），因此天然绕过 frozen dataclass 的 `FrozenInstanceError` 拦截。
 ///
 /// 成功路径**不维护 Path**（P0-3 优化，零 String 分配）。
 ///
@@ -171,6 +179,13 @@ pub struct StructNode {
     /// - `false` → `placeholder`（Phase 1 性能优化保留）
     /// - `true` → `new_root`（恢复 context 使用）
     has_expressions: bool,
+    /// R4 新增：interned `"__dict__"`（getattr 实例 dict 复用，避免每次 parse 创建 str）。
+    ///
+    /// 在 [`StructNode::new`] 中通过 [`crate::instance::intern_pystring`] 创建一次，
+    /// 后续 parse 直接 `instance.getattr(self.dict_attr_name.bind(py))` 复用。
+    /// 由于 `"__dict__"` 是 CPython 内部高频使用的字符串，实际开销接近零
+    /// （命中 interned 池，仅一次指针比较）。
+    dict_attr_name: Py<PyString>,
 }
 
 impl StructNode {
@@ -184,7 +199,7 @@ impl StructNode {
     /// - `has_post_init`：编译期检测用户类是否定义了 `__post_init__`。
     /// - `has_expressions`：该 Struct 是否含有表达式字段（决定 context 模式）。
     pub fn new(
-        _py: Python<'_>,
+        py: Python<'_>,
         fields: Vec<StructField>,
         cls: Py<PyType>,
         has_post_init: bool,
@@ -195,6 +210,7 @@ impl StructNode {
             cls,
             has_post_init,
             has_expressions,
+            dict_attr_name: intern_pystring(py, "__dict__"),
         }
     }
 
@@ -255,28 +271,47 @@ impl StructNode {
 }
 
 impl Construct for StructNode {
-    fn parse(
+    fn parse<'py>(
         &self,
-        py: Python<'_>,
+        py: Python<'py>,
         stream: &mut ParseStream<'_>,
-        ctx: &mut Context<'_>,
+        ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 方案 B' 步骤 1-2：获取 dict 并逐字段解析。
-        //
-        // has_expressions=false（Phase 1 路径）：新建独立 PyDict，写入此 dict。
-        //   ctx 为 placeholder（无 PyDict），不写 context。WO 字段仍按 mode 丢弃。
-        //
-        // has_expressions=true（Phase 2 路径）：复用 ctx 的 PyDict 作为 instance dict
-        //   （零额外 PyDict 创建，设计 §5.5.2）。通过 ctx.set_field_at 写入
-        //   （同时写 PyDict + expr_values_buf，供 GetInt 按索引快速取值）。
-        //   最后 take_fields 将 dict 所有权移交给实例（零 clone_ref）。
+        // R4 步骤 1：先创建实例（tp_new，实例自带空 __dict__）。
+        // 错误路径：实例创建失败时无 dict 需清理，Rust RAII 保证安全。
+        let instance = create_class(self.cls.bind(py)).map_err(|e| ConstructError::Generic {
+            message: format!("failed to create instance via tp_new: {}", e),
+            path: path.to_string(),
+        })?;
 
-        // 用于 force_setattr 的 dict（Py<PyAny>，拥有所有权）。
-        let dict_for_instance: Py<PyAny> = if self.has_expressions {
-            // Phase 2 表达式路径：使用 ctx 的 dict。
-            // 初始化 expr_values_buf（栈分配内联数组，零堆开销）。
+        // R4 步骤 2：获取实例的 __dict__（借用实例自带的空 dict，非新建）。
+        // 使用缓存的 interned "__dict__"，避免每次 parse 创建临时 str。
+        // slots 类（无 __dict__）此处 getattr 失败 → 返回明确错误（设计修订 §8.1）。
+        let dict_bound = instance
+            .getattr(self.dict_attr_name.bind(py))
+            .map_err(|e| ConstructError::Generic {
+                message: format!(
+                    "failed to get __dict__ from instance: {}. \
+                     该类可能使用了 __slots__ 或 @dataclass(slots=True)，\
+                     不支持 slots dataclass。",
+                    e
+                ),
+                path: path.to_string(),
+            })?
+            .downcast_into::<PyDict>()
+            .map_err(|_| ConstructError::Generic {
+                message: "instance __dict__ is not a dict (possible __slots__ class)".into(),
+                path: path.to_string(),
+            })?;
+
+        // R4 步骤 3：根据 has_expressions 选择填充路径。
+        if self.has_expressions {
+            // Phase 2 表达式路径：将实例 dict 注入 ctx，通过 set_field_at 同步
+            // expr_values_buf（供 GetInt 按索引快速取值）。
+            ctx.inject_fields(dict_bound);
             ctx.init_expr_values(self.fields.len());
+
             for (idx, field) in self.fields.iter().enumerate() {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
@@ -287,7 +322,7 @@ impl Construct for StructNode {
                 };
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
-                        // 写入 ctx 的 dict + expr_values_buf（同时充当 context 与 instance dict）。
+                        // 写入 ctx 的 fields（即实例 dict）+ expr_values_buf。
                         ctx.set_field_at(idx, field.name.py_name(), value.bind(py), py)?;
                     }
                     FieldMode::Wo => {
@@ -297,19 +332,10 @@ impl Construct for StructNode {
                     }
                 }
             }
-            // take_fields 将 dict 所有权移交给实例（零 clone_ref）。
-            // parse 结束后 ctx 不再使用，dict 安全移出。
-            ctx.take_fields()
-                .ok_or_else(|| ConstructError::ExprContext {
-                    message: "expression struct requires context with PyDict, but got placeholder"
-                        .to_string(),
-                    path: path.to_string(),
-                })?
-                .into_any()
-                .unbind()
+            // dict 已在 ctx.fields 中，随 ctx 存活。无需 take_fields（R4 消除）。
         } else {
-            // Phase 1 路径：新建独立 PyDict。
-            let dict = PyDict::new_bound(py);
+            // Phase 1 无表达式路径：直接操作 dict（不经过 ctx）。
+            // PyDict_SetItem 不触发 __setattr__，天然绕过 frozen dataclass 拦截。
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
@@ -320,40 +346,16 @@ impl Construct for StructNode {
                 };
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
-                        // RW/RO：存入 instance dict。
-                        // 裸 `?`：PyErr → ConstructError::Generic（From<PyErr>）。
-                        dict.set_item(field.name.py_name().bind(py), value.bind(py))?;
+                        dict_bound.set_item(field.name.py_name().bind(py), value.bind(py))?;
                     }
                     FieldMode::Wo => {
-                        // WO：仅消费字节，不存入 dict。
                         drop(value);
                     }
                 }
             }
-            dict.into_any().unbind()
-        };
+        }
 
-        // 方案 B' 步骤 3：tp_new 创建空实例（直接读 tp_new 槽位）。
-        let instance = create_class(self.cls.bind(py)).map_err(|e| ConstructError::Generic {
-            message: format!("failed to create instance via tp_new: {}", e),
-            path: path.to_string(),
-        })?;
-
-        // 方案 B' 步骤 4：整体替换 __dict__（绕过自定义 __setattr__）。
-        // 错误时附加 slots 提示（设计修订 §5.7.1 N4-R3 运行期兜底）。
-        force_setattr(py, &instance, "__dict__", dict_for_instance).map_err(|e| {
-            ConstructError::Generic {
-                message: format!(
-                    "failed to set __dict__ on instance: {}. \
-                     该类可能使用了 __slots__ 或 @dataclass(slots=True)，\
-                     Phase 1 不支持 slots dataclass。",
-                    e
-                ),
-                path: path.to_string(),
-            }
-        })?;
-
-        // 方案 B' 步骤 5：可选 __post_init__ 调用（仅 has_post_init=True 时）。
+        // R4 步骤 4：可选 __post_init__（在 dict 填充之后，与 R3 时序语义等价）。
         if self.has_post_init {
             instance
                 .call_method0("__post_init__")
@@ -363,6 +365,7 @@ impl Construct for StructNode {
                 })?;
         }
 
+        // R4 步骤 5：返回实例（无需 force_setattr——dict 本就是实例的 __dict__）。
         Ok(instance.unbind())
     }
 
@@ -1172,8 +1175,9 @@ mod tests {
 
     #[test]
     fn parse_frozen_dataclass_does_not_raise() {
-        // 验证 frozen dataclass 可正常 parse（force_setattr 绕过 frozen 拦截）。
-        // 设计修订 §5.6.3 第 7 条。
+        // R4 验证：frozen dataclass 可正常 parse。
+        // PyDict_SetItem 直接操作 dict，不经过 tp_setattro（即不触发 __setattr__），
+        // 天然绕过 frozen dataclass 的 FrozenInstanceError 拦截（§2.2）。
         with_py(|py| {
             let code = concat!(
                 "from dataclasses import dataclass\n",
@@ -1214,6 +1218,43 @@ mod tests {
                 .expect("extract");
             assert_eq!(x, 0xAA);
             assert_eq!(y, 0xBB);
+        });
+    }
+
+    #[test]
+    fn parse_slots_class_returns_error_mentioning_dict_or_slots() {
+        // R4（§8.1）：slots 类无 __dict__，getattr("__dict__") 失败 → 返回错误。
+        // 错误消息应提示 __dict__ 或 slots，便于用户定位问题。
+        with_py(|py| {
+            let code = "class WithSlots:\n    __slots__ = ('x',)\n";
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None)
+                .expect("define WithSlots");
+            let cls = globals
+                .get_item("WithSlots")
+                .expect("get_item ok")
+                .expect("class exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+
+            let fields = vec![rw_field(py, "x", u8_node())];
+            let node = StructNode::new(py, fields, cls, false, false);
+            let mut stream = ParseStream::new(&[0x42]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("slots class should fail");
+            match err {
+                ConstructError::Generic { message, .. } => {
+                    assert!(
+                        message.contains("__dict__") || message.contains("slots"),
+                        "error should mention __dict__/slots: {}",
+                        message
+                    );
+                }
+                other => panic!("expected Generic error for slots class, got {:?}", other),
+            }
         });
     }
 
@@ -1362,15 +1403,16 @@ mod tests {
     }
 
     #[test]
-    fn has_expressions_true_uses_new_root_context_for_parse() {
-        // has_expressions=true 时，parse 路径使用 ctx 的 dict（new_root 创建）。
-        // take_fields 将 dict 移交给实例，parse 后 ctx.fields() 为 None。
-        // 验证：实例属性正确 + ctx.fields() 为 None（dict 已移出）。
+    fn has_expressions_true_injects_instance_dict_into_context() {
+        // R4：has_expressions=true 时，parse 先创建实例，借用实例 __dict__ 注入 ctx。
+        // parse 后 ctx.fields() 为 Some（持有实例 __dict__ 的引用），不再 take。
+        // 验证：实例属性正确 + ctx.fields() 为 Some + ctx dict 与实例 __dict__ 同一对象。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let mut stream = ParseStream::new(&[0x01, 0x02]);
-            let mut ctx = Context::new_root(py).expect("ctx");
+            // R4：统一用 placeholder（生产路径 _parse_raw 也用 placeholder）
+            let mut ctx = Context::placeholder(py);
             let mut path = Path::new();
             let result = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
@@ -1381,15 +1423,25 @@ mod tests {
             let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 0x01);
             assert_eq!(b, 0x02);
-            // take_fields 后 ctx.fields() 为 None（dict 所有权已移交给实例）
-            assert!(ctx.fields().is_none());
+            // R4：inject 后 ctx.fields() 为 Some（不再 take_fields）
+            let ctx_dict = ctx
+                .fields()
+                .expect("ctx should hold instance dict after inject_fields");
+            assert_eq!(ctx_dict.len(), 2);
+            // 验证 ctx 的 dict 就是实例的 __dict__（同一对象，R4 借用语义）
+            let inst_dict = inst.getattr("__dict__").unwrap();
+            assert!(
+                ctx_dict.as_ptr() == inst_dict.as_ptr(),
+                "ctx dict should be the instance's __dict__ (same object)"
+            );
         });
     }
 
     #[test]
     fn has_expressions_true_with_wo_field_skips_context_write() {
-        // has_expressions=true + WO 字段：WO 不写入 dict（不写入实例也不写入 expr_values）。
-        // take_fields 后 ctx.fields() 为 None，通过实例 __dict__ 验证。
+        // R4：has_expressions=true + WO 字段：WO 不写入实例 dict（不 set_field_at）。
+        // dict 被 inject 到 ctx，parse 后 ctx.fields() 为 Some（实例 __dict__），
+        // 通过实例 __dict__ 验证 WO 字段不存在。
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),

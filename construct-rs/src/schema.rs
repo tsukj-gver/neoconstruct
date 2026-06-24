@@ -34,8 +34,8 @@ use pyo3::types::{PyAny, PyBytes, PyType};
 /// `#[pyclass(frozen)]` 使 Python 侧无法修改其属性。Rust 侧 `root`（[`Node`]）
 /// 与 `cls` 不可变，运行时不允许增删节点或修改参数。
 ///
-/// parse 入口（[`CompiledSchema::_parse_raw`]）直接返回用户类实例（方案 B'，
-/// Rust 内部 create_class + force_setattr 构造，不返回 dict 到 Python）。
+/// parse 入口（[`CompiledSchema::_parse_raw`]）直接返回用户类实例（R4，
+/// Rust 内部 create_class + 借用 `__dict__` 构造，不返回 dict 到 Python）。
 /// 嵌套字段的实例化由 [`crate::nodes::struct_node::StructNode`] 与
 /// [`crate::nodes::struct_ref::StructRefNode`] 在 Rust 内部递归完成，
 /// 全程无 Python 回调。
@@ -56,8 +56,10 @@ pub struct CompiledSchema {
     cls: Py<PyType>,
     /// 缓存：根 StructNode 是否含表达式（创建时计算一次）。
     ///
-    /// 决定 `_parse_raw` / `_build_raw` 入口使用 `Context::new_root`（有表达式）
-    /// 还是 `Context::placeholder`（无表达式）。缓存避免每次 parse/build 重新 match。
+    /// 决定 `_build_raw` 入口使用 `Context::new_root`（有表达式）还是
+    /// `Context::placeholder`（无表达式）。`_parse_raw` 在 R4 后统一使用
+    /// `placeholder`（StructNode.parse 内部自行管理 dict）。缓存避免每次
+    /// build 重新 match。
     has_expressions: bool,
     /// 缓存：静态大小（无表达式时为 `Some(n)`，有表达式时为 `None`）。
     ///
@@ -108,8 +110,9 @@ impl CompiledSchema {
 
     /// 判断根节点（StructNode）是否含有表达式字段。
     ///
-    /// 决定 `_parse_raw` / `_build_raw` 入口使用 `Context::new_root`（有表达式）
-    /// 还是 `Context::placeholder`（无表达式，Phase 1 性能优化保留）。
+    /// 决定 `_build_raw` 入口使用 `Context::new_root`（有表达式）还是
+    /// `Context::placeholder`（无表达式，Phase 1 性能优化保留）。`_parse_raw`
+    /// 在 R4 后统一使用 `placeholder`，不再调用此方法。
     ///
     /// 非 Struct 根节点视为无表达式。
     ///
@@ -132,17 +135,17 @@ impl CompiledSchema {
     /// _parse_raw(self, data: bytes) -> Any
     /// ```
     ///
-    /// # 内部流程（方案 B'）
+    /// # 内部流程（R4：借用实例 `__dict__`）
     ///
     /// 1. 从 `PyBytes` 提取 `&[u8]`，创建 `ParseStream`（纯 Rust）。
-    /// 2. 根据 root 是否含表达式选择 Context：
-    ///    - 有表达式 → `Context::new_root`（创建 PyDict，供表达式求值）
-    ///    - 无表达式 → `Context::placeholder`（零开销，Phase 1 优化保留）
+    /// 2. 统一使用 `Context::placeholder`（不分配 `PyDict`）——StructNode.parse
+    ///    内部根据 `has_expressions` 自行创建实例并 inject 实例 `__dict__`。
     /// 3. 调用 `self.root.parse(...)`——进入执行树遍历。
-    /// 4. StructNode.parse 内部完整构造用户类实例（create_class + force_setattr）。
+    /// 4. StructNode.parse 内部完整构造用户类实例（create_class → getattr
+    ///    `__dict__` → 填充 dict → 可选 `__post_init__`），无需 `force_setattr`。
     /// 5. 直接返回实例（不再跨 FFI 返回 dict 到 Python）。
     ///
-    /// 详见 `docs/设计修订-parse路径优化.md` §3.1、`docs/模块设计-表达式系统.md` §5.5。
+    /// 详见 `docs/设计修订-parse路径优化-借用实例dict.md` §3.5。
     #[pyo3(signature = (data))]
     pub fn _parse_raw<'py>(
         &self,
@@ -151,15 +154,12 @@ impl CompiledSchema {
     ) -> PyResult<Bound<'py, PyAny>> {
         let bytes = data.as_bytes();
         let mut stream = ParseStream::new(bytes);
-        // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
-        let mut ctx = if self.root_has_expressions() {
-            Context::new_root(py)?
-        } else {
-            // P0-2：无表达式时使用占位 context（不分配 PyDict）。
-            Context::placeholder(py)
-        };
+        // R4：统一使用 placeholder。StructNode.parse 内部根据 has_expressions
+        // 自行创建实例并 inject dict（has_expressions=true 时）或直接操作实例
+        // dict（has_expressions=false 时）。不再需要入口处判断 has_expressions。
+        let mut ctx = Context::placeholder(py);
         let mut path = Path::new();
-        // root.parse 返回用户类实例（StructNode 内部 create_class + force_setattr）
+        // root.parse 返回用户类实例（StructNode 内部 create_class + 借用 __dict__）
         let result = self.root.parse(py, &mut stream, &mut ctx, &mut path)?;
         Ok(result.into_bound(py))
     }
@@ -190,7 +190,8 @@ impl CompiledSchema {
             Some(cap) => BuildStream::with_capacity(cap),
             None => BuildStream::new(),
         };
-        // 根据 root 是否含表达式选择 context 模式（设计 §5.5.1）。
+        // 根据 root 是否含表达式选择 context 模式（build 方向，设计 §5.5.1）。
+        // 注意：parse 方向（R4）统一用 placeholder，build 方向仍需区分。
         let has_expr = self.root_has_expressions();
         let mut ctx = if has_expr {
             Context::new_root(py)?

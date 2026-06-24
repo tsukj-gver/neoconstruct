@@ -140,10 +140,11 @@ pub fn compile_schema(
         .map(|progs| progs.iter().any(|p| p.is_some()))
         .unwrap_or(false);
 
-    // 2. 检测 __slots__（设计修订 §3.6 + §5.7.1 N4-R3）
+    // 2. 检测 __slots__（设计修订 §3.6 + §5.7.1 N4-R3 + R4 §8.1）
     //    手写 __slots__ 在 __init_subclass__ 时已可见，编译期报错（fail fast）。
     //    @dataclass(slots=True) 的 __slots__ 在 __init_subclass__ 后才生成，
-    //    可能漏检，由 parse 时 force_setattr 失败兜底（struct_node.rs 错误信息已含提示）。
+    //    可能漏检，由 parse 时 getattr("__dict__") 失败兜底（struct_node.rs
+    //    错误信息已含 slots 提示）。
     if check_has_slots(cls)? {
         let cls_name = cls
             .name()

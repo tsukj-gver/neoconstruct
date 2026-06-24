@@ -138,6 +138,30 @@ impl<'py> Context<'py> {
         })
     }
 
+    /// 创建不持有 `PyDict` 的嵌套 context（有 parent，无 fields）。
+    ///
+    /// 用于 parse 路径优化（R4）：[`crate::nodes::struct_ref::StructRefNode`] 委托
+    /// 内层 [`crate::nodes::struct_node::StructNode`] 的 parse 时，内层 parse 会
+    /// 先创建实例并 [`Context::inject_fields`] 实例的 `__dict__` 到此 context。
+    /// 相比 [`Context::new_child`]（创建空 `PyDict`），此方法零 `PyDict` 分配。
+    ///
+    /// # 参数
+    ///
+    /// - `parent`：外层 context（用于嵌套 `_` 引用）。
+    ///
+    /// # 引用计数
+    ///
+    /// 不创建任何 Python 对象，零开销。`parent` 仅作为引用存储（不 incref，
+    /// 生命周期由 `'py` 保证）。
+    pub fn new_child_placeholder(parent: &'py Context<'py>) -> Self {
+        Self {
+            fields: None,
+            parent: Some(parent),
+            expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
+            expr_values_len: 0,
+        }
+    }
+
     /// 初始化 expr_values 缓冲区（预分配 n 个 null 槽位）。
     ///
     /// 在 StructNode.parse/build 的 `has_expressions` 分支入口调用一次，
@@ -303,13 +327,41 @@ impl<'py> Context<'py> {
         Ok(v)
     }
 
+    /// 注入一个已存在的 `PyDict` 作为 fields（借用外部 dict）。
+    ///
+    /// 用于 parse 路径优化（R4）：先创建实例，取其 `__dict__`，注入 context，
+    /// 随后的 [`Context::set_field_at`] 直接写实例的 dict。替代
+    /// [`Context::new_root`] + [`Context::take_fields`] 的"创建独立 dict 再移出"模式，
+    /// 消除中间 dict 创建（节省 ~30-50ns）与 `force_setattr` 整体替换
+    /// （节省 ~32-48ns）。
+    ///
+    /// 调用后 `self.fields = Some(dict)`。若 context 原有 fields（如
+    /// [`Context::new_root`] 创建的空 dict），旧引用被 drop（引用计数 -1），
+    /// 新 dict 引用接管。对 placeholder context（`fields = None`）调用时直接注入。
+    ///
+    /// # 引用计数
+    ///
+    /// `dict: Bound<'py, PyDict>` 是 owned 引用（如 `PyObject_GetAttr` 返回的
+    /// new reference，引用计数已 +1）。注入后由 `self.fields` 持有，Context drop
+    /// 时 -1。实例同时通过 `tp_dictoffset` 持有 dict 引用，dict 不会被过早释放。
+    ///
+    /// # Safety
+    ///
+    /// 注入的 dict 必须在此 Context 存活期间保持有效。生产路径中 dict 来自实例的
+    /// `__dict__`，实例存活到 parse 返回，Context 存活到调用方栈帧结束——
+    /// 实例通过 `unbind()` 返回调用方，dict 因此始终有效。
+    #[inline]
+    pub fn inject_fields(&mut self, dict: Bound<'py, PyDict>) {
+        self.fields = Some(dict);
+    }
+
     /// 取出 fields dict 的所有权（parse 末尾将 dict 移交给实例）。
     ///
     /// 调用后 `self.fields = None`，后续访问 `fields()` 返回 `None`。
     /// 仅在 parse/build 结束、ctx 不再使用时调用。
     ///
-    /// 用于 has_expressions=true 的 parse 路径：将 ctx 的 dict 直接移交给
-    /// 实例（避免 clone 的 Py_INCREF 开销）。
+    /// 用于 build 方向（has_expressions=true 时仍需要独立 dict 作为表达式存储）。
+    /// parse 方向在 R4 优化后改用 [`Context::inject_fields`]，不再调用此方法。
     #[inline]
     pub fn take_fields(&mut self) -> Option<Bound<'py, PyDict>> {
         self.fields.take()
@@ -392,6 +444,110 @@ mod tests {
                 parent_ref.fields().expect("fields").len(),
                 root.fields().expect("fields").len()
             );
+        });
+    }
+
+    #[test]
+    fn new_child_placeholder_has_parent_but_no_dict() {
+        // R4: new_child_placeholder 有 parent 但 fields=None（零 PyDict 分配）。
+        with_python(|py| {
+            let root = Context::new_root(py).expect("root");
+            let child = Context::new_child_placeholder(&root);
+            assert!(child.parent().is_some(), "should link to parent");
+            assert!(
+                child.fields().is_none(),
+                "placeholder child should not allocate PyDict"
+            );
+        });
+    }
+
+    #[test]
+    fn new_child_placeholder_parent_chain_works() {
+        // 验证 new_child_placeholder 的 parent 链可用于嵌套 _ 引用。
+        with_python(|py| {
+            let root = Context::new_root(py).expect("root");
+            let mid = Context::new_child_placeholder(&root);
+            let leaf = Context::new_child_placeholder(&mid);
+            assert!(leaf.parent().is_some());
+            let mid_ref = leaf.parent().expect("mid");
+            assert!(mid_ref.parent().is_some());
+            let root_ref = mid_ref.parent().expect("root");
+            assert!(root_ref.parent().is_none());
+        });
+    }
+
+    #[test]
+    fn inject_fields_replaces_none_with_dict() {
+        // R4: placeholder context 上 inject_fields 后 fields 可用。
+        with_python(|py| {
+            let mut ctx = Context::placeholder(py);
+            assert!(ctx.fields().is_none());
+            let dict = PyDict::new_bound(py);
+            dict.set_item("k", 1i64).expect("set k");
+            ctx.inject_fields(dict);
+            assert!(ctx.fields().is_some());
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+        });
+    }
+
+    #[test]
+    fn inject_fields_replaces_existing_dict() {
+        // R4: new_root context 上 inject_fields 替换旧 dict（旧 dict drop，引用 -1）。
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            // 旧 dict 有内容
+            ctx.set_field("old", &42i64.into_py(py).bind(py).clone())
+                .expect("set old");
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+
+            // 注入新 dict
+            let new_dict = PyDict::new_bound(py);
+            new_dict.set_item("new", 99i64).expect("set new");
+            ctx.inject_fields(new_dict);
+
+            // 验证旧 dict 被替换
+            let fields = ctx.fields().expect("fields");
+            assert_eq!(fields.len(), 1);
+            assert!(fields.contains("new").expect("contains new"));
+            assert!(!fields.contains("old").expect("not contains old"));
+        });
+    }
+
+    #[test]
+    fn inject_fields_then_set_field_at_works() {
+        // R4: inject_fields 后 set_field_at 正常工作（模拟 has_expressions=true parse 路径）。
+        with_python(|py| {
+            let mut ctx = Context::placeholder(py);
+            let dict = PyDict::new_bound(py);
+            ctx.inject_fields(dict);
+            ctx.init_expr_values(1);
+            let key = PyString::new_bound(py, "count").unbind();
+            let value = 42i64.into_py(py);
+            ctx.set_field_at(0, &key, value.bind(py), py)
+                .expect("set_field_at");
+            // dict 已写入
+            assert_eq!(ctx.fields().expect("fields").len(), 1);
+            // buf 也写入（get_int_at 能读到）
+            assert_eq!(ctx.get_int_at(0, py).expect("get_int_at"), 42);
+        });
+    }
+
+    #[test]
+    fn new_child_placeholder_then_inject_simulates_nested_parse() {
+        // 模拟 StructRef 嵌套 parse：外层 new_root → child placeholder → inject 内层 dict。
+        with_python(|py| {
+            let root = Context::new_root(py).expect("root");
+            let mut child = Context::new_child_placeholder(&root);
+            assert!(child.fields().is_none());
+
+            // 内层 parse 创建实例后 inject dict
+            let inner_dict = PyDict::new_bound(py);
+            inner_dict.set_item("x", 5i64).expect("set x");
+            child.inject_fields(inner_dict);
+
+            // child 现在有 dict 且 parent 链正确
+            assert_eq!(child.fields().expect("fields").len(), 1);
+            assert!(child.parent().is_some());
         });
     }
 
