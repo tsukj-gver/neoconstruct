@@ -58,8 +58,8 @@ PM 不编写业务代码，不深入实现细节。PM 的输入是数据（指�
 ## 工作流管道
 
 ```
-PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → AUDIT → ACCEPTED
- (PM)      (ARCH)        (REV)         (DEV)      (VET)     (AUDITOR)  (PM)
+PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED → AUDITED
+ (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)     (AUDITOR)
 ```
 
 - **PENDING**：PM 选取任务
@@ -67,10 +67,10 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → AUDIT →
 - **DESIGN_REVIEW**：REV 检视设计（延续性、性能、可行性、完备性）
 - **CODING**：DEV 编码 + 单元测试 + 自检
 - **CODE_REVIEW**：VET 审查代码（逻辑、行为一致性、错误处理、边界条件）
-- **AUDIT**：AUDITOR 审计流程完整性、交付件完整性、测量口径、标准合规
-- **ACCEPTED**：PM 确认完成
+- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）
+- **AUDITED**：AUDITOR 审计 PM 的验收是否到位
 
-**驳回**：REV 驳回至 DESIGNING；VET 驳回至 CODING；AUDITOR 驳回至对应阶段。必须附具体原因。
+**驳回**：REV 驳回至 DESIGNING；VET 驳回至 CODING；AUDITOR 驳回至 PM（PM 补充缺失的管理工作）。必须附具体原因。
 
 **角色隔离**：同一子任务中 DEV 不得兼任 REV 或 VET。
 
