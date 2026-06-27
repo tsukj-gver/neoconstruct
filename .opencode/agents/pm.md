@@ -81,6 +81,8 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 
 分派时提供：任务标识、状态转换、任务要求、必读文件、输出要求、操作权限。
 
+**性能相关子任务**：当阶段总纲有 S-PERF 标准时，DEV 分派 prompt 中必须明确要求运行 benchmark 并在报告中提供性能数据。即使子任务尚未端到端可用，也要求提供组件级微基准数据。
+
 驳回后重新分派必须附完整驳回原因。
 
 ## 指标验收
