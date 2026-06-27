@@ -1,0 +1,705 @@
+"""construct-rs vs Python construct 2.10.70 BitStream 场景性能基准测试。
+
+设计依据：AGENTS.md §6（性能门禁）、§7（核心技术决策）、Phase 2.5 ``benchmark_expr.py``
+的子进程隔离方法。
+
+覆盖范围：Phase 3 全部子任务（3.1 BitsInteger / 3.2 Bitwise+BitStruct / 3.3
+Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build} 两个方向。
+
+口径（AGENTS.md §6）：
+    本脚本严格遵循"用户面 API"测量口径：
+    - **construct-rs**：通过 ``maturin develop`` 安装到 venv，子进程中 Python ``timeit``
+      调用真实用户面 API（``Packet.parse(data)`` / ``packet.build()``）。包含完整的
+      Python 分发 + 单次 FFI 穿越 + Rust 内核执行开销。
+    - **Python construct 2.10.70**：``pip install`` 安装到 venv，子进程中 Python ``timeit``
+      调用等效 API（``fmt.parse(data)`` / ``fmt.build(obj)``）。
+
+    两个包同名 ``construct``，无法在同一 Python 进程中同时导入。本脚本采用 **子进程隔离**
+    策略：每个 impl × 场景 × 方向在独立子进程中运行，通过 JSON 输出结果，主进程合并
+    打印对比表。
+
+    **重要**：之前 Phase 3.1 / 3.3 性能补测（``experiments/bench_bits``、
+    ``experiments/bench_phase33``）使用 Rust 二进制直接调 Rust 库，跳过了 Python 分发
+    和 FFI 开销，口径错误。本脚本是 Phase 3 性能数据的**权威来源**。
+
+用法::
+
+    python tests/benchmark_bitstream.py
+
+输出：stdout 打印对比表 + 详细日志写 ``tests/benchmark_bitstream_results.txt``。
+
+通过标准（Phase 3 总纲 S-PERF）：
+- BitStruct parse/build 几何平均 ≥10x vs Python construct 2.10.70
+- 单点 <4x 视为门禁失败
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import platform
+import statistics
+import subprocess
+import sys
+import textwrap
+import time
+from pathlib import Path
+
+# 每次测量的最小调用次数（timeit number）
+NUMBER = 100_000
+# 重复测量次数（取中位数）
+REPEAT = 5
+
+# construct-rs python/ 目录（用于 sys.path 操纵，让 construct-rs 覆盖 site-packages）
+_CRS_PYTHON_DIR = str(
+    Path(__file__).resolve().parent.parent / "python"
+)
+
+# Python 解释器（用于跑两个 impl）。默认与主进程相同。
+# 子进程隔离保证两个同名包不会冲突。
+_PYTHON_EXE = sys.executable
+
+
+# ---------------------------------------------------------------------------
+# 子进程测量脚本（每个 impl 在独立进程中运行）
+# ---------------------------------------------------------------------------
+#
+# 子进程脚本接收 4 个参数：impl, case, direction, number, repeat, crs_python_dir。
+# 输出一行 JSON 到 stdout。
+#
+# 两个 impl 的差异：
+# - 'rs'：sys.path 操纵让 construct-rs/python 优先；用户面 API 是 @dataclass 类
+# - 'py'：sys.path 操纵移除 construct-rs/python，使用 site-packages 的 Python 原版；
+#         用户面 API 是 Bitwise/BitStruct/Struct 等构造器
+#
+# 各场景的用例定义（parse_data 和 build_input）在两个 impl 中保持语义等价。
+
+_MEASURE_SCRIPT = textwrap.dedent(
+    """\
+    import json
+    import statistics
+    import sys
+    import timeit
+
+    IMPL = {impl!r}
+    CASE = {case!r}
+    DIRECTION = {direction!r}
+    NUMBER = {number!r}
+    REPEAT = {repeat!r}
+    CRS_PYTHON_DIR = {crs_python_dir!r}
+
+    # ---- sys.path 操纵 ----
+    # 关键：两个 impl 必须导入不同的 construct 包，sys.path 必须严格隔离。
+    # 默认 sys.path 中 site-packages 在前（含 Python 原版 construct），
+    # construct-rs/python 在后（通过 .pth 添加），需要显式重排。
+    if IMPL == 'rs':
+        # construct-rs：强制移到 sys.path 最前（即使已存在也要重排）
+        sys.path[:] = [p for p in sys.path if p != CRS_PYTHON_DIR]
+        sys.path.insert(0, CRS_PYTHON_DIR)
+    else:
+        # Python construct：确保 construct-rs/python 不在 sys.path 中
+        sys.path[:] = [p for p in sys.path if p != CRS_PYTHON_DIR]
+    # 清除已缓存的 construct 模块（防止父进程预导入的影响）
+    for k in list(sys.modules):
+        if k == 'construct' or k.startswith('construct.'):
+            del sys.modules[k]
+
+    # ---- 导入 ----
+    if IMPL == 'rs':
+        from dataclasses import dataclass
+        from construct import (
+            StructMixin, BitStructMixin, field, wfield,
+            BitsInteger, Bit, Nibble, Octet,
+            Bitwise, Bytewise, BitsSwapped, ByteSwapped, Padding,
+            Bytes, Int16ub, Int32ub,
+        )
+    else:
+        import construct as pc
+        Bitwise = pc.Bitwise
+        BitsInteger = pc.BitsInteger
+        BitStruct = pc.BitStruct
+        Padding = pc.Padding
+        Bytes = pc.Bytes
+        Bytewise = pc.Bytewise
+        ByteSwapped = pc.ByteSwapped
+        BitsSwapped = pc.BitsSwapped
+        Struct = pc.Struct
+        Nibble = pc.Nibble
+        Bit = pc.Bit
+        Octet = pc.Octet
+        Int16ub = pc.Int16ub
+        Int32ub = pc.Int32ub
+
+    # ---- 用例定义 ----
+    def _make_case(case):
+        # 每个用例返回 (parse_target, build_target)
+        # parse_target / build_target 是无参 callable，分别是 parse 和 build 的测量目标
+        if IMPL == 'rs':
+            return _make_case_rs(case)
+        else:
+            return _make_case_py(case)
+
+    def _make_case_rs(case):
+        if case == 'B1':
+            # Bitwise(BitsInteger(8))
+            @dataclass
+            class P(BitStructMixin):
+                v: int = field(BitsInteger(8))
+            parse_data = b"\\xA5"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=0xA5)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'B2':
+            # Bitwise(BitsInteger(16))
+            @dataclass
+            class P(BitStructMixin):
+                v: int = field(BitsInteger(16))
+            parse_data = b"\\xA5\\x3C"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=0xA53C)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'B3':
+            # Bitwise(BitsInteger(32))
+            @dataclass
+            class P(BitStructMixin):
+                v: int = field(BitsInteger(32))
+            parse_data = b"\\xA5\\x3C\\x96\\xC3"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=0xA53C96C3)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'B4':
+            # Bitwise(BitsInteger(8, signed=True))
+            @dataclass
+            class P(BitStructMixin):
+                v: int = field(BitsInteger(8, signed=True))
+            parse_data = b"\\xA5"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=-91)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BS1':
+            # BitStruct(Nibble, BitsInteger(10), Padding(2))
+            @dataclass
+            class P(BitStructMixin):
+                a: int = field(Nibble())
+                b: int = field(BitsInteger(10))
+                c: int = wfield(Padding(2), default=None)
+            parse_data = b"\\xBE\\xEF"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(a=0xB, b=0x3BB)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BS2':
+            # BitStruct(Bit, Nibble, Octet, Padding(3))
+            @dataclass
+            class P(BitStructMixin):
+                a: int = field(Bit())
+                b: int = field(Nibble())
+                c: int = field(Octet())
+                d: int = wfield(Padding(3), default=None)
+            parse_data = b"\\xAB\\xCD"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(a=1, b=0x5, c=0x79)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BW1':
+            # BitStruct(Nibble, Bytewise(Int16ub), Nibble)
+            @dataclass
+            class P(BitStructMixin):
+                a: int = field(Nibble())
+                b: int = field(Bytewise(Int16ub))
+                c: int = field(Nibble())
+            parse_data = b"\\xA1\\x23\\x4B"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(a=0xA, b=0x1234, c=0xB)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BW2':
+            # BitsSwapped(Bytes(4))
+            @dataclass
+            class P(StructMixin):
+                v: bytes = field(BitsSwapped(Bytes(4)))
+            parse_data = b"\\xF0\\x0F\\xAA\\x55"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=b"\\x0F\\xF0\\x55\\xAA")
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BW3':
+            # ByteSwapped(Int32ub)
+            @dataclass
+            class P(StructMixin):
+                v: int = field(ByteSwapped(Int32ub))
+            parse_data = b"\\x78\\x56\\x34\\x12"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(v=0x12345678)
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        if case == 'BW4':
+            # Struct(Bytes(1), Padding(4), Bytes(2))
+            @dataclass
+            class P(StructMixin):
+                tag: bytes = field(Bytes(1))
+                reserved: int = wfield(Padding(4), default=None)
+                data: bytes = field(Bytes(2))
+            parse_data = b"\\xAA\\x00\\x00\\x00\\x00\\xBB\\xCC"
+            parse_target = lambda: P.parse(parse_data)
+            obj = P(tag=b"\\xAA", data=b"\\xBB\\xCC")
+            build_target = lambda: obj.build()
+            return parse_target, build_target
+
+        raise ValueError('unknown case: ' + case)
+
+    def _make_case_py(case):
+        if case == 'B1':
+            fmt = Bitwise(BitsInteger(8))
+            parse_data = b"\\xA5"
+            build_input = 0xA5
+        elif case == 'B2':
+            fmt = Bitwise(BitsInteger(16))
+            parse_data = b"\\xA5\\x3C"
+            build_input = 0xA53C
+        elif case == 'B3':
+            fmt = Bitwise(BitsInteger(32))
+            parse_data = b"\\xA5\\x3C\\x96\\xC3"
+            build_input = 0xA53C96C3
+        elif case == 'B4':
+            fmt = Bitwise(BitsInteger(8, signed=True))
+            parse_data = b"\\xA5"
+            build_input = -91
+        elif case == 'BS1':
+            fmt = BitStruct("a"/Nibble, "b"/BitsInteger(10), "c"/Padding(2))
+            parse_data = b"\\xBE\\xEF"
+            build_input = dict(a=0xB, b=0x3BB)
+        elif case == 'BS2':
+            fmt = BitStruct("a"/Bit, "b"/Nibble, "c"/Octet, "d"/Padding(3))
+            parse_data = b"\\xAB\\xCD"
+            build_input = dict(a=1, b=0x5, c=0x79)
+        elif case == 'BW1':
+            fmt = BitStruct("a"/Nibble, "b"/Bytewise(Int16ub), "c"/Nibble)
+            parse_data = b"\\xA1\\x23\\x4B"
+            build_input = dict(a=0xA, b=0x1234, c=0xB)
+        elif case == 'BW2':
+            fmt = BitsSwapped(Bytes(4))
+            parse_data = b"\\xF0\\x0F\\xAA\\x55"
+            build_input = b"\\x0F\\xF0\\x55\\xAA"
+        elif case == 'BW3':
+            fmt = ByteSwapped(Int32ub)
+            parse_data = b"\\x78\\x56\\x34\\x12"
+            build_input = 0x12345678
+        elif case == 'BW4':
+            fmt = Struct("tag"/Bytes(1), "pad"/Padding(4), "data"/Bytes(2))
+            parse_data = b"\\xAA\\x00\\x00\\x00\\x00\\xBB\\xCC"
+            build_input = dict(tag=b"\\xAA", data=b"\\xBB\\xCC")
+        else:
+            raise ValueError('unknown case: ' + case)
+
+        parse_target = lambda: fmt.parse(parse_data)
+        build_target = lambda: fmt.build(build_input)
+        return parse_target, build_target
+
+    # ---- 测量 ----
+    parse_target, build_target = _make_case(CASE)
+    target = parse_target if DIRECTION == 'parse' else build_target
+
+    # 预热（1 次，让任何惰性初始化生效）
+    target()
+
+    # 多次测量取中位数
+    timer = timeit.Timer(target)
+    times = timer.repeat(repeat=REPEAT, number=NUMBER)
+
+    per_call_ns = (statistics.median(times) / NUMBER) * 1e9
+
+    print(json.dumps({{
+        'impl': IMPL,
+        'case': CASE,
+        'direction': DIRECTION,
+        'per_call_ns': per_call_ns,
+        'median_s': statistics.median(times),
+        'min_s': min(times),
+        'all_s': times,
+    }}))
+    """
+)
+
+
+def _run_measurement(impl: str, case: str, direction: str) -> dict:
+    """在子进程中运行一次测量。
+
+    :param impl: 'rs' 或 'py'
+    :param case: 场景名（'B1'..'BW4'）
+    :param direction: 'parse' 或 'build'
+    :return: JSON 解析后的结果字典。
+    :raises RuntimeError: 子进程失败或输出无法解析。
+    """
+    code = _MEASURE_SCRIPT.format(
+        impl=impl,
+        case=case,
+        direction=direction,
+        number=NUMBER,
+        repeat=REPEAT,
+        crs_python_dir=_CRS_PYTHON_DIR,
+    )
+    result = subprocess.run(
+        [_PYTHON_EXE, "-c", code],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"测量失败 impl={impl} case={case} direction={direction}\n"
+            f"stderr: {result.stderr[-2000:]}"
+        )
+    lines = [line for line in result.stdout.strip().splitlines() if line.strip()]
+    if not lines:
+        raise RuntimeError(
+            f"测量无输出 impl={impl} case={case} direction={direction}\n"
+            f"stderr: {result.stderr[-2000:]}"
+        )
+    try:
+        return json.loads(lines[-1])
+    except json.JSONDecodeError as e:
+        raise RuntimeError(
+            f"无法解析 JSON 输出 impl={impl} case={case} direction={direction}\n"
+            f"stdout: {result.stdout[-2000:]}\n"
+            f"error: {e}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 场景定义
+# ---------------------------------------------------------------------------
+
+CASES = [
+    # Phase 3.1: BitsInteger（在 Bitwise 域内）
+    ("B1", "3.1", "Bitwise(BitsInteger(8))"),
+    ("B2", "3.1", "Bitwise(BitsInteger(16))"),
+    ("B3", "3.1", "Bitwise(BitsInteger(32))"),
+    ("B4", "3.1", "Bitwise(BitsInteger(8, signed=True))"),
+    # Phase 3.2: Bitwise + BitStruct
+    ("BS1", "3.2", "BitStruct(Nibble, BitsInteger(10), Padding(2))"),
+    ("BS2", "3.2", "BitStruct(Bit, Nibble, Octet, Padding(3))"),
+    # Phase 3.3: Bytewise / BitsSwapped / ByteSwapped / Padding
+    ("BW1", "3.3", "BitStruct(Nibble, Bytewise(Int16ub), Nibble)"),
+    ("BW2", "3.3", "BitsSwapped(Bytes(4))"),
+    ("BW3", "3.3", "ByteSwapped(Int32ub)"),
+    ("BW4", "3.3", "Struct(Bytes(1), Padding(4), Bytes(2))"),
+]
+
+DIRECTIONS = ["parse", "build"]
+
+# 场景详情（用于结果文件）
+CASE_DETAILS = {
+    "B1": "BitsInteger(8) parse/build — 8-bit unsigned via Bitwise",
+    "B2": "BitsInteger(16) parse/build — 16-bit unsigned via Bitwise",
+    "B3": "BitsInteger(32) parse/build — 32-bit unsigned via Bitwise",
+    "B4": "BitsInteger(8, signed=True) parse/build — 8-bit signed via Bitwise",
+    "BS1": "BitStruct 3 字段（4+10+2=16 bit）— Phase 3 ARCH 实测基线场景",
+    "BS2": "BitStruct 4 字段含 Bit/Nibble/Octet（1+4+8+3=16 bit）",
+    "BW1": "BitStruct + Bytewise 嵌入（4+16+4=24 bit，未对齐慢路径）",
+    "BW2": "BitsSwapped(Bytes(4)) — TransformNode BitSwap",
+    "BW3": "ByteSwapped(Int32ub) — TransformNode ByteSwap",
+    "BW4": "Struct + 字节级 Padding（1+4+2=7 字节）",
+}
+
+# 性能门禁（Phase 3 总纲 S-PERF）
+GATE_TARGET = 10.0  # 几何平均目标 ≥10x
+GATE_FAIL = 4.0     # 单点 <4x 视为门禁失败
+
+
+# ---------------------------------------------------------------------------
+# 主流程
+# ---------------------------------------------------------------------------
+
+def run_all_benchmarks(cases: list[str]) -> dict:
+    """运行全部 case × {parse, build} × {rs, py} 测量。
+
+    :param cases: 要测量的 case ID 列表。
+    :return: 嵌套字典 {case_id: {direction: {impl: result_dict}}}。
+    """
+    results = {}
+    for case_id in cases:
+        results[case_id] = {}
+        for direction in DIRECTIONS:
+            results[case_id][direction] = {}
+            for impl in ["rs", "py"]:
+                print(
+                    f"  测量 {case_id:<4} {direction:<6} {impl}...",
+                    end="",
+                    flush=True,
+                )
+                r = _run_measurement(impl, case_id, direction)
+                results[case_id][direction][impl] = r
+                print(f" {r['per_call_ns']:.1f} ns/call")
+    return results
+
+
+def format_results_table(results: dict, cases: list[str]) -> str:
+    """格式化结果为对比表。"""
+    lines = []
+    header = (
+        f"{'场景':<6} {'方向':<6} {'Rust (ns)':<12} "
+        f"{'Python (ns)':<14} {'加速比':<10} {'判定':<10}"
+    )
+    lines.append(header)
+    lines.append("-" * len(header))
+
+    for case_id in cases:
+        for direction in DIRECTIONS:
+            rs = results[case_id][direction]["rs"]["per_call_ns"]
+            py = results[case_id][direction]["py"]["per_call_ns"]
+            speedup = py / rs if rs > 0 else float("inf")
+
+            if speedup >= GATE_TARGET:
+                verdict = "[PASS]"
+            elif speedup >= GATE_FAIL:
+                verdict = "[WARN]"
+            else:
+                verdict = "[FAIL]"
+
+            lines.append(
+                f"{case_id:<6} {direction:<6} {rs:<12.1f} {py:<14.1f} "
+                f"{speedup:<10.2f}x {verdict}"
+            )
+    return "\n".join(lines)
+
+
+def compute_geomean_speedups(results: dict, cases: list[str]) -> dict:
+    """计算每个方向的几何平均加速比。
+
+    :return: {'parse': geomean, 'build': geomean, 'all': geomean}
+    """
+    import math
+
+    def _geomean(values):
+        if not values:
+            return 0.0
+        log_sum = sum(math.log(v) for v in values if v > 0)
+        return math.exp(log_sum / len(values))
+
+    parse_speedups = []
+    build_speedups = []
+    for case_id in cases:
+        for direction in DIRECTIONS:
+            rs = results[case_id][direction]["rs"]["per_call_ns"]
+            py = results[case_id][direction]["py"]["per_call_ns"]
+            sp = py / rs if rs > 0 else 0
+            if direction == "parse":
+                parse_speedups.append(sp)
+            else:
+                build_speedups.append(sp)
+
+    return {
+        "parse": _geomean(parse_speedups),
+        "build": _geomean(build_speedups),
+        "all": _geomean(parse_speedups + build_speedups),
+    }
+
+
+def check_gates(results: dict, cases: list[str]) -> list[str]:
+    """检查通过标准，返回失败消息列表（空表示全部通过）。"""
+    failures = []
+
+    # 1. 单点检查：<4x 视为门禁失败
+    for case_id in cases:
+        for direction in DIRECTIONS:
+            rs = results[case_id][direction]["rs"]["per_call_ns"]
+            py = results[case_id][direction]["py"]["per_call_ns"]
+            speedup = py / rs if rs > 0 else 0
+            if speedup < GATE_FAIL:
+                failures.append(
+                    f"门禁失败：{case_id} {direction} 加速比 {speedup:.2f}x "
+                    f"< {GATE_FAIL}x"
+                )
+
+    # 2. 几何平均检查（Phase 3 总纲 S-PERF ≥10x）
+    geomeans = compute_geomean_speedups(results, cases)
+    if geomeans["parse"] < GATE_TARGET:
+        failures.append(
+            f"几何平均门禁失败：parse {geomeans['parse']:.2f}x < {GATE_TARGET}x"
+        )
+    if geomeans["build"] < GATE_TARGET:
+        failures.append(
+            f"几何平均门禁失败：build {geomeans['build']:.2f}x < {GATE_TARGET}x"
+        )
+
+    return failures
+
+
+def write_results_file(
+    results: dict,
+    table: str,
+    geomeans: dict,
+    failures: list[str],
+    cases: list[str],
+) -> Path:
+    """将完整结果写入 tests/benchmark_bitstream_results.txt。"""
+    out_path = Path(__file__).resolve().parent / "benchmark_bitstream_results.txt"
+
+    # 构造 case → (phase, desc) 映射
+    case_meta = {cid: (phase, desc) for cid, phase, desc in CASES}
+
+    lines = []
+    lines.append("=" * 78)
+    lines.append("construct-rs vs Python construct 2.10.70 BitStream 性能测试结果")
+    lines.append("=" * 78)
+    lines.append("")
+    lines.append("环境信息：")
+    lines.append(f"  Python 版本     : {sys.version.split()[0]}")
+    lines.append(f"  Python 解释器   : {_PYTHON_EXE}")
+    lines.append(f"  平台            : {platform.platform()}")
+    lines.append(f"  处理器          : {platform.processor() or '未知'}")
+    lines.append(f"  machine         : {platform.machine()}")
+    lines.append(f"  timeit number   : {NUMBER}")
+    lines.append(f"  repeat (中位数) : {REPEAT}")
+    lines.append(f"  测量时间        : {time.strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    lines.append("测量口径（AGENTS.md §6）：")
+    lines.append("  - construct-rs：maturin develop 安装到 venv，Python timeit 调用")
+    lines.append("    用户面 API（Packet.parse / packet.build）。一次 FFI 穿越。")
+    lines.append("  - Python construct 2.10.70：pip install 安装到 venv，Python timeit")
+    lines.append("    调用等效 API（fmt.parse / fmt.build）。")
+    lines.append("  - 子进程隔离：两个同名 construct 包在独立进程中运行，避免 sys.path 冲突。")
+    lines.append("  - 相同 timeit 参数（NUMBER/REPEAT），取相同统计量（中位数）。")
+    lines.append("")
+    lines.append(f"通过标准（Phase 3 总纲 S-PERF）：")
+    lines.append(f"  - 几何平均 ≥{GATE_TARGET}x（parse 和 build 两个方向）")
+    lines.append(f"  - 单点 <{GATE_FAIL}x 视为门禁失败")
+    lines.append("")
+    lines.append("对比表：")
+    lines.append(table)
+    lines.append("")
+    lines.append("几何平均加速比：")
+    lines.append(f"  parse 方向 : {geomeans['parse']:.2f}x")
+    lines.append(f"  build 方向 : {geomeans['build']:.2f}x")
+    lines.append(f"  全部       : {geomeans['all']:.2f}x")
+    lines.append("")
+    lines.append("场景说明：")
+    current_phase = None
+    for case_id in cases:
+        phase, desc = case_meta[case_id]
+        if phase != current_phase:
+            current_phase = phase
+            lines.append(f"  -- Phase {phase} --")
+        lines.append(f"  {case_id}: {desc}")
+    lines.append("")
+    lines.append("门禁检查：")
+    if failures:
+        for f in failures:
+            lines.append(f"  [FAIL] {f}")
+    else:
+        lines.append("  [PASS] 全部通过")
+    lines.append("")
+    lines.append("原始数据（per_call_ns = 每次调用纳秒数，min_ns = 单轮最小值）：")
+    for case_id in cases:
+        for direction in DIRECTIONS:
+            for impl in ("rs", "py"):
+                r = results[case_id][direction][impl]
+                min_ns = r["min_s"] / NUMBER * 1e9
+                lines.append(
+                    f"  {case_id:<4} {direction:<6} {impl}: "
+                    f"median={r['per_call_ns']:.1f}ns  min={min_ns:.1f}ns"
+                )
+    lines.append("")
+
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="construct-rs BitStream 场景性能基准测试（用户面 API 口径）"
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        help="仅测量指定场景（可多次指定），默认全部 10 个场景",
+    )
+    parser.add_argument(
+        "--list",
+        action="store_true",
+        help="列出所有场景并退出",
+    )
+    args = parser.parse_args()
+
+    if args.list:
+        print("可用场景：")
+        current_phase = None
+        for case_id, phase, desc in CASES:
+            if phase != current_phase:
+                current_phase = phase
+                print(f"  -- Phase {phase} --")
+            print(f"  {case_id:<5} {desc}")
+        return 0
+
+    # 过滤场景
+    selected_cases = [cid for cid, _, _ in CASES]
+    if args.case:
+        unknown = set(args.case) - set(selected_cases)
+        if unknown:
+            print(f"错误：未知场景 {unknown}")
+            print(f"可用场景：{selected_cases}")
+            return 1
+        selected_cases = args.case
+
+    print("=" * 78)
+    print("construct-rs vs Python construct 2.10.70 BitStream 性能测试")
+    print("=" * 78)
+    print(f"Python 版本     : {sys.version.split()[0]}")
+    print(f"Python 解释器   : {_PYTHON_EXE}")
+    print(f"construct-rs 源 : {_CRS_PYTHON_DIR}")
+    print(f"timeit number={NUMBER}, repeat={REPEAT} (取中位数)")
+    print()
+    print(f"测量 {len(selected_cases)} 个场景（{', '.join(selected_cases)}）")
+    print("每个场景 × 方向 × impl 在独立子进程中运行...")
+    print()
+
+    results = run_all_benchmarks(selected_cases)
+
+    print()
+    print("对比表：")
+    table = format_results_table(results, selected_cases)
+    print(table)
+    print()
+
+    geomeans = compute_geomean_speedups(results, selected_cases)
+    print("几何平均加速比：")
+    print(f"  parse : {geomeans['parse']:.2f}x")
+    print(f"  build : {geomeans['build']:.2f}x")
+    print(f"  全部  : {geomeans['all']:.2f}x")
+    print()
+
+    failures = check_gates(results, selected_cases)
+    print("门禁检查：")
+    if failures:
+        for f in failures:
+            print(f"  [FAIL] {f}")
+    else:
+        print(f"  [PASS] 全部通过（≥{GATE_TARGET}x）")
+
+    out_path = write_results_file(
+        results, table, geomeans, failures, selected_cases
+    )
+    print()
+    print(f"详细结果已写入: {out_path}")
+
+    return 0 if not failures else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
