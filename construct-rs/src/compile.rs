@@ -35,6 +35,7 @@
 use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
+use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
@@ -359,6 +360,18 @@ fn build_node_from_descriptor(
             let program = ExprProgram::new(ops);
             return Ok(Node::Computed(ComputedNode::new(program)));
         }
+        // BitsIntegerDescriptor（Phase 3.1）→ BitsIntegerNode。
+        // 仅支持常量 length（int）。表达式 length（FieldRef/ExprRef）编译期拒绝。
+        // Python 侧 BitsInteger(length, signed, swapped) / Bit() / Nibble() / Octet()
+        // 都映射到此描述符（Bit/Nibble/Octet 是 BitsInteger 的语法糖）。
+        "BitsIntegerDescriptor" => {
+            return Ok(Node::BitsInteger(build_bits_integer_node(
+                py,
+                desc,
+                field_index,
+                path_for_field(field_index),
+            )?));
+        }
         _ => {}
     }
 
@@ -371,6 +384,114 @@ fn build_node_from_descriptor(
     Err(ConstructError::Compilation {
         message: format!("未知的字段描述符类型: {}", repr_str),
     })
+}
+
+/// 构造编译期错误使用的字段路径字符串（"field {index}"）。
+///
+/// Phase 3.1 中 BitsInteger 编译期错误使用此路径（不含父 Struct 字段名上下文，
+/// 后者由 `with_field_context` 在上层附加）。
+fn path_for_field(field_index: usize) -> String {
+    format!("field {}", field_index)
+}
+
+/// 从 `BitsIntegerDescriptor` 构建 `BitsIntegerNode`，编译期完成所有 length 校验。
+///
+/// Phase 3.1 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
+/// 返回 `Compilation` 错误，闭环设计 §7.2 / §8.2 表达式 length 路径（P4）。
+///
+/// # 编译期校验（fail-fast，比 Python 提前暴露）
+///
+/// - 表达式 length → `Compilation`（"BitsInteger expression length not supported in Phase 3.1"）
+/// - length 为负 → `Compilation`（"length must be non-negative"，避免 usize 回绕，P6）
+/// - length > MAX_BITS_INTEGER (64) → `Compilation`（"exceeds 64-bit limit"，P5/BI-3）
+fn build_bits_integer_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    path: String,
+) -> Result<BitsIntegerNode, ConstructError> {
+    let length_obj = desc
+        .getattr("length")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor missing 'length' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    // Phase 3.1：仅支持常量 length（Python int）。
+    // 尝试 extract 为 i64。失败表示是表达式（FieldRef/ExprRef）或其他非 int 类型。
+    let length_i64: i64 = match length_obj.extract::<i64>() {
+        Ok(v) => v,
+        Err(_) => {
+            // 检查是否是表达式（FieldRef/ExprRef/其他描述符）。即使是其他类型，
+            // Phase 3.1 也不支持，统一返回 Compilation。
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "BitsInteger expression length not supported in Phase 3.1 \
+                     (use a constant integer length) (field index {})",
+                    field_index
+                ),
+            });
+        }
+    };
+
+    // P6: 编译期检测负 length（避免 i64 负数 as usize 回绕为巨大值）
+    if length_i64 < 0 {
+        return Err(ConstructError::Compilation {
+            message: format!(
+                "BitsInteger length {} must be non-negative (field index {})",
+                length_i64, field_index
+            ),
+        });
+    }
+
+    let length = length_i64 as usize;
+
+    // P5 / BI-3: length > 64 提前暴露（避免运行时报错）
+    if length > MAX_BITS_INTEGER {
+        return Err(ConstructError::Compilation {
+            message: format!(
+                "BitsInteger length {} exceeds 64-bit limit (max {}) (field index {})",
+                length, MAX_BITS_INTEGER, field_index
+            ),
+        });
+    }
+
+    let signed: bool = desc
+        .getattr("signed")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor missing 'signed' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .extract()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor 'signed' attribute must be bool (field index {})",
+                field_index
+            ),
+        })?;
+
+    let swapped: bool = desc
+        .getattr("swapped")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor missing 'swapped' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .extract()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor 'swapped' attribute must be bool (field index {})",
+                field_index
+            ),
+        })?;
+
+    let _ = (py, &path); // py 与 path 暂未使用，保留参数以便后续扩展
+    Ok(BitsIntegerNode::new(length, signed, swapped))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
@@ -2350,6 +2471,251 @@ class {name}:
                 }
                 other => panic!("expected Node::Struct, got {:?}", other),
             }
+        });
+    }
+
+    // ======================================================================
+    // Phase 3.1 子任务：BitsIntegerDescriptor 识别与编译期校验
+    // ======================================================================
+
+    /// 创建一个 BitsIntegerDescriptor Python 实例（模拟 Python 侧 BitsInteger()）。
+    ///
+    /// 使用 `run_bound` 定义类（带 property），然后实例化。
+    /// 长度/signed/swapped 通过参数注入。
+    fn make_bits_integer_descriptor(
+        py: Python<'_>,
+        length: i64,
+        signed: bool,
+        swapped: bool,
+    ) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        // 定义类（含 _expr_params property，对常量 length 返回空 dict）
+        let code = concat!(
+            "class BitsIntegerDescriptor:\n",
+            "    def __init__(self, length, signed, swapped):\n",
+            "        self.length = length\n",
+            "        self.signed = signed\n",
+            "        self.swapped = swapped\n",
+            "    @property\n",
+            "    def _expr_params(self):\n",
+            "        # 仅当 length 是 FieldRef/ExprRef 时返回非空，常量返回空\n",
+            "        if isinstance(self.length, int):\n",
+            "            return {}\n",
+            "        return {'length': self.length}\n",
+            "    def __repr__(self):\n",
+            "        return 'BitsInteger(length={!r}, signed={!r}, swapped={!r})'.format(\n",
+            "            self.length, self.signed, self.swapped)\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define BitsIntegerDescriptor");
+        let cls = globals
+            .get_item("BitsIntegerDescriptor")
+            .expect("get_item ok")
+            .expect("class exists");
+        cls.call((length, signed, swapped), None)
+            .expect("instantiate")
+            .unbind()
+    }
+
+    /// 创建一个 BitsIntegerDescriptor，length 为 FieldRef 标记（模拟表达式 length）。
+    fn make_bits_integer_expr_length_descriptor(py: Python<'_>) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class BitsIntegerDescriptor:\n",
+            "    def __init__(self, length, signed, swapped):\n",
+            "        self.length = length\n",
+            "        self.signed = signed\n",
+            "        self.swapped = swapped\n",
+            "    @property\n",
+            "    def _expr_params(self):\n",
+            "        return {'length': self.length}\n",
+            "class FakeFieldRef:\n",
+            "    pass\n",
+        );
+        py.run_bound(code, Some(&globals), None).expect("define");
+        let cls = globals
+            .get_item("BitsIntegerDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        let fake_ref = globals
+            .get_item("FakeFieldRef")
+            .expect("get ok")
+            .expect("exists")
+            .call((), None)
+            .expect("instantiate");
+        cls.call((fake_ref, false, false), None)
+            .expect("instantiate")
+            .unbind()
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_produces_bits_integer_node() {
+        // BitsInteger(8) → Node::BitsInteger(BitsIntegerNode { length: 8, ... })
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitsIntTest");
+            let desc = make_bits_integer_descriptor(py, 8, false, false).into_any();
+            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    match &s.fields()[0].node {
+                        Node::BitsInteger(b) => {
+                            assert_eq!(b.length(), 8);
+                            assert!(!b.signed());
+                            assert!(!b.swapped());
+                        }
+                        other => panic!("expected BitsInteger, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_bit_nibble_octet_lengths() {
+        // 测试 Bit(1), Nibble(4), Octet(8) 三种长度
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitNibbleOctet");
+            let bit = make_bits_integer_descriptor(py, 1, false, false).into_any();
+            let nibble = make_bits_integer_descriptor(py, 4, false, false).into_any();
+            let octet = make_bits_integer_descriptor(py, 8, false, false).into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["bit".to_string(), "nibble".to_string(), "octet".to_string()],
+                vec![bit, nibble, octet],
+                None,
+                None,
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    let fields = s.fields();
+                    assert!(matches!(
+                        fields[0].node,
+                        Node::BitsInteger(ref b) if b.length() == 1
+                    ));
+                    assert!(matches!(
+                        fields[1].node,
+                        Node::BitsInteger(ref b) if b.length() == 4
+                    ));
+                    assert!(matches!(
+                        fields[2].node,
+                        Node::BitsInteger(ref b) if b.length() == 8
+                    ));
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_signed_swapped() {
+        // 测试 signed=true + swapped=true
+        with_py(|py| {
+            let cls = make_dummy_class(py, "SignedSwapped");
+            let desc = make_bits_integer_descriptor(py, 16, true, true).into_any();
+            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::BitsInteger(b) => {
+                        assert_eq!(b.length(), 16);
+                        assert!(b.signed());
+                        assert!(b.swapped());
+                    }
+                    other => panic!("expected BitsInteger, got {:?}", other),
+                },
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_max_length_64_succeeds() {
+        // BI-3 边界：length=64 应编译成功
+        with_py(|py| {
+            let cls = make_dummy_class(py, "MaxLen");
+            let desc = make_bits_integer_descriptor(py, 64, false, false).into_any();
+            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert!(matches!(
+                        &s.fields()[0].node,
+                        Node::BitsInteger(b) if b.length() == 64
+                    ));
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_length_exceeds_64_returns_compilation_error() {
+        // BI-3: length > 64 → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "TooLong");
+            let desc = make_bits_integer_descriptor(py, 65, false, false).into_any();
+            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("64") || msg.contains("exceeds"),
+                "message should mention 64-bit limit: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_negative_length_returns_compilation_error() {
+        // BI-2: length < 0 → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "Negative");
+            let desc = make_bits_integer_descriptor(py, -1, false, false).into_any();
+            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("non-negative") || msg.contains("negative"),
+                "message should mention non-negative: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_zero_length_compiles_succeeds() {
+        // 长度为 0：编译成功（编译期不拒绝），运行时 parse/build 时返回 FormatField 错误（BI-1）
+        // 设计 §9.1 BI-1 明确 length==0 在 parse/build 时报错，不延后到编译期。
+        // 但本测试仅验证编译期能通过——实际行为以 BI-1 运行时错误为准。
+        // 注意：当前实现允许编译，但 parse/build 时返回 FormatField 错误。
+        with_py(|py| {
+            let cls = make_dummy_class(py, "Zero");
+            let desc = make_bits_integer_descriptor(py, 0, false, false).into_any();
+            let result = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None);
+            // 编译应成功（运行时报错）
+            assert!(result.is_ok(), "compile should succeed: {:?}", result);
+        });
+    }
+
+    #[test]
+    fn compile_bits_integer_descriptor_expression_length_returns_compilation_error() {
+        // P4: 表达式 length（非 int）→ Compilation error（Phase 3.1 不支持）
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ExprLen");
+            let desc = make_bits_integer_expr_length_descriptor(py).into_any();
+            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
+                .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("expression length") || msg.contains("not supported"),
+                "message should mention expression length not supported: {}",
+                msg
+            );
         });
     }
 }

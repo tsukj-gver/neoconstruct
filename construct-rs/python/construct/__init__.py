@@ -71,6 +71,12 @@ try:
         Int64sl,
         Int64ub,
         Int64ul,
+        # Phase 3.1: bit 域描述符
+        Bit,
+        BitsInteger,
+        BitsIntegerDescriptor,
+        Nibble,
+        Octet,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -114,6 +120,12 @@ __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
     "GreedyBytesDescriptor",
+    # Phase 3.1: bit 域描述符
+    "Bit",
+    "Nibble",
+    "Octet",
+    "BitsInteger",
+    "BitsIntegerDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常

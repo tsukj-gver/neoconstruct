@@ -1,6 +1,7 @@
 //! Node 系统：Construct trait 定义与 Node 枚举（enum_dispatch 静态分派）。
 //!
-//! 设计依据：`docs/架构设计.md` §C.1（Construct trait）、§C.2（Node enum）。
+//! 设计依据：`docs/架构设计.md` §C.1（Construct trait）、§C.2（Node enum）、
+//! `docs/模块设计-BitStream.md` §6。
 //!
 //! ## 概述
 //!
@@ -10,15 +11,17 @@
 //!
 //! ## 当前范围
 //!
-//! 当前含 7 个节点变体：
+//! 当前含 8 个节点变体：
 //! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
 //!   [`BytesNode`](bytes::BytesNode)（固定/表达式长度字节）、
-//!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）
+//!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）、
+//!   [`BitsIntegerNode`](bits_integer::BitsIntegerNode)（bit 级整数，Phase 3.1）
 //! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
 //!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）
 //! - RO 节点：[`TellNode`](tell::TellNode)（流位置）、
 //!   [`ComputedNode`](computed::ComputedNode)（表达式计算值）
 
+pub mod bits_integer;
 pub mod bytes;
 pub mod computed;
 pub mod format_field;
@@ -31,6 +34,7 @@ use crate::context::Context;
 use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
+use bits_integer::BitsIntegerNode;
 use bytes::BytesNode;
 use computed::ComputedNode;
 use enum_dispatch::enum_dispatch;
@@ -123,7 +127,7 @@ pub trait Construct {
 ///
 /// # 当前变体
 ///
-/// - 3 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`
+/// - 4 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`、`BitsInteger`（Phase 3.1）
 /// - 2 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）
 /// - 2 个 RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
 #[derive(Debug)]
@@ -143,6 +147,9 @@ pub enum Node {
     Tell(TellNode),
     /// RO 节点：从表达式计算值（对应 Python construct `Computed`）
     Computed(ComputedNode),
+    /// bit 级整数节点：`BitsInteger` / `Bit` / `Nibble` / `Octet`
+    /// （对应 Python construct `BitsInteger`，必须在 `Bitwise` 域内使用，Phase 3.1）
+    BitsInteger(BitsIntegerNode),
 }
 
 impl Node {
