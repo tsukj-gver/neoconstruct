@@ -10,7 +10,7 @@ construct-rs vs Python construct 2.10.70 BitStream 性能测试结果
   machine         : AMD64
   timeit number   : 100000
   repeat (中位数) : 5
-  测量时间        : 2026-06-28 00:13:21
+  测量时间        : 2026-06-28 01:44:33
 
 测量口径（AGENTS.md §6）：
   - construct-rs：maturin develop 安装到 venv，Python timeit 调用
@@ -27,31 +27,31 @@ construct-rs vs Python construct 2.10.70 BitStream 性能测试结果
 对比表：
 场景     方向     Rust (ns)    Python (ns)    加速比        判定        
 ---------------------------------------------------------------
-B1     parse  274.8        1608.3         5.85      x [WARN]
-B1     build  191.2        2193.1         11.47     x [PASS]
-B2     parse  288.1        1941.9         6.74      x [WARN]
-B2     build  203.6        2758.3         13.55     x [PASS]
-B3     parse  294.9        2517.5         8.54      x [WARN]
-B3     build  207.9        3797.5         18.27     x [PASS]
-B4     parse  334.3        1680.3         5.03      x [WARN]
-B4     build  195.5        2276.9         11.65     x [PASS]
-BS1    parse  385.6        4929.3         12.78     x [PASS]
-BS1    build  291.4        5713.1         19.60     x [PASS]
-BS2    parse  415.3        5482.1         13.20     x [PASS]
-BS2    build  338.4        6030.6         17.82     x [PASS]
-BW1    parse  402.8        5889.6         14.62     x [PASS]
-BW1    build  318.5        6214.0         19.51     x [PASS]
-BW2    parse  297.8        1480.4         4.97      x [WARN]
-BW2    build  243.7        1559.5         6.40      x [WARN]
-BW3    parse  325.4        1187.3         3.65      x [FAIL]
-BW3    build  244.8        1185.9         4.84      x [WARN]
-BW4    parse  330.3        3326.3         10.07     x [PASS]
-BW4    build  255.8        3186.5         12.46     x [PASS]
+B1     parse  278.9        1782.8         6.39      x [WARN]
+B1     build  214.2        2437.1         11.38     x [PASS]
+B2     parse  296.1        2173.1         7.34      x [WARN]
+B2     build  225.1        3033.1         13.47     x [PASS]
+B3     parse  291.5        2825.2         9.69      x [WARN]
+B3     build  226.1        4212.2         18.63     x [PASS]
+B4     parse  290.9        1837.5         6.32      x [WARN]
+B4     build  217.6        2512.0         11.54     x [PASS]
+BS1    parse  338.7        4932.9         14.57     x [PASS]
+BS1    build  298.1        5648.2         18.94     x [PASS]
+BS2    parse  360.9        5391.5         14.94     x [PASS]
+BS2    build  332.2        6168.4         18.57     x [PASS]
+BW1    parse  408.9        5755.3         14.08     x [PASS]
+BW1    build  360.7        6548.7         18.15     x [PASS]
+BW2    parse  336.1        1554.0         4.62      x [WARN]
+BW2    build  248.4        1615.5         6.50      x [WARN]
+BW3    parse  329.0        1232.3         3.75      x [FAIL]
+BW3    build  251.4        1254.3         4.99      x [WARN]
+BW4    parse  328.8        3463.7         10.53     x [PASS]
+BW4    build  262.4        3345.0         12.75     x [PASS]
 
 几何平均加速比：
-  parse 方向 : 7.73x
+  parse 方向 : 8.33x
   build 方向 : 12.42x
-  全部       : 9.80x
+  全部       : 10.17x
 
 场景说明：
   -- Phase 3.1 --
@@ -69,47 +69,47 @@ BW4    build  255.8        3186.5         12.46     x [PASS]
   BW4: Struct(Bytes(1), Padding(4), Bytes(2))
 
 门禁检查：
-  [FAIL] 门禁失败：BW3 parse 加速比 3.65x < 4.0x
-  [FAIL] 几何平均门禁失败：parse 7.73x < 10.0x
+  [FAIL] 门禁失败：BW3 parse 加速比 3.75x < 4.0x
+  [FAIL] 几何平均门禁失败：parse 8.33x < 10.0x
 
 原始数据（per_call_ns = 每次调用纳秒数，min_ns = 单轮最小值）：
-  B1   parse  rs: median=274.8ns  min=274.3ns
-  B1   parse  py: median=1608.3ns  min=1603.4ns
-  B1   build  rs: median=191.2ns  min=190.7ns
-  B1   build  py: median=2193.1ns  min=2183.9ns
-  B2   parse  rs: median=288.1ns  min=287.3ns
-  B2   parse  py: median=1941.9ns  min=1934.8ns
-  B2   build  rs: median=203.6ns  min=203.2ns
-  B2   build  py: median=2758.3ns  min=2742.7ns
-  B3   parse  rs: median=294.9ns  min=294.2ns
-  B3   parse  py: median=2517.5ns  min=2506.9ns
-  B3   build  rs: median=207.9ns  min=206.8ns
-  B3   build  py: median=3797.5ns  min=3787.7ns
-  B4   parse  rs: median=334.3ns  min=331.2ns
-  B4   parse  py: median=1680.3ns  min=1676.4ns
-  B4   build  rs: median=195.5ns  min=194.0ns
-  B4   build  py: median=2276.9ns  min=2266.4ns
-  BS1  parse  rs: median=385.6ns  min=349.4ns
-  BS1  parse  py: median=4929.3ns  min=4919.1ns
-  BS1  build  rs: median=291.4ns  min=286.0ns
-  BS1  build  py: median=5713.1ns  min=5510.2ns
-  BS2  parse  rs: median=415.3ns  min=411.8ns
-  BS2  parse  py: median=5482.1ns  min=5442.2ns
-  BS2  build  rs: median=338.4ns  min=334.3ns
-  BS2  build  py: median=6030.6ns  min=5937.6ns
-  BW1  parse  rs: median=402.8ns  min=402.5ns
-  BW1  parse  py: median=5889.6ns  min=5838.1ns
-  BW1  build  rs: median=318.5ns  min=315.2ns
-  BW1  build  py: median=6214.0ns  min=6011.1ns
-  BW2  parse  rs: median=297.8ns  min=296.4ns
-  BW2  parse  py: median=1480.4ns  min=1391.2ns
-  BW2  build  rs: median=243.7ns  min=240.4ns
-  BW2  build  py: median=1559.5ns  min=1547.1ns
-  BW3  parse  rs: median=325.4ns  min=324.2ns
-  BW3  parse  py: median=1187.3ns  min=1186.1ns
-  BW3  build  rs: median=244.8ns  min=239.0ns
-  BW3  build  py: median=1185.9ns  min=1180.9ns
-  BW4  parse  rs: median=330.3ns  min=323.9ns
-  BW4  parse  py: median=3326.3ns  min=3296.8ns
-  BW4  build  rs: median=255.8ns  min=251.6ns
-  BW4  build  py: median=3186.5ns  min=3162.3ns
+  B1   parse  rs: median=278.9ns  min=268.9ns
+  B1   parse  py: median=1782.8ns  min=1759.3ns
+  B1   build  rs: median=214.2ns  min=212.9ns
+  B1   build  py: median=2437.1ns  min=2408.7ns
+  B2   parse  rs: median=296.1ns  min=293.4ns
+  B2   parse  py: median=2173.1ns  min=2156.2ns
+  B2   build  rs: median=225.1ns  min=224.4ns
+  B2   build  py: median=3033.1ns  min=2985.9ns
+  B3   parse  rs: median=291.5ns  min=285.8ns
+  B3   parse  py: median=2825.2ns  min=2762.4ns
+  B3   build  rs: median=226.1ns  min=224.7ns
+  B3   build  py: median=4212.2ns  min=4151.6ns
+  B4   parse  rs: median=290.9ns  min=289.1ns
+  B4   parse  py: median=1837.5ns  min=1813.3ns
+  B4   build  rs: median=217.6ns  min=214.3ns
+  B4   build  py: median=2512.0ns  min=2459.9ns
+  BS1  parse  rs: median=338.7ns  min=331.9ns
+  BS1  parse  py: median=4932.9ns  min=4864.1ns
+  BS1  build  rs: median=298.1ns  min=293.8ns
+  BS1  build  py: median=5648.2ns  min=5582.0ns
+  BS2  parse  rs: median=360.9ns  min=357.3ns
+  BS2  parse  py: median=5391.5ns  min=5345.0ns
+  BS2  build  rs: median=332.2ns  min=324.8ns
+  BS2  build  py: median=6168.4ns  min=6083.1ns
+  BW1  parse  rs: median=408.9ns  min=402.5ns
+  BW1  parse  py: median=5755.3ns  min=5742.0ns
+  BW1  build  rs: median=360.7ns  min=353.9ns
+  BW1  build  py: median=6548.7ns  min=6201.7ns
+  BW2  parse  rs: median=336.1ns  min=326.6ns
+  BW2  parse  py: median=1554.0ns  min=1542.7ns
+  BW2  build  rs: median=248.4ns  min=245.6ns
+  BW2  build  py: median=1615.5ns  min=1599.1ns
+  BW3  parse  rs: median=329.0ns  min=323.2ns
+  BW3  parse  py: median=1232.3ns  min=1216.2ns
+  BW3  build  rs: median=251.4ns  min=244.6ns
+  BW3  build  py: median=1254.3ns  min=1248.1ns
+  BW4  parse  rs: median=328.8ns  min=324.0ns
+  BW4  parse  py: median=3463.7ns  min=3421.1ns
+  BW4  build  rs: median=262.4ns  min=259.7ns
+  BW4  build  py: median=3345.0ns  min=3298.2ns

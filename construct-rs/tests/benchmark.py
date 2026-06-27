@@ -226,7 +226,10 @@ _MEASURE_SCRIPT = textwrap.dedent(
             class Empty(StructMixin):
                 pass
             data = b''
-            return (lambda: Empty.parse(data)), (lambda: Empty().build())
+            # 实例在循环外创建（与其他 case 一致），避免把 dataclass 实例化
+            # 开销计入 build 测量
+            obj = Empty()
+            return (lambda: Empty.parse(data)), (lambda: obj.build())
         else:
             empty = Struct()
             data = b''

@@ -176,6 +176,36 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    /// bit 级整数错误：`BitsInteger` 节点的运行时错误（非整数输入、超出范围、
+    /// length<=0、swapped+%8!=0 等）。
+    ///
+    /// 对应 Python construct 的 `IntegerError`（`core.py` L49、L1367/L1374/L1378/L1387）。
+    ///
+    /// Phase 3.3 新增：将原 BitsInteger 节点使用 `FormatField` 变体的实现统一改为
+    /// `Integer`，使用户可通过 `except IntegerError` 精确捕获（3.1 VET P1 修复）。
+    #[error("integer error: {message} at {path}")]
+    Integer {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 填充错误：`Padding` 字段的 pattern 非法（bit 域仅接受 `0x00` / `0x01`）等。
+    ///
+    /// 对应 Python construct 的 `PaddingError`（`core.py` L124、L4146）。
+    ///
+    /// Phase 3.3 新增：`BitPaddingNode::new` 在编译期对非法 pattern 返回此错误，
+    /// 比 Python 在 `bits2bytes` 阶段延迟 `KeyError` 更早暴露（设计 §4.2 P1 修复）。
+    /// 字节级 `PaddingNode` 的负长度等错误也归此类。
+    #[error("padding error: {message} at {path}")]
+    Padding {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -195,7 +225,9 @@ impl ConstructError {
             | ConstructError::Generic { message, .. }
             | ConstructError::ExprContext { message, .. }
             | ConstructError::ExprDivByZero { message, .. }
-            | ConstructError::BitField { message, .. } => Some(message),
+            | ConstructError::BitField { message, .. }
+            | ConstructError::Integer { message, .. }
+            | ConstructError::Padding { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
@@ -217,7 +249,9 @@ impl ConstructError {
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
             | ConstructError::ExprStackUnderflow { path }
-            | ConstructError::BitField { path, .. } => Some(path),
+            | ConstructError::BitField { path, .. }
+            | ConstructError::Integer { path, .. }
+            | ConstructError::Padding { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -261,6 +295,8 @@ impl ConstructError {
             ConstructError::ExprDivByZero { .. } => "ExprDivByZero",
             ConstructError::ExprStackUnderflow { .. } => "ExprStackUnderflow",
             ConstructError::BitField { .. } => "BitField",
+            ConstructError::Integer { .. } => "Integer",
+            ConstructError::Padding { .. } => "Padding",
         }
     }
 
@@ -316,7 +352,9 @@ impl ConstructError {
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
             | ConstructError::ExprStackUnderflow { path }
-            | ConstructError::BitField { path, .. } => *path = new_path,
+            | ConstructError::BitField { path, .. }
+            | ConstructError::Integer { path, .. }
+            | ConstructError::Padding { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -354,6 +392,12 @@ struct ExceptionClasses {
     /// Phase 2 暂无专门的 ExprError Python 类，统一映射到基类。
     /// 后续子任务可增加专门的 ExprError 类并在此缓存。
     construct_error_base: Py<PyType>,
+    /// 对应 `ConstructError::Integer`（Phase 3.3）。
+    /// Python construct 的 `IntegerError`，用于 BitsInteger 节点的运行时错误。
+    integer_error: Py<PyType>,
+    /// 对应 `ConstructError::Padding`（Phase 3.3）。
+    /// Python construct 的 `PaddingError`，用于 Padding 字段的非法 pattern 等。
+    padding_error: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -396,6 +440,8 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         unresolved_reference_error: get("UnresolvedReferenceError")?,
         generic_construct_error: get("GenericConstructError")?,
         construct_error_base: get("ConstructError")?,
+        integer_error: get("IntegerError")?,
+        padding_error: get("PaddingError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -430,6 +476,11 @@ fn select_exception_class<'py>(
         // 设计 §7.3 规定复用 StreamError（与 Python RestreamedBytesIO.close 缓冲
         // 清空校验的 StreamError 对齐）。
         ConstructError::BitField { .. } => &classes.stream_error,
+        // Phase 3.3：BitsInteger 运行时错误映射到 Python IntegerError，
+        // 与 Python construct 的 IntegerError 对齐（core.py L49/L1367 等）。
+        ConstructError::Integer { .. } => &classes.integer_error,
+        // Phase 3.3：Padding 错误映射到 Python PaddingError（core.py L124/L4146）。
+        ConstructError::Padding { .. } => &classes.padding_error,
     };
     cls.bind(py).clone()
 }
@@ -749,6 +800,8 @@ mod tests {
             "class CompilationError(ConstructError): pass\n",
             "class UnresolvedReferenceError(ConstructError): pass\n",
             "class GenericConstructError(ConstructError): pass\n",
+            "class IntegerError(ConstructError): pass\n",
+            "class PaddingError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run test classes definition");
@@ -768,6 +821,8 @@ mod tests {
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),
             construct_error_base: get("ConstructError"),
+            integer_error: get("IntegerError"),
+            padding_error: get("PaddingError"),
         }
     }
 

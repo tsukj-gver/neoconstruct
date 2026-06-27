@@ -191,9 +191,13 @@ impl<'a> ParseStream<'a> {
             });
         }
 
-        // 预检查：剩余 bit 数（考虑当前 bit_pos 偏移）
+        // 预检查：剩余 bit 数（考虑当前 bit_pos 偏移）。
+        // 使用 saturating_sub / saturating_mul 防御性计算：即使不变量被破坏
+        // （pos > data.len() 或剩余字节为 0 但 bit_pos > 0），也不会下溢回绕。
         let remaining_bytes = self.data.len().saturating_sub(self.pos);
-        let remaining_bits = remaining_bytes * 8 - self.bit_pos as usize;
+        let remaining_bits = remaining_bytes
+            .saturating_mul(8)
+            .saturating_sub(self.bit_pos as usize);
         if n > remaining_bits {
             return Err(ConstructError::Stream {
                 message: format!(
@@ -263,7 +267,9 @@ impl<'a> ParseStream<'a> {
         }
 
         let remaining_bytes = self.data.len().saturating_sub(self.pos);
-        let remaining_bits = remaining_bytes * 8 - self.bit_pos as usize;
+        let remaining_bits = remaining_bytes
+            .saturating_mul(8)
+            .saturating_sub(self.bit_pos as usize);
         if n > remaining_bits {
             return Err(ConstructError::Stream {
                 message: format!(

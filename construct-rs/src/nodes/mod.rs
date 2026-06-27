@@ -11,42 +11,54 @@
 //!
 //! ## 当前范围
 //!
-//! 当前含 9 个节点变体：
+//! 当前含 13 个节点变体：
 //! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
 //!   [`BytesNode`](bytes::BytesNode)（固定/表达式长度字节）、
 //!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）、
 //!   [`BitsIntegerNode`](bits_integer::BitsIntegerNode)（bit 级整数，Phase 3.1）
 //! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
 //!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）、
-//!   [`BitwiseNode`](bitwise::BitwiseNode)（bit 域包装器，Phase 3.2）
+//!   [`BitwiseNode`](bitwise::BitwiseNode)（bit 域包装器，Phase 3.2）、
+//!   [`BytewiseNode`](bytewise::BytewiseNode)（bit→byte 适配器，Phase 3.3）、
+//!   [`TransformNode`](transform::TransformNode)（字节级变换，Phase 3.3）
 //! - RO 节点：[`TellNode`](tell::TellNode)（流位置）、
 //!   [`ComputedNode`](computed::ComputedNode)（表达式计算值）
+//! - 填充节点：[`BitPaddingNode`](bit_padding::BitPaddingNode)（bit 级填充，Phase 3.3）、
+//!   [`PaddingNode`](padding::PaddingNode)（字节级填充，Phase 3.3）
 
+pub mod bit_padding;
 pub mod bits_integer;
 pub mod bitwise;
 pub mod bytes;
+pub mod bytewise;
 pub mod computed;
 pub mod format_field;
 pub mod greedy_bytes;
+pub mod padding;
 pub mod struct_node;
 pub mod struct_ref;
 pub mod tell;
+pub mod transform;
 
 use crate::context::Context;
 use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
+use bit_padding::BitPaddingNode;
 use bits_integer::BitsIntegerNode;
 use bitwise::BitwiseNode;
 use bytes::BytesNode;
+use bytewise::BytewiseNode;
 use computed::ComputedNode;
 use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
+use padding::PaddingNode;
 use pyo3::prelude::*;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
 use tell::TellNode;
+use transform::TransformNode;
 
 /// 所有构造器节点实现的统一接口。
 ///
@@ -131,9 +143,12 @@ pub trait Construct {
 /// # 当前变体
 ///
 /// - 4 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`、`BitsInteger`（Phase 3.1）
-/// - 3 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）、
-///   `Bitwise`（bit 域包装器，Phase 3.2，首个递归 `Box<Node>` 变体）
+/// - 5 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）、
+///   `Bitwise`（bit 域包装器，Phase 3.2，首个递归 `Box<Node>` 变体）、
+///   `Bytewise`（bit→byte 适配器，Phase 3.3，递归 `Box<Node>`）、
+///   `Transform`（字节级变换，Phase 3.3，递归 `Box<Node>`）
 /// - 2 个 RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
+/// - 2 个填充节点：`BitPadding`（bit 级，Phase 3.3）、`Padding`（字节级，Phase 3.3）
 #[derive(Debug)]
 #[enum_dispatch(Construct)]
 pub enum Node {
@@ -160,14 +175,27 @@ pub enum Node {
     /// 首个递归 Node 变体——`inner: Box<Node>` 打破 enum 的无限大小。
     /// enum_dispatch 仍正常工作（dispatch 到 BitwiseNode::parse，内部解引用 Box）。
     Bitwise(BitwiseNode),
+    /// bit→byte 适配器节点：在 bit 域内为内部 subcon 重建字节对齐的子流
+    /// （对应 Python construct `Bytewise`，Phase 3.3，递归 `Box<Node>`）。
+    Bytewise(BytewiseNode),
+    /// 字节级变换节点：`BitsSwapped` / `ByteSwapped`
+    /// （对应 Python construct `Transformed` 的两种变换，Phase 3.3，递归 `Box<Node>`）。
+    Transform(TransformNode),
+    /// bit 级填充节点：`Padding` 在 Bitwise 域内的行为
+    /// （Phase 3.3，pattern 严格校验 0x00/0x01）。
+    BitPadding(BitPaddingNode),
+    /// 字节级填充节点：`Padding` 在普通 Struct 域内的行为
+    /// （对应 Python construct `Padding` 字节域用法，Phase 3.3 补全 Phase 1 遗留）。
+    Padding(PaddingNode),
 }
 
 impl Node {
     /// 判断此节点（或其子树）是否含有表达式字段。
     ///
     /// 当前仅 [`Node::Struct`] 携带 `has_expressions` 标志（编译期计算），
-    /// [`Node::Bitwise`] 递归检查内部子树（Phase 3.2）。
-    /// 其他节点变体（原子节点、`StructRef`、`Tell`、`Computed`）返回 `false`。
+    /// [`Node::Bitwise`] / [`Node::Bytewise`] / [`Node::Transform`] 递归检查内部子树
+    /// （Phase 3.2 / 3.3）。
+    /// 其他节点变体（原子节点、`StructRef`、`Tell`、`Computed`、填充节点）返回 `false`。
     ///
     /// `struct_ref.rs` 与 `schema.rs` 通过此方法判断内层/根节点是否含表达式，
     /// 决定是否创建带 `PyDict` 的 context（避免重复 `matches!(root, Node::Struct(s) if ...)`）。
@@ -175,6 +203,8 @@ impl Node {
         match self {
             Node::Struct(s) => s.has_expressions(),
             Node::Bitwise(b) => b.inner().has_expressions(),
+            Node::Bytewise(b) => b.inner().has_expressions(),
+            Node::Transform(t) => t.inner().has_expressions(),
             _ => false,
         }
     }

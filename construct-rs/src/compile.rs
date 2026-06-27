@@ -35,15 +35,19 @@
 use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
+use crate::nodes::bit_padding::BitPaddingNode;
 use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
 use crate::nodes::bitwise::BitwiseNode;
 use crate::nodes::bytes::BytesNode;
+use crate::nodes::bytewise::BytewiseNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
+use crate::nodes::padding::PaddingNode;
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::tell::TellNode;
+use crate::nodes::transform::{ByteTransform, TransformNode};
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
 use pyo3::prelude::*;
@@ -253,9 +257,6 @@ fn build_node_from_descriptor(
     expr_programs: &[Option<Py<PyAny>>],
     bitwise: bool,
 ) -> Result<Node, ConstructError> {
-    // Phase 3.2：bitwise 参数仅用于 PaddingDescriptor 分支（Phase 3.3 实现）。
-    // 当前显式 consume 以避免 unused_variables 警告，同时保留参数语义供递归调用。
-    let _ = bitwise;
     // 1. FormatFieldDescriptor → Node::FormatField
     if let Ok(fmt) = desc.extract::<Py<FormatFieldDescriptor>>() {
         let fmt_ref = fmt.bind(py).get();
@@ -412,6 +413,62 @@ fn build_node_from_descriptor(
                 build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, true)?;
             return Ok(Node::Bitwise(BitwiseNode::new(inner_node)));
         }
+        // PaddingDescriptor（Phase 3.3）→ 根据 bitwise 上下文选择 BitPaddingNode（bit 域）
+        // 或 PaddingNode（字节域）。设计 §4.2 / §4.6 / §7.2。
+        "PaddingDescriptor" => {
+            return build_padding_node(py, desc, field_index, bitwise);
+        }
+        // BytewiseDescriptor（Phase 3.3）→ BytewiseNode（递归编译内部 subcon，bitwise=false）。
+        // 内部 subcon 重建字节域（设计 §7.2 递归 bitwise 上下文传播）。
+        "BytewiseDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "BytewiseDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            // Bytewise 把 bit 流重组为字节流，内部回到 bitwise=false 上下文
+            let inner_node =
+                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            return Ok(Node::Bytewise(BytewiseNode::new(inner_node)));
+        }
+        // BitsSwappedDescriptor（Phase 3.3）→ TransformNode(BitSwap)。
+        // 内部 subcon 在字节域编译（变换后仍是字节，bitwise=false）。
+        "BitsSwappedDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "BitsSwappedDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node =
+                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            return Ok(Node::Transform(TransformNode::new(
+                inner_node,
+                ByteTransform::BitSwap,
+            )));
+        }
+        // ByteSwappedDescriptor（Phase 3.3）→ TransformNode(ByteSwap)。
+        "ByteSwappedDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "ByteSwappedDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node =
+                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            return Ok(Node::Transform(TransformNode::new(
+                inner_node,
+                ByteTransform::ByteSwap,
+            )));
+        }
         _ => {}
     }
 
@@ -444,6 +501,11 @@ fn path_for_field(field_index: usize) -> String {
 /// - 表达式 length → `Compilation`（"BitsInteger expression length not supported in Phase 3.1"）
 /// - length 为负 → `Compilation`（"length must be non-negative"，避免 usize 回绕，P6）
 /// - length > MAX_BITS_INTEGER (64) → `Compilation`（"exceeds 64-bit limit"，P5/BI-3）
+///
+/// `path` 参数已并入编译期错误信息（3.1 P4 修复）：
+/// 编译期错误本来没有 path（Compilation 无 path 字段），但 message 中可包含
+/// field_index 与 path_for_field 上下文，便于在上层 `with_field_context`
+/// 附加父字段名后定位。
 fn build_bits_integer_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -454,8 +516,8 @@ fn build_bits_integer_node(
         .getattr("length")
         .map_err(|e| ConstructError::Compilation {
             message: format!(
-                "BitsIntegerDescriptor missing 'length' attribute: {} (field index {})",
-                e, field_index
+                "BitsIntegerDescriptor missing 'length' attribute: {} (field index {}, path {})",
+                e, field_index, path
             ),
         })?;
 
@@ -469,8 +531,8 @@ fn build_bits_integer_node(
             return Err(ConstructError::Compilation {
                 message: format!(
                     "BitsInteger expression length not supported in Phase 3.1 \
-                     (use a constant integer length) (field index {})",
-                    field_index
+                     (use a constant integer length) (field index {}, path {})",
+                    field_index, path
                 ),
             });
         }
@@ -480,8 +542,8 @@ fn build_bits_integer_node(
     if length_i64 < 0 {
         return Err(ConstructError::Compilation {
             message: format!(
-                "BitsInteger length {} must be non-negative (field index {})",
-                length_i64, field_index
+                "BitsInteger length {} must be non-negative (field index {}, path {})",
+                length_i64, field_index, path
             ),
         });
     }
@@ -492,8 +554,8 @@ fn build_bits_integer_node(
     if length > MAX_BITS_INTEGER {
         return Err(ConstructError::Compilation {
             message: format!(
-                "BitsInteger length {} exceeds 64-bit limit (max {}) (field index {})",
-                length, MAX_BITS_INTEGER, field_index
+                "BitsInteger length {} exceeds 64-bit limit (max {}) (field index {}, path {})",
+                length, MAX_BITS_INTEGER, field_index, path
             ),
         });
     }
@@ -502,15 +564,15 @@ fn build_bits_integer_node(
         .getattr("signed")
         .map_err(|e| ConstructError::Compilation {
             message: format!(
-                "BitsIntegerDescriptor missing 'signed' attribute: {} (field index {})",
-                e, field_index
+                "BitsIntegerDescriptor missing 'signed' attribute: {} (field index {}, path {})",
+                e, field_index, path
             ),
         })?
         .extract()
         .map_err(|_| ConstructError::Compilation {
             message: format!(
-                "BitsIntegerDescriptor 'signed' attribute must be bool (field index {})",
-                field_index
+                "BitsIntegerDescriptor 'signed' attribute must be bool (field index {}, path {})",
+                field_index, path
             ),
         })?;
 
@@ -518,20 +580,102 @@ fn build_bits_integer_node(
         .getattr("swapped")
         .map_err(|e| ConstructError::Compilation {
             message: format!(
-                "BitsIntegerDescriptor missing 'swapped' attribute: {} (field index {})",
+                "BitsIntegerDescriptor missing 'swapped' attribute: {} (field index {}, path {})",
+                e, field_index, path
+            ),
+        })?
+        .extract()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "BitsIntegerDescriptor 'swapped' attribute must be bool (field index {}, path {})",
+                field_index, path
+            ),
+        })?;
+
+    let _ = py; // py 保留供未来扩展使用（例如从 Python 对象提取表达式程序）
+    Ok(BitsIntegerNode::new(length, signed, swapped))
+}
+
+/// 从 `PaddingDescriptor` 构建 bit 域或字节域 Padding 节点（设计 §4.2 / §4.6 / §7.2）。
+///
+/// `bitwise` 参数决定选择 [`BitPaddingNode`]（bit 域，pattern 严格 0x00/0x01）
+/// 还是 [`PaddingNode`]（字节域，pattern 任意 0-255）。
+///
+/// Phase 3.1 / 3.3 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
+/// 返回 `Compilation` 错误（设计 §7.2 P4）。
+///
+/// # 编译期校验
+///
+/// - 表达式 length → `Compilation`（"Padding expression length not supported in Phase 3.1"）
+/// - length 为负 → `Compilation`（"length must be non-negative"）
+/// - bit 域 pattern 非 {0x00, 0x01} → `Padding`（由 BitPaddingNode::new 触发）
+fn build_padding_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    bitwise: bool,
+) -> Result<Node, ConstructError> {
+    let length_obj = desc
+        .getattr("length")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PaddingDescriptor missing 'length' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    // Phase 3.1：仅支持常量 length（Python int）。
+    let length_i64: i64 = match length_obj.extract::<i64>() {
+        Ok(v) => v,
+        Err(_) => {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "Padding expression length not supported in Phase 3.1 \
+                     (use a constant integer length) (field index {})",
+                    field_index
+                ),
+            });
+        }
+    };
+
+    // P6: 编译期检测负 length
+    if length_i64 < 0 {
+        return Err(ConstructError::Compilation {
+            message: format!(
+                "Padding length {} must be non-negative (field index {})",
+                length_i64, field_index
+            ),
+        });
+    }
+
+    let length = length_i64 as usize;
+
+    // 提取 pattern（Python 侧 PaddingDescriptor.pattern 已是 int 0-255）。
+    let pattern: u8 = desc
+        .getattr("pattern")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PaddingDescriptor missing 'pattern' attribute: {} (field index {})",
                 e, field_index
             ),
         })?
         .extract()
         .map_err(|_| ConstructError::Compilation {
             message: format!(
-                "BitsIntegerDescriptor 'swapped' attribute must be bool (field index {})",
+                "PaddingDescriptor 'pattern' attribute must be int (field index {})",
                 field_index
             ),
         })?;
 
-    let _ = (py, &path); // py 与 path 暂未使用，保留参数以便后续扩展
-    Ok(BitsIntegerNode::new(length, signed, swapped))
+    let _ = py;
+    if bitwise {
+        // bit 域：BitPaddingNode::new 严格校验 pattern ∈ {0x00, 0x01}，
+        // 非法 pattern 返回 Padding 错误（设计 §4.2 P1 修正）。
+        Ok(Node::BitPadding(BitPaddingNode::new(length, pattern)?))
+    } else {
+        // 字节域：PaddingNode 接受任意 pattern 字节
+        Ok(Node::Padding(PaddingNode::new_const(length, pattern)))
+    }
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
@@ -3173,6 +3317,513 @@ class {name}:
                 "got: {}",
                 msg
             );
+        });
+    }
+
+    // ======================================================================
+    // Phase 3.3 子任务：PaddingDescriptor / BytewiseDescriptor /
+    // BitsSwappedDescriptor / ByteSwappedDescriptor 识别
+    // ======================================================================
+
+    /// 创建一个 PaddingDescriptor Python 实例（模拟 Python 侧 `Padding(length, pattern)`）。
+    fn make_padding_descriptor(py: Python<'_>, length: i64, pattern: u8) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class PaddingDescriptor:\n",
+            "    def __init__(self, length, pattern):\n",
+            "        self.length = length\n",
+            "        self.pattern = pattern\n",
+            "    @property\n",
+            "    def _expr_params(self):\n",
+            "        if isinstance(self.length, int):\n",
+            "            return {}\n",
+            "        return {'length': self.length}\n",
+            "    def __repr__(self):\n",
+            "        return 'Padding(length={!r}, pattern={!r})'.format(self.length, self.pattern)\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define PaddingDescriptor");
+        let cls = globals
+            .get_item("PaddingDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        cls.call((length, pattern), None)
+            .expect("instantiate")
+            .unbind()
+    }
+
+    /// 创建一个 BytewiseDescriptor Python 实例。
+    fn make_bytewise_descriptor(py: Python<'_>, subcon: Py<PyAny>) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class BytewiseDescriptor:\n",
+            "    __slots__ = ('subcon',)\n",
+            "    def __init__(self, subcon):\n",
+            "        self.subcon = subcon\n",
+            "    _expr_params = {}\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define BytewiseDescriptor");
+        let cls = globals
+            .get_item("BytewiseDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        cls.call((subcon,), None).expect("instantiate").unbind()
+    }
+
+    /// 创建一个 BitsSwappedDescriptor Python 实例。
+    fn make_bits_swapped_descriptor(py: Python<'_>, subcon: Py<PyAny>) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class BitsSwappedDescriptor:\n",
+            "    __slots__ = ('subcon',)\n",
+            "    def __init__(self, subcon):\n",
+            "        self.subcon = subcon\n",
+            "    _expr_params = {}\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define BitsSwappedDescriptor");
+        let cls = globals
+            .get_item("BitsSwappedDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        cls.call((subcon,), None).expect("instantiate").unbind()
+    }
+
+    /// 创建一个 ByteSwappedDescriptor Python 实例。
+    fn make_byte_swapped_descriptor(py: Python<'_>, subcon: Py<PyAny>) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class ByteSwappedDescriptor:\n",
+            "    __slots__ = ('subcon',)\n",
+            "    def __init__(self, subcon):\n",
+            "        self.subcon = subcon\n",
+            "    _expr_params = {}\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define ByteSwappedDescriptor");
+        let cls = globals
+            .get_item("ByteSwappedDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        cls.call((subcon,), None).expect("instantiate").unbind()
+    }
+
+    // ------------------------------------------------------------------
+    // PaddingDescriptor 编译
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compile_padding_descriptor_byte_domain_produces_padding_node() {
+        // Padding(4) 在字节域 → Node::Padding（字节级）
+        with_py(|py| {
+            let cls = make_dummy_class(py, "PadByte");
+            let desc = make_padding_descriptor(py, 4, 0).into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["reserved".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    assert!(matches!(s.fields()[0].node, Node::Padding(_)));
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_padding_descriptor_bit_domain_produces_bit_padding_node() {
+        // Padding(4) 在 bit 域（bitwise=true）→ Node::BitPadding
+        with_py(|py| {
+            let cls = make_dummy_class(py, "PadBit");
+            let desc = make_padding_descriptor(py, 4, 0).into_any();
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["reserved".to_string()],
+                vec![desc],
+                None,
+                None,
+                true, // bitwise=true → 根包入 Bitwise，Padding 编译为 BitPadding
+            )
+            .expect("compile");
+            match schema.root() {
+                Node::Bitwise(b) => match b.inner() {
+                    Node::Struct(s) => {
+                        assert!(matches!(s.fields()[0].node, Node::BitPadding(_)));
+                    }
+                    other => panic!("expected Struct, got {:?}", other),
+                },
+                other => panic!("expected Bitwise, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_padding_descriptor_bit_domain_invalid_pattern_returns_error() {
+        // P1 修复：bit 域 Padding pattern 非 {0x00, 0x01} → Padding 错误
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BadPattern");
+            let desc = make_padding_descriptor(py, 4, 0x80).into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["reserved".to_string()],
+                vec![desc],
+                None,
+                None,
+                true, // bitwise=true
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("0x00") && msg.contains("0x01") && msg.contains("0x80"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_padding_descriptor_negative_length_returns_error() {
+        // Padding(-1) → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "NegPad");
+            let desc = make_padding_descriptor(py, -1, 0).into_any();
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["reserved".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("non-negative") || msg.contains("negative"),
+                "got: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_padding_end_to_end_byte_domain_round_trip() {
+        // 端到端：Padding(4) 字节域 parse/build
+        // Padding 作为 RW 字段（parse 返回 None 存入实例，build 忽略 obj）
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "PadE2E");
+            let int8ub = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let pad4 = make_padding_descriptor(py, 4, 0).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["tag".to_string(), "reserved".to_string()],
+                vec![int8ub, pad4],
+                // Padding 用 RW 模式：build 时从实例取值（Padding.build 忽略 obj）
+                Some(vec!["rw".to_string(), "rw".to_string()]),
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // parse b'\xAA\x00\x00\x00\x00' → tag=0xAA
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xAA, 0, 0, 0, 0]);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let tag: i64 = parsed.getattr("tag").unwrap().extract().unwrap();
+            assert_eq!(tag, 0xAA);
+
+            // build back：Padding.build 忽略 obj（这里 reserved=None）
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("tag", 0xAA).unwrap();
+            kwargs.set_item("reserved", py.None()).unwrap();
+            let obj = cls.call((), Some(&kwargs)).expect("obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), &[0xAA, 0, 0, 0, 0]);
+        });
+    }
+
+    #[test]
+    fn compile_padding_end_to_end_bit_domain_round_trip() {
+        // 端到端：BitStruct { a: BitsInteger(4), b: Padding(4) }
+        // 总 8 bit = 1 字节
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "BitPadE2E");
+            let a_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+            let pad_desc = make_padding_descriptor(py, 4, 0).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "reserved".to_string()],
+                vec![a_desc, pad_desc],
+                // a 是 RW，reserved 是 RW（Padding.build 忽略 obj）
+                Some(vec!["rw".to_string(), "rw".to_string()]),
+                None,
+                true, // bitwise=true
+            )
+            .expect("compile");
+
+            // parse b'\xA5' → a=0xA
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xA5]);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
+            assert_eq!(a, 0xA);
+
+            // build back：reserved=None，Padding.build 忽略 obj
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("a", 0xA).unwrap();
+            kwargs.set_item("reserved", py.None()).unwrap();
+            let obj = cls.call((), Some(&kwargs)).expect("obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), &[0xA0]);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // BytewiseDescriptor 编译
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compile_bytewise_descriptor_produces_bytewise_node() {
+        // Bytewise(Int16ub) → Node::Bytewise wrapping FormatField
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BytewiseTest");
+            let inner = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int16ub", PythonFormat::UnsignedInt16Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let desc = make_bytewise_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::Bytewise(b) => match b.inner() {
+                        Node::FormatField(_) => {}
+                        other => panic!("expected FormatField, got {:?}", other),
+                    },
+                    other => panic!("expected Bytewise, got {:?}", other),
+                },
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bytewise_inside_bitstruct_end_to_end() {
+        // BitStruct { a: Nibble, b: Bytewise(Int8ub), c: Nibble }
+        // 总 4+8+4 = 16 bit = 2 字节
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "BitBytewise");
+            let a_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+            let inner_format = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let b_desc = make_bytewise_descriptor(py, inner_format).into_any();
+            let c_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()],
+                vec![a_desc, b_desc, c_desc],
+                None,
+                None,
+                true,
+            )
+            .expect("compile");
+
+            // parse [0xA5, 0xF0] → a=0xA, b=0x5F, c=0x0
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xA5, 0xF0]);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = parsed.getattr("b").unwrap().extract().unwrap();
+            let c: i64 = parsed.getattr("c").unwrap().extract().unwrap();
+            assert_eq!(a, 0xA);
+            assert_eq!(b, 0x5F);
+            assert_eq!(c, 0x0);
+        });
+    }
+
+    // ------------------------------------------------------------------
+    // BitsSwappedDescriptor / ByteSwappedDescriptor 编译
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn compile_bits_swapped_descriptor_produces_transform_node() {
+        // BitsSwapped(Bytes(2)) → Node::Transform(BitSwap)
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitSwapTest");
+            let inner = Py::new(py, BytesDescriptor::new(2.into_py(py)))
+                .expect("Py::new")
+                .into_any();
+            let desc = make_bits_swapped_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::Transform(t) => {
+                        assert_eq!(
+                            t.transform(),
+                            crate::nodes::transform::ByteTransform::BitSwap
+                        );
+                    }
+                    other => panic!("expected Transform, got {:?}", other),
+                },
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_byte_swapped_descriptor_produces_transform_node() {
+        // ByteSwapped(Int16ub) → Node::Transform(ByteSwap)
+        with_py(|py| {
+            let cls = make_dummy_class(py, "ByteSwapTest");
+            let inner = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int16ub", PythonFormat::UnsignedInt16Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let desc = make_byte_swapped_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::Transform(t) => {
+                        assert_eq!(
+                            t.transform(),
+                            crate::nodes::transform::ByteTransform::ByteSwap
+                        );
+                    }
+                    other => panic!("expected Transform, got {:?}", other),
+                },
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_byte_swapped_end_to_end_round_trip() {
+        // 端到端：ByteSwapped(Int32ub) parse/build
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "ByteSwapE2E");
+            let inner = Py::new(
+                py,
+                FormatFieldDescriptor::new("Int32ub", PythonFormat::UnsignedInt32Big),
+            )
+            .expect("Py::new")
+            .into_any();
+            let desc = make_byte_swapped_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // parse [0x78, 0x56, 0x34, 0x12] → ByteSwap → 0x12345678
+            let data = pyo3::types::PyBytes::new_bound(py, &[0x78, 0x56, 0x34, 0x12]);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let v: i64 = parsed.getattr("v").unwrap().extract().unwrap();
+            assert_eq!(v, 0x12345678);
+
+            // build back
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("v", 0x12345678).unwrap();
+            let obj = cls.call((), Some(&kwargs)).expect("obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), &[0x78, 0x56, 0x34, 0x12]);
+        });
+    }
+
+    #[test]
+    fn compile_bits_swapped_end_to_end_round_trip() {
+        // 端到端：BitsSwapped(Bytes(2)) parse/build
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "BitSwapE2E");
+            let inner = Py::new(py, BytesDescriptor::new(2.into_py(py)))
+                .expect("Py::new")
+                .into_any();
+            let desc = make_bits_swapped_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // parse [0xF0, 0x0F] → BitSwap → [0x0F, 0xF0] → Bytes(2) → b"\x0F\xF0"
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xF0, 0x0F]);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let v_binding = parsed.getattr("v").unwrap();
+            let v: &[u8] = v_binding
+                .downcast::<pyo3::types::PyBytes>()
+                .unwrap()
+                .as_bytes();
+            assert_eq!(v, &[0x0F, 0xF0]);
         });
     }
 }

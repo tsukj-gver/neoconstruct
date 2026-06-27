@@ -136,8 +136,10 @@ impl Construct for BitwiseNode {
         if exit_bit_pos != entry_bit_pos {
             return Err(ConstructError::BitField {
                 message: format!(
-                    "bit stream not byte-aligned after Bitwise build (entry bit_pos={}, exit bit_pos={})",
-                    entry_bit_pos, exit_bit_pos
+                    "bit stream not byte-aligned after Bitwise build (entry bit_pos={}, exit bit_pos={}, consumed {} bits mod 8)",
+                    entry_bit_pos,
+                    exit_bit_pos,
+                    ((exit_bit_pos as i32 - entry_bit_pos as i32 + 8) % 8)
                 ),
                 path: path.to_string(),
             });
@@ -153,6 +155,9 @@ impl Construct for BitwiseNode {
         // BW-2: inner sizeof 非 8 倍数 → BitField 错误。
         // 注意：inner_bits % 8 != 0 时返回错误（与 parse/build 时校验一致），
         // 而非 Python 的 size//8 截断。construct-rs fail-fast（设计 BW-2）。
+        //
+        // sizeof 签名不携带 path 参数，因此 path 字段为空字符串。
+        // message 已含 "Bitwise inner sizeof N" 定位信息（3.2 P1 已知遗留）。
         if inner_bits % 8 != 0 {
             return Err(ConstructError::BitField {
                 message: format!(

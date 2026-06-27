@@ -26,7 +26,7 @@
 //!
 //! 对齐 Python `swapbytesinbits`（binary.py L135）：在 read/write 前后对 bit 串
 //! 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则 Python 抛 ValueError，
-//! construct-rs 返回 `FormatField` 错误，BI-6）。
+//! construct-rs 返回 `Integer` 错误，BI-6）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -63,7 +63,7 @@ pub const MAX_BITS_INTEGER: usize = 64;
 /// # swapped 语义（字节序）
 ///
 /// 对齐 Python `swapbytesinbits`（`lib/binary.py` L135）：在 read/write 前后对 bit 串
-/// 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则返回 `FormatField` 错误，BI-6）。
+/// 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则返回 `Integer` 错误，BI-6）。
 /// 对应"Byte-Level Little-Endian"（分析报告 §2 四种组合）。
 ///
 /// # sizeof
@@ -72,13 +72,13 @@ pub const MAX_BITS_INTEGER: usize = 64;
 ///
 /// # 错误（§9.1 BI-1~BI-9）
 ///
-/// - BI-1 length==0：parse/build 返回 `FormatField` 错误
+/// - BI-1 length==0：parse/build 返回 `Integer` 错误
 /// - BI-2 length<0：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
 /// - BI-3 length>64：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
 /// - BI-4 length==64 + signed：用 i128 中间值，正确处理二补码
-/// - BI-6 swapped + length%8!=0：parse/build 返回 `FormatField` 错误
-/// - BI-7 build 非 int：返回 `FormatField` 错误
-/// - BI-8 build 超范围：返回 `FormatField` 错误
+/// - BI-6 swapped + length%8!=0：parse/build 返回 `Integer` 错误
+/// - BI-7 build 非 int：返回 `Integer` 错误
+/// - BI-8 build 超范围：返回 `Integer` 错误
 /// - BI-9 流中 bit 不足：parse 返回 `Stream` 错误（由 `read_bits` 传播）
 #[derive(Debug, Clone, Copy)]
 pub struct BitsIntegerNode {
@@ -95,7 +95,7 @@ impl BitsIntegerNode {
     ///
     /// 注意：本构造函数不做参数校验（length 范围、swapped 与 length 关系等）。
     /// 校验在编译管线（`build_node_from_descriptor`）与 parse/build 时进行：
-    /// - length<=0 / >64 / swapped+%8!=0 在 parse/build 时返回 `FormatField` 错误
+    /// - length<=0 / >64 / swapped+%8!=0 在 parse/build 时返回 `Integer` 错误
     /// - length<0 / >64 在编译期返回 `Compilation` 错误（更早暴露）
     ///
     /// # 参数
@@ -141,14 +141,14 @@ impl super::Construct for BitsIntegerNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         // BI-1: length must be positive
         if self.length == 0 {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!("BitsInteger length {} must be positive", self.length),
                 path: path.to_string(),
             });
         }
         // BI-3 defensive: length <= 64 (编译期已校验，运行时兜底)
         if self.length > MAX_BITS_INTEGER {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!(
                     "BitsInteger length {} exceeds 64-bit limit (max {})",
                     self.length, MAX_BITS_INTEGER
@@ -158,7 +158,7 @@ impl super::Construct for BitsIntegerNode {
         }
         // BI-6: swapped requires length % 8 == 0
         if self.swapped && !self.length.is_multiple_of(8) {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!(
                     "BitsInteger swapped (little-endian) requires length {} to be a multiple of 8",
                     self.length
@@ -177,17 +177,36 @@ impl super::Construct for BitsIntegerNode {
             raw
         };
 
-        // 应用 signed（二补码）
-        // 使用 i128 中间值以正确处理 length=64 + signed 的边界（BI-4）
-        let value: i128 = if self.signed && (raw >> (self.length - 1)) & 1 == 1 {
-            // 最高位为 1 → 负数：raw - 2^length
-            (raw as i128) - (1i128 << self.length)
+        // 应用 signed（二补码）+ 转 PyLong
+        //
+        // # OPT-1: PyLong 创建路径选择
+        //
+        // pyo3 0.22 的 `i128::IntoPy` 走任意精度路径（~21 ns），不走 CPython
+        // 小整数缓存 fast path；而 `i64::IntoPy`/`u64::IntoPy` 走 fast path
+        // （~1.7 ns / ~1.9 ns）。本块据此选择最快路径：
+        //
+        // - `signed || length < 64`：值总在 i64 范围内
+        //   - signed: `-2^(length-1) .. 2^(length-1)-1`，length<=64 时 fits in i64
+        //   - unsigned length<64: `0 .. 2^length-1`，length<64 时 fits in i64 正范围
+        // - `unsigned && length == 64`：raw 可能 > i64::MAX（最大 u64::MAX），
+        //   用 u64 直接转换
+        //
+        // i128 仍作为 length=64+signed 的二补码计算中间值（避免 `1i64 << 64` 溢出，
+        // §9.1 BI-4），但最终值仍在 i64 范围内（i64::MIN..=i64::MAX）。
+        if self.signed || self.length < 64 {
+            // signed 二补码计算（仅在最高位为 1 时生效）
+            // i128 中间值正确处理 length=64 + signed 的边界（BI-4）
+            let value: i128 = if self.signed && (raw >> (self.length - 1)) & 1 == 1 {
+                (raw as i128) - (1i128 << self.length)
+            } else {
+                raw as i128
+            };
+            // 安全：上述分析保证 value ∈ i64 范围
+            Ok((value as i64).into_py(py))
         } else {
-            raw as i128
-        };
-
-        // 转 PyLong（pyo3 支持 i128 → Python 任意精度 int）
-        Ok(value.into_py(py))
+            // unsigned + length == 64：raw 可能 > i64::MAX，用 u64 直接转换
+            Ok(raw.into_py(py))
+        }
     }
 
     fn build(
@@ -200,13 +219,13 @@ impl super::Construct for BitsIntegerNode {
     ) -> Result<(), ConstructError> {
         // BI-1: length must be positive
         if self.length == 0 {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!("BitsInteger length {} must be positive", self.length),
                 path: path.to_string(),
             });
         }
         if self.length > MAX_BITS_INTEGER {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!(
                     "BitsInteger length {} exceeds 64-bit limit (max {})",
                     self.length, MAX_BITS_INTEGER
@@ -216,7 +235,7 @@ impl super::Construct for BitsIntegerNode {
         }
         // BI-6: swapped requires length % 8 == 0
         if self.swapped && !self.length.is_multiple_of(8) {
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!(
                     "BitsInteger swapped (little-endian) requires length {} to be a multiple of 8",
                     self.length
@@ -235,7 +254,7 @@ impl super::Construct for BitsIntegerNode {
                 .name()
                 .map(|n| n.to_string())
                 .unwrap_or_else(|_| "<unknown>".to_string());
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!("BitsInteger value of type {} is not an integer", type_name),
                 path: path.to_string(),
             });
@@ -251,7 +270,7 @@ impl super::Construct for BitsIntegerNode {
                     .ok()
                     .and_then(|r| r.to_str().ok().map(String::from))
                     .unwrap_or_else(|| "<unknown>".to_string());
-                return Err(ConstructError::FormatField {
+                return Err(ConstructError::Integer {
                     message: format!(
                         "BitsInteger value {} out of representable range (i128)",
                         repr
@@ -276,7 +295,7 @@ impl super::Construct for BitsIntegerNode {
                 .ok()
                 .and_then(|r| r.to_str().ok().map(String::from))
                 .unwrap_or_else(|| "<unknown>".to_string());
-            return Err(ConstructError::FormatField {
+            return Err(ConstructError::Integer {
                 message: format!(
                     "BitsInteger value {} out of range (min={}, max={}, length={}, signed={})",
                     repr, min, max, self.length, self.signed
@@ -698,7 +717,7 @@ mod tests {
 
     #[test]
     fn parse_swapped_with_non_multiple_of_8_returns_error() {
-        // BI-6: swapped + length=12 (非 8 倍数) → FormatField error
+        // BI-6: swapped + length=12 (非 8 倍数) → Integer error
         with_py(|py| {
             let node = BitsIntegerNode::new(12, false, true);
             let mut stream = ParseStream::new(&[0xAB, 0xC0]);
@@ -708,11 +727,11 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::FormatField { message, path } => {
+                ConstructError::Integer { message, path } => {
                     assert!(message.contains("multiple of 8"), "got: {}", message);
                     assert_eq!(path, "root");
                 }
-                other => panic!("expected FormatField, got {:?}", other),
+                other => panic!("expected Integer, got {:?}", other),
             }
         });
     }
@@ -733,10 +752,10 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::FormatField { message, .. } => {
+                ConstructError::Integer { message, .. } => {
                     assert!(message.contains("must be positive"), "got: {}", message);
                 }
-                other => panic!("expected FormatField, got {:?}", other),
+                other => panic!("expected Integer, got {:?}", other),
             }
         });
     }
@@ -917,7 +936,7 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            assert!(matches!(err, ConstructError::FormatField { .. }));
+            assert!(matches!(err, ConstructError::Integer { .. }));
         });
     }
 
@@ -934,10 +953,10 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::FormatField { message, .. } => {
+                ConstructError::Integer { message, .. } => {
                     assert!(message.contains("multiple of 8"), "got: {}", message);
                 }
-                other => panic!("expected FormatField, got {:?}", other),
+                other => panic!("expected Integer, got {:?}", other),
             }
         });
     }
@@ -955,10 +974,10 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::FormatField { message, .. } => {
+                ConstructError::Integer { message, .. } => {
                     assert!(message.contains("not an integer"), "got: {}", message);
                 }
-                other => panic!("expected FormatField, got {:?}", other),
+                other => panic!("expected Integer, got {:?}", other),
             }
         });
     }
@@ -976,10 +995,10 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::FormatField { message, .. } => {
+                ConstructError::Integer { message, .. } => {
                     assert!(message.contains("out of range"), "got: {}", message);
                 }
-                other => panic!("expected FormatField, got {:?}", other),
+                other => panic!("expected Integer, got {:?}", other),
             }
         });
     }
@@ -996,7 +1015,7 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            assert!(matches!(err, ConstructError::FormatField { .. }));
+            assert!(matches!(err, ConstructError::Integer { .. }));
         });
     }
 
@@ -1012,7 +1031,7 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            assert!(matches!(err, ConstructError::FormatField { .. }));
+            assert!(matches!(err, ConstructError::Integer { .. }));
         });
     }
 
