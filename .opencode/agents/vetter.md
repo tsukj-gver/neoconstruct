@@ -8,6 +8,7 @@ permission:
     "docs/**": "deny"
     "construct-rs/**": "deny"
     "plans/**/过程记录.md": "allow"
+    "experiments/**": "allow"
   bash:
     "*": "allow"
     "git push*": "deny"

@@ -8,6 +8,7 @@ mode: subagent
     "construct-rs/**": "deny"
     "construct/**": "deny"
     "docs/**": "allow"
+    "experiments/**": "allow"
   bash:
     "*": "allow"
 ---

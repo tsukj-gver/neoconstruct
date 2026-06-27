@@ -88,13 +88,16 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 
 | 角色 | 可写 | 只读 |
 |------|------|------|
-| PM | `plans/00-项目进度.md`（总进度）、`plans/phaseN/过程记录.md`（状态更新）、`plans/phaseN/总纲.md`（清单勾选） | 全部 |
-| ARCH | `docs/`（设计文档） | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志） | `docs/`、`plans/phaseN/总纲.md` |
-| REV | `plans/phaseN/过程记录.md`（设计检视结果） | 全部 |
-| VET | `plans/phaseN/过程记录.md`（代码审查结果） | 全部 |
+| PM | 除业务代码外的全部（`plans/`、`docs/`、`.opencode/`、`experiments/`） | `construct-rs/src/`、`construct/` |
+| ARCH | `docs/`（设计文档）、`experiments/`（实验） | `plans/`、`construct/` |
+| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志）、`experiments/`（实验） | `docs/`、`plans/phaseN/总纲.md` |
+| REV | `plans/phaseN/过程记录.md`（设计检视结果）、`experiments/`（实验） | 全部 |
+| VET | `plans/phaseN/过程记录.md`（代码审查结果）、`experiments/`（实验） | 全部 |
+
+`experiments/` 是试验场，任何角色都可以在此写代码做实验（测元操作耗时、验证行为、诊断问题），不受编码规范约束，不影响交付物。
 
 **禁止修改**：
+- `construct-rs/src/` 下的业务代码（仅 DEV 可写）
 - `construct/` 目录下的任何文件（Python 原版，只读参考）
 - 已验收阶段的总纲文件（除非 PM 授权）
 - 非自己角色负责的文件段落
