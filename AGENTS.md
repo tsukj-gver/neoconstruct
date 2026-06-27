@@ -170,6 +170,12 @@ cargo bench
 - 两边使用相同的 timeit 参数（NUMBER/REPEAT），取相同的统计量
 - 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）
 
+**S-PERF benchmark 输出要求**：benchmark 脚本除了原始数据（ns/call），还必须自动输出派生指标供 PM 审查：
+- parse/build 比率（每个场景的 Rust 比率和参考实现的比率，对照方向是否一致）
+- 加速比按场景复杂度排列（验证趋势是否符合预期）
+- 低于 4x 的场景单独标注
+- 任何 parse/build 方向与参考实现相反的场景单独标注
+
 ### Git 命令
 
 ```bash
