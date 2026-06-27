@@ -32,7 +32,7 @@ from ._errors import (
     StreamError,
     UnresolvedReferenceError,
 )
-from ._mixin import StructMixin, field, rfield, wfield, Tell, Computed
+from ._mixin import StructMixin, BitStructMixin, field, rfield, wfield, Tell, Computed
 
 # ---------------------------------------------------------------------------
 # Rust 扩展导入
@@ -77,6 +77,9 @@ try:
         BitsIntegerDescriptor,
         Nibble,
         Octet,
+        # Phase 3.2: Bitwise
+        Bitwise,
+        BitwiseDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -92,6 +95,7 @@ __version__ = "0.1.0"
 __all__ = [
     # 核心 API
     "StructMixin",
+    "BitStructMixin",
     "field",
     "rfield",
     "wfield",
@@ -126,6 +130,9 @@ __all__ = [
     "Octet",
     "BitsInteger",
     "BitsIntegerDescriptor",
+    # Phase 3.2: Bitwise
+    "Bitwise",
+    "BitwiseDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常

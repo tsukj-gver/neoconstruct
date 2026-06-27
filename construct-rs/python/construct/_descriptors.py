@@ -179,6 +179,67 @@ def Octet():
     return BitsIntegerDescriptor(8, False, False)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3.2: Bitwise 描述符
+#
+# 设计依据：``docs/模块设计-BitStream.md`` §8.2、§11。
+#
+# ``Bitwise(subcon)`` 是核心包装器，将字节流转为 bit 流。construct-rs 通过
+# type name "BitwiseDescriptor" 识别，递归编译内部 subcon（bitwise=true 上下文），
+# 包装为 ``Node::Bitwise(BitwiseNode)``。
+#
+# 使用方式：通常用户使用 ``BitStructMixin`` 而非显式 ``Bitwise``。
+# 显式 ``Bitwise(subcon)`` 用于：在普通 Struct 中嵌入 bit 域字段。
+# ---------------------------------------------------------------------------
+
+
+class BitwiseDescriptor:
+    """``Bitwise(subcon)`` 描述符。
+
+    bit 域包装器：将字节流转为 bit 流，内部 subcon 在 bit 域内编译与执行。
+    对应 Python construct 的 ``Bitwise``。
+
+    ``_expr_params`` 协议返回空 dict：Bitwise 无表达式参数（subcon 由递归处理）。
+    """
+
+    __slots__ = ("subcon",)
+
+    def __init__(self, subcon):
+        """初始化 Bitwise 描述符。
+
+        :param subcon: 被包裹的子构造器（通常是 ``Struct`` 的描述符、``BitsInteger``、
+                        或其他 bit 友好的描述符）。
+        """
+        self.subcon = subcon
+
+    # 类级别常量：Bitwise 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Bitwise({!r})".format(self.subcon)
+
+
+def Bitwise(subcon):
+    """创建一个 Bitwise 描述符。
+
+    bit 域包装器：将字节流转为 bit 流。对应 Python construct 的 ``Bitwise``。
+
+    使用方式（在普通 Struct 中嵌入 bit 域）::
+
+        @dataclass
+        class Header(StructMixin):
+            magic: int = field(Int32ub)
+            bits: int = field(Bitwise(BitsInteger(8)))  # 1 字节 = 8 bit
+
+    注意：``BitStruct`` 用户通常使用 ``BitStructMixin`` 而非显式 ``Bitwise``。
+    ``BitStruct(...)`` 等价于 ``Bitwise(Struct(...))``。
+
+    :param subcon: 被包裹的子构造器。
+    :return: ``BitwiseDescriptor`` 实例。
+    """
+    return BitwiseDescriptor(subcon)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -207,4 +268,7 @@ __all__ = [
     "Bit",
     "Nibble",
     "Octet",
+    # Phase 3.2 Bitwise
+    "BitwiseDescriptor",
+    "Bitwise",
 ]

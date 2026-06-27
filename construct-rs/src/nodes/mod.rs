@@ -11,17 +11,19 @@
 //!
 //! ## 当前范围
 //!
-//! 当前含 8 个节点变体：
+//! 当前含 9 个节点变体：
 //! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
 //!   [`BytesNode`](bytes::BytesNode)（固定/表达式长度字节）、
 //!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）、
 //!   [`BitsIntegerNode`](bits_integer::BitsIntegerNode)（bit 级整数，Phase 3.1）
 //! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
-//!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）
+//!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）、
+//!   [`BitwiseNode`](bitwise::BitwiseNode)（bit 域包装器，Phase 3.2）
 //! - RO 节点：[`TellNode`](tell::TellNode)（流位置）、
 //!   [`ComputedNode`](computed::ComputedNode)（表达式计算值）
 
 pub mod bits_integer;
+pub mod bitwise;
 pub mod bytes;
 pub mod computed;
 pub mod format_field;
@@ -35,6 +37,7 @@ use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use bits_integer::BitsIntegerNode;
+use bitwise::BitwiseNode;
 use bytes::BytesNode;
 use computed::ComputedNode;
 use enum_dispatch::enum_dispatch;
@@ -128,7 +131,8 @@ pub trait Construct {
 /// # 当前变体
 ///
 /// - 4 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`、`BitsInteger`（Phase 3.1）
-/// - 2 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）
+/// - 3 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）、
+///   `Bitwise`（bit 域包装器，Phase 3.2，首个递归 `Box<Node>` 变体）
 /// - 2 个 RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
 #[derive(Debug)]
 #[enum_dispatch(Construct)]
@@ -150,12 +154,19 @@ pub enum Node {
     /// bit 级整数节点：`BitsInteger` / `Bit` / `Nibble` / `Octet`
     /// （对应 Python construct `BitsInteger`，必须在 `Bitwise` 域内使用，Phase 3.1）
     BitsInteger(BitsIntegerNode),
+    /// bit 域包装器节点：建立 bit 级游标边界，结束时校验对齐
+    /// （对应 Python construct `Bitwise` / `BitStruct`，Phase 3.2）。
+    ///
+    /// 首个递归 Node 变体——`inner: Box<Node>` 打破 enum 的无限大小。
+    /// enum_dispatch 仍正常工作（dispatch 到 BitwiseNode::parse，内部解引用 Box）。
+    Bitwise(BitwiseNode),
 }
 
 impl Node {
     /// 判断此节点（或其子树）是否含有表达式字段。
     ///
     /// 当前仅 [`Node::Struct`] 携带 `has_expressions` 标志（编译期计算），
+    /// [`Node::Bitwise`] 递归检查内部子树（Phase 3.2）。
     /// 其他节点变体（原子节点、`StructRef`、`Tell`、`Computed`）返回 `false`。
     ///
     /// `struct_ref.rs` 与 `schema.rs` 通过此方法判断内层/根节点是否含表达式，
@@ -163,6 +174,7 @@ impl Node {
     pub fn has_expressions(&self) -> bool {
         match self {
             Node::Struct(s) => s.has_expressions(),
+            Node::Bitwise(b) => b.inner().has_expressions(),
             _ => false,
         }
     }

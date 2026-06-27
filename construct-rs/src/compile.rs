@@ -36,6 +36,7 @@ use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDesc
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
 use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
+use crate::nodes::bitwise::BitwiseNode;
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
@@ -53,7 +54,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 
 /// 编译 Schema 为执行树（一次 FFI 穿越）。
 ///
-/// Python 可见签名（Phase 2 扩展，向后兼容）：
+/// Python 可见签名（Phase 3.2 扩展，向后兼容）：
 ///
 /// ```python
 /// compile_schema(
@@ -62,6 +63,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 ///     descriptors: list,
 ///     modes: list[str] | None = None,             # ["rw", "ro", "wo", ...]
 ///     expr_programs: list[dict | None] | None = None,  # 每字段的表达式程序
+///     bitwise: bool = False,                       # Phase 3.2：BitStructMixin 传 True
 /// ) -> CompiledSchema
 /// ```
 ///
@@ -75,6 +77,10 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// - `expr_programs`：可选的每字段表达式程序列表。长度与 `field_names` 一致，
 ///   每个元素为 `None`（该字段无表达式）或 Python dict（`{param_name: [expr_ops]}`）。
 ///   当前 2.3 阶段仅用于计算 `has_expressions` 标志，具体程序解析推迟到 2.5/2.6。
+/// - `bitwise`：Phase 3.2 新增。`true` 时根 `StructNode` 被包入 `BitwiseNode`
+///   （对应 Python `BitStructMixin`，等价于 `Bitwise(Struct(...))`）。
+///   字段树在 `bitwise=true` 上下文下编译（影响 `Padding` 描述符的选择，
+///   详见 [`build_node_from_descriptor`]）。
 ///
 /// # 返回
 ///
@@ -85,7 +91,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// - [`ConstructError::Compilation`]：`field_names` 与 `descriptors` 长度不一致、
 ///   未知 mode 字符串、描述符类型未知、`cls` 不是类型、或类定义了 `__slots__`。
 #[pyfunction]
-#[pyo3(signature = (cls, field_names, descriptors, modes=None, expr_programs=None))]
+#[pyo3(signature = (cls, field_names, descriptors, modes=None, expr_programs=None, bitwise=false))]
 pub fn compile_schema(
     py: Python<'_>,
     cls: &Bound<'_, PyType>,
@@ -93,6 +99,7 @@ pub fn compile_schema(
     descriptors: Vec<Py<PyAny>>,
     modes: Option<Vec<String>>,
     expr_programs: Option<Vec<Option<Py<PyAny>>>>,
+    bitwise: bool,
 ) -> PyResult<CompiledSchema> {
     // 1. 校验 field_names 与 descriptors 长度一致
     if field_names.len() != descriptors.len() {
@@ -169,7 +176,7 @@ pub fn compile_schema(
     let mut fields: Vec<StructField> = Vec::with_capacity(field_names.len());
     for (i, (name, desc)) in field_names.iter().zip(descriptors.iter()).enumerate() {
         let desc_bound = desc.bind(py);
-        let node = build_node_from_descriptor(py, desc_bound, i, expr_programs_slice)
+        let node = build_node_from_descriptor(py, desc_bound, i, expr_programs_slice, bitwise)
             .map_err(|e| with_field_context(e, name))?;
         // FieldName::new 创建 interned PyString 缓存。
         // mode 从解析后的 modes_resolved 取（Phase 2 扩展）。
@@ -182,7 +189,7 @@ pub fn compile_schema(
     }
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
-    let root = Node::Struct(StructNode::new(
+    let struct_root = Node::Struct(StructNode::new(
         py,
         fields,
         cls.clone().unbind(),
@@ -190,7 +197,15 @@ pub fn compile_schema(
         has_expressions,
     ));
 
-    // 6. 包装为 CompiledSchema
+    // 6. Phase 3.2：bitwise=true 时，根 StructNode 被包入 BitwiseNode
+    //    （对应 Python BitStructMixin → Bitwise(Struct(...))）。
+    let root = if bitwise {
+        Node::Bitwise(BitwiseNode::new(struct_root))
+    } else {
+        struct_root
+    };
+
+    // 7. 包装为 CompiledSchema
     Ok(CompiledSchema::new(root, cls.clone().unbind(), py))
 }
 
@@ -226,12 +241,21 @@ fn check_has_post_init(cls: &Bound<'_, PyType>) -> bool {
 /// - `desc`：描述符的 Python 引用
 /// - `field_index`：当前字段在 fields 列表中的索引（用于从 `expr_programs` 取表达式）
 /// - `expr_programs`：每字段的表达式程序切片（与字段数等长，None 表示无表达式）
+/// - `bitwise`：当前编译上下文是否在 bit 域内（设计 §7.2 递归 `bitwise` 上下文传播）。
+///
+///   Phase 3.2：此参数仅用于向递归调用传播（`BitwiseDescriptor` 内部递归传 `true`）。
+///   Phase 3.3 将在 `PaddingDescriptor` 分支使用此参数选择 `BitPaddingNode`（bit 域）
+///   或 `PaddingNode`（字节域）。当前为前向兼容保留。
 fn build_node_from_descriptor(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
     field_index: usize,
     expr_programs: &[Option<Py<PyAny>>],
+    bitwise: bool,
 ) -> Result<Node, ConstructError> {
+    // Phase 3.2：bitwise 参数仅用于 PaddingDescriptor 分支（Phase 3.3 实现）。
+    // 当前显式 consume 以避免 unused_variables 警告，同时保留参数语义供递归调用。
+    let _ = bitwise;
     // 1. FormatFieldDescriptor → Node::FormatField
     if let Ok(fmt) = desc.extract::<Py<FormatFieldDescriptor>>() {
         let fmt_ref = fmt.bind(py).get();
@@ -371,6 +395,22 @@ fn build_node_from_descriptor(
                 field_index,
                 path_for_field(field_index),
             )?));
+        }
+        // BitwiseDescriptor（Phase 3.2）→ BitwiseNode（递归编译内部 subcon，bitwise=true）。
+        // 对应 Python `Bitwise(subcon)`。内部 subcon 在 bit 域上下文编译。
+        // 设计 §7.2：进入 BitwiseDescriptor 后，内部递归调用传 bitwise=true。
+        "BitwiseDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "BitwiseDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node =
+                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, true)?;
+            return Ok(Node::Bitwise(BitwiseNode::new(inner_node)));
         }
         _ => {}
     }
@@ -714,7 +754,8 @@ class {name}:
     fn compile_empty_schema_produces_empty_struct_node() {
         with_py(|py| {
             let cls = make_dummy_class(py, "Empty");
-            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
+            let schema =
+                compile_schema(py, &cls, vec![], vec![], None, None, false).expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert!(s.is_empty(), "expected empty struct");
@@ -745,6 +786,7 @@ class {name}:
                 vec![desc.into_any()],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -801,7 +843,8 @@ class {name}:
             ];
             let descs = vec![int8ub, int16ub, bytes4, greedy];
 
-            let schema = compile_schema(py, &cls, names, descs, None, None).expect("compile");
+            let schema =
+                compile_schema(py, &cls, names, descs, None, None, false).expect("compile");
 
             match schema.root() {
                 Node::Struct(s) => {
@@ -835,6 +878,7 @@ class {name}:
                 vec![inner_cls_py],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -871,6 +915,7 @@ class {name}:
                 vec![],
                 None,
                 None,
+                false,
             );
             let err = result.expect_err("should fail");
             let pyerr: PyErr = err;
@@ -893,8 +938,16 @@ class {name}:
             let cls = make_dummy_class(py, "Bad");
             // 传入 Python int 作为描述符（非已知类型，也非 StructMixin）
             let bad_desc = py.eval_bound("42", None, None).expect("eval").unbind();
-            let err = compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc], None, None)
-                .expect_err("should fail");
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![bad_desc],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
             let pyerr: PyErr = err;
             let msg = format!("{}", pyerr);
             assert!(
@@ -923,8 +976,15 @@ class {name}:
                 .eval_bound("'not a descriptor'", None, None)
                 .expect("eval")
                 .unbind();
-            let result =
-                compile_schema(py, &cls, vec!["x".to_string()], vec![bad_desc], None, None);
+            let result = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![bad_desc],
+                None,
+                None,
+                false,
+            );
             assert!(result.is_err(), "should fail");
         });
     }
@@ -966,7 +1026,8 @@ class {name}:
                 })
                 .collect();
 
-            let schema = compile_schema(py, &cls, names, descs, None, None).expect("compile");
+            let schema =
+                compile_schema(py, &cls, names, descs, None, None, false).expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 16);
@@ -991,8 +1052,16 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
 
             // _parse_raw 现在返回用户类实例（方案 B'）
             let data = PyBytes::new_bound(py, &[0x42u8]);
@@ -1036,6 +1105,7 @@ class {name}:
                 vec![int8ub, int16ub],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -1061,8 +1131,16 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![int32ub], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![int32ub],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
 
             // 只提供 2 字节，但 Int32ub 需要 4 字节
             let data = PyBytes::new_bound(py, &[0x01, 0x02]);
@@ -1096,8 +1174,16 @@ class {name}:
             .expect("Py::new")
             .into_any();
 
-            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
 
             // 构造 Python 对象 {x: 0x42}
             let obj = py
@@ -1139,6 +1225,7 @@ class {name}:
                 vec![int8ub, int16ub, bytes2],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -1175,7 +1262,8 @@ class {name}:
     fn end_to_end_empty_schema_parse_returns_empty_instance() {
         with_py(|py| {
             let cls = make_dummy_class(py, "E2EEmpty");
-            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
+            let schema =
+                compile_schema(py, &cls, vec![], vec![], None, None, false).expect("compile");
 
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse");
@@ -1197,7 +1285,8 @@ class {name}:
     fn end_to_end_empty_schema_build_returns_empty_bytes() {
         with_py(|py| {
             let cls = make_dummy_class(py, "E2EEmptyB");
-            let schema = compile_schema(py, &cls, vec![], vec![], None, None).expect("compile");
+            let schema =
+                compile_schema(py, &cls, vec![], vec![], None, None, false).expect("compile");
 
             let obj = py.eval_bound("object()", None, None).expect("obj");
             let result = schema._build_raw(py, &obj).expect("build");
@@ -1237,6 +1326,7 @@ class {name}:
                 vec![int8ub, bytes2, greedy],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -1293,6 +1383,7 @@ class {name}:
                 vec![inner_desc],
                 None,
                 None,
+                false,
             )
             .expect("compile inner");
             let inner_schema_py = Py::new(py, inner_schema).expect("Py::new schema");
@@ -1318,6 +1409,7 @@ class {name}:
                 vec![tag_desc, inner_cls_py.clone_ref(py).into_any()],
                 None,
                 None,
+                false,
             )
             .expect("compile outer");
 
@@ -1401,7 +1493,7 @@ class {name}:
                 .expect("create slotted class")
                 .downcast_into::<PyType>()
                 .expect("is PyType");
-            let err = compile_schema(py, &cls_bound, vec![], vec![], None, None)
+            let err = compile_schema(py, &cls_bound, vec![], vec![], None, None, false)
                 .expect_err("should fail");
             let msg = format!("{}", err);
             assert!(
@@ -1423,7 +1515,15 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let result = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None);
+            let result = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            );
             assert!(result.is_ok(), "compile should succeed: {:?}", result);
         });
     }
@@ -1498,6 +1598,7 @@ class {name}:
                 vec![desc],
                 None,
                 None,
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1548,6 +1649,7 @@ class {name}:
                 vec![int8ub, int16ub],
                 None,
                 None,
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1586,6 +1688,7 @@ class {name}:
                 vec![mk_desc(), mk_desc(), mk_desc()],
                 Some(vec!["rw".to_string(), "ro".to_string(), "wo".to_string()]),
                 None,
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1618,6 +1721,7 @@ class {name}:
                 vec![desc],
                 Some(vec!["invalid".to_string()]),
                 None,
+                false,
             )
             .expect_err("should fail");
             let msg = format!("{}", err);
@@ -1647,6 +1751,7 @@ class {name}:
                 vec![desc.clone_ref(py), desc],
                 Some(vec!["rw".to_string()]),
                 None,
+                false,
             )
             .expect_err("should fail");
             let msg = format!("{}", err);
@@ -1673,8 +1778,16 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert!(!s.has_expressions(), "should have no expressions");
@@ -1704,6 +1817,7 @@ class {name}:
                 vec![mk_desc(), mk_desc()],
                 None,
                 Some(vec![None, None]),
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1736,6 +1850,7 @@ class {name}:
                 vec![mk_desc(), mk_desc()],
                 None,
                 Some(vec![None, Some(prog)]),
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1775,6 +1890,7 @@ class {name}:
                 vec![mk_desc(), mk_desc(), mk_desc()],
                 Some(vec!["rw".to_string(), "ro".to_string(), "wo".to_string()]),
                 Some(vec![None, Some(prog), None]),
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -1801,8 +1917,16 @@ class {name}:
             )
             .expect("Py::new")
             .into_any();
-            let schema = compile_schema(py, &cls, vec!["x".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 1);
@@ -2021,6 +2145,7 @@ class {name}:
                 vec![count_desc, bytes_desc],
                 None,
                 Some(vec![None, Some(prog)]),
+                false,
             )
             .expect("compile");
 
@@ -2060,6 +2185,7 @@ class {name}:
                 vec![bytes_desc],
                 None,
                 None,
+                false,
             )
             .expect("compile");
 
@@ -2103,6 +2229,7 @@ class {name}:
                 vec![bytes_desc],
                 None,
                 None,
+                false,
             )
             .expect_err("should fail");
             let msg = err.to_string();
@@ -2134,6 +2261,7 @@ class {name}:
                 vec![bytes_desc],
                 None,
                 Some(vec![Some(empty_prog)]),
+                false,
             )
             .expect_err("should fail");
             let msg = err.to_string();
@@ -2169,6 +2297,7 @@ class {name}:
                 vec![count_desc, bytes_desc],
                 None,
                 Some(vec![None, Some(prog)]),
+                false,
             )
             .expect("compile");
 
@@ -2272,6 +2401,7 @@ class {name}:
                 vec![tell_desc],
                 Some(vec!["ro".to_string()]),
                 None, // TellDescriptor 无表达式参数
+                false,
             )
             .expect("compile");
 
@@ -2310,6 +2440,7 @@ class {name}:
                 vec![count_desc, computed_desc],
                 Some(vec!["rw".to_string(), "ro".to_string()]),
                 Some(vec![None, Some(prog)]),
+                false,
             )
             .expect("compile");
 
@@ -2345,6 +2476,7 @@ class {name}:
                 vec![computed_desc],
                 Some(vec!["ro".to_string()]),
                 None,
+                false,
             )
             .expect_err("should fail");
             let msg = err.to_string();
@@ -2375,6 +2507,7 @@ class {name}:
                 vec![computed_desc],
                 Some(vec!["ro".to_string()]),
                 Some(vec![Some(empty_prog)]),
+                false,
             )
             .expect_err("should fail");
             let msg = err.to_string();
@@ -2424,6 +2557,7 @@ class {name}:
                     "ro".to_string(),
                 ]),
                 Some(vec![None, None, None, Some(prog)]),
+                false,
             )
             .expect("compile");
 
@@ -2463,6 +2597,7 @@ class {name}:
                 vec![tell_desc],
                 Some(vec!["rw".to_string()]),
                 None,
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -2554,8 +2689,16 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "BitsIntTest");
             let desc = make_bits_integer_descriptor(py, 8, false, false).into_any();
-            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert_eq!(s.len(), 1);
@@ -2588,6 +2731,7 @@ class {name}:
                 vec![bit, nibble, octet],
                 None,
                 None,
+                false,
             )
             .expect("compile");
             match schema.root() {
@@ -2617,8 +2761,16 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "SignedSwapped");
             let desc = make_bits_integer_descriptor(py, 16, true, true).into_any();
-            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => match &s.fields()[0].node {
                     Node::BitsInteger(b) => {
@@ -2639,8 +2791,16 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "MaxLen");
             let desc = make_bits_integer_descriptor(py, 64, false, false).into_any();
-            let schema = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect("compile");
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
             match schema.root() {
                 Node::Struct(s) => {
                     assert!(matches!(
@@ -2659,8 +2819,16 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "TooLong");
             let desc = make_bits_integer_descriptor(py, 65, false, false).into_any();
-            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect_err("should fail");
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
             let msg = err.to_string();
             assert!(
                 msg.contains("64") || msg.contains("exceeds"),
@@ -2676,8 +2844,16 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "Negative");
             let desc = make_bits_integer_descriptor(py, -1, false, false).into_any();
-            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect_err("should fail");
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
             let msg = err.to_string();
             assert!(
                 msg.contains("non-negative") || msg.contains("negative"),
@@ -2696,7 +2872,15 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "Zero");
             let desc = make_bits_integer_descriptor(py, 0, false, false).into_any();
-            let result = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None);
+            let result = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            );
             // 编译应成功（运行时报错）
             assert!(result.is_ok(), "compile should succeed: {:?}", result);
         });
@@ -2708,12 +2892,285 @@ class {name}:
         with_py(|py| {
             let cls = make_dummy_class(py, "ExprLen");
             let desc = make_bits_integer_expr_length_descriptor(py).into_any();
-            let err = compile_schema(py, &cls, vec!["v".to_string()], vec![desc], None, None)
-                .expect_err("should fail");
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
             let msg = err.to_string();
             assert!(
                 msg.contains("expression length") || msg.contains("not supported"),
                 "message should mention expression length not supported: {}",
+                msg
+            );
+        });
+    }
+
+    // ======================================================================
+    // Phase 3.2 子任务：BitwiseDescriptor 识别 + bitwise 根包装
+    // ======================================================================
+
+    /// 创建一个 BitwiseDescriptor Python 实例（模拟 Python 侧 `Bitwise(subcon)`）。
+    fn make_bitwise_descriptor(py: Python<'_>, subcon: Py<PyAny>) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class BitwiseDescriptor:\n",
+            "    __slots__ = ('subcon',)\n",
+            "    def __init__(self, subcon):\n",
+            "        self.subcon = subcon\n",
+            "    _expr_params = {}\n",
+            "    def __repr__(self):\n",
+            "        return 'Bitwise({!r})'.format(self.subcon)\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define BitwiseDescriptor");
+        let cls = globals
+            .get_item("BitwiseDescriptor")
+            .expect("get_item ok")
+            .expect("class exists");
+        cls.call((subcon,), None).expect("instantiate").unbind()
+    }
+
+    #[test]
+    fn compile_bitwise_descriptor_produces_bitwise_node() {
+        // Bitwise(BitsInteger(8)) → Node::Bitwise(BitwiseNode(BitsInteger(8)))
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitwiseTest");
+            let inner = make_bits_integer_descriptor(py, 8, false, false);
+            let desc = make_bitwise_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["x".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    match &s.fields()[0].node {
+                        Node::Bitwise(b) => {
+                            // inner 应该是 BitsInteger(8)
+                            match b.inner() {
+                                Node::BitsInteger(bi) => {
+                                    assert_eq!(bi.length(), 8);
+                                    assert!(!bi.signed());
+                                    assert!(!bi.swapped());
+                                }
+                                other => {
+                                    panic!("expected BitsInteger inside Bitwise, got {:?}", other)
+                                }
+                            }
+                        }
+                        other => panic!("expected Bitwise, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bitwise_descriptor_with_struct_subcon() {
+        // Bitwise(Struct-like): 用 StructRef 测试
+        // 实际上 Bitwise(subcon) 通常包裹 BitsInteger 或嵌套 Struct（后者通过 StructRef）
+        // 这里测试 BitwiseDescriptor 至少识别 subcon 字段
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitwiseStruct");
+            // 用 BitsInteger 作为内层（最常见用法）
+            let inner = make_bits_integer_descriptor(py, 16, false, false);
+            let desc = make_bitwise_descriptor(py, inner).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::Bitwise(b) => match b.inner() {
+                        Node::BitsInteger(bi) => assert_eq!(bi.length(), 16),
+                        other => panic!("expected BitsInteger, got {:?}", other),
+                    },
+                    other => panic!("expected Bitwise, got {:?}", other),
+                },
+                other => panic!("expected Node::Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bitwise_true_wraps_root_struct_in_bitwise_node() {
+        // bitwise=true 参数：根 StructNode 被包入 BitwiseNode
+        // （对应 Python BitStructMixin → Bitwise(Struct(...))）
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BitStructLike");
+            let a_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+            let b_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![a_desc, b_desc],
+                None,
+                None,
+                true, // bitwise=true（BitStructMixin）
+            )
+            .expect("compile");
+
+            // 根应是 Bitwise(BitwiseNode { inner: Struct })
+            match schema.root() {
+                Node::Bitwise(b) => match b.inner() {
+                    Node::Struct(s) => {
+                        assert_eq!(s.len(), 2);
+                    }
+                    other => panic!("expected Struct inside Bitwise, got {:?}", other),
+                },
+                other => panic!("expected Node::Bitwise root, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bitwise_false_does_not_wrap_root() {
+        // bitwise=false（默认）：根仍是 StructNode，不被包入 BitwiseNode
+        with_py(|py| {
+            let cls = make_dummy_class(py, "RegularStruct");
+            let desc = make_bits_integer_descriptor(py, 8, false, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // 根应是 Struct（不是 Bitwise）
+            match schema.root() {
+                Node::Struct(_) => {}
+                other => panic!("expected Node::Struct root, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_bitwise_descriptor_missing_subcon_returns_error() {
+        // BitwiseDescriptor 无 subcon 属性 → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BadBitwise");
+            // 创建一个空的 BitwiseDescriptor（无 subcon 属性）
+            let desc = py
+                .eval_bound(
+                    "type('BitwiseDescriptor', (), {'_expr_params': {}})()",
+                    None,
+                    None,
+                )
+                .expect("create empty BitwiseDescriptor")
+                .unbind();
+
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc.into_any()],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("subcon") || msg.contains("BitwiseDescriptor"),
+                "message should mention subcon: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_bitstruct_mixin_end_to_end_round_trip() {
+        // 端到端：BitStruct-like schema（bitwise=true）parse + build 往返
+        // BitStruct { a: BitsInteger(4), b: BitsInteger(4) } parse b'\xA5' → a=10, b=5
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "BitStructE2E");
+            let a_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+            let b_desc = make_bits_integer_descriptor(py, 4, false, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string(), "b".to_string()],
+                vec![a_desc, b_desc],
+                None,
+                None,
+                true, // bitwise=true
+            )
+            .expect("compile");
+
+            // parse b'\xA5'
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xA5]);
+            let instance = schema._parse_raw(py, &data).expect("parse");
+            let a: i64 = instance.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = instance.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0xA);
+            assert_eq!(b, 0x5);
+
+            // build back
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs.set_item("a", 0xA).unwrap();
+            kwargs.set_item("b", 0x5).unwrap();
+            let obj = cls.call((), Some(&kwargs)).expect("create obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), &[0xA5]);
+        });
+    }
+
+    #[test]
+    fn compile_bitstruct_mixin_unaligned_inner_returns_bitfield_error() {
+        // BitStruct { a: BitsInteger(5) } - 5 bit 非 8 倍数 → parse 时 BitField error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BadBitStruct");
+            let desc = make_bits_integer_descriptor(py, 5, false, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["a".to_string()],
+                vec![desc],
+                None,
+                None,
+                true, // bitwise=true
+            )
+            .expect("compile");
+
+            // parse 应失败（BitField 错误）
+            let data = pyo3::types::PyBytes::new_bound(py, &[0xFF]);
+            let err = schema._parse_raw(py, &data).expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("not byte-aligned") || msg.contains("BitField"),
+                "got: {}",
                 msg
             );
         });

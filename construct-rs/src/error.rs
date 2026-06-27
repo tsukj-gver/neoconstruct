@@ -159,6 +159,23 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    /// bit 域对齐错误：`BitwiseNode` 结束时 bit 游标未回到入口值
+    /// （消耗的 bit 数非 8 倍数），或 `BitwiseNode::sizeof` 的 inner sizeof 非 8 倍数。
+    ///
+    /// 对应 Python construct 的 `RestreamedBytesIO.close()` 缓冲清空校验
+    /// （`lib/bitstream.py` L50-54）：Bitwise 的 Restreamed 用 decoderunit=1 byte /
+    /// encoderunit=8 bits（`core.py` L1068），close() 检查 rbuffer/wbuffer 为空
+    /// 等价于"消耗 bit 数为 8 倍数"。
+    ///
+    /// Python 无独立 `BitFieldError`，复用 `StreamError` 映射（§7.3）。
+    #[error("bit field error: {message} at {path}")]
+    BitField {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -177,7 +194,8 @@ impl ConstructError {
             | ConstructError::UnresolvedReference { message }
             | ConstructError::Generic { message, .. }
             | ConstructError::ExprContext { message, .. }
-            | ConstructError::ExprDivByZero { message, .. } => Some(message),
+            | ConstructError::ExprDivByZero { message, .. }
+            | ConstructError::BitField { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
@@ -198,7 +216,8 @@ impl ConstructError {
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
-            | ConstructError::ExprStackUnderflow { path } => Some(path),
+            | ConstructError::ExprStackUnderflow { path }
+            | ConstructError::BitField { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -241,6 +260,7 @@ impl ConstructError {
             ConstructError::ExprContext { .. } => "ExprContext",
             ConstructError::ExprDivByZero { .. } => "ExprDivByZero",
             ConstructError::ExprStackUnderflow { .. } => "ExprStackUnderflow",
+            ConstructError::BitField { .. } => "BitField",
         }
     }
 
@@ -295,7 +315,8 @@ impl ConstructError {
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
-            | ConstructError::ExprStackUnderflow { path } => *path = new_path,
+            | ConstructError::ExprStackUnderflow { path }
+            | ConstructError::BitField { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -405,6 +426,10 @@ fn select_exception_class<'py>(
         | ConstructError::ExprContext { .. }
         | ConstructError::ExprDivByZero { .. }
         | ConstructError::ExprStackUnderflow { .. } => &classes.construct_error_base,
+        // Phase 3.2 BitField：Python construct 无独立 BitFieldError，
+        // 设计 §7.3 规定复用 StreamError（与 Python RestreamedBytesIO.close 缓冲
+        // 清空校验的 StreamError 对齐）。
+        ConstructError::BitField { .. } => &classes.stream_error,
     };
     cls.bind(py).clone()
 }

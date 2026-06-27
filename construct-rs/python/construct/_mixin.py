@@ -726,7 +726,10 @@ def _compile_schema_for_class(cls):
     3. 调用 ``_compile_expressions`` 获取 expr_programs
     4. 提取 modes 列表
     5. 传入 compile_schema（扩展后的签名，含 modes + expr_programs）
-    6. 调用 ``_apply_dataclass_field_config``（已有）
+
+    Phase 3.2 扩展：
+    6. 读取 ``cls._construct_bitwise`` 标志（由 ``BitStructMixin`` 设置）。
+       为 True 时传入 ``bitwise=True``，根 StructNode 被 Rust 侧包入 BitwiseNode。
 
     :param cls: 刚创建的 StructMixin 子类。
     """
@@ -747,6 +750,10 @@ def _compile_schema_for_class(cls):
     # 转换为 Rust 侧期望的 Vec<Option<dict>> 格式。
     expr_programs_list = _expr_programs_to_list(expr_programs, len(descriptors))
 
+    # Phase 3.2：读取 BitStructMixin 设置的 bitwise 标志。
+    # 普通 StructMixin 子类不设置此标志，getattr 默认 False。
+    bitwise = getattr(cls, "_construct_bitwise", False)
+
     # 缓存 descriptors 供延迟桩重试编译使用（SF-1 修复，§3.1 步骤 6）。
     cls._cached_descriptors = descriptors
 
@@ -763,6 +770,7 @@ def _compile_schema_for_class(cls):
             subcons,
             modes=modes,
             expr_programs=expr_programs_list,
+            bitwise=bitwise,
         )
     except Exception as e:
         # 检查是否为前向引用未解析（UnresolvedReference）。
@@ -846,6 +854,7 @@ def _install_lazy_stubs(cls):
                 subcons,
                 modes=modes,
                 expr_programs=expr_programs_list,
+                bitwise=getattr(cls, "_construct_bitwise", False),
             )
             # 编译成功：注入 dataclass 配置，存储产物，删除桩
             _apply_dataclass_field_config(cls, descriptors)
@@ -972,4 +981,44 @@ class StructMixin:
         return schema._build_raw(self)
 
 
-__all__ = ["StructMixin", "field", "rfield", "wfield", "Tell", "Computed"]
+class BitStructMixin(StructMixin):
+    """BitStruct 基类。子类用 ``@dataclass`` 装饰，字段使用 bit 级描述符
+    （``Nibble``、``BitsInteger``、``Bit`` 等）。
+
+    等价于 Python construct 的 ``BitStruct``，即 ``Bitwise(Struct(...))`` 的语法糖。
+    编译时（``__init_subclass__``）整体被 ``BitwiseNode`` 包裹，字段树在 bit 域
+    编译（Phase 3.3 后：Padding → ``BitPaddingNode``）。
+
+    使用方式::
+
+        from dataclasses import dataclass
+        from construct import BitStructMixin, field, Bit, Nibble, BitsInteger
+
+        @dataclass
+        class Header(BitStructMixin):
+            flag: int = field(Bit())            # 1 bit
+            value: int = field(BitsInteger(10))  # 10 bits
+            reserved: int = field(BitsInteger(5))  # 5 bits (凑齐 16 bit = 2 字节)
+
+        Header.parse(b'\\xbe\\xef')  # 2 字节 = 16 bits
+
+    实现机制：
+
+    1. ``BitStructMixin.__init_subclass__`` 在 ``StructMixin.__init_subclass__``
+       之前设置 ``cls._construct_bitwise = True``。
+    2. ``StructMixin.__init_subclass__`` 调用 ``_compile_schema_for_class``，
+       读取 ``_construct_bitwise`` 标志，传入 ``compile_schema(bitwise=True)``。
+    3. Rust 侧 ``compile_schema`` 见 ``bitwise=true``，将根 ``StructNode`` 包入
+       ``BitwiseNode``（等价于 ``Bitwise(Struct(...))``）。
+
+    注意：``BitStructMixin`` 字段总尺寸必须是 8 的倍数（bit 数），否则
+    ``BitwiseNode`` 在 parse/build 时返回 ``BitFieldError``。
+    """
+
+    def __init_subclass__(cls, **kwargs):
+        """子类创建时先标记 bitwise，再委托 ``StructMixin`` 完成编译。"""
+        cls._construct_bitwise = True
+        super().__init_subclass__(**kwargs)
+
+
+__all__ = ["StructMixin", "BitStructMixin", "field", "rfield", "wfield", "Tell", "Computed"]
