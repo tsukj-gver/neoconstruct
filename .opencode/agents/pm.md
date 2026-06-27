@@ -81,7 +81,10 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 
 分派时提供：任务标识、状态转换、任务要求、必读文件、输出要求、操作权限。
 
-**性能相关子任务**：当阶段总纲有 S-PERF 标准时，DEV 分派 prompt 中必须明确要求运行 benchmark 并在报告中提供性能数据。即使子任务尚未端到端可用，也要求提供组件级微基准数据。
+**性能相关子任务**：当阶段总纲有 S-PERF 标准时，DEV 分派 prompt 中必须明确：
+- benchmark 必须从 Python 侧 API 测量（maturin develop + Python timeit），不可直接调 Rust 库
+- 对照 Python 原版 construct 绝对基线，两边走相同的 Python 调用路径
+- PM 验收时必须确认 benchmark 方法的口径正确，再判断数据
 
 驳回后重新分派必须附完整驳回原因。
 
