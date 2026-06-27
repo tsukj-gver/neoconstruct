@@ -28,6 +28,8 @@ from ._errors import (
     FieldLengthError,
     FormatFieldError,
     GenericConstructError,
+    IntegerError,
+    PaddingError,
     SizeofError,
     StreamError,
     UnresolvedReferenceError,
@@ -80,6 +82,15 @@ try:
         # Phase 3.2: Bitwise
         Bitwise,
         BitwiseDescriptor,
+        # Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped
+        Padding,
+        PaddingDescriptor,
+        Bytewise,
+        BytewiseDescriptor,
+        BitsSwapped,
+        BitsSwappedDescriptor,
+        ByteSwapped,
+        ByteSwappedDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -133,6 +144,15 @@ __all__ = [
     # Phase 3.2: Bitwise
     "Bitwise",
     "BitwiseDescriptor",
+    # Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped
+    "Padding",
+    "PaddingDescriptor",
+    "Bytewise",
+    "BytewiseDescriptor",
+    "BitsSwapped",
+    "BitsSwappedDescriptor",
+    "ByteSwapped",
+    "ByteSwappedDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常
@@ -144,4 +164,6 @@ __all__ = [
     "CompilationError",
     "UnresolvedReferenceError",
     "GenericConstructError",
+    "IntegerError",
+    "PaddingError",
 ]

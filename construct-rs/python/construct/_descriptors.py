@@ -240,6 +240,219 @@ def Bitwise(subcon):
     return BitwiseDescriptor(subcon)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped 描述符
+#
+# 设计依据：``docs/模块设计-BitStream.md`` §4.2 / §4.4 / §4.5 / §4.6 / §8.2。
+#
+# - ``PaddingDescriptor``：根据编译期 ``bitwise`` 上下文编译为 ``BitPaddingNode``
+#   （bit 域，pattern 严格 0x00/0x01）或 ``PaddingNode``（字节域）。
+# - ``BytewiseDescriptor``：在 bit 域内重建字节流（``BytewiseNode``）。
+# - ``BitsSwappedDescriptor`` / ``ByteSwappedDescriptor``：字节级 bit/字节反序变换
+#   （``TransformNode`` with BitSwap/ByteSwap）。
+# ---------------------------------------------------------------------------
+
+
+class PaddingDescriptor:
+    """``Padding(length, pattern=b"\\x00")`` 描述符。
+
+    单位由编译期 ``bitwise`` 上下文决定（设计 §2.4 决策 B4）：
+
+    - 字节域（普通 Struct 内）：``PaddingNode``，length 单位为字节，pattern 任意 0-255。
+    - bit 域（Bitwise/BitStruct 内）：``BitPaddingNode``，length 单位为 bit，
+      pattern 严格 ``0x00`` 或 ``0x01``（其他值返回 ``PaddingError``）。
+
+    Phase 3.1 / 3.3：仅支持常量 length（int）。表达式 length 在 Rust 编译管线
+    返回 ``CompilationError``。
+
+    :param length: 填充长度（bit 或字节，由上下文决定）。
+    :param pattern: 填充模式。字节域：1 字节 bytes（取首字节）；bit 域：仅 0x00 或 0x01。
+    """
+
+    __slots__ = ("length", "pattern")
+
+    def __init__(self, length, pattern=b"\x00"):
+        """初始化 Padding 描述符。
+
+        :param length: 填充长度。
+        :param pattern: 填充模式（默认 ``b"\\x00"``）。Python construct 接受 bytes，
+                        这里取首字节作为 int pattern。
+        """
+        self.length = length
+        # pattern 在 Python construct 中是 bytes；这里取首字节作为 int 保留。
+        if isinstance(pattern, (bytes, bytearray)):
+            self.pattern = pattern[0] if len(pattern) > 0 else 0
+        else:
+            # 已经是 int 或其他形式（直接保留，Rust 侧 extract<u8> 校验）
+            self.pattern = pattern
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议。
+
+        返回 ``{"length": self.length}``。当 length 是 int 时跳过编译；
+        是 FieldRef/ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.length, int):
+            return {}
+        return {"length": self.length}
+
+    def __repr__(self):
+        return "Padding(length={!r}, pattern={!r})".format(self.length, self.pattern)
+
+
+def Padding(length, pattern=b"\x00"):
+    """创建一个 Padding 描述符。
+
+    填充指定长度的字节或 bit（由所在上下文决定）。
+
+    使用方式（字节域）::
+
+        @dataclass
+        class Header(StructMixin):
+            magic: int = field(Int32ub)
+            reserved: int = rfield(Padding(4))  # 4 字节填充
+
+    使用方式（bit 域）::
+
+        @dataclass
+        class Bits(BitStructMixin):
+            flag: int = field(Bit())               # 1 bit
+            reserved: int = rfield(Padding(7))      # 7 bit 填充
+
+    :param length: 填充长度（bit 或字节）。
+    :param pattern: 填充模式。bit 域仅接受 ``b"\\x00"`` 或 ``b"\\x01"``。
+    :return: ``PaddingDescriptor`` 实例。
+    """
+    return PaddingDescriptor(length, pattern)
+
+
+class BytewiseDescriptor:
+    """``Bytewise(subcon)`` 描述符。
+
+    bit→byte 适配器：在 bit 域（Bitwise/BitStruct 内）为内部 subcon 重建字节流。
+    必须在 Bitwise 域内使用。
+
+    ``_expr_params`` 协议返回空 dict：Bytewise 无表达式参数（subcon 由递归处理）。
+    """
+
+    __slots__ = ("subcon",)
+
+    def __init__(self, subcon):
+        """初始化 Bytewise 描述符。
+
+        :param subcon: 字节级子构造器（通常是 ``Int16ub``、``Bytes(N)``、Struct 等）。
+        """
+        self.subcon = subcon
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Bytewise({!r})".format(self.subcon)
+
+
+def Bytewise(subcon):
+    """创建一个 Bytewise 描述符。
+
+    在 bit 域内重建字节流，使内部 subcon 在字节级操作。对应 Python construct 的 ``Bytewise``。
+
+    使用方式（在 BitStruct 中嵌入整字节字段）::
+
+        @dataclass
+        class Header(BitStructMixin):
+            flag: int = field(Nibble())           # 4 bit
+            value: int = field(Bytewise(Int32ub)) # 4 字节（对齐快路径）
+            tail: int = field(Nibble())           # 4 bit
+
+    :param subcon: 字节级子构造器。
+    :return: ``BytewiseDescriptor`` 实例。
+    """
+    return BytewiseDescriptor(subcon)
+
+
+class BitsSwappedDescriptor:
+    """``BitsSwapped(subcon)`` 描述符。
+
+    字节内 bit 序翻转：每字节的 8 个 bit 反序（0xF0 → 0x0F）。
+    对应 Python construct 的 ``BitsSwapped``（基于 ``swapbitsinbytes`` 变换）。
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ("subcon",)
+
+    def __init__(self, subcon):
+        """初始化 BitsSwapped 描述符。
+
+        :param subcon: 被包裹的子构造器（必须定长，Phase 3.1 已知限制）。
+        """
+        self.subcon = subcon
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "BitsSwapped({!r})".format(self.subcon)
+
+
+def BitsSwapped(subcon):
+    """创建一个 BitsSwapped 描述符。
+
+    对每字节的 bit 序进行翻转。对应 Python construct 的 ``BitsSwapped``。
+
+    使用方式::
+
+        d = BitsSwapped(Bitwise(Bytes(8)))
+        d.parse(b"\\x01")  # bit 反序后解析
+
+    注意：Phase 3 的 ``TransformNode`` 要求定长 subcon（设计 §13.5 已知限制）。
+
+    :param subcon: 被包裹的子构造器。
+    :return: ``BitsSwappedDescriptor`` 实例。
+    """
+    return BitsSwappedDescriptor(subcon)
+
+
+class ByteSwappedDescriptor:
+    """``ByteSwapped(subcon)`` 描述符。
+
+    整体字节序翻转：bytes 反序（[0x01, 0x02] → [0x02, 0x01]）。
+    对应 Python construct 的 ``ByteSwapped``（基于 ``swapbytes`` 变换）。
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ("subcon",)
+
+    def __init__(self, subcon):
+        """初始化 ByteSwapped 描述符。
+
+        :param subcon: 被包裹的子构造器（必须定长）。
+        """
+        self.subcon = subcon
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "ByteSwapped({!r})".format(self.subcon)
+
+
+def ByteSwapped(subcon):
+    """创建一个 ByteSwapped 描述符。
+
+    对字节序进行整体翻转。对应 Python construct 的 ``ByteSwapped``。
+
+    使用方式::
+
+        Int24ul <--> ByteSwapped(Int24ub) <--> BytesInteger(3, swapped=True)
+
+    注意：Phase 3 的 ``TransformNode`` 要求定长 subcon。
+
+    :param subcon: 被包裹的子构造器。
+    :return: ``ByteSwappedDescriptor`` 实例。
+    """
+    return ByteSwappedDescriptor(subcon)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -271,4 +484,13 @@ __all__ = [
     # Phase 3.2 Bitwise
     "BitwiseDescriptor",
     "Bitwise",
+    # Phase 3.3 Padding / Bytewise / BitsSwapped / ByteSwapped
+    "PaddingDescriptor",
+    "Padding",
+    "BytewiseDescriptor",
+    "Bytewise",
+    "BitsSwappedDescriptor",
+    "BitsSwapped",
+    "ByteSwappedDescriptor",
+    "ByteSwapped",
 ]

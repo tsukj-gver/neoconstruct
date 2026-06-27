@@ -18,6 +18,8 @@ Python 异常                    Rust ConstructError 变体
 :class:`CompilationError`     ``ConstructError::Compilation``
 :class:`UnresolvedReferenceError`  ``ConstructError::UnresolvedReference``
 :class:`GenericConstructError``ConstructError::Generic``
+:class:`IntegerError`         ``ConstructError::Integer`` (Phase 3.3)
+:class:`PaddingError`         ``ConstructError::Padding`` (Phase 3.3)
 ============================  ==========================================
 
 .. note::
@@ -83,6 +85,28 @@ class SizeofError(ConstructError):
     """
 
 
+class IntegerError(ConstructError):
+    """整数错误：``BitsInteger`` 解析/构建失败（非整数类型、超出范围等）。
+
+    对应 Python construct 的 ``IntegerError`` 和 Rust 的
+    ``ConstructError::Integer``。
+
+    Phase 3.3 新增：``BitsInteger`` 节点的运行时错误统一映射到此异常类，
+    使用户可通过 ``except IntegerError`` 精确捕获（与 Python construct 一致）。
+    """
+
+
+class PaddingError(ConstructError):
+    """填充错误：``Padding`` 字段的 pattern 非法（bit 域仅接受 0x00/0x01）等。
+
+    对应 Python construct 的 ``PaddingError`` 和 Rust 的
+    ``ConstructError::Padding``。
+
+    Phase 3.3 新增：``BitPaddingNode`` 在编译期对非法 pattern 返回此错误
+    （比 Python 在 ``bits2bytes`` 阶段延迟 ``KeyError`` 更早暴露）。
+    """
+
+
 class CompilationError(ConstructError):
     """编译错误：schema 编译失败（未知描述符、字段重复等）。
 
@@ -114,4 +138,6 @@ __all__ = [
     "CompilationError",
     "UnresolvedReferenceError",
     "GenericConstructError",
+    "IntegerError",
+    "PaddingError",
 ]
