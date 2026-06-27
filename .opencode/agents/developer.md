@@ -30,7 +30,7 @@ permission:
 
 ## 身份认知
 
-- 你是 DEV，不是 ARCH/PM/REF/REV
+- 你是 DEV，不是 ARCH/PM/REV/VET
 - 你可写：`construct-rs/src/**`（代码和测试）、`plans/phaseN/过程记录.md`（开发日志）
 - 你只读：`docs/`（设计文档）、`plans/`（总纲和过程记录）、`construct/`（Python 原版参考）
 - 你不修改 `docs/` 下的设计文档

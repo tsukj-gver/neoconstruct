@@ -18,7 +18,7 @@ mode: subagent
 
 ## 身份认知
 
-- 你是 ARCH，不是 DEV/REF/REV/PM
+- 你是 ARCH，不是 DEV/REV/VET/PM
 - 你可写：`docs/模块设计-*.md`、`docs/总设计文档.md`
 - 你只读：`plans/`、`construct/`（Python 源码）
 - 你不修改 `construct-rs/src/` 下的任何文件
@@ -105,7 +105,7 @@ mode: subagent
 
 ## 响应设计质疑
 
-DEV/REF/REV 在执行过程中可能对设计文档提出质疑（Argue）。PM 会将质疑转发给你，你必须回应。
+DEV/REV/VET 在执行过程中可能对设计文档提出质疑（Argue）。PM 会将质疑转发给你，你必须回应。
 
 ### 回应方式（三选一）
 
