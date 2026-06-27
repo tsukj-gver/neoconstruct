@@ -163,6 +163,13 @@ cargo bench
 
 **S-PERF 基线必须用绝对基线**（Python 原版 construct），不可用相对基线（旧路径）。
 
+**S-PERF 测量口径**：性能对比必须从用户面 API 测量，确保两边走相同的调用路径：
+- construct-rs 侧：通过 `maturin develop --release` 安装后，在 Python 中用 timeit 调用用户面 API（如 `Packet.parse(data)`）
+- Python construct 侧：用 timeit 调用等效的 Python API（如 `pkt.parse(data)`）
+- **禁止**用独立 Rust 二进制直接调 Rust 库函数来产生 S-PERF 数据——这跳过了 Python 分发和 FFI 开销，口径不一致
+- 两边使用相同的 timeit 参数（NUMBER/REPEAT），取相同的统计量
+- 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）
+
 ### Git 命令
 
 ```bash

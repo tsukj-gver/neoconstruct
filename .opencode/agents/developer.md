@@ -66,10 +66,8 @@ permission:
   [ ] cargo test — 全部 PASS
 
 性能（当阶段总纲有 S-PERF 标准时必填）：
-  [ ] benchmark 必须从 Python 侧 API 测量——通过 maturin develop 安装的 construct-rs，
-      用 Python timeit 调用用户面 API（如 Packet.parse(data)），不可直接调 Rust 库函数
-  [ ] 对照 Python 原版 construct（绝对基线），两边走相同的 Python 调用路径
-  [ ] 报告中包含性能数据表（场景 × 方向 × Rust ns × Python ns × 加速比）
+  [ ] 按 AGENTS.md 性能门禁要求运行 benchmark（口径、基线、方法）
+  [ ] 报告中包含性能数据表（场景 × 方向 × 加速比）
   [ ] 如果子任务尚未端到端可用，说明原因并提供可用的组件级数据
 
 接口对照：
