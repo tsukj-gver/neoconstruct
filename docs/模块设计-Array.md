@@ -16,8 +16,32 @@
 >   StopIf L4079、PrefixedArray L4934）、`construct/construct/lib/containers.py`（ListContainer）
 >
 > **角色**：ARCH
-> **状态**：DESIGNING
+> **状态**：DESIGNING（REV 驳回后第二次修订，等待重新检视）
 > **创建时间**：2026-06-29
+> **修订时间**：2026-06-29（修正 REV 驳回的 P1/P2/P3 + M1-M4）
+
+---
+
+## 0. REV 驳回修正摘要（v2）
+
+REV 在 v1 检视中驳回 3 个严重问题（P1/P2/P3）+ 4 个中等问题（M1-M4）。
+本次修订（v2）逐项修正：
+
+| 编号 | 问题 | 修正位置 | 修正内容 |
+|------|------|---------|---------|
+| P1 | `has_expressions` 对 `StopIf(Expr)` 返回 false | §6.1.1 | 改为 `matches!(cond, Expr(_))`，附 StructRef 路径的根因说明 |
+| P2 | RepeatUntil build discard 语义错 | §4.3.4、§7.3 RU-8 | `partial.append` 加 `if !self.discard` 守卫；新增 RU-8 边界 |
+| P3 | Array 表达式 count 编译路径留 placeholder | §6.2.2、§12.2 | 完整编译路径（参照 BytesDescriptor）；明确 inner 表达式限制（P3.1）+ 扩展方案（P3.2） |
+| M1 | GreedyRange 吞掉所有非 StopField 错误 | §9.5 GE-1 | 新增 §9.5 已知差异表，详述 ExplicitError 等价物缺失的决策与影响 |
+| M2 | PrefixedArray count 溢出行为含糊 | §7.4 PA-5 | 改为"由 countfield 节点自行报错"，删除"回绕"误述 |
+| M3 | sizeof 表达式 count 的 GIL 路径不明 | §4.1.4 | 明确 GIL 前置条件 + with_gil 闭包正确写法（避免借用逃逸） |
+| M4 | RepeatUntil S-PERF 适用性歧义 | §8.2、§8.3（新增）、§12.1 | 明确"Array"指狭义 Array；RepeatUntil 拆 4.5a（PyCallable）+ 4.5b（Expr），4.5b 必须在 Phase 4 验收前完成 |
+
+附加修正（连带）：
+- §6.1.1 补全各 Node 的 has_expressions 实现细节（含 RepeatPredicate::Expr、PrefixedArray.countfield）
+- §9.5 新增"已知行为差异表"，集中管理 LC-1~LC-4、IX-1、GE-1/GE-2、RU-build-1、PA-5、NE-expr-1/2
+- §7.1 AR-10 更新（inner 表达式编译期失败）
+- §11.5 / §12.7 自检与结论同步更新
 
 ---
 
@@ -733,11 +757,35 @@ fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
 }
 ```
 
-> **GIL 注意**：sizeof 接收 `&Context` 而非 `py: Python`（现有签名）。
-> 若 count 是表达式，需获取 GIL 调 `eval_expr_int`。`Python::with_gil` 在已持有 GIL
-> 时是 O(1)（仅获取 token），可接受。**替代**：若 DEV 发现此路径有性能问题，
-> 可修改 Construct trait 的 sizeof 签名增加 `py: Python<'_>` 参数（影响全部节点，
-> 需 PM 评估）。当前 sizeof 路径少且非热路径，保留 with_gil 调用。
+> **GIL 前置条件（M3 修正，明确化）**：sizeof 接收 `&Context` 而非 `py: Python`
+> （现有 Construct trait 签名）。若 count 是表达式，需获取 GIL 调 `eval_expr_int`。
+>
+> **契约明确**：
+> 1. **sizeof 必须在已持有 GIL 的线程调用**。当前所有 sizeof 调用点都在
+>    parse/build 内部（FFI 入口已持 GIL），此前置条件自然满足。Rust 侧不
+>    显式断言 GIL（pyo3 内部会 panic，但实际不触发）。
+> 2. **`Python::with_gil` 在已持有 GIL 时是 O(1)**（仅获取 token，不阻塞），
+>    可接受。但需注意闭包返回值的生命周期——`Python::with_gil(|py| py)` 返回的
+>    `Python<'_>` 借用闭包内的 GIL scope，**不能跨闭包边界使用**。正确写法是把
+>    所有需要 `py` 的逻辑放进闭包内：
+>    ```rust
+>    let n = Python::with_gil(|py| -> Result<usize, ConstructError> {
+>        let v = crate::expr::eval_expr_int(prog, ctx, py)?;
+>        if v < 0 {
+>            return Err(ConstructError::Range {
+>                message: format!("sizeof array count {} is negative", v),
+>                path: String::new(),
+>            });
+>        }
+>        Ok(v as usize)
+>    })?;
+>    ```
+>    DEV 实现时严格按此模式，避免借用逃逸。
+> 3. **sizeof 不在热路径**（Python 用户极少对 Array 调 sizeof），with_gil 开销可接受。
+>
+> **替代方案（不采用）**：修改 Construct trait 的 sizeof 签名增加 `py: Python<'_>`
+> 参数。优点是消除 with_gil；缺点是影响全部 13 个现有节点 + IndexNode/StopIfNode 的
+> sizeof 签名，改动面大。PM 决策点 6 维持选项 A（with_gil）。
 
 ### 4.2 GreedyRangeNode（P1，读到流结束）
 
@@ -1011,7 +1059,20 @@ fn build(...) -> Result<(), ConstructError> {
         }
         path.pop();
 
-        partial.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
+        // P2 修正：对齐 Python L2694-2696 的 discard 语义。
+        // Python 源码：
+        //   if not discard:
+        //       retlist.append(buildret)
+        //       partiallist.append(buildret)   ← partiallist 仅在非 discard 时 append
+        //   if predicate(e, partiallist, context):
+        //       break
+        // 关键：discard=True 时 partiallist 始终为空，谓词收到空 list。
+        // 对依赖 list 内容的谓词（如 lambda x,lst,c: lst[-2:] == [0,0]），
+        // discard=True 与 discard=False 会产生不同的终止时机——这是 Python 的语义。
+        if !self.discard {
+            partial.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
+        }
+
         let stop = call_repeat_predicate(py, predicate, elem_bound, partial.as_any(), ctx)?;
         if stop {
             matched = true;
@@ -1361,20 +1422,81 @@ pub fn has_expressions(&self) -> bool {
         Node::GreedyRange(g) => g.has_expressions(),
         Node::RepeatUntil(r) => r.has_expressions(),
         Node::PrefixedArray(p) => p.has_expressions(),
-        Node::Index(_) | Node::StopIf(_) => false,   // 不含表达式字段（StopIf 的 Expr 在节点自身）
+        Node::Index(_) => false,                       // IndexNode 不引用任何 Struct 字段
+        Node::StopIf(s) => s.has_expressions(),        // StopIf(Expr) 引用 Struct 字段
     }
 }
 ```
 
-`ArrayNode::has_expressions` 等返回 `self.inner.has_expressions() || self.count.is_expr()`
-（count 为 Expr 时也算表达式）。
+各 Node 的实现：
 
-> **注意**：`StopIf(Expr)` 节点自身持有表达式程序，但其表达式不引用 Struct 字段
-> （引用的是当前 context 中的值，由外层 Struct 提供）。`has_expressions` 用于决定
-> StructNode 是否创建带 PyDict 的 context——若 Struct 含 StopIf(Expr)，应返回 true。
-> 此判断在 StructNode 编译期通过 `expr_programs` 参数确定（已有机制），
-> `StopIf(Expr).has_expressions()` 返回 false 不影响（StructNode 看的是字段级别的
-> expr_programs）。**DEV 实现时验证此路径**。
+```rust
+impl ArrayNode {
+    pub fn has_expressions(&self) -> bool {
+        self.inner.has_expressions() || matches!(self.count, CountSource::Expr(_))
+    }
+}
+
+impl GreedyRangeNode {
+    pub fn has_expressions(&self) -> bool {
+        self.inner.has_expressions()
+    }
+}
+
+impl RepeatUntilNode {
+    pub fn has_expressions(&self) -> bool {
+        // Expr 谓词引用 Struct 字段（如 RepeatUntil(this.x > 0, ...)）；
+        // PyCallable 谓词不参与 ExprProgram 路径，但 inner 可能含表达式。
+        self.inner.has_expressions() || matches!(self.predicate, RepeatPredicate::Expr(_))
+    }
+}
+
+impl PrefixedArrayNode {
+    pub fn has_expressions(&self) -> bool {
+        // countfield 是独立 Node（如 VarInt、Byte），其本身通常无表达式；
+        // inner 子树可能含表达式。
+        self.countfield.has_expressions() || self.inner.has_expressions()
+    }
+}
+
+impl IndexNode {
+    pub fn has_expressions(&self) -> bool {
+        false   // 仅读 ctx._index，不引用 Struct 字段
+    }
+}
+
+impl StopIfNode {
+    pub fn has_expressions(&self) -> bool {
+        // 关键：StopIf(this.x == 0) 中的 this.x 引用 Struct 字段 x，
+        // 经 expr_values_buf 取值；必须返回 true 触发 StructNode 创建 child ctx。
+        matches!(self.cond, StopIfCondition::Expr(_))
+    }
+}
+
+impl StopIfCondition {
+    pub fn is_expr(&self) -> bool {
+        matches!(self, StopIfCondition::Expr(_))
+    }
+}
+```
+
+> **P1 关键说明（REV 驳回修正）**：`StopIf(Expr)` 节点自身的表达式程序
+> （如 `this.x == 0` 编译为 `[GetInt(0), Const(0), Eq]`）**确实引用 Struct 字段**
+> （此例中的 `x`）。`has_expressions()` 必须返回 true，原因有二：
+>
+> 1. **StructRef 路径**（struct_ref.rs L171/L194）：当 StructRef 引用一个含
+>    `Array(5, StopIf(this.x > 10))` 字段的 Struct 时，`root.has_expressions()`
+>    会递归到 StopIf；若返回 false，则 StructRef 不创建 child context、
+>    不调用 `init_expr_values`，导致 StopIf 求值时 GetInt 命中空 buf 报错。
+>
+> 2. **StructRef 不依赖 expr_programs**：虽然顶层 StructNode 通过
+>    `expr_programs` 参数知道哪些字段含表达式（编译期），但 StructRef 在
+>    **运行时**重新解析 schema 并通过 `root.has_expressions()` 决定是否创建
+>    child context。这是运行时路径，与编译期的 expr_programs 是两套机制。
+>    因此 `has_expressions()` 必须独立正确。
+>
+> `StopIf(Always)` / `StopIf(Never)` 不引用字段（编译期常量），返回 false。
+> `IndexNode` 仅读 `ctx._index`，不引用 Struct 字段，返回 false。
 
 #### 6.1.2 `compute_ro_value` 扩展
 
@@ -1407,21 +1529,63 @@ match type_name.to_str()? {
 
 #### 6.2.2 build_array_node 辅助函数
 
+**完整编译设计（P3 修正）**：参照 compile.rs L266-308 的 `BytesDescriptor` 表达式长度
+编译路径，给出 ArrayDescriptor 的 count 表达式完整编译路径。
+
+**Python 侧 ArrayDescriptor**：
+
+```python
+class ArrayDescriptor:
+    """Array(count, subcon, discard) 描述符。"""
+    __slots__ = ("count", "subcon", "discard")
+
+    def __init__(self, count, subcon, discard=False):
+        self.count = count
+        self.subcon = subcon
+        self.discard = discard
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 {"count": self.count}。当 count 是 int 时常量跳过编译；
+        是 _FieldDescriptor/_ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.count, int):
+            return {}
+        return {"count": self.count}
+```
+
+**Rust 侧 build_array_node**：
+
 ```rust
+/// 编译 ArrayDescriptor → ArrayNode。
+///
+/// 设计参照 build_node_from_descriptor 的 BytesDescriptor 分支（compile.rs L266-308）：
+/// 1. 从 desc 读取 count / subcon / discard
+/// 2. count 分类：usize 常量 → CountSource::Const；
+///    非常量 → 从 expr_programs[field_index]["count"] 取 ExprOp 列表 → CountSource::Expr
+/// 3. 递归编译 subcon（沿用 field_index，inner 共享外层字段的 expr_values_buf）
 fn build_array_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
     field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    bitwise: bool,
 ) -> Result<ArrayNode, ConstructError> {
-    // 1. 递归编译 subcon。
+    // 1. 递归编译 subcon（沿用 field_index；详见下方"嵌套 inner 表达式"说明）。
     let subcon_desc = desc.getattr("subcon").map_err(|e| ConstructError::Compilation {
         message: format!("ArrayDescriptor missing 'subcon': {}", e),
     })?;
-    let inner_node = build_node_from_descriptor(py, &subcon_desc, field_index, &[], false)?;
+    let inner_node = build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, bitwise)?;
 
     // 2. 解析 count：常量 or 表达式。
-    let count_desc = desc.getattr("count").map_err(|e| ...)?;
-    let count = if let Ok(n) = count_desc.extract::<i64>() {
+    let count_obj = desc.getattr("count").map_err(|e| ConstructError::Compilation {
+        message: format!("ArrayDescriptor missing 'count': {}", e),
+    })?;
+
+    let count = if let Ok(n) = count_obj.extract::<i64>() {
+        // 常量路径（Phase 4 首版必须支持，零运行时开销）
         if n < 0 {
             return Err(ConstructError::Compilation {
                 message: format!("Array count {} must be non-negative", n),
@@ -1429,34 +1593,118 @@ fn build_array_node(
         }
         CountSource::Const(n as usize)
     } else {
-        // 表达式 count：从 expr_programs 取（需调用方传入，或从 desc 提取）
-        // 简化：Phase 4 假设 compile_schema 已传入 expr_programs，
-        //       此处从 expr_programs[field_index]["count"] 取。
-        //       此处签名需调整，传 expr_programs 进来。
-        // 暂用 placeholder，DEV 实现时细化。
-        return Err(ConstructError::Compilation {
-            message: "Array expression count not yet supported in build_array_node".to_string(),
-        });
+        // 表达式路径：从 expr_programs[field_index]["count"] 取 ExprOp 列表。
+        // 与 BytesDescriptor 的 "length" 键完全同模式。
+        let field_exprs = expr_programs
+            .get(field_index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "Array field has non-constant count but no expression program was provided \
+                     (field index {})", field_index
+                ),
+            })?;
+
+        let field_exprs_dict = field_exprs
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "Array expression program must be a dict".to_string(),
+            })?;
+
+        let ops_list = field_exprs_dict
+            .get_item("count")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("failed to get 'count' from Array expression programs: {}", e),
+            })?
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "Array field has non-constant count but 'count' key missing in expression \
+                     program (field index {})", field_index
+                ),
+            })?;
+
+        let ops = parse_expr_ops_from_py(&ops_list)?;
+        let program = ExprProgram::new(ops);
+        CountSource::Expr(program)
     };
 
     // 3. discard 标志。
-    let discard: bool = desc.getattr("discard")?.extract().unwrap_or(false);
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
 
     Ok(ArrayNode::new(inner_node, count, discard))
 }
 ```
 
-> **expr_programs 传递**：当前 `build_node_from_descriptor` 接收 `expr_programs` 切片。
-> Array 的 count 表达式需从 `expr_programs[field_index]` 取。但 Array 是 subcon，
-> 其 expr_programs 应在递归调用时正确传递。**DEV 实现时**：
-> - 若 Array 是 Struct 字段的 subcon，`field_index` 是 Struct 字段索引，
->   `expr_programs[field_index]` 是该字段的 count 表达式。
-> - 若 Array 嵌套（Array 内 Array），内层 Array 的 count 表达式存储位置需设计。
->   Python 侧 `_compile_expr_tree` 已处理嵌套（每个 subcon 独立编译）。
->
-> **简化首版**：仅支持 Array count 为编译期常量（`CountSource::Const`）。
-> 表达式 count 延后到 Phase 4 后续子任务（与 Bytes 表达式长度同样路径）。
-> PM 在子任务拆分时区分 4.0a（常量 count）与 4.0b（表达式 count）。
+> **CountSource::is_expr 辅助**：DEV 实现时给 `CountSource` 加
+> `pub fn is_expr(&self) -> bool { matches!(self, CountSource::Expr(_)) }`，
+> 供 `has_expressions` 使用（§6.1.1）。
+
+##### P3.1 嵌套 inner 表达式的支持范围（关键决策）
+
+`build_node_from_descriptor` 递归调用 `build_array_node` 时，**沿用同一个 field_index
+和 expr_programs 切片**（参照 BitwiseDescriptor 分支 compile.rs L412-413）。这意味着：
+
+| 场景 | 支持情况 | 说明 |
+|------|---------|------|
+| `Array(this.n, Byte)` | ✅ Phase 4 支持 | 顶层 count 表达式，从 expr_programs[N]["count"] 取 |
+| `Array(N, StopIf(this.x))` | ❌ 编译期失败 | inner StopIf 的 "cond" 表达式未被 Python 侧收集（见下方） |
+| `Array(N, Bytes(this.m))` | ❌ 编译期失败 | inner Bytes 的 "length" 表达式未被收集 |
+| `Array(N, Array(this.m, Byte))` | ❌ 编译期失败 | 内层 Array 的 count 表达式未被收集 |
+| `Bitwise(Bytes(this.m))` | ❌ Phase 1-3 已不可用 | 同根问题（_extract_and_compile_exprs 不递归） |
+
+**根因**：Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）**只对字段顶层
+subcon 调用一次**（_mixin.py L633-634：`subcon = desc.subcon;
+_extract_and_compile_exprs(subcon, ...)`），**不递归进入 inner**。当 subcon 是
+BitwiseDescriptor / ArrayDescriptor / 等"包装型"描述符（`_expr_params = {}` 或仅含
+自身参数）时，inner 的表达式参数不会被收集到 expr_programs 中。
+
+Rust 侧递归调用 `build_node_from_descriptor(inner_desc, field_index, expr_programs, ..)`
+时，若 inner 是含表达式的描述符（Bytes(expr_length)、Computed、StopIf(expr_cond) 等），
+会从 `expr_programs[field_index]` 查找 "length"/"func"/"cond" 键——但 Python 侧未填入，
+报 CompilationError（"key missing"）。**这是 Phase 1-3 既有的限制，Array 与之一致。**
+
+**Phase 4 的支持范围明确为**：
+
+- ✅ **顶层 count 表达式**：`Array(this.n, simple_subcon)`，simple_subcon 是
+  FormatField / 常量 Bytes / 常量 BitsInteger / Padding 等不含表达式的描述符。
+- ❌ **inner 含表达式**：留待"嵌套表达式收集"特性（独立子任务，建议 Phase 4.0b 或
+  Phase 5+，需扩展 `_extract_and_compile_exprs` 递归收集 inner，并解决命名空间冲突
+  ——见下方 P3.2）。
+
+**StopIf 在 Struct 直接字段中**（非 inner）依然支持：`@dataclass class S(StructMixin):
+x: int = field(Byte); stop = rfield(StopIf(this.x))`。StopIfDescriptor 是字段，
+field_index 在字段列表中，其 "cond" 表达式从 `expr_programs[field_index]["cond"]` 取
+（与 ComputedDescriptor 的 "func" 同模式），不受上述 inner 限制影响。
+
+##### P3.2 嵌套 inner 表达式的扩展方案（后续子任务参考）
+
+若未来需支持 `Array(N, Bytes(this.m))`、`Array(N, StopIf(this.x))`，扩展点：
+
+1. **Python 侧**：修改 `_extract_and_compile_exprs` 递归进入包装型描述符的 `subcon`
+   属性，用**路径化键名**避免命名空间冲突：
+   ```python
+   # 例如 Array(N, Array(this.m, Byte)) 的 expr_programs[N] 结构：
+   {
+       "count": <outer count ops>,           # 顶层 Array count
+       "inner.count": <inner count ops>,     # 内层 Array count（路径化键名）
+   }
+   # 或用嵌套 dict：{"count": [...], "inner": {"count": [...]}}
+   ```
+2. **Rust 侧**：`build_array_node` 递归时，从 `expr_programs[field_index]` 取
+   `"inner.count"` / `"inner.length"` / `"inner.cond"` 等路径化键。
+3. **路径生成规则**：包装型描述符（Bitwise / Bytewise / Array / GreedyRange /
+   PrefixedArray / RepeatUntil）递归时给键名前缀 `"inner."`。多重嵌套按层级累加。
+
+**复杂度评估**：~2-3 个子任务（Python 编译器扩展 + Rust build_*_node 路径化取键 +
+端到端测试）。**不阻塞 Phase 4 出口**——S-FUNC 仅要求覆盖 Python 顶层 count 表达式。
+
+> **PM 决策点（更新 §12.2）**：Phase 4 首版仅支持顶层 count 表达式。
+> inner 含表达式的场景（`Array(N, Bytes(this.m))`、`Array(N, StopIf(...))`）
+> 归入 Phase 4.0b 或 Phase 5+，与现有 Bitwise(Bytes(this.m)) 的限制一致。
 
 #### 6.2.3 其他 build_*_node 函数
 
@@ -1629,7 +1877,7 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | AR-7 | discard=True | 仍消耗字节，返回空 list |
 | AR-8 | count 超过 usize::MAX（i64 表达式） | 求值时 as usize 截断（wrapping），后续 Stream 错误 |
 | AR-9 | inner 是 Struct | 每个 elem 是 Struct 实例，list 是 PyList of instances |
-| AR-10 | inner 是表达式长度 Bytes | 表达式从 ctx 取值（_index 可用） |
+| AR-10 | inner 是表达式长度 Bytes（`Array(N, Bytes(this.m))`） | **编译期失败**（CompilationError，"length key missing"）—— inner 表达式收集未实现，§6.2.2 P3.1 |
 
 ### 7.2 GreedyRange 边界
 
@@ -1655,7 +1903,8 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | RU-4 | 谓词 Python callable 抛异常 | 异常向上传播（Generic 错误） |
 | RU-5 | 空流且谓词立即满足（不可能，因需先 parse） | 至少 parse 一个元素 |
 | RU-6 | sizeof | 永远 Err |
-| RU-7 | discard=True | 仍调谓词（用空 list），不收集元素 |
+| RU-7 | parse 方向 discard=True | 仍调谓词（用空 list），不收集元素到 obj list |
+| RU-8 | build 方向 discard=True（P2 修正） | partiallist 始终为空，谓词收到空 list；对 `lambda x,lst,c: lst[-2:]==[0,0]` 这类依赖 list 内容的谓词会产生与 discard=False 不同的终止时机（对齐 Python core.py L2694-2696） |
 
 ### 7.4 PrefixedArray 边界
 
@@ -1665,7 +1914,7 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | PA-2 | countfield 解析的 count 不是整数 | 返回 `Range` 错误 |
 | PA-3 | count = 0 | 返回空 list（countfield 已消耗） |
 | PA-4 | count 大于实际可解析元素 | 第 N 个元素失败时错误向上传播 |
-| PA-5 | build 时 list 长度 > countfield 容量 | 取决于 countfield 实现（如 Byte 溢出回绕） |
+| PA-5 | build 时 list 长度超出 countfield 表示范围 | 由 countfield 节点自行报错（如 FormatFieldNode 抛 `FormatField`/`Stream` 错误），PrefixedArrayNode 不做额外校验 |
 | PA-6 | sizeof | 永远 Err（保守，§4.6.4） |
 
 ### 7.5 Index 边界
@@ -1741,15 +1990,16 @@ construct-rs `ArrayNode.parse` 的预期开销：
 
 ### 8.2 可证伪预测
 
-| 场景 | 预测加速比 | 验证方法 |
-|------|-----------|---------|
-| Array(100, Byte) parse | ≥15x | timeit, N=1000, 取 min |
-| Array(100, Byte) build | ≥12x | timeit, N=1000 |
-| Array(100, Struct{2 fields}) parse | ≥8x | Struct 内层有更多 C API 开销 |
-| GreedyRange(Byte) parse 100 元素 | ≥8x | seek 开销 + 动态长度 |
-| PrefixedArray(Byte, Byte) parse 100 元素 | ≥10x | 等同 Array + 1 次 countfield |
-| RepeatUntil(lambda x,l,c: x>50, Byte) parse | ≥3x | PyCallable 路径慢，Expr 路径补全后 ≥8x |
-| Index（在 Array 内） | ≥20x | 仅读 ctx 字段 |
+| 场景 | 预测加速比 | 验证方法 | S-PERF 出口 |
+|------|-----------|---------|-----------|
+| Array(100, Byte) parse | ≥15x | timeit, N=1000, 取 min | ✅ 纳入 |
+| Array(100, Byte) build | ≥12x | timeit, N=1000 | ✅ 纳入 |
+| Array(100, Struct{2 fields}) parse | ≥8x | Struct 内层有更多 C API 开销 | ✅ 纳入 |
+| GreedyRange(Byte) parse 100 元素 | ≥8x | seek 开销 + 动态长度 | ✅ 纳入 |
+| PrefixedArray(Byte, Byte) parse 100 元素 | ≥10x | 等同 Array + 1 次 countfield | ✅ 纳入 |
+| RepeatUntil(lambda x,l,c: x>50, Byte) parse（PyCallable） | ≥3x | PyCallable 路径慢 | ⚠️ 见 §8.5 |
+| RepeatUntil 同上（Expr 谓词） | ≥8x | Expr 路径消除 FFI | ⚠️ 见 §8.5 |
+| Index（在 Array 内） | ≥20x | 仅读 ctx 字段 | ✅ 纳入 |
 
 **证伪条件**：
 - 若 Array(100, Byte) parse 加速比 < 10x，视为性能未达标，需排查：
@@ -1758,7 +2008,32 @@ construct-rs `ArrayNode.parse` 的预期开销：
   - ctx.set_index 是否被错误地走 PyDict 路径
 - 若加速比 < 4x（S-PERF 硬目标），视为架构失败，回退设计。
 
-### 8.3 验证脚本设计
+### 8.3 RepeatUntil 的 S-PERF 适用性（M4 修正，明确化）
+
+总纲 §S-PERF："Array parse/build ≥10x vs Python construct"——
+"Array" 在 PM 与 ARCH 共识下指**狭义 Array**（ArrayNode），不含 RepeatUntil。
+RepeatUntil 因谓词跨 FFI 的固有特性，单独评估。
+
+**S-PERF 出口对 RepeatUntil 的判定规则**：
+
+1. **PyCallable 路径（首版）**：≥3x 即视为可接受（不要求 ≥10x）。
+   理由：谓词每次迭代跨 FFI 调 Python callable（~500-1000ns/次），N=100 时
+   仅 FFI 开销 = 50-100μs，已接近 Python 总耗时。3-5x 是 PyCallable 路径的物理上限。
+
+2. **Expr 谓词路径（4.5b）**：≥8x。理由：Expr 路径消除 FFI（谓词在 Rust 内求值），
+   加速比应接近 Array 的水平。Expr 路径**应作为 Phase 4 内的必要子任务**，
+   不延后到 Phase 5+——否则 RepeatUntil 性能不达标。
+
+3. **S-PERF 基准报告**：S-PERF 阶段需对 RepeatUntil 分别测量 PyCallable 与 Expr
+   两条路径，单独列出。若仅 PyCallable 路径，需在报告中明确标注
+   "RepeatUntil 当前仅 PyCallable，性能 3-5x；Expr 路径待 4.5b"。
+
+**子任务拆分建议（更新 §12.1）**：
+- 4.5a：RepeatUntilNode PyCallable 路径（功能完整，3-5x）
+- 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，≥8x）
+- 4.5b **必须在 Phase 4 验收前完成**，不可延后到 Phase 5+。
+
+### 8.4 验证脚本设计
 
 `experiments/phase4_bench.py`（PM 在 S-PERF 阶段执行）：
 
@@ -1798,7 +2073,7 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 - 子进程隔离（两边包同名，不可同进程导入）
 - 取 `min(repeat=5)` × `number=1000`
 
-### 8.4 性能假设的关键依赖
+### 8.5 性能假设的关键依赖
 
 1. **PyList::new_bound + Vec 预分配**：消除 append 循环的 realloc。
    - 若 PyList 内部仍多次 realloc（容量预测不准），加速比下降。
@@ -1877,6 +2152,72 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 | `this.<field>` | `GetInt(idx)` | 现有 |
 | 算术/位/比较 | `Add` / `Sub` / ... / `Gt` / ... | 现有 |
 
+### 9.5 已知行为差异（M1 修正 + 整理）
+
+construct-rs 与 Python construct 2.10.70 的有意行为差异，列于此集中管理。
+PM/REV 验收时需逐项确认（用户文档应注明）。
+
+| ID | 差异点 | Python 行为 | construct-rs 行为 | 理由 / 影响范围 |
+|----|--------|------------|------------------|----------------|
+| LC-1 | `isinstance(result, ListContainer)` | True | **False**（返回原生 list） | ListContainer 子类实例化走 Python 慢路径；§2.7 决策 A7 |
+| LC-2 | `result.search(name, value)` | 可用 | **AttributeError**（原生 list 无 search） | 工具方法可后续作为独立函数提供 |
+| LC-3 | `repr(result)` / `str(result)` | ListContainer 美化（缩进展示） | 原生 list repr | 用户可用 pprint 替代；非核心功能 |
+| LC-4 | `result == [1,2,3]` | True（值相等） | True | 值比较一致，无差异 |
+| IX-1 | `Computed(this._index + 1)` 不在数组内 | `TypeError: None + 1` | 返回 `1`（GetIndex 在 None 时返回 0） | 宽松语义避免合法用法的错误处理路径；§3.3.2 |
+| GE-1 | GreedyRange 内部子构造器抛 `ExplicitError` | 向上传播（不回退） | **无 ExplicitError 等价物**，与其他错误一样 seek 回退 + 正常终止 | 见下方详述 |
+| GE-2 | GreedyRange 内部子构造器抛 FormatField/Stream 等普通错误 | seek 回退 + 正常终止 | 同 Python（seek 回退 + 正常终止） | 行为一致 |
+| RU-build-1 | RepeatUntil build discard=True 时谓词收到的 list | 空 list（始终为空） | 空 list（对齐 Python，§4.3.4 P2 修正） | 行为一致 |
+| PA-5 | PrefixedArray build 时 list 长度超出 countfield 表示范围 | countfield 抛 FormatFieldError/StreamError | 由 countfield 节点自行报错（同方向） | 行为一致，§7.4 PA-5 |
+| NE-expr-1 | `Array(N, Bytes(this.m))` inner 含表达式 | 支持 | **编译期失败**（CompilationError） | 与 `Bitwise(Bytes(this.m))` 同限制；§6.2.2 P3.1 |
+| NE-expr-2 | `Array(N, StopIf(this.x))` inner 含表达式 | 支持 | **编译期失败** | 同上，需扩展 _extract_and_compile_exprs 递归 |
+
+#### M1 详述：GreedyRange 错误吞掉（GE-1）
+
+Python `GreedyRange._parse`（core.py L2599-2615）区分三类异常：
+
+```python
+try:
+    for i in itertools.count():
+        ...
+except StopFieldError:      # 1. 早停信号：正常终止，不回退
+    pass
+except ExplicitError:        # 2. 显式不可恢复错误：向上传播
+    raise
+except Exception:            # 3. 其他错误（含 Stream/FormatField 等）：seek 回退 + 正常终止
+    stream_seek(stream, fallback, 0, path)
+```
+
+construct-rs 当前设计（§4.2.2）的分流：
+
+```rust
+match self.inner.parse(...) {
+    Ok(elem) => { ... },
+    Err(StopField { .. }) => { stream.seek(fallback, ...)?; break; },  // 1. 同 Python
+    Err(e) => { let _ = stream.seek(fallback, ...); break; },          // 2+3 合并
+}
+```
+
+**差异**：construct-rs 没有 `ConstructError::Explicit` 等价变体。Python 的
+`ExplicitError` 是用户/库显式标记的"不可恢复错误"（在 Stream/FieldError 之上），
+construct-rs 把所有非 StopField 错误都视为"流终止信号"（回退 + 正常终止）。
+
+**影响**：
+- **FormatField/Stream 错误**（如字节不足、整数溢出）：行为与 Python 一致（GE-2）。
+- **用户主动抛 ExplicitError**：Python 让错误传播（GreedyRange 不终止），construct-rs
+  把它当成普通错误终止 GreedyRange。**但**：当前 construct-rs 不暴露任何
+  ExplicitError 触发 API（无对应描述符），所以**实际无用户场景触发此差异**。
+
+**决策**：**不引入 `ConstructError::Explicit`**。理由：
+1. 当前用户面 API 不暴露 ExplicitError 触发方式，差异不可达。
+2. 引入新变体需要：(a) Python 侧暴露 `ExplicitError` 类；(b) Rust 侧新增 ConstructError
+   变体 + 全节点链路正确传播；(c) 测试覆盖。工作量大，收益小。
+3. Python `ExplicitError` 极少用（仅在 Switch/If ThenElse 等高级特性的错误分支），
+   Phase 4 不覆盖这些特性。
+
+**后续处理（标记为已知问题）**：若未来 Phase 5+ 实现 Switch / IfThenElse 并暴露
+`ExplicitError` 用户 API，再补充 `ConstructError::Explicit` 变体并在 GreedyRange 分流。
+当前 GE-1 作为已知差异记录，**不阻塞 Phase 4 出口**。
+
 ---
 
 ## 10. 后续优化方向（非 Phase 4 范围）
@@ -1935,14 +2276,15 @@ LazyStruct 同阶段）。
 
 ### 11.2 边界条件完整性
 
-✅ Array 边界 10 条（§7.1）
+✅ Array 边界 10 条（§7.1，AR-10 已更新为"inner 表达式编译期失败"）
 ✅ GreedyRange 边界 9 条（§7.2）
-✅ RepeatUntil 边界 7 条（§7.3）
-✅ PrefixedArray 边界 6 条（§7.4）
+✅ RepeatUntil 边界 8 条（§7.3，新增 RU-8 build discard 语义）
+✅ PrefixedArray 边界 6 条（§7.4，PA-5 措辞修正）
 ✅ Index 边界 4 条（§7.5）
 ✅ StopIf 边界 7 条（§7.6）
 ✅ ListContainer 兼容性 4 条（§7.7）
 ✅ 嵌套与组合 7 条（§7.8）
+✅ 已知行为差异 11 条（§9.5，含 LC/IX/GE/RU-build/PA/NE-expr 全集）
 
 ### 11.3 与现有架构的兼容性
 
@@ -1952,53 +2294,98 @@ LazyStruct 同阶段）。
 ✅ Context 新增字段不影响现有构造函数语义（_index 默认 None）
 ✅ compile_schema 向后兼容（新增描述符识别分支）
 ✅ StructNode 仅增加 StopField 捕获分支（不破坏现有行为）
+✅ has_expressions 修正不影响现有 13 个 Node 变体（仅 StopIf/Index 新增分支）
 
 ### 11.4 性能假设的瓶颈覆盖
 
-✅ FFI 调用（仅 RepeatUntil PyCallable 路径有，其他无）
+✅ FFI 调用（RepeatUntil PyCallable 路径有，Expr 路径消除）
 ✅ PyList 创建与 append（§8.1）
 ✅ ctx._index 写入（§8.1）
-✅ path push/pop（§8.1）
+✅ path push/pop（§8.1、§8.5）
 ✅ 子节点 parse 分派（§8.1）
+✅ RepeatUntil S-PERF 适用性（§8.3 单独明确）
 
 ### 11.5 编码红线遵守
 
 ✅ 无 `unwrap()` / `expect()` 在非测试代码（伪代码中的 unwrap 仅为示意，DEV 实现时
    用 `?` 或 match）
 ✅ 无 panic（错误返回 Err）
-✅ 无 TODO/FIXME（设计文档中无）
+✅ 无 TODO/FIXME（设计文档中无；v1 的 placeholder 已在 v2 补全）
 ✅ 无硬编码魔法数字（常量在模块顶部定义）
 ✅ 所有 pub 项有 `///` 文档注释（DEV 实现时补全）
 ✅ 错误携带 path（所有新增错误变体都有 path 字段）
 ✅ parse/build 对称性（所有 Array 节点同时支持 parse 和 build）
 
+### 11.6 REV 驳回修正自检（v2 新增）
+
+| 编号 | 自检项 | 结论 |
+|------|--------|------|
+| P1 | §6.1.1 中 `StopIf(s)` 的 has_expressions 是否返回 `matches!(cond, Expr(_))`？ | ✅ |
+| P1 | 是否附 StructRef 路径（struct_ref.rs L171/L194）的根因说明？ | ✅ |
+| P2 | §4.3.4 build 伪代码中 `partial.append` 是否在 `if !self.discard` 守卫内？ | ✅ |
+| P2 | §7.3 是否新增 RU-8 build discard 边界条目？ | ✅ |
+| P3 | §6.2.2 是否给出完整的表达式 count 编译路径（无 placeholder）？ | ✅ |
+| P3 | 是否明确 inner 含表达式的支持范围（P3.1）与扩展方案（P3.2）？ | ✅ |
+| M1 | §9.5 是否新增 GE-1（GreedyRange 错误吞掉）条目并附决策说明？ | ✅ |
+| M2 | §7.4 PA-5 是否删除"回绕"误述，改为"countfield 自行报错"？ | ✅ |
+| M3 | §4.1.4 是否明确 sizeof 的 GIL 前置条件 + with_gil 闭包正确写法？ | ✅ |
+| M4 | §8.3 是否明确 S-PERF 出口对 RepeatUntil 的判定规则？ | ✅ |
+| M4 | §12.1 是否明确 4.5a/4.5b 拆分且 4.5b 必须在 Phase 4 验收前完成？ | ✅ |
+
 ---
 
 ## 12. 遗留问题与 PM 决策点
 
-### 12.1 PM 决策点 1：RepeatUntil 谓词路径范围
+### 12.1 PM 决策点 1：RepeatUntil 谓词路径范围（M4 已明确）
 
 **问题**：RepeatUntil 的 Expr 谓词路径（§4.3.2）是否在 Phase 4 实现？
 
-**建议**：Phase 4 首版仅实现 PyCallable 路径（功能完整），Expr 路径作为后续优化。
+**结论（M4 修正后）**：**Expr 路径必须在 Phase 4 验收前完成**（子任务 4.5b），
+不可延后到 Phase 5+。
+
+理由（详见 §8.3 S-PERF 适用性）：
+- PyCallable 路径（4.5a）功能完整、行为正确，但性能仅 3-5x（物理上限）。
+- 若仅交付 PyCallable，RepeatUntil 不满足 S-PERF 出口标准。
+- Expr 路径（4.5b）消除 FFI，预期 ≥8x，满足出口标准。
+- 4.5b 工作量：`_current_elem` 槽位 + `ExprOp::GetElem`（仅整数元素）+
+  Python 编译器识别简单谓词模式 + 端到端测试。约 1-2 个子任务。
+
+**Expr 路径已知限制**（写入设计文档 §10.1）：
+- 仅支持整数元素（PyLong_AsLongLong）。Struct 元素的 RepeatUntil 仍走 PyCallable。
+- 仅识别简单谓词模式（`lambda x,_,_: x OP N`，OP ∈ {>, >=, ==, !=, <, <=}）。
+- 复杂谓词（如 `lambda x,lst,c: lst[-2:] == [0,0]`）回落到 PyCallable。
+
+**子任务拆分**：
+- 4.5a：RepeatUntilNode PyCallable 路径（功能完整，3-5x）—— S-FUNC 出口
+- 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，≥8x）—— S-PERF 出口
+- 4.5b **必须在 Phase 4 验收前完成**。
+
+### 12.2 PM 决策点 2：Array count 表达式支持范围（P3 已明确）
+
+**问题**：Array 的 count 表达式（如 `Array(this.length, Byte)`）支持范围？
+
+**结论（P3 修正后）**：
+
+| 场景 | Phase 4 支持 | 说明 |
+|------|------------|------|
+| 顶层 count 表达式 `Array(this.n, simple_subcon)` | ✅ 支持 | 从 `expr_programs[field_index]["count"]` 取，参照 BytesDescriptor 表达式长度（§6.2.2 完整路径） |
+| inner 含表达式 `Array(N, Bytes(this.m))` | ❌ 编译期失败 | 与 `Bitwise(Bytes(this.m))` 同限制；§6.2.2 P3.1 |
+| inner 含表达式 `Array(N, StopIf(this.x))` | ❌ 编译期失败 | 同上 |
+| 嵌套 Array 表达式 `Array(N, Array(this.m, Byte))` | ❌ 编译期失败 | 同上 |
+| StopIf 作为 Struct 直接字段（`rfield(StopIf(this.x))`） | ✅ 支持 | 与 ComputedDescriptor 的 "func" 同模式 |
+
 理由：
-- PyCallable 路径行为正确，S-FUNC 可达成。
-- Expr 路径需要 `_current_elem` 槽位 + `ExprOp::GetElem` + Python 编译器识别，
-  工作量约 1-2 子任务。
-- S-PERF 在 Array/GreedyRange/PrefixedArray 上可达成 ≥10x，RepeatUntil 单独
-  可能仅 3-5x。若 PM 接受 RepeatUntil 性能延后，首版不实现 Expr。
+- 顶层 count 表达式：ExprProgram 基础设施已具备，完整编译路径已在 §6.2.2 设计。
+  不实现会显著限制 Array 的实用性（用户无法用 `Array(n, Byte)` 引用前序字段）。
+- inner 含表达式：Python 侧 `_extract_and_compile_exprs` 当前不递归（_mixin.py L583-615），
+  需扩展递归收集 + 解决命名空间冲突。属于独立特性，建议 Phase 4.0b 或 Phase 5+。
 
-**PM 行动**：在子任务拆分时明确 4.0a（PyCallable）与 4.0b（Expr）的范围。
-
-### 12.2 PM 决策点 2：Array count 表达式支持范围
-
-**问题**：Array 的 count 表达式（如 `Array(this.length, Byte)`）是否在 Phase 4 实现？
-
-**建议**：与 Bytes 表达式长度（已实现）走相同路径，**应一并实现**。
-理由：
-- ExprProgram 基础设施已具备。
-- CountSource::Expr 变体已设计。
-- 不实现会显著限制 Array 的实用性（用户无法用 `Array(n, Byte)` 引用前序字段）。
+**PM 行动**：
+- 子任务 4.1（ArrayNode）必须支持顶层 count 表达式（参照 §6.2.2 完整编译路径）。
+- 若需要 inner 含表达式支持，新增子任务（Phase 4.0b 或后续），扩展 Python 侧
+  `_extract_and_compile_exprs` 递归（§6.2.2 P3.2 扩展方案）。
+- **与现有 Bitwise(Bytes(this.m)) 限制一致**：在用户文档中明确说明
+  "包装型描述符的 inner 不支持含表达式的子描述符，需扁平化到字段层级"。
 
 **PM 行动**：确认 expr_programs 在编译期的传递路径（§6.2.2）。
 
@@ -2031,7 +2418,7 @@ LazyStruct 同阶段）。
 **建议**：首版保留 push/pop，性能不达标再优化。理由：
 - 优化增加代码复杂度（错误路径需手动重建）。
 - 2μs/100 元素对 ≥10x 目标影响有限（占总耗时 ~20%）。
-- 性能分析后再决策（§8.4 关键依赖 3）。
+- 性能分析后再决策（§8.5 关键依赖 3）。
 
 **PM 行动**：在 S-PERF 阶段若发现 path push/pop 是瓶颈，新增子任务优化。
 
@@ -2053,20 +2440,26 @@ LazyStruct 同阶段）。
 ✅ 设计覆盖全部 P0-P5 构造器
 ✅ 与现有架构兼容（无破坏性变更）
 ✅ 性能假设具体可证伪
-✅ 边界条件覆盖完整
-✅ 遗留问题已明确（6 个 PM 决策点）
+✅ 边界条件覆盖完整（含 REV 驳回修正后的 RU-8 build discard、AR-10 inner 限制）
+✅ 遗留问题已明确（6 个 PM 决策点，其中 1/2 已根据 REV 驳回收敛）
+✅ REV 驳回的 3 个严重问题（P1/P2/P3）已修正
+✅ REV 驳回的 4 个中等问题（M1/M2/M3/M4）已修正
 
 **建议 PM 在子任务拆分时**：
 1. 4.0a：基础设施（ParseStream.seek、Context._index、ExprOp::GetIndex、错误变体、
    Python 异常类映射）—— 这是所有 Array 节点的前置依赖
-2. 4.1：ArrayNode（P0）
+2. 4.1：ArrayNode（P0，含顶层 count 表达式，§6.2.2 完整编译路径）
 3. 4.2：GreedyRangeNode（P1）
-4. 3：PrefixedArrayNode（P2）
-5. 4.4：IndexNode（P4）+ StopIfNode（P5）+ StructNode 的 StopField 捕获修改
-6. 4.5：RepeatUntilNode（P3，首版仅 PyCallable）
-7. 4.6：S-FUNC 验证 + S-PERF 基准
+4. 4.3：PrefixedArrayNode（P2）
+5. 4.4：IndexNode（P4）+ StopIfNode（P5）+ StructNode 的 StopField 捕获修改 +
+   has_expressions 修正（§6.1.1，StopIf(Expr) 返回 true）
+6. 4.5a：RepeatUntilNode PyCallable 路径（功能完整，S-FUNC 出口）
+7. 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，S-PERF 出口，必须在 Phase 4 验收前完成）
+8. 4.6：S-FUNC 验证 + S-PERF 基准（含 RepeatUntil 双路径对比）
 
 子任务可合并（如 4.1+4.2 一次 DEV 编码），由 PM 决定。
+
+**REV 修正后无需重新检视全部内容**，仅针对 P1/P2/P3/M1-M4 的修改部分重新检视即可。
 
 ---
 
