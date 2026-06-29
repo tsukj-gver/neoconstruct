@@ -20,6 +20,10 @@ Python 异常                    Rust ConstructError 变体
 :class:`GenericConstructError``ConstructError::Generic``
 :class:`IntegerError`         ``ConstructError::Integer`` (Phase 3.3)
 :class:`PaddingError`         ``ConstructError::Padding`` (Phase 3.3)
+:class:`RangeError`           ``ConstructError::Range`` (Phase 4)
+:class:`RepeatError`          ``ConstructError::Repeat`` (Phase 4)
+:class:`StopFieldError`       ``ConstructError::StopField`` (Phase 4)
+:class:`IndexFieldError`      ``ConstructError::IndexField`` (Phase 4)
 ============================  ==========================================
 
 .. note::
@@ -129,6 +133,50 @@ class GenericConstructError(ConstructError):
     """
 
 
+class RangeError(ConstructError):
+    """范围错误：Array count 无效（负数或与给定列表长度不符）。
+
+    对应 Python construct 的 ``RangeError`` 和 Rust 的
+    ``ConstructError::Range``。
+
+    Phase 4 新增：Array 系列节点的 count 校验失败时触发
+    （core.py L2528、L2541、L2543）。
+    """
+
+
+class RepeatError(ConstructError):
+    """重复错误：RepeatUntil build 时无元素满足谓词。
+
+    对应 Python construct 的 ``RepeatError`` 和 Rust 的
+    ``ConstructError::Repeat``。
+
+    Phase 4 新增：RepeatUntil build 遍历完列表无元素满足谓词时触发
+    （core.py L2700）。
+    """
+
+
+class StopFieldError(ConstructError):
+    """早停信号：StopIf 条件为真时抛出，被外层 Struct/GreedyRange 捕获。
+
+    对应 Python construct 的 ``StopFieldError`` 和 Rust 的
+    ``ConstructError::StopField``。
+
+    Phase 4 新增：作为 Result 哨兵变体（非 panic），正常路径被
+    GreedyRangeNode / StructNode 捕获视为正常终止（core.py L4106）。
+    """
+
+
+class IndexFieldError(ConstructError):
+    """Index 字段错误：Index 节点读取 _index 时上下文未提供。
+
+    对应 Python construct 的 ``IndexFieldError`` 和 Rust 的
+    ``ConstructError::IndexField``。
+
+    Phase 4 新增：当前 IndexNode 在 _index 缺失时返回 Py_None（不触发此错误），
+    此异常类保留供未来严格模式使用。
+    """
+
+
 __all__ = [
     "ConstructError",
     "StreamError",
@@ -140,4 +188,8 @@ __all__ = [
     "GenericConstructError",
     "IntegerError",
     "PaddingError",
+    "RangeError",
+    "RepeatError",
+    "StopFieldError",
+    "IndexFieldError",
 ]

@@ -129,6 +129,38 @@ impl<'a> ParseStream<'a> {
         self.pos
     }
 
+    /// 设置字节游标到 `pos`，同时重置 bit 游标为 0（字节对齐）。
+    ///
+    /// 用于 GreedyRange 失败回退（对齐 Python
+    /// `stream_seek(stream, fallback, 0, path)`，`whence=0` 绝对定位）。
+    /// Phase 4 新增（设计 §3.1.1）。
+    ///
+    /// # 边界
+    ///
+    /// - `pos > data.len()`：返回 `ConstructError::Stream`（含 expected/found）。
+    /// - `bit_pos != 0` 时调用：先重置 bit_pos 为 0（GreedyRange 通常字节对齐，
+    ///   此分支防御性兼容）。
+    ///
+    /// # 参数
+    ///
+    /// - `pos`：目标字节位置（绝对偏移，0-based）。
+    /// - `path`：错误追踪路径。
+    pub fn seek(&mut self, pos: usize, path: &Path) -> Result<(), ConstructError> {
+        if pos > self.data.len() {
+            return Err(ConstructError::Stream {
+                message: format!(
+                    "stream seek out of bounds, pos={}, data_len={}",
+                    pos,
+                    self.data.len()
+                ),
+                path: path.to_string(),
+            });
+        }
+        self.pos = pos;
+        self.bit_pos = 0;
+        Ok(())
+    }
+
     /// 是否已读到流末尾。
     pub fn is_at_end(&self) -> bool {
         self.pos >= self.data.len()
@@ -754,6 +786,97 @@ mod tests {
         let chunk = reader.read(original.len(), &path).expect("read back");
         assert_eq!(chunk, original);
         assert!(reader.is_at_end());
+    }
+
+    // ---------------------------------------------------------------------------
+    // ParseStream::seek（Phase 4 新增）
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_stream_seek_to_absolute_position() {
+        let data = b"abcdef";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        // 初始 pos=0
+        assert_eq!(s.tell(), 0);
+        s.seek(3, &path).expect("seek to 3");
+        assert_eq!(s.tell(), 3);
+        let chunk = s.read(2, &path).expect("read 2");
+        assert_eq!(chunk, b"de");
+    }
+
+    #[test]
+    fn parse_stream_seek_to_zero_resets_cursor() {
+        let data = b"abcdef";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        let _ = s.read(4, &path).expect("read 4");
+        assert_eq!(s.tell(), 4);
+        s.seek(0, &path).expect("seek back to 0");
+        assert_eq!(s.tell(), 0);
+    }
+
+    #[test]
+    fn parse_stream_seek_to_end_allowed() {
+        let data = b"abc";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        s.seek(3, &path).expect("seek to len");
+        assert_eq!(s.tell(), 3);
+        assert!(s.is_at_end());
+    }
+
+    #[test]
+    fn parse_stream_seek_beyond_end_returns_stream_error() {
+        let data = b"abc";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        let err = s.seek(10, &path).expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, path } => {
+                assert!(message.contains("pos=10"), "got: {}", message);
+                assert!(message.contains("data_len=3"), "got: {}", message);
+                assert_eq!(path, "root");
+            }
+            other => panic!("expected Stream error, got {:?}", other),
+        }
+        // 失败时不推进游标
+        assert_eq!(s.tell(), 0);
+    }
+
+    #[test]
+    fn parse_stream_seek_resets_bit_pos_to_zero() {
+        // 验证 seek 重置 bit 游标（防御性兼容 bit 域调用）
+        let mut s = ParseStream::new(&[0xFF, 0xFF]);
+        let path = root_path();
+        // 制造 bit 偏移
+        let _ = s.read_bits(4, &path).expect("read 4 bits");
+        assert_eq!(s.bit_pos(), 4);
+        // seek 应重置 bit_pos
+        s.seek(0, &path).expect("seek");
+        assert_eq!(s.bit_pos(), 0);
+        assert_eq!(s.tell(), 0);
+    }
+
+    #[test]
+    fn parse_stream_seek_used_for_greedy_range_fallback_pattern() {
+        // 模拟 GreedyRange 的回退模式：记录 fallback → 失败时 seek 回 fallback
+        let data = b"\x01\x02\x03\xFF"; // 前 3 字节合法，第 4 字节"失败"
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+
+        let fallback = s.tell();
+        let _ = s.read(1, &path).expect("read 1"); // 模拟成功解析第 1 个元素
+        let fallback1 = s.tell();
+
+        let _ = s.read(1, &path).expect("read 1"); // 第 2 个
+        let fallback2 = s.tell();
+
+        // 假设第 3 次解析失败，回退到 fallback2
+        s.seek(fallback2, &path).expect("seek back");
+        assert_eq!(s.tell(), fallback2);
+        let _ = fallback;
+        let _ = fallback1;
     }
 
     // ---------------------------------------------------------------------------

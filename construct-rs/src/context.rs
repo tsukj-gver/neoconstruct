@@ -83,6 +83,18 @@ pub struct Context<'py> {
     /// `0` 表示未初始化（placeholder 或未调用 `init_expr_values`）。
     /// `> 0` 表示已初始化，`buf[0..len)` 为有效槽位。
     expr_values_len: usize,
+
+    /// Phase 4 新增：当前数组迭代下标（仅 Array 系列节点设置）。
+    ///
+    /// `None` 表示当前不在数组迭代中（`IndexNode` 读到时返回 `Py_None`）。
+    /// 栈分配，零堆开销。
+    ///
+    /// 嵌套数组语义（Array 内 Array）：内层覆盖外层，循环结束后恢复。
+    /// 子 Struct context 通过 [`Context::new_child`] / [`Context::new_child_placeholder`]
+    /// 继承父的 `_index`，使 Index 字段在子 Struct 中可读。
+    ///
+    /// 设计依据：`docs/模块设计-Array.md` §3.2 决策 A3。
+    _index: Option<usize>,
 }
 
 // SAFETY note: Context 包含 raw pointer (`expr_values_buf` 中的 `*mut ffi::PyObject`)，
@@ -103,6 +115,7 @@ impl<'py> Context<'py> {
             parent: None,
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
+            _index: None,
         })
     }
 
@@ -120,6 +133,7 @@ impl<'py> Context<'py> {
             parent: None,
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
+            _index: None,
         }
     }
 
@@ -129,12 +143,16 @@ impl<'py> Context<'py> {
     /// `expr_values_len` 初始化为 `0`——内层 Struct 自行调用
     /// [`Context::init_expr_values`] 按需初始化。
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
+    ///
+    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A），使
+    /// `this._index` 在嵌套 Struct 字段表达式中可读。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
             parent: Some(parent),
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
+            _index: parent._index,
         })
     }
 
@@ -153,12 +171,15 @@ impl<'py> Context<'py> {
     ///
     /// 不创建任何 Python 对象，零开销。`parent` 仅作为引用存储（不 incref，
     /// 生命周期由 `'py` 保证）。
+    ///
+    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A）。
     pub fn new_child_placeholder(parent: &'py Context<'py>) -> Self {
         Self {
             fields: None,
             parent: Some(parent),
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
+            _index: parent._index,
         }
     }
 
@@ -372,6 +393,37 @@ impl<'py> Context<'py> {
     /// 占位 context（`fields = None`）或已 [`take_fields`] 的 context 返回 `None`。
     pub fn fields(&self) -> Option<&Bound<'py, PyDict>> {
         self.fields.as_ref()
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4：_index（数组迭代下标）
+    // -----------------------------------------------------------------------
+
+    /// 设置当前数组迭代下标。
+    ///
+    /// 由 ArrayNode / GreedyRangeNode / RepeatUntilNode / PrefixedArrayNode 在
+    /// 每次迭代前调用。栈字段写入，零开销。
+    ///
+    /// 设计依据：`docs/模块设计-Array.md` §3.2 决策 A3。
+    #[inline]
+    pub fn set_index(&mut self, index: usize) {
+        self._index = Some(index);
+    }
+
+    /// 清除当前数组迭代下标。
+    ///
+    /// 由 Array 系列节点在循环结束后调用（恢复"不在数组中"状态）。
+    #[inline]
+    pub fn clear_index(&mut self) {
+        self._index = None;
+    }
+
+    /// 读取当前数组迭代下标。
+    ///
+    /// IndexNode 使用。`None` 表示不在数组迭代中。
+    #[inline]
+    pub fn index(&self) -> Option<usize> {
+        self._index
     }
 }
 
@@ -984,6 +1036,113 @@ mod tests {
             let mut ctx = Context::new_root(py).expect("root");
             let _first = ctx.take_fields().expect("first take");
             assert!(ctx.take_fields().is_none(), "second take should be None");
+        });
+    }
+
+    // ======================================================================
+    // _index（Phase 4 Array 系列支持）
+    // ======================================================================
+
+    #[test]
+    fn new_root_index_is_none() {
+        with_python(|py| {
+            let ctx = Context::new_root(py).expect("root");
+            assert!(ctx.index().is_none(), "new_root should have _index=None");
+        });
+    }
+
+    #[test]
+    fn placeholder_index_is_none() {
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            assert!(ctx.index().is_none(), "placeholder should have _index=None");
+        });
+    }
+
+    #[test]
+    fn set_index_then_index_returns_value() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            assert!(ctx.index().is_none());
+            ctx.set_index(42);
+            assert_eq!(ctx.index(), Some(42));
+            ctx.set_index(0);
+            assert_eq!(ctx.index(), Some(0));
+        });
+    }
+
+    #[test]
+    fn clear_index_resets_to_none() {
+        with_python(|py| {
+            let mut ctx = Context::new_root(py).expect("root");
+            ctx.set_index(5);
+            assert_eq!(ctx.index(), Some(5));
+            ctx.clear_index();
+            assert!(ctx.index().is_none());
+        });
+    }
+
+    #[test]
+    fn new_child_inherits_parent_index() {
+        // 设计 §3.2.2 选项 A：子 context 继承父的 _index
+        with_python(|py| {
+            let mut root = Context::new_root(py).expect("root");
+            root.set_index(7);
+            let child = Context::new_child(&root, py).expect("child");
+            assert_eq!(child.index(), Some(7), "child should inherit parent _index");
+        });
+    }
+
+    #[test]
+    fn new_child_placeholder_inherits_parent_index() {
+        with_python(|py| {
+            let mut root = Context::new_root(py).expect("root");
+            root.set_index(3);
+            let child = Context::new_child_placeholder(&root);
+            assert_eq!(child.index(), Some(3));
+        });
+    }
+
+    #[test]
+    fn new_child_inherits_none_when_parent_no_index() {
+        with_python(|py| {
+            let root = Context::new_root(py).expect("root");
+            // 父 _index = None
+            let child = Context::new_child(&root, py).expect("child");
+            assert!(child.index().is_none());
+        });
+    }
+
+    #[test]
+    fn nested_array_index_semantics() {
+        // 模拟 Array 内 Array 的嵌套语义：外层 set，内层覆盖，结束后恢复
+        // （详见设计 §3.2.2）
+        with_python(|py| {
+            let mut outer = Context::new_root(py).expect("outer");
+            // 外层 i=0
+            outer.set_index(0);
+            assert_eq!(outer.index(), Some(0));
+
+            // 模拟进入内层 Array：保存 old_index，内层迭代设置自己的 _index
+            let old_outer = outer.index();
+            let mut inner = Context::new_child(&outer, py).expect("inner");
+            // 内层继承外层 Some(0)
+            assert_eq!(inner.index(), Some(0));
+
+            inner.set_index(0); // 内层 j=0
+            assert_eq!(inner.index(), Some(0));
+            inner.set_index(1); // 内层 j=1
+            assert_eq!(inner.index(), Some(1));
+
+            // 内层结束：恢复 old_outer（在外层操作）
+            drop(inner);
+            match old_outer {
+                Some(idx) => outer.set_index(idx),
+                None => outer.clear_index(),
+            }
+            // 外层 i=1
+            outer.set_index(1);
+            assert_eq!(outer.index(), Some(1));
         });
     }
 }

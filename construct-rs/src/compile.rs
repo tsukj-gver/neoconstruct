@@ -35,6 +35,7 @@
 use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
+use crate::nodes::array::{ArrayNode, CountSource};
 use crate::nodes::bit_padding::BitPaddingNode;
 use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
 use crate::nodes::bitwise::BitwiseNode;
@@ -469,6 +470,23 @@ fn build_node_from_descriptor(
                 ByteTransform::ByteSwap,
             )));
         }
+        // ArrayDescriptor（Phase 4）→ ArrayNode。
+        // 完整编译路径参照 BytesDescriptor 表达式长度路径（compile.rs L266-308）：
+        // - count 为 int → CountSource::Const
+        // - count 为 FieldRef/ExprRef → 从 expr_programs[field_index]["count"] 取 ExprOp 列表
+        // 设计依据：`docs/模块设计-Array.md` §6.2.2。
+        //
+        // 限制（设计 §6.2.2 P3.1）：inner subcon 不支持含表达式的子描述符
+        // （如 Array(N, Bytes(this.m))），与 Bitwise(Bytes(this.m)) 同根因——
+        // _extract_and_compile_exprs 不递归 inner。Phase 4 仅支持顶层 count 表达式。
+        "ArrayDescriptor" => {
+            return Ok(Node::Array(build_array_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
         _ => {}
     }
 
@@ -676,6 +694,115 @@ fn build_padding_node(
         // 字节域：PaddingNode 接受任意 pattern 字节
         Ok(Node::Padding(PaddingNode::new_const(length, pattern)))
     }
+}
+
+/// 从 `ArrayDescriptor` 构建 `ArrayNode`（设计 §6.2.2）。
+///
+/// 编译路径参照 [`build_node_from_descriptor`] 的 BytesDescriptor 分支（compile.rs L266-308）：
+///
+/// 1. 从 desc 读取 count / subcon / discard。
+/// 2. count 分类：
+///    - Python int 常量 → [`CountSource::Const`]（校验非负）。
+///    - 非常量（FieldRef/ExprRef 等）→ 从 `expr_programs[field_index]["count"]` 取
+///      ExprOp 列表 → [`CountSource::Expr`]。
+/// 3. 递归编译 subcon：**沿用同一个 field_index 和 expr_programs 切片**
+///    （与 BitwiseDescriptor / BytewiseDescriptor 同模式）。
+///
+/// # 限制（设计 §6.2.2 P3.1）
+///
+/// inner subcon 不支持含表达式的子描述符（如 `Array(N, Bytes(this.m))`）。
+/// Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）不递归 inner subcon，
+/// 导致 inner 的表达式参数不会被收集到 expr_programs 中。Rust 侧递归编译 inner 时
+/// 若 inner 是含表达式的描述符，会因 expr_programs 中缺键报 Compilation 错误。
+/// 这与 Phase 3 的 `Bitwise(Bytes(this.m))` 限制一致。
+fn build_array_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<ArrayNode, ConstructError> {
+    // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "ArrayDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+
+    // 2. 解析 count：常量 or 表达式。
+    let count_obj = desc
+        .getattr("count")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "ArrayDescriptor missing 'count' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    let count =
+        if let Ok(n) = count_obj.extract::<i64>() {
+            // 常量路径（零运行时开销）。
+            if n < 0 {
+                return Err(ConstructError::Compilation {
+                    message: format!(
+                        "Array count {} must be non-negative (field index {})",
+                        n, field_index
+                    ),
+                });
+            }
+            CountSource::Const(n as usize)
+        } else {
+            // 表达式路径：从 expr_programs[field_index]["count"] 取 ExprOp 列表。
+            // 与 BytesDescriptor 的 "length" 键完全同模式。
+            let field_exprs = expr_programs
+                .get(field_index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| ConstructError::Compilation {
+                    message: format!(
+                    "Array field has non-constant count but no expression program was provided \
+                     (field index {})",
+                    field_index
+                ),
+                })?;
+
+            let field_exprs_dict = field_exprs.bind(py).downcast::<PyDict>().map_err(|_| {
+                ConstructError::Compilation {
+                    message: "Array expression program must be a dict".to_string(),
+                }
+            })?;
+
+            let ops_list = field_exprs_dict
+                .get_item("count")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "failed to get 'count' from Array expression programs: {} (field index {})",
+                        e, field_index
+                    ),
+                })?
+                .ok_or_else(|| ConstructError::Compilation {
+                    message: format!(
+                        "Array field has non-constant count but 'count' key missing in expression \
+                     program (field index {})",
+                        field_index
+                    ),
+                })?;
+
+            let ops = parse_expr_ops_from_py(&ops_list)?;
+            let program = ExprProgram::new(ops);
+            CountSource::Expr(program)
+        };
+
+    // 3. discard 标志（默认 false）。
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
+
+    Ok(ArrayNode::new(inner_node, count, discard))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。

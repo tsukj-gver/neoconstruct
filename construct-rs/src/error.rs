@@ -206,6 +206,61 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    // --- Phase 4 Array 系列错误（设计 §3.4）---
+    /// Array count 无效（负数或与给定列表长度不符）。
+    ///
+    /// 对应 Python construct 的 `RangeError`（`core.py` L2528、L2541、L2543）。
+    ///
+    /// 触发场景：
+    /// - Array count 表达式求值为负数
+    /// - Array build 时 `len(obj) != count`
+    /// - PrefixedArray countfield 解析得到负数
+    #[error("range error: {message} at {path}")]
+    Range {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// RepeatUntil build 时无元素满足谓词。
+    ///
+    /// 对应 Python construct 的 `RepeatError`（`core.py` L2700）。
+    #[error("repeat error: {message} at {path}")]
+    Repeat {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 早停信号（仅 `StopIfNode` 产生，`GreedyRangeNode` / `StructNode` 捕获）。
+    ///
+    /// 对应 Python construct 的 `StopFieldError`（`core.py` L4106）。
+    ///
+    /// 作为 `Result` 的哨兵变体而非 panic，保证 `Construct` trait 签名不变
+    /// （设计 §2.4 决策 A4）。正常路径由 `GreedyRangeNode` 等捕获，不应到达 FFI 入口。
+    #[error("stop field signal at {path}")]
+    StopField {
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// Index 节点读取 `_index` 时上下文未提供（理论上不发生——Array 都会设置）。
+    ///
+    /// 对应 Python construct 的 `IndexFieldError`。
+    ///
+    /// 当前设计 `IndexNode` 在 `_index` 为 `None` 时返回 `Py_None`（对齐 Python
+    /// `context.get("_index", None)`），不主动触发此变体。保留供未来严格模式使用
+    /// （设计 §3.4.4）。
+    #[error("index field error: {message} at {path}")]
+    IndexField {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -227,11 +282,15 @@ impl ConstructError {
             | ConstructError::ExprDivByZero { message, .. }
             | ConstructError::BitField { message, .. }
             | ConstructError::Integer { message, .. }
-            | ConstructError::Padding { message, .. } => Some(message),
+            | ConstructError::Padding { message, .. }
+            | ConstructError::Range { message, .. }
+            | ConstructError::Repeat { message, .. }
+            | ConstructError::IndexField { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprStackUnderflow { .. } => None,
+            | ConstructError::ExprStackUnderflow { .. }
+            | ConstructError::StopField { .. } => None,
         }
     }
 
@@ -251,7 +310,11 @@ impl ConstructError {
             | ConstructError::ExprStackUnderflow { path }
             | ConstructError::BitField { path, .. }
             | ConstructError::Integer { path, .. }
-            | ConstructError::Padding { path, .. } => Some(path),
+            | ConstructError::Padding { path, .. }
+            | ConstructError::Range { path, .. }
+            | ConstructError::Repeat { path, .. }
+            | ConstructError::StopField { path }
+            | ConstructError::IndexField { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -271,7 +334,8 @@ impl ConstructError {
             // 结构化变体：无单一 message 字段，Display 已包含完整信息（含 path）。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
-            | ConstructError::ExprStackUnderflow { .. } => self.to_string(),
+            | ConstructError::ExprStackUnderflow { .. }
+            | ConstructError::StopField { .. } => self.to_string(),
             // 其他变体：按 path 拼接。此分支的变体均有 message 字段（message() 返回 Some）。
             _ => match self.path() {
                 Some(p) => format!("Error in path {}\n{}", p, self.message().unwrap_or("")),
@@ -297,6 +361,10 @@ impl ConstructError {
             ConstructError::BitField { .. } => "BitField",
             ConstructError::Integer { .. } => "Integer",
             ConstructError::Padding { .. } => "Padding",
+            ConstructError::Range { .. } => "Range",
+            ConstructError::Repeat { .. } => "Repeat",
+            ConstructError::StopField { .. } => "StopField",
+            ConstructError::IndexField { .. } => "IndexField",
         }
     }
 
@@ -354,7 +422,11 @@ impl ConstructError {
             | ConstructError::ExprStackUnderflow { path }
             | ConstructError::BitField { path, .. }
             | ConstructError::Integer { path, .. }
-            | ConstructError::Padding { path, .. } => *path = new_path,
+            | ConstructError::Padding { path, .. }
+            | ConstructError::Range { path, .. }
+            | ConstructError::Repeat { path, .. }
+            | ConstructError::StopField { path }
+            | ConstructError::IndexField { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -398,6 +470,18 @@ struct ExceptionClasses {
     /// 对应 `ConstructError::Padding`（Phase 3.3）。
     /// Python construct 的 `PaddingError`，用于 Padding 字段的非法 pattern 等。
     padding_error: Py<PyType>,
+    /// 对应 `ConstructError::Range`（Phase 4）。
+    /// Python construct 的 `RangeError`，用于 Array count 无效等。
+    range_error: Py<PyType>,
+    /// 对应 `ConstructError::Repeat`（Phase 4）。
+    /// Python construct 的 `RepeatError`，用于 RepeatUntil build 无元素满足谓词。
+    repeat_error: Py<PyType>,
+    /// 对应 `ConstructError::StopField`（Phase 4）。
+    /// Python construct 的 `StopFieldError`，StopIf 早停信号。
+    stop_field_error: Py<PyType>,
+    /// 对应 `ConstructError::IndexField`（Phase 4）。
+    /// Python construct 的 `IndexFieldError`，Index 节点 _index 缺失（保留）。
+    index_field_error: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -442,6 +526,10 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         construct_error_base: get("ConstructError")?,
         integer_error: get("IntegerError")?,
         padding_error: get("PaddingError")?,
+        range_error: get("RangeError")?,
+        repeat_error: get("RepeatError")?,
+        stop_field_error: get("StopFieldError")?,
+        index_field_error: get("IndexFieldError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -481,6 +569,11 @@ fn select_exception_class<'py>(
         ConstructError::Integer { .. } => &classes.integer_error,
         // Phase 3.3：Padding 错误映射到 Python PaddingError（core.py L124/L4146）。
         ConstructError::Padding { .. } => &classes.padding_error,
+        // Phase 4 Array 系列（设计 §3.4.5）。
+        ConstructError::Range { .. } => &classes.range_error,
+        ConstructError::Repeat { .. } => &classes.repeat_error,
+        ConstructError::StopField { .. } => &classes.stop_field_error,
+        ConstructError::IndexField { .. } => &classes.index_field_error,
     };
     cls.bind(py).clone()
 }
@@ -802,6 +895,10 @@ mod tests {
             "class GenericConstructError(ConstructError): pass\n",
             "class IntegerError(ConstructError): pass\n",
             "class PaddingError(ConstructError): pass\n",
+            "class RangeError(ConstructError): pass\n",
+            "class RepeatError(ConstructError): pass\n",
+            "class StopFieldError(ConstructError): pass\n",
+            "class IndexFieldError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run test classes definition");
@@ -823,6 +920,10 @@ mod tests {
             construct_error_base: get("ConstructError"),
             integer_error: get("IntegerError"),
             padding_error: get("PaddingError"),
+            range_error: get("RangeError"),
+            repeat_error: get("RepeatError"),
+            stop_field_error: get("StopFieldError"),
+            index_field_error: get("IndexFieldError"),
         }
     }
 

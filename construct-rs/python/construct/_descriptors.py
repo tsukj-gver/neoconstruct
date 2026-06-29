@@ -453,6 +453,97 @@ def ByteSwapped(subcon):
     return ByteSwappedDescriptor(subcon)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: Array 描述符
+#
+# 设计依据：``docs/模块设计-Array.md`` §6.2.2 / §6.3。
+#
+# ``Array(count, subcon, discard=False)`` 是固定次数数组描述符，对应 Python
+# construct 的 ``Array``。construct-rs 通过 type name "ArrayDescriptor" 识别，
+# 构建 ``Node::Array(ArrayNode)``。
+#
+# count 支持：
+# - int 常量 → ``CountSource::Const``
+# - FieldRef/ExprRef → ``CountSource::Expr``（从 expr_programs 取 "count" 键）
+#
+# 限制（§6.2.2 P3.1）：inner subcon 暂不支持含表达式的子描述符
+# （如 ``Array(N, Bytes(this.m))``）。需将 inner 表达式扁平化到字段层级。
+# ---------------------------------------------------------------------------
+
+
+class ArrayDescriptor:
+    """``Array(count, subcon, discard=False)`` 描述符。
+
+    固定次数数组：解析 ``count`` 个 ``subcon`` 元素到 Python list，
+    或从 list 构建 ``count`` 个元素的字节序列。
+
+    对应 Python construct 的 ``Array``。
+
+    ``_expr_params`` 协议：当 ``count`` 是 int 时返回 ``{}``（跳过编译）；
+    当 count 是 FieldRef/ExprRef 时返回 ``{"count": self.count}``（编译为 ExprOp 列表）。
+
+    :param count: 元素数量（int 常量或 FieldRef/ExprRef 表达式）。
+    :param subcon: 元素子构造器（描述符）。
+    :param discard: 若为 True，解析时仍消耗流但不收集结果（返回空 list）。
+    """
+
+    __slots__ = ("count", "subcon", "discard")
+
+    def __init__(self, count, subcon, discard=False):
+        """初始化 Array 描述符。
+
+        :param count: 元素数量。
+        :param subcon: 元素子构造器。
+        :param discard: 是否丢弃解析结果。
+        """
+        self.count = count
+        self.subcon = subcon
+        self.discard = discard
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 ``{"count": self.count}``。当 count 是 int 时，
+        ``_extract_and_compile_exprs`` 跳过编译；当 count 是 FieldRef/ExprRef 时
+        编译为 ExprOp 列表。
+        """
+        if isinstance(self.count, int):
+            return {}
+        return {"count": self.count}
+
+    def __repr__(self):
+        return "Array(count={!r}, subcon={!r}, discard={!r})".format(
+            self.count, self.subcon, self.discard
+        )
+
+
+def Array(count, subcon, discard=False):
+    """创建一个 Array 描述符。
+
+    固定次数数组。对应 Python construct 的 ``Array``。
+
+    使用方式::
+
+        @dataclass
+        class Header(StructMixin):
+            count: int = field(Int8ub)
+            items: list = field(Array(this.count, Byte))
+
+    运算符重载：``Byte[5]`` 等价于 ``Array(5, Byte)``（Python construct 推荐语法）。
+
+    限制（Phase 4）：inner subcon 不支持含表达式的子描述符（如
+    ``Array(N, Bytes(this.m))``）。若需 inner 表达式，请将 inner 扁平化为
+    独立字段。
+
+    :param count: 元素数量（int 或 FieldRef/ExprRef 表达式）。
+    :param subcon: 元素子构造器。
+    :param discard: 若为 True，解析返回空 list 但仍消耗流。
+    :return: ``ArrayDescriptor`` 实例。
+    """
+    return ArrayDescriptor(count, subcon, discard)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -493,4 +584,7 @@ __all__ = [
     "BitsSwapped",
     "ByteSwappedDescriptor",
     "ByteSwapped",
+    # Phase 4 Array
+    "ArrayDescriptor",
+    "Array",
 ]

@@ -28,9 +28,13 @@ from ._errors import (
     FieldLengthError,
     FormatFieldError,
     GenericConstructError,
+    IndexFieldError,
     IntegerError,
     PaddingError,
+    RangeError,
+    RepeatError,
     SizeofError,
+    StopFieldError,
     StreamError,
     UnresolvedReferenceError,
 )
@@ -91,6 +95,9 @@ try:
         BitsSwappedDescriptor,
         ByteSwapped,
         ByteSwappedDescriptor,
+        # Phase 4: Array
+        Array,
+        ArrayDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -153,6 +160,9 @@ __all__ = [
     "BitsSwappedDescriptor",
     "ByteSwapped",
     "ByteSwappedDescriptor",
+    # Phase 4: Array
+    "Array",
+    "ArrayDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常
@@ -166,4 +176,8 @@ __all__ = [
     "GenericConstructError",
     "IntegerError",
     "PaddingError",
+    "RangeError",
+    "RepeatError",
+    "StopFieldError",
+    "IndexFieldError",
 ]

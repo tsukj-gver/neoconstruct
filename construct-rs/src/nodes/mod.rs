@@ -26,6 +26,7 @@
 //! - 填充节点：[`BitPaddingNode`](bit_padding::BitPaddingNode)（bit 级填充，Phase 3.3）、
 //!   [`PaddingNode`](padding::PaddingNode)（字节级填充，Phase 3.3）
 
+pub mod array;
 pub mod bit_padding;
 pub mod bits_integer;
 pub mod bitwise;
@@ -44,6 +45,7 @@ use crate::context::Context;
 use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
+use array::ArrayNode;
 use bit_padding::BitPaddingNode;
 use bits_integer::BitsIntegerNode;
 use bitwise::BitwiseNode;
@@ -187,6 +189,9 @@ pub enum Node {
     /// 字节级填充节点：`Padding` 在普通 Struct 域内的行为
     /// （对应 Python construct `Padding` 字节域用法，Phase 3.3 补全 Phase 1 遗留）。
     Padding(PaddingNode),
+    /// 固定次数数组节点（对应 Python construct `Array(count, subcon, discard)`）。
+    /// Phase 4 新增。inner 用 `Box<Node>`，count 可为常量或 ExprProgram。
+    Array(ArrayNode),
 }
 
 impl Node {
@@ -205,6 +210,7 @@ impl Node {
             Node::Bitwise(b) => b.inner().has_expressions(),
             Node::Bytewise(b) => b.inner().has_expressions(),
             Node::Transform(t) => t.inner().has_expressions(),
+            Node::Array(a) => a.has_expressions(),
             _ => false,
         }
     }
