@@ -1,0 +1,98 @@
+﻿
+==============================================================================================================
+#    鍦烘櫙                                N   bytes/call      Py ns/call      Rs ns/call       鍔犻€熸瘮      鏂瑰悜
+--------------------------------------------------------------------------------------------------------------
+a01_iArray(10, Int8ub)                10           10         3305 ns          518 ns    6.38x <10x   parse
+       鈹斺攢 build                       10           10         3395 ns          359 ns    9.46x <10x   build
+a02_iArray(100, Int8ub)              100          100        24040 ns         1998 ns   12.03x   parse
+       鈹斺攢 build                      100          100        24665 ns         1179 ns   20.92x   build
+a03_iArray(1000, Int8ub)            1000         1000       233202 ns        15324 ns   15.22x   parse
+       鈹斺攢 build                     1000         1000       241318 ns         9181 ns   26.28x   build
+a04_iArray(10000, Int8ub)          10000        10000      2309.82 us       136111 ns   16.97x   parse
+       鈹斺攢 build                    10000        10000      2415.50 us        89424 ns   27.01x   build
+a05_iArray(100, Int32ub)             100          400        27326 ns         2563 ns   10.66x   parse
+       鈹斺攢 build                      100          400        26872 ns         1191 ns   22.56x   build
+a06_iArray(1000, Int32ub)           1000         4000       264932 ns        20750 ns   12.77x   parse
+       鈹斺攢 build                     1000         4000       259025 ns         9554 ns   27.11x   build
+a07_bArray(100, Bytes(8))            100          800        21208 ns         2533 ns    8.37x <10x   parse
+       鈹斺攢 build                      100          800        26414 ns         1400 ns   18.87x   build
+a08_bArray(1000, Bytes(8))          1000         8000       207099 ns        20049 ns   10.33x   parse
+       鈹斺攢 build                     1000         8000       251708 ns        11297 ns   22.28x   build
+a09_sArray(100, Struct{2})           100          200       209152 ns        13196 ns   15.85x   parse
+       鈹斺攢 build                      100          200       182854 ns         5310 ns   34.44x   build
+a10_sArray(1000, Struct{2})         1000         2000      2074.78 us       131036 ns   15.83x   parse
+       鈹斺攢 build                     1000         2000      1879.18 us        47833 ns   39.29x   build
+a11_sArray(100, Struct{4})           100          400       283555 ns        18692 ns   15.17x   parse
+       鈹斺攢 build                      100          400       250231 ns         8459 ns   29.58x   build
+a12_sArray(1000, Struct{4})         1000         4000      2860.40 us       183790 ns   15.56x   parse
+       鈹斺攢 build                     1000         4000      2567.02 us        77451 ns   33.14x   build
+--------------------------------------------------------------------------------------------------------------
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 1锛氬姞閫熸瘮鎸夊満鏅帓搴忥紙鐢遍珮鍒颁綆锛?鈹€鈹€鈹€
+  Array(1000, Struct{2}) build        N=1000     39.29x
+  Array(100, Struct{2}) build         N=100      34.44x
+  Array(1000, Struct{4}) build        N=1000     33.14x
+  Array(100, Struct{4}) build         N=100      29.58x
+  Array(1000, Int32ub) build          N=1000     27.11x
+  Array(10000, Int8ub) build          N=10000    27.01x
+  Array(1000, Int8ub) build           N=1000     26.28x
+  Array(100, Int32ub) build           N=100      22.56x
+  Array(1000, Bytes(8)) build         N=1000     22.28x
+  Array(100, Int8ub) build            N=100      20.92x
+  Array(100, Bytes(8)) build          N=100      18.87x
+  Array(10000, Int8ub) parse          N=10000    16.97x
+  Array(100, Struct{2}) parse         N=100      15.85x
+  Array(1000, Struct{2}) parse        N=1000     15.83x
+  Array(1000, Struct{4}) parse        N=1000     15.56x
+  Array(1000, Int8ub) parse           N=1000     15.22x
+  Array(100, Struct{4}) parse         N=100      15.17x
+  Array(1000, Int32ub) parse          N=1000     12.77x
+  Array(100, Int8ub) parse            N=100      12.03x
+  Array(100, Int32ub) parse           N=100      10.66x
+  Array(1000, Bytes(8)) parse         N=1000     10.33x
+  Array(10, Int8ub) build             N=10        9.46x <10x
+  Array(100, Bytes(8)) parse          N=100       8.37x <10x
+  Array(10, Int8ub) parse             N=10        6.38x <10x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 2锛歱arse/build 姣旂巼锛堝悓瀹炵幇鍐呴儴锛?鈹€鈹€鈹€
+  鍦烘櫙                                N    py p/b    rs p/b        鏂瑰悜涓€鑷?
+  Array(10, Int8ub)                10     0.97x     1.44x           N
+  Array(100, Int8ub)              100     0.97x     1.69x           N
+  Array(1000, Int8ub)            1000     0.97x     1.67x           N
+  Array(10000, Int8ub)          10000     0.96x     1.52x           N
+  Array(100, Int32ub)             100     1.02x     2.15x           Y
+  Array(1000, Int32ub)           1000     1.02x     2.17x           Y
+  Array(100, Bytes(8))            100     0.80x     1.81x           N
+  Array(1000, Bytes(8))          1000     0.82x     1.77x           N
+  Array(100, Struct{2})           100     1.14x     2.49x           Y
+  Array(1000, Struct{2})         1000     1.10x     2.74x           Y
+  Array(100, Struct{4})           100     1.13x     2.21x           Y
+  Array(1000, Struct{4})         1000     1.11x     2.37x           Y
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 3锛氳妯℃墿灞曡秼鍔匡紙Int8ub N=10/100/1000/10000锛宯s/鍏冪礌锛?鈹€鈹€鈹€
+        N    py parse ns/elem    rs parse ns/elem    py build ns/elem    rs build ns/elem
+       10             330.50              51.80             339.50              35.90
+      100             240.40              19.98             246.65              11.79
+     1000             233.20              15.32             241.32               9.18
+    10000             230.98              13.61             241.55               8.94
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 4锛氬厓绱犵被鍨嬪鏉傚害瓒嬪娍锛圢=100锛宲arse 鍔犻€熸瘮锛?鈹€鈹€鈹€
+  Int8ub(1B)           parse 鍔犻€熸瘮:  12.03x
+  Int32ub(4B)          parse 鍔犻€熸瘮:  10.66x
+  Bytes(8)             parse 鍔犻€熸瘮:   8.37x
+  Struct{2}(2B)        parse 鍔犻€熸瘮:  15.85x
+  Struct{4}(4B)        parse 鍔犻€熸瘮:  15.17x
+
+鈹€鈹€鈹€ 寮傚父椤规娴?鈹€鈹€鈹€
+  [PASS] 鍏ㄩ儴鍦烘櫙 >= 4x
+  [INFO] 4x-10x 涔嬮棿鐨勫満鏅?(3):
+    Array(10, Int8ub) parse: 6.38x
+    Array(10, Int8ub) build: 9.46x
+    Array(100, Bytes(8)) parse: 8.37x
+
+鈹€鈹€鈹€ S-PERF 鍑哄彛鏍囧噯 (鈮?0.0x) 鈹€鈹€鈹€
+  [WARN] 3/24 鍦烘櫙浣庝簬 10.0x:
+    Array(10, Int8ub) parse: 6.38x
+    Array(10, Int8ub) build: 9.46x
+    Array(100, Bytes(8)) parse: 8.37x
+==============================================================================================================

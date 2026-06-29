@@ -1,0 +1,68 @@
+﻿
+==============================================================================================================
+#    鍦烘櫙                                       N   bytes/call      Py ns/call      Rs ns/call       鍔犻€熸瘮      鏂瑰悜
+--------------------------------------------------------------------------------------------------------------
+g1_i8GreedyRange(Int8ub) N=64                64           64        18359 ns         1449 ns   12.67x   parse
+       鈹斺攢 build                              64           64        15549 ns         1030 ns   15.10x   build
+g2_i8GreedyRange(Int8ub) N=1024            1024         1024       270114 ns        15683 ns   17.22x   parse
+       鈹斺攢 build                            1024         1024       240715 ns        10484 ns   22.96x   build
+g3_i8GreedyRange(Int8ub) N=8192            8192         8192      2150.98 us       111192 ns   19.34x   parse
+       鈹斺攢 build                            8192         8192      1928.20 us        77403 ns   24.91x   build
+g4_i3GreedyRange(Int32ub) N=256             256         1024        75835 ns         5906 ns   12.84x   parse
+       鈹斺攢 build                             256         1024        65378 ns         3046 ns   21.46x   build
+g5_i3GreedyRange(Int32ub) N=2048           2048         8192       607709 ns        40362 ns   15.06x   parse
+       鈹斺攢 build                            2048         8192       516910 ns        20376 ns   25.37x   build
+g6_byGreedyRange(Bytes(8)) N=128            128         1024        32305 ns         3357 ns    9.62x <10x   parse
+       鈹斺攢 build                             128         1024        32299 ns         1913 ns   16.88x   build
+g7_stGreedyRange(Struct{2}) N=512           512         1024      1084.52 us        66059 ns   16.42x   parse
+       鈹斺攢 build                             512         1024      1007.63 us        24809 ns   40.62x   build
+--------------------------------------------------------------------------------------------------------------
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 1锛氬姞閫熸瘮鎸夊満鏅帓搴忥紙鐢遍珮鍒颁綆锛?鈹€鈹€鈹€
+  GreedyRange(Struct{2}) N=512 build              40.62x
+  GreedyRange(Int32ub) N=2048 build               25.37x
+  GreedyRange(Int8ub) N=8192 build                24.91x
+  GreedyRange(Int8ub) N=1024 build                22.96x
+  GreedyRange(Int32ub) N=256 build                21.46x
+  GreedyRange(Int8ub) N=8192 parse                19.34x
+  GreedyRange(Int8ub) N=1024 parse                17.22x
+  GreedyRange(Bytes(8)) N=128 build               16.88x
+  GreedyRange(Struct{2}) N=512 parse              16.42x
+  GreedyRange(Int8ub) N=64 build                  15.10x
+  GreedyRange(Int32ub) N=2048 parse               15.06x
+  GreedyRange(Int32ub) N=256 parse                12.84x
+  GreedyRange(Int8ub) N=64 parse                  12.67x
+  GreedyRange(Bytes(8)) N=128 parse                9.62x <10x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 2锛歱arse/build 姣旂巼锛堝悓瀹炵幇鍐呴儴锛?鈹€鈹€鈹€
+  鍦烘櫙                                       N    py p/b    rs p/b        鏂瑰悜涓€鑷?
+  GreedyRange(Int8ub) N=64                64     1.18x     1.41x           Y
+  GreedyRange(Int8ub) N=1024            1024     1.12x     1.50x           Y
+  GreedyRange(Int8ub) N=8192            8192     1.12x     1.44x           Y
+  GreedyRange(Int32ub) N=256             256     1.16x     1.94x           Y
+  GreedyRange(Int32ub) N=2048           2048     1.18x     1.98x           Y
+  GreedyRange(Bytes(8)) N=128            128     1.00x     1.75x           Y
+  GreedyRange(Struct{2}) N=512           512     1.08x     2.66x           Y
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 3锛欼nt8ub 瑙勬ā鎵╁睍锛坣s/鍏冪礌锛?鈹€鈹€鈹€
+        N    py parse ns/elem    rs parse ns/elem    py build ns/elem    rs build ns/elem
+       64             286.86              22.64             242.95              16.09
+     1024             263.78              15.32             235.07              10.24
+     8192             262.57              13.57             235.38               9.45
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 4锛氱瓑瀛楄妭閲忕骇锛垀1KB锛夊厓绱犵被鍨嬪姣?鈹€鈹€鈹€
+  鍏冪礌绫诲瀷                     N elems       parse 鍔犻€熸瘮       build 鍔犻€熸瘮
+  Int8ub (1B)                 1024          17.22x          22.96x
+  Int32ub (4B)                 256          12.84x          21.46x
+  Bytes(8) (8B)                128           9.62x          16.88x
+  Struct{2} (2B)               512          16.42x          40.62x
+
+鈹€鈹€鈹€ 寮傚父椤规娴?鈹€鈹€鈹€
+  [PASS] 鍏ㄩ儴鍦烘櫙 >= 4x
+  [INFO] 4x-10x 涔嬮棿鐨勫満鏅?(1):
+    GreedyRange(Bytes(8)) N=128 parse: 9.62x
+
+鈹€鈹€鈹€ S-PERF 鍑哄彛鏍囧噯 (鈮?0.0x) 鈹€鈹€鈹€
+  [WARN] 1/14 鍦烘櫙浣庝簬 10.0x:
+    GreedyRange(Bytes(8)) N=128 parse: 9.62x
+==============================================================================================================
