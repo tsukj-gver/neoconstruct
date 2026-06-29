@@ -46,6 +46,7 @@ use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::greedy_range::GreedyRangeNode;
 use crate::nodes::padding::PaddingNode;
+use crate::nodes::prefixed_array::PrefixedArrayNode;
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::tell::TellNode;
@@ -500,6 +501,24 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
+        // PrefixedArrayDescriptor（Phase 4）→ PrefixedArrayNode。
+        // 对应 Python `PrefixedArray(countfield, subcon)`。
+        // 设计依据：`docs/模块设计-Array.md` §4.6 / §6.2.3。
+        //
+        // 编译路径：递归编译 countfield 与 subcon，二者均沿用同一 field_index
+        // 和 expr_programs 切片（与 BitwiseDescriptor / ArrayDescriptor 同模式）。
+        //
+        // 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）：
+        // countfield 与 inner 均不支持含表达式的子描述符
+        // （如 `PrefixedArray(Bytes(this.m), Byte)`）。
+        "PrefixedArrayDescriptor" => {
+            return Ok(Node::PrefixedArray(build_prefixed_array_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
         _ => {}
     }
 
@@ -856,6 +875,53 @@ fn build_greedy_range_node(
         .unwrap_or(false);
 
     Ok(GreedyRangeNode::new(inner_node, discard))
+}
+
+/// 从 `PrefixedArrayDescriptor` 构建 `PrefixedArrayNode`（设计 §4.6 / §6.2.3）。
+///
+/// 编译路径：
+///
+/// 1. 从 desc 读取 countfield / subcon。
+/// 2. 递归编译 countfield：作为独立的 Node 子树（沿用同一个 field_index 和
+///    expr_programs 切片，与 BitwiseDescriptor / ArrayDescriptor 同模式）。
+/// 3. 递归编译 subcon（inner）：同上。
+/// 4. 组装为 `PrefixedArrayNode { countfield, inner }`。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// countfield 与 inner subcon 均不支持含表达式的子描述符。
+/// Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）不递归进入 inner。
+fn build_prefixed_array_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<PrefixedArrayNode, ConstructError> {
+    // 1. 递归编译 countfield（沿用 field_index）。
+    let countfield_desc = desc
+        .getattr("countfield")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PrefixedArrayDescriptor missing 'countfield' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let countfield_node =
+        build_node_from_descriptor(py, &countfield_desc, field_index, expr_programs, false)?;
+
+    // 2. 递归编译 subcon（沿用 field_index）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PrefixedArrayDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+
+    Ok(PrefixedArrayNode::new(countfield_node, inner_node))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。

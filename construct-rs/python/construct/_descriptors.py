@@ -619,6 +619,90 @@ def GreedyRange(subcon, discard=False):
     return GreedyRangeDescriptor(subcon, discard)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 子任务 4.3: PrefixedArray 描述符
+#
+# 设计依据：``docs/模块设计-Array.md`` §4.6 / §6.3。
+#
+# ``PrefixedArray(countfield, subcon)`` 是前缀长度数组描述符，对应 Python
+# construct 的 ``PrefixedArray``。construct-rs 通过 type name "PrefixedArrayDescriptor"
+# 识别，构建 ``Node::PrefixedArray(PrefixedArrayNode)``。
+#
+# 与 Python 原版的关键差异：
+# - construct-rs 不依赖 FocusedSeq/Rebuild（未实现），而是独立 Node
+#   （设计决策 A6，§5.1 选项 A）。
+# - ``len_`` 辅助函数不实现（§6.3.3）。
+# ---------------------------------------------------------------------------
+
+
+class PrefixedArrayDescriptor:
+    """``PrefixedArray(countfield, subcon)`` 描述符。
+
+    前缀长度数组：先解析/构建 ``countfield`` 得到元素数量 ``count``，再循环 ``count``
+    次 ``subcon`` 的解析/构建。对应 Python construct 的 ``PrefixedArray``。
+
+    construct-rs 用独立 Node 实现（不依赖 FocusedSeq/Rebuild）。
+
+    ``_expr_params`` 协议返回空 dict：PrefixedArray 自身无表达式参数
+    （countfield 与 subcon 由递归处理，P3.1 限制下两者均不支持含表达式的子描述符）。
+
+    :param countfield: 计数字段（描述符），常见 ``Int8ub`` / ``Int16ub`` / ``VarInt``。
+                       build 时取 list 长度作为 countfield 的输入值。
+    :param subcon: 元素子构造器（描述符）。
+    """
+
+    __slots__ = ("countfield", "subcon")
+
+    def __init__(self, countfield, subcon):
+        """初始化 PrefixedArray 描述符。
+
+        :param countfield: 计数字段（必须能产生/接收整数）。
+        :param subcon: 元素子构造器。
+        """
+        self.countfield = countfield
+        self.subcon = subcon
+
+    # 类级别常量：PrefixedArray 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "PrefixedArray(countfield={!r}, subcon={!r})".format(
+            self.countfield, self.subcon
+        )
+
+
+def PrefixedArray(countfield, subcon):
+    """创建一个 PrefixedArray 描述符。
+
+    前缀长度数组。对应 Python construct 的 ``PrefixedArray``。
+
+    使用方式::
+
+        @dataclass
+        class Packet(StructMixin):
+            items: list = field(PrefixedArray(Int8ub, Int32ub))
+            # 等价于 Python：PrefixedArray(Byte, Int32ub)
+
+    parse 行为：
+    - 先解析 ``countfield`` 得到 count（必须是非负整数，否则 RangeError）
+    - 循环 count 次解析 ``subcon``，返回 Python 原生 list（非 ListContainer）
+
+    build 行为：
+    - 取 list 长度，先 build ``countfield`` 写入长度
+    - 遍历 list build ``subcon``
+
+    限制（Phase 4）：
+    - sizeof 永远返回 ``SizeofError``（元素数量运行时未知，§4.6.4）
+    - countfield 与 subcon 均不支持含表达式的子描述符（与 ``Array`` / ``Bitwise`` 同限制）
+    - count 超出 countfield 表示范围时由 countfield 节点自行报错（PA-5）
+
+    :param countfield: 计数字段（描述符）。
+    :param subcon: 元素子构造器。
+    :return: ``PrefixedArrayDescriptor`` 实例。
+    """
+    return PrefixedArrayDescriptor(countfield, subcon)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -659,9 +743,11 @@ __all__ = [
     "BitsSwapped",
     "ByteSwappedDescriptor",
     "ByteSwapped",
-    # Phase 4 Array / GreedyRange
+    # Phase 4 Array / GreedyRange / PrefixedArray
     "ArrayDescriptor",
     "Array",
     "GreedyRangeDescriptor",
     "GreedyRange",
+    "PrefixedArrayDescriptor",
+    "PrefixedArray",
 ]

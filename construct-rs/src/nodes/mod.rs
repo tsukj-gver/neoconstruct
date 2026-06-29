@@ -37,6 +37,7 @@ pub mod format_field;
 pub mod greedy_bytes;
 pub mod greedy_range;
 pub mod padding;
+pub mod prefixed_array;
 pub mod struct_node;
 pub mod struct_ref;
 pub mod tell;
@@ -58,6 +59,7 @@ use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use greedy_range::GreedyRangeNode;
 use padding::PaddingNode;
+use prefixed_array::PrefixedArrayNode;
 use pyo3::prelude::*;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
@@ -197,6 +199,11 @@ pub enum Node {
     /// 读到流结束的数组节点（对应 Python construct `GreedyRange(subcon, discard)`）。
     /// Phase 4 新增。inner 用 `Box<Node>`，parse 直到流末尾或子构造器失败。
     GreedyRange(GreedyRangeNode),
+    /// 前缀长度数组节点（对应 Python construct `PrefixedArray(countfield, subcon)`）。
+    /// Phase 4 新增。countfield 与 inner 都用 `Box<Node>`；parse 先解析 countfield
+    /// 得到 count，再循环 count 次 inner.parse；build 先取 list 长度 build countfield，
+    /// 再遍历 list build inner。
+    PrefixedArray(PrefixedArrayNode),
 }
 
 impl Node {
@@ -217,6 +224,7 @@ impl Node {
             Node::Transform(t) => t.inner().has_expressions(),
             Node::Array(a) => a.has_expressions(),
             Node::GreedyRange(g) => g.has_expressions(),
+            Node::PrefixedArray(p) => p.has_expressions(),
             _ => false,
         }
     }
