@@ -1,0 +1,110 @@
+[
+  {
+    "scenario": "I1_parse_N256",
+    "key": "I1_parse",
+    "N": 256,
+    "NUMBER": 10000,
+    "py_ns_per_call": 36496.21999356896,
+    "rs_ns_per_call": 3926.1300116777415,
+    "speedup": 9.295723749599707
+  },
+  {
+    "scenario": "I1_build_N256",
+    "key": "I1_build",
+    "N": 256,
+    "NUMBER": 10000,
+    "py_ns_per_call": 33715.89998714626,
+    "rs_ns_per_call": 1828.770013526082,
+    "speedup": 18.436380593390236
+  },
+  {
+    "scenario": "I1_parse_N4096",
+    "key": "I1_parse",
+    "N": 4096,
+    "NUMBER": 1000,
+    "py_ns_per_call": 652255.1998496056,
+    "rs_ns_per_call": 65438.800025731325,
+    "speedup": 9.967407709082853
+  },
+  {
+    "scenario": "I1_build_N4096",
+    "key": "I1_build",
+    "N": 4096,
+    "NUMBER": 1000,
+    "py_ns_per_call": 555860.1000811905,
+    "rs_ns_per_call": 26482.50013589859,
+    "speedup": 20.989713857404624
+  },
+  {
+    "scenario": "I2_parse_N256",
+    "key": "I2_parse",
+    "N": 256,
+    "NUMBER": 10000,
+    "py_ns_per_call": 531904.8299919814,
+    "rs_ns_per_call": 33228.900004178286,
+    "speedup": 16.007295755354477
+  },
+  {
+    "scenario": "I2_build_N256",
+    "key": "I2_build",
+    "N": 256,
+    "NUMBER": 10000,
+    "py_ns_per_call": 494097.219989635,
+    "rs_ns_per_call": 10482.46999271214,
+    "speedup": 47.13557208684141
+  },
+  {
+    "scenario": "I2_parse_N4096",
+    "key": "I2_parse",
+    "N": 4096,
+    "NUMBER": 1000,
+    "py_ns_per_call": 8859743.800014257,
+    "rs_ns_per_call": 540539.10006769,
+    "speedup": 16.390569708842115
+  },
+  {
+    "scenario": "I2_build_N4096",
+    "key": "I2_build",
+    "N": 4096,
+    "NUMBER": 1000,
+    "py_ns_per_call": 7778545.300010592,
+    "rs_ns_per_call": 167208.39985646307,
+    "speedup": 46.52006302726382
+  },
+  {
+    "scenario": "S1_parse_no_trigger",
+    "key": "S1_parse_no_trigger",
+    "N": 0,
+    "NUMBER": 50000,
+    "py_ns_per_call": 3339.3000019714236,
+    "rs_ns_per_call": 326.8539998680353,
+    "speedup": 10.216488105758655
+  },
+  {
+    "scenario": "S1_build_no_trigger",
+    "key": "S1_build_no_trigger",
+    "N": 0,
+    "NUMBER": 50000,
+    "py_ns_per_call": 3050.6099993363023,
+    "rs_ns_per_call": 275.6220009177923,
+    "speedup": 11.068093218894324
+  },
+  {
+    "scenario": "S2_parse_triggered",
+    "key": "S2_parse_triggered",
+    "N": 0,
+    "NUMBER": 50000,
+    "py_ns_per_call": 3350.3640023991466,
+    "rs_ns_per_call": 347.3279997706413,
+    "speedup": 9.646109742409381
+  },
+  {
+    "scenario": "S3_parse_always",
+    "key": "S3_parse_always",
+    "N": 0,
+    "NUMBER": 50000,
+    "py_ns_per_call": 2994.470000267029,
+    "rs_ns_per_call": 300.7720038294792,
+    "speedup": 9.955946571293
+  }
+]
