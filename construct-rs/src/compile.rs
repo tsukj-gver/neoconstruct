@@ -48,6 +48,7 @@ use crate::nodes::greedy_range::GreedyRangeNode;
 use crate::nodes::index::IndexNode;
 use crate::nodes::padding::PaddingNode;
 use crate::nodes::prefixed_array::PrefixedArrayNode;
+use crate::nodes::repeat_until::{RepeatPredicate, RepeatUntilNode};
 use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
@@ -526,6 +527,23 @@ fn build_node_from_descriptor(
         // IndexNode 直接调 ctx.index() 读取，不走 ExprProgram（v3 决策，§3.3）。
         // IndexDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
         "IndexDescriptor" => return Ok(Node::Index(IndexNode::new())),
+        // RepeatUntilDescriptor（Phase 4.5）→ RepeatUntilNode。
+        // 对应 Python construct `RepeatUntil(predicate, subcon, discard)`（core.py L2637）。
+        // 谓词分类（设计 §4.3.1）：
+        //   - 简单 lambda（如 `lambda x, _, _: x > 5`）→ RepeatPredicate::Expr
+        //     从 expr_programs[field_index]["predicate"] 取 ExprOp 列表。
+        //     Python 侧 _try_compile_repeat_predicate 用 AST 识别简单模式并预编译。
+        //   - 复杂 lambda → RepeatPredicate::PyCallable（每次迭代跨 FFI）
+        //     descriptor 持有原 callable，Rust 侧从 desc.predicate 读取。
+        // 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3 / §10.1。
+        "RepeatUntilDescriptor" => {
+            return Ok(Node::RepeatUntil(build_repeat_until_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
         // StopIfDescriptor（Phase 4）→ StopIfNode。
         // 对应 Python construct `StopIf(condfunc)`（core.py L4079）。
         // 条件分类（设计 §4.5.1）：
@@ -1032,6 +1050,101 @@ fn build_stop_if_node(
     Ok(StopIfNode::new(StopIfCondition::Expr(program)))
 }
 
+/// 从 `RepeatUntilDescriptor` 构建 `RepeatUntilNode`（设计 §4.3 / §6.3 / §10.1）。
+///
+/// # 编译路径
+///
+/// 1. 从 desc 读取 `predicate` / `subcon` / `discard`。
+/// 2. 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式）。
+/// 3. 谓词分类：
+///    - 简单 lambda（如 `lambda x, _, _: x > 5`）→ [`RepeatPredicate::Expr`]。
+///      从 `expr_programs[field_index]["predicate"]` 取 ExprOp 列表。
+///      Python 侧 `_try_compile_repeat_predicate`（_descriptors.py）用 AST 识别简单模式，
+///      将 `lambda x, _, _: x OP N` 编译为 `[("getelem",), ("const", N), (op_name,)]`。
+///    - 复杂 lambda → [`RepeatPredicate::PyCallable`]（每次迭代跨 FFI）。
+///      descriptor 持有原 callable，Rust 侧从 desc.predicate 读取。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// inner subcon 不支持含表达式的子描述符。
+fn build_repeat_until_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<RepeatUntilNode, ConstructError> {
+    // 1. 递归编译 subcon（沿用 field_index）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntilDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+
+    // 2. discard 标志（默认 false）。
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
+
+    // 3. 谓词分类：检查 expr_programs[field_index] 是否有 "predicate" 键。
+    //    Python 侧 _try_compile_repeat_predicate 成功时写入此键。
+    //    失败时（复杂 lambda），expr_programs[field_index] 为 None 或无此键。
+    let field_exprs_opt = expr_programs.get(field_index).and_then(Option::as_ref);
+
+    let predicate = if let Some(field_exprs) = field_exprs_opt {
+        let field_exprs_dict =
+            field_exprs
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| ConstructError::Compilation {
+                    message: "RepeatUntil expression program must be a dict".to_string(),
+                })?;
+        let predicate_ops_opt = field_exprs_dict
+            .get_item("predicate")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "failed to get 'predicate' from RepeatUntil expression programs: {} (field index {})",
+                    e, field_index
+                ),
+            })?;
+        if let Some(ops_list) = predicate_ops_opt {
+            // Expr 路径：预编译的 ExprOp 列表。
+            let ops = parse_expr_ops_from_py(&ops_list)?;
+            let program = ExprProgram::new(ops);
+            RepeatPredicate::Expr(program)
+        } else {
+            // PyCallable 路径：从 desc.predicate 读 callable。
+            let callable = desc
+                .getattr("predicate")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "RepeatUntilDescriptor missing 'predicate' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            RepeatPredicate::PyCallable(callable.unbind())
+        }
+    } else {
+        // expr_programs 中无此字段：PyCallable 路径。
+        let callable = desc
+            .getattr("predicate")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "RepeatUntilDescriptor missing 'predicate' attribute: {} (field index {})",
+                    e, field_index
+                ),
+            })?;
+        RepeatPredicate::PyCallable(callable.unbind())
+    };
+
+    Ok(RepeatUntilNode::new(inner_node, predicate, discard))
+}
+
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
 ///
 /// Python 侧编译器（`_compile_expr_tree`）将表达式树翻译为后序遍历的元组列表，
@@ -1097,6 +1210,7 @@ fn parse_expr_ops_from_py(ops_list: &Bound<'_, PyAny>) -> Result<Vec<ExprOp>, Co
                     })?;
                 ExprOp::GetInt(idx)
             }
+            "getelem" => ExprOp::GetElem,
             "const" => {
                 let val: i64 = tuple
                     .get_item(1)

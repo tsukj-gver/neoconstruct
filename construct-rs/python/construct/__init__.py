@@ -102,11 +102,13 @@ try:
         GreedyRangeDescriptor,
         PrefixedArray,
         PrefixedArrayDescriptor,
-        # Phase 4: Index / StopIf
+        # Phase 4: Index / StopIf / RepeatUntil
         Index,
         IndexDescriptor,
         StopIf,
         StopIfDescriptor,
+        RepeatUntil,
+        RepeatUntilDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -176,11 +178,13 @@ __all__ = [
     "GreedyRangeDescriptor",
     "PrefixedArray",
     "PrefixedArrayDescriptor",
-    # Phase 4: Index / StopIf
+    # Phase 4: Index / StopIf / RepeatUntil
     "Index",
     "IndexDescriptor",
     "StopIf",
     "StopIfDescriptor",
+    "RepeatUntil",
+    "RepeatUntilDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常

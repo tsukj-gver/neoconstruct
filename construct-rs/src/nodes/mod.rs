@@ -39,6 +39,7 @@ pub mod greedy_range;
 pub mod index;
 pub mod padding;
 pub mod prefixed_array;
+pub mod repeat_until;
 pub mod stop_if;
 pub mod struct_node;
 pub mod struct_ref;
@@ -64,6 +65,7 @@ use index::IndexNode;
 use padding::PaddingNode;
 use prefixed_array::PrefixedArrayNode;
 use pyo3::prelude::*;
+use repeat_until::RepeatUntilNode;
 use stop_if::StopIfNode;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
@@ -208,6 +210,11 @@ pub enum Node {
     /// 得到 count，再循环 count 次 inner.parse；build 先取 list 长度 build countfield，
     /// 再遍历 list build inner。
     PrefixedArray(PrefixedArrayNode),
+    /// 谓词终止数组节点（对应 Python construct `RepeatUntil(predicate, subcon, discard)`）。
+    /// Phase 4.5 新增。inner 用 `Box<Node>`，谓词可为 ExprProgram（快路径，零 FFI）
+    /// 或 PyCallable（兜底，每次迭代跨 FFI）。parse/build 循环直到谓词为真
+    /// （最后元素包含在内）；build 无元素满足则 `Repeat` 错误。sizeof 永远 Err。
+    RepeatUntil(RepeatUntilNode),
     /// 取当前数组迭代下标的节点（对应 Python construct `Index`）。
     /// Phase 4 新增（设计 §4.4）。直接调 `ctx.index()` 读取，不走 ExprProgram
     /// （v3 决策，§3.3）。parse 返回 PyLong 或 Py_None；build 是 no-op；sizeof=0。
@@ -238,6 +245,7 @@ impl Node {
             Node::Array(a) => a.has_expressions(),
             Node::GreedyRange(g) => g.has_expressions(),
             Node::PrefixedArray(p) => p.has_expressions(),
+            Node::RepeatUntil(r) => r.has_expressions(),
             Node::Index(i) => i.has_expressions(),
             Node::StopIf(s) => s.has_expressions(),
             _ => false,

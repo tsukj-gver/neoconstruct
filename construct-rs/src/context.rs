@@ -95,6 +95,23 @@ pub struct Context<'py> {
     ///
     /// 设计依据：`docs/模块设计-Array.md` §3.2 决策 A3。
     _index: Option<usize>,
+
+    /// Phase 4.5b 新增：RepeatUntil 当前元素的 borrowed PyObject 指针
+    /// （仅 Expr 谓词路径使用）。
+    ///
+    /// 设计依据：`docs/模块设计-Array.md` §4.3.2。
+    ///
+    /// - **借用语义**：指向 RepeatUntilNode::parse/build 循环中当前元素的
+    ///   `Py<PyAny>`（owned by 局部变量或 list），不增加引用计数。
+    /// - **生命周期**：仅在一次谓词求值期间有效。RepeatUntilNode 在调
+    ///   `eval_expr_int` 前调用 `set_current_elem_ptr`，求值结束后立即
+    ///   `clear_current_elem_ptr`。
+    /// - **不支持继承**：子 context（new_child / new_child_placeholder）
+    ///   **不**继承此字段——predicate 仅在 RepeatUntilNode 自身求值，子
+    ///   Struct 不需要看到外层 RepeatUntil 的当前元素。
+    /// - **None 语义**：未设置（不在 RepeatUntil Expr 求值中）。`GetElem`
+    ///   指令读到 None 时返回 `ExprContext` 错误。
+    _current_elem_ptr: Option<*mut ffi::PyObject>,
 }
 
 // SAFETY note: Context 包含 raw pointer (`expr_values_buf` 中的 `*mut ffi::PyObject`)，
@@ -116,6 +133,7 @@ impl<'py> Context<'py> {
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
             _index: None,
+            _current_elem_ptr: None,
         })
     }
 
@@ -134,6 +152,7 @@ impl<'py> Context<'py> {
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
             _index: None,
+            _current_elem_ptr: None,
         }
     }
 
@@ -153,6 +172,8 @@ impl<'py> Context<'py> {
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
             _index: parent._index,
+            // 不继承父的 _current_elem_ptr：predicate 仅在 RepeatUntilNode 自身求值。
+            _current_elem_ptr: None,
         })
     }
 
@@ -180,6 +201,8 @@ impl<'py> Context<'py> {
             expr_values_buf: [std::ptr::null_mut(); MAX_INLINE_FIELDS],
             expr_values_len: 0,
             _index: parent._index,
+            // 不继承父的 _current_elem_ptr。
+            _current_elem_ptr: None,
         }
     }
 
@@ -424,6 +447,90 @@ impl<'py> Context<'py> {
     #[inline]
     pub fn index(&self) -> Option<usize> {
         self._index
+    }
+
+    // -----------------------------------------------------------------------
+    // Phase 4.5b：_current_elem（RepeatUntil Expr 谓词路径）
+    // -----------------------------------------------------------------------
+
+    /// 设置当前 RepeatUntil 元素的 borrowed PyObject 指针（Expr 谓词路径）。
+    ///
+    /// 由 [`crate::nodes::repeat_until::RepeatUntilNode`] 在每次迭代中调
+    /// `eval_expr_int` 前调用，求值结束后立即 [`clear_current_elem_ptr`]。
+    ///
+    /// # Safety（调用方契约）
+    ///
+    /// - `ptr` 必须指向一个存活的 PyObject（非空）。
+    /// - 调用方必须保证在 `clear_current_elem_ptr` 之前 PyObject 不被 GC 回收。
+    ///   生产路径中 elem 是 `Py<PyAny>`（owned reference），其生命周期覆盖
+    ///   整个谓词求值过程，GIL 持有期间无并发释放。
+    /// - 持有 GIL 是前置条件（pyo3 保证）。
+    ///
+    /// [`clear_current_elem_ptr`]: Context::clear_current_elem_ptr
+    #[inline]
+    pub fn set_current_elem_ptr(&mut self, ptr: *mut ffi::PyObject) {
+        self._current_elem_ptr = Some(ptr);
+    }
+
+    /// 清除当前 RepeatUntil 元素指针。
+    ///
+    /// 由 [`crate::nodes::repeat_until::RepeatUntilNode`] 在 `eval_expr_int`
+    /// 返回后立即调用，避免悬挂指针。
+    #[inline]
+    pub fn clear_current_elem_ptr(&mut self) {
+        self._current_elem_ptr = None;
+    }
+
+    /// 取当前 RepeatUntil 元素指针（borrowed，不 incref）。
+    ///
+    /// `GetElem` 指令使用。`None` 表示未设置（不在 RepeatUntil Expr 求值中）。
+    #[inline]
+    pub fn current_elem_ptr(&self) -> Option<*mut ffi::PyObject> {
+        self._current_elem_ptr
+    }
+
+    /// 取当前 RepeatUntil 元素的 i64 值（仅支持 PyLong）。
+    ///
+    /// `ExprOp::GetElem` 指令使用。元素非整数（或未设置）时返回错误。
+    ///
+    /// # 错误
+    ///
+    /// - [`ConstructError::ExprContext`]：`_current_elem_ptr == None`（不在
+    ///   RepeatUntil Expr 路径中）。
+    /// - [`ConstructError::ExprType`]：元素非 PyLong 或溢出 i64。
+    #[inline]
+    pub fn current_elem_as_i64(&self, _py: Python<'_>) -> Result<i64, ConstructError> {
+        let ptr = self
+            ._current_elem_ptr
+            .ok_or_else(|| ConstructError::ExprContext {
+                message:
+                    "current_elem_as_i64: _current_elem not set (not in RepeatUntil Expr path)"
+                        .to_string(),
+                path: String::new(),
+            })?;
+        if ptr.is_null() {
+            return Err(ConstructError::ExprContext {
+                message: "current_elem_as_i64: _current_elem is null".to_string(),
+                path: String::new(),
+            });
+        }
+        // SAFETY: ptr 由 set_current_elem_ptr 设置，调用方契约保证 PyObject 存活
+        // 且持有 GIL。PyLong_AsLongLong 对非 PyLong 返回 -1 并设置异常。
+        let v = unsafe { ffi::PyLong_AsLongLong(ptr) };
+        if v == -1 {
+            // 区分"-1 合法值"与"转换失败"
+            // SAFETY: 持有 GIL，PyErr_Occurred 仅检查不取异常。
+            let err_occurred = unsafe { ffi::PyErr_Occurred() };
+            if !err_occurred.is_null() {
+                unsafe { ffi::PyErr_Clear() };
+                return Err(ConstructError::ExprType {
+                    field: "<current_elem>".to_string(),
+                    expected: "integer (i64)".to_string(),
+                    path: String::new(),
+                });
+            }
+        }
+        Ok(v)
     }
 }
 

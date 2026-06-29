@@ -610,6 +610,11 @@ def _extract_and_compile_exprs(subcon, field_index_map, field_name):
         if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
             ops = _compile_expr_tree(param_value, field_index_map, field_name)
             result[param_name] = ops
+        elif isinstance(param_value, list):
+            # 预编译 ops（如 RepeatUntil 简单 lambda 谓词，由 _descriptors._try_compile_repeat_predicate
+            # 通过 AST 识别并翻译为 ExprOp 元组列表）。直接透传，无需再编译。
+            # 注意：元素必须是元组（与 _compile_expr_tree 输出格式一致）。
+            result[param_name] = param_value
         # 常量值（int/bytes/str）不编译（留在描述符中供 Rust 侧读取）
 
     return result

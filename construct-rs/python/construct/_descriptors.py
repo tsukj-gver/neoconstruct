@@ -29,6 +29,10 @@
    - ``Bit()`` / ``Nibble()`` / ``Octet()`` — ``BitsInteger(1/4/8)`` 语法糖
 """
 
+import ast
+import inspect
+import textwrap
+
 # 从 Rust 扩展导入描述符类与单例。
 # 扩展未构建时静默跳过（允许纯 Python 开发模式）。
 try:
@@ -859,6 +863,241 @@ def StopIf(condfunc):
     return StopIfDescriptor(condfunc)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 子任务 4.5: RepeatUntil 描述符
+#
+# 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3 / §10.1。
+#
+# ``RepeatUntil(predicate, subcon, discard=False)`` 是谓词终止数组描述符，对应
+# Python construct 的 ``RepeatUntil``。construct-rs 通过 type name "RepeatUntilDescriptor"
+# 识别，构建 ``Node::RepeatUntil(RepeatUntilNode)``。
+#
+# 两条谓词路径（设计 §4.3.1 / §2.5）：
+# - **Expr 路径**（性能 ≥8x）：简单 lambda（如 ``lambda x,_,_: x > 5``）编译期
+#   通过 AST 识别并翻译为 ExprProgram ``[GetElem, Const(N), Op]``，运行时零 FFI。
+#   仅支持整数元素 + 6 种比较运算（>, >=, ==, !=, <, <=）。
+# - **PyCallable 路径**（性能 ≥3x）：复杂 lambda 回落到 Python callable，
+#   每次迭代跨 FFI 调用。
+# ---------------------------------------------------------------------------
+
+
+# AST operator → ExprOp 名称（同 _mixin._OP_TO_EXPROP 子集，仅比较运算）。
+_AST_OP_TO_EXPROP = {
+    ast.Gt: "gt",
+    ast.GtE: "ge",
+    ast.Lt: "lt",
+    ast.LtE: "le",
+    ast.Eq: "eq",
+    ast.NotEq: "ne",
+}
+
+
+def _try_compile_repeat_predicate(predicate):
+    """尝试将简单 RepeatUntil 谓词编译为 ExprOp 列表（Expr 路径）。
+
+    识别模式（仅依赖当前元素 x，与 list/context 无关）::
+
+        lambda x, _, _: x OP N
+        lambda x, _, _: N OP x   # 常量在左
+
+    其中 OP ∈ {>, >=, ==, !=, <, <=}，N 是整数常量。
+
+    :param predicate: Python callable。
+    :return: ExprOp 元组列表（如 ``[("getelem",), ("const", 5), ("gt",)]`），
+             无法识别时返回 None（回落到 PyCallable 路径）。
+    """
+    if not callable(predicate):
+        return None
+
+    # 获取谓词源码
+    try:
+        source = inspect.getsource(predicate).strip()
+    except (OSError, TypeError, RecursionError):
+        # 无法获取源码（如动态构建的 lambda、built-in 函数）
+        return None
+
+    # 解析为 AST
+    try:
+        # dedent 处理多行 lambda（在容器内定义时）
+        source = textwrap.dedent(source)
+        # 取第一个表达式语句
+        tree = ast.parse(source)
+    except SyntaxError:
+        return None
+
+    # 找到 Lambda 节点（可能嵌套在 Expr 或赋值中）
+    lambda_node = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Lambda):
+            lambda_node = node
+            break
+
+    if lambda_node is None:
+        return None
+
+    # 检查 lambda 签名：恰好 3 个位置参数
+    args = lambda_node.args
+    if args.posonlyargs or args.kwonlyargs or args.vararg or args.kwarg:
+        # 仅支持纯位置参数
+        return None
+    if len(args.args) != 3:
+        return None
+
+    first_arg_name = args.args[0].arg
+
+    # 检查 body 是单次比较
+    body = lambda_node.body
+    if not isinstance(body, ast.Compare):
+        return None
+
+    # 仅支持单次比较（一个 op，一个 comparator）
+    if len(body.ops) != 1 or len(body.comparators) != 1:
+        return None
+
+    op_ast = body.ops[0]
+    comparator = body.comparators[0]
+    left = body.left
+
+    op_name = _AST_OP_TO_EXPROP.get(type(op_ast))
+    if op_name is None:
+        return None
+
+    # 两种形式：
+    # 1. lambda x,_,_: x OP N
+    # 2. lambda x,_,_: N OP x  （需翻转 OP）
+    def _is_arg(node):
+        return isinstance(node, ast.Name) and node.id == first_arg_name
+
+    def _is_int_const(node):
+        return isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool)
+
+    if _is_arg(left) and _is_int_const(comparator):
+        # 形式 1: x OP N → [GetElem, Const(N), OP]
+        n = comparator.value
+        return [("getelem",), ("const", n), (op_name,)]
+    elif _is_int_const(left) and _is_arg(comparator):
+        # 形式 2: N OP x → 翻转操作符
+        # N < x ⟺ x > N；N > x ⟺ x < N；N <= x ⟺ x >= N；N >= x ⟺ x <= N
+        # N == x ⟺ x == N；N != x ⟺ x != N
+        n = left.value
+        flip = {
+            "gt": "lt",
+            "ge": "le",
+            "lt": "gt",
+            "le": "ge",
+            "eq": "eq",
+            "ne": "ne",
+        }
+        flipped = flip[op_name]
+        return [("getelem",), ("const", n), (flipped,)]
+    else:
+        return None
+
+
+class RepeatUntilDescriptor:
+    """``RepeatUntil(predicate, subcon, discard=False)`` 描述符。
+
+    谓词终止数组：解析元素到 list 直到谓词为真（最后元素包含在内），
+    或从 list 构建字节序列直到某元素满足谓词。对应 Python construct 的 ``RepeatUntil``。
+
+    两条谓词路径（设计 §4.3.1）：
+
+    - **Expr 路径**（性能优）：predicate 是简单 lambda（如 ``lambda x,_,_: x > 5``），
+      编译期识别为 ExprProgram ``[GetElem, Const(N), Op]``，运行时零 FFI。
+      仅支持整数元素 + 6 种比较运算。
+    - **PyCallable 路径**（功能完整）：predicate 是复杂 lambda，每次迭代跨 FFI
+      调用 ``predicate(obj, list, context)``。
+
+    ``_expr_params`` 协议：
+
+    - 简单 lambda 时返回 ``{"predicate": [ops_list]}``（已预编译为 ExprOp 元组列表）。
+      注意：与其他描述符不同，这里的 value 是已编译的 ops list（不是 FieldRef/ExprRef），
+      ``_mixin._extract_and_compile_exprs`` 直接透传。
+    - 复杂 lambda 时返回 ``{}``（PyCallable 路径，Rust 侧从 desc.predicate 读 callable）。
+
+    :param predicate: 终止谓词 ``(obj, list, context) -> bool``。
+    :param subcon: 元素子构造器（描述符）。
+    :param discard: 若为 True，parse 返回空 list 但仍消耗流；build 时 partial list 始终为空。
+    """
+
+    __slots__ = ("predicate", "subcon", "discard", "_expr_params")
+
+    def __init__(self, predicate, subcon, discard=False):
+        """初始化 RepeatUntil 描述符。
+
+        :param predicate: 终止谓词。
+        :param subcon: 元素子构造器。
+        :param discard: 是否丢弃解析结果。
+        """
+        self.predicate = predicate
+        self.subcon = subcon
+        self.discard = discard
+
+        # 尝试编译为 Expr 路径（简单 lambda）
+        ops = _try_compile_repeat_predicate(predicate)
+        if ops is not None:
+            # Expr 路径：预编译 ops 通过 _expr_params 透传给 Rust 侧。
+            # _extract_and_compile_exprs 检测到 list 类型直接透传（_mixin.py 已修改）。
+            self._expr_params = {"predicate": ops}
+        else:
+            # PyCallable 路径：Rust 侧从 self.predicate 读 callable。
+            self._expr_params = {}
+
+    def __repr__(self):
+        return "RepeatUntil(predicate={!r}, subcon={!r}, discard={!r})".format(
+            self.predicate, self.subcon, self.discard
+        )
+
+
+def RepeatUntil(predicate, subcon, discard=False):
+    """创建一个 RepeatUntil 描述符。
+
+    谓词终止数组。对应 Python construct 的 ``RepeatUntil``。
+
+    使用方式（PyCallable 路径，简单 lambda 自动走 Expr 快路径）::
+
+        @dataclass
+        class Packet(StructMixin):
+            payload: list = field(RepeatUntil(lambda x, lst, ctx: x == 0xFF, Int8ub))
+
+        Packet.parse(b"\\x01\\x02\\xFF\\xAA")
+        # Packet(payload=[1, 2, 255])   # 最后元素 0xFF 包含在内
+        Packet.parse(b"\\x01\\x02\\xFF\\xAA").build()
+        # b"\\x01\\x02\\xFF"
+
+    使用方式（复杂谓词，回落到 PyCallable 路径）::
+
+        @dataclass
+        class Packet(StructMixin):
+            payload: list = field(RepeatUntil(
+                lambda x, lst, ctx: len(lst) >= 2 and lst[-2:] == [0, 0],
+                Int8ub,
+            ))
+
+        Packet.parse(b"\\x01\\x00\\x00\\xAA")
+        # Packet(payload=[1, 0, 0])
+
+    性能说明（设计 §8.3）：
+
+    - 简单 lambda 自动编译为 Expr 路径，加速比 ≥8x。
+    - 复杂 lambda 走 PyCallable 路径，加速比 ≥3x（每次迭代跨 FFI 调用）。
+    - 用户可在 ``_expr_params`` 中检查是否走 Expr 路径。
+
+    限制（Phase 4）：
+
+    - sizeof 永远返回 ``SizeofError``（元素数量运行时未知）
+    - inner subcon 不支持含表达式的子描述符（与 ``Array`` / ``Bitwise`` 同限制）
+    - Expr 路径仅支持整数元素 + 6 种比较运算（>, >=, ==, !=, <, <=）
+    - build 时谓词不满足则 ``RepeatError``（对应 Python `RepeatError`）
+
+    :param predicate: 终止谓词 ``(obj, list, context) -> bool``。
+    :param subcon: 元素子构造器。
+    :param discard: 若为 True，parse 返回空 list 但仍消耗流；build 时 partial 始终为空。
+    :return: ``RepeatUntilDescriptor`` 实例。
+    """
+    return RepeatUntilDescriptor(predicate, subcon, discard)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -906,9 +1145,11 @@ __all__ = [
     "GreedyRange",
     "PrefixedArrayDescriptor",
     "PrefixedArray",
-    # Phase 4 Index / StopIf
+    # Phase 4 Index / StopIf / RepeatUntil
     "IndexDescriptor",
     "Index",
     "StopIfDescriptor",
     "StopIf",
+    "RepeatUntilDescriptor",
+    "RepeatUntil",
 ]
