@@ -35,8 +35,8 @@
 //! 详见 `docs/模块设计-Array.md` §8.5 关键依赖 4。
 
 use pyo3::prelude::*;
-use pyo3::types::PyType;
 use pyo3::sync::GILOnceCell;
+use pyo3::types::PyType;
 
 /// 全局缓存的 `construct.lib.containers.Container` 类引用。
 ///
@@ -151,7 +151,7 @@ mod tests {
             let v: i64 = instance.getattr("threshold").unwrap().extract().unwrap();
             assert_eq!(v, 42);
             // item 访问
-            let v2: i64 = instance.get_item("threshold").unwrap().unwrap().extract().unwrap();
+            let v2: i64 = instance.get_item("threshold").unwrap().extract().unwrap();
             assert_eq!(v2, 42);
             // isinstance(instance, dict) → True（Container 继承 dict）
             let dict_cls = py.get_type_bound::<pyo3::types::PyDict>();

@@ -39,17 +39,27 @@
 //!    - 评估谓词：为真 → matched=true，break
 //! 4. 若 !matched → `Repeat` 错误（RU-3）
 //!
+//! ## 已知差异（V-2，文档化）
+//!
+//! **partial 收集 `elem` 而非 `buildret`**：Python L2693-2696 中
+//! `partiallist.append(buildret)`，其中 `buildret = self.subcon._build(e, ...)`。
+//! Rust `Construct::build` 返回 `()`（无返回值），因此收集的是用户输入 `e`。
+//! 对 FormatField/Bytes 内部（绝大多数场景），`buildret == e` 无差异；
+//! 对 Adapter 系（如 Enum）作为 inner 时，`buildret` 是 decode 后的子构造器值，
+//! 可能 ≠ e。Adapter-as-inner-RepeatUntil 是罕见场景，行为差异在此文档化。
+//!
 //! ## sizeof
 //!
 //! 永远返回 `Err`（对齐 Python L2703-2704）。
 
+use crate::container_cache;
 use crate::context::Context;
 use crate::error::ConstructError;
 use crate::expr::{eval_expr_int, ExprProgram};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyTuple};
+use pyo3::types::{PyAny, PyDict, PyList, PyTuple, PyType};
 
 use super::Construct;
 
@@ -158,9 +168,20 @@ impl RepeatUntilNode {
     }
 
     /// has_expressions 判断（设计 §6.1.1）。
-    /// Expr 谓词路径返回 true（虽然不引用 Struct 字段，但需要触发
-    /// StructNode 的 init_expr_values 路径以建立 expr_values_buf，
-    /// 避免 GetElem 之外的指令意外命中空 buf）。
+    ///
+    /// Expr 谓词路径返回 true（防御性）：确保父 Struct 走 has_expressions=true
+    /// 路径，使 ctx 在进入 RepeatUntil 时已初始化 expr_values_buf。
+    ///
+    /// **当前 GetElem 不读 expr_values_buf**（V-5 修正：原注释误述"避免 GetElem
+    /// 之外的指令意外命中空 buf"，但 GetElem 走 [`Context::current_elem_ptr`]，
+    /// 不读 expr_values_buf；[`eval_expr_int`] 也仅在 GetInt 指令下读 buf）。
+    /// 此处的 true 是**防御性编码**：
+    /// - 若未来 ExprProgram 扩展引入 GetInt（如谓词 `x > field_name`），
+    ///   父 Struct 必须已初始化 buf，否则 GetInt 在空 buf 上返回 ExprFieldMissing。
+    /// - 保留 true 避免未来扩展时遗漏 init。开销 ~5-10ns（仅一次 Vec::with_capacity）。
+    ///
+    /// PyCallable 谓词路径递归 inner：谓词本身在 Python 中求值，不依赖 expr_values_buf，
+    /// 但 inner 子树可能含表达式（如 `RepeatUntil(Byte, Bytes(m))` 的 Bytes(m)）。
     pub fn has_expressions(&self) -> bool {
         self.inner.has_expressions() || self.predicate.is_expr()
     }
@@ -264,16 +285,15 @@ impl super::Construct for RepeatUntilNode {
             }
             RepeatPredicate::PyCallable(predicate) => {
                 let pred_bound = predicate.bind(py);
-                // 预创建 context proxy，每次迭代仅更新 _index。
-                let ctx_proxy = PyDict::new_bound(py);
-                let index_key = "_index";
-                let _ = ctx_proxy.set_item(index_key, py.None());
+                // v4 V-1：缓存 Container 类，零开销取用。
+                let container_cls =
+                    container_cache::container_class(py).map_err(|e| ConstructError::Generic {
+                        message: format!("RepeatUntil build: failed to get Container class: {}", e),
+                        path: path.to_string(),
+                    })?;
 
                 for (i, elem) in items.iter().enumerate() {
                     ctx.set_index(i);
-                    // 更新 proxy 中的 _index
-                    let _ = ctx_proxy.set_item(index_key, i.into_py(py).bind(py));
-
                     path.push_index(i);
                     let elem_bound = elem.bind(py);
                     if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
@@ -285,18 +305,30 @@ impl super::Construct for RepeatUntilNode {
                     path.pop();
 
                     // P2 修正：仅非 discard 时 append 到 partial。
+                    // V-2 已知差异：partial 收集的是 elem（用户输入），
+                    // Python L2693-2696 收集 buildret（inner._build 返回值）。
+                    // 详见模块顶部"已知差异"段落。
                     if !self.discard {
                         partial
                             .append(elem.clone_ref(py))
                             .map_err(ConstructError::from)?;
                     }
 
-                    let stop = call_predicate_with_proxy(
+                    // v4 V-1：构造 Container proxy（含 ctx.fields() 字段 + _index）。
+                    let ctx_proxy = match build_context_proxy(py, &container_cls, ctx, path) {
+                        Ok(p) => p,
+                        Err(e) => {
+                            restore_index(ctx, old_index);
+                            return Err(e);
+                        }
+                    };
+                    let stop = call_repeat_predicate(
                         py,
                         pred_bound,
                         elem_bound,
                         partial.as_any(),
                         &ctx_proxy,
+                        path,
                     )?;
                     if stop {
                         matched = true;
@@ -377,7 +409,12 @@ fn parse_expr_path<'py>(
     }
 }
 
-/// PyCallable 路径的 parse 内部实现。
+/// PyCallable 路径的 parse 内部实现（v4 V-1）。
+///
+/// 每次迭代构造 Container proxy（含 ctx.fields() 全部字段 + _index），
+/// 调用 Python predicate(elem, list, ctx_proxy)。
+///
+/// 设计依据：`docs/模块设计-Array.md` §4.3.3 v4 伪代码 + §2.5 决策 A5 v4。
 #[allow(clippy::too_many_arguments)]
 fn parse_callable_path<'py>(
     py: Python<'py>,
@@ -389,19 +426,16 @@ fn parse_callable_path<'py>(
     list: &Bound<'py, PyList>,
     discard: bool,
 ) -> Result<(), ConstructError> {
-    // 预创建 context proxy（仅 _index），避免每次迭代 PyDict::new_bound 开销。
-    // 每次迭代仅更新 _index（PyDict_SetItem 快路径，~20ns）。
-    let ctx_proxy = PyDict::new_bound(py);
-    let index_key = "_index";
-    // 初始化 _index 为 None（首次 set_index 会更新）
-    let _ = ctx_proxy.set_item(index_key, py.None());
+    // v4 V-1：缓存 Container 类，零开销取用。
+    let container_cls =
+        container_cache::container_class(py).map_err(|e| ConstructError::Generic {
+            message: format!("RepeatUntil parse: failed to get Container class: {}", e),
+            path: path.to_string(),
+        })?;
 
     let mut i: usize = 0;
     loop {
         ctx.set_index(i);
-        // 更新 proxy 中的 _index
-        let _ = ctx_proxy.set_item(index_key, i.into_py(py).bind(py));
-
         path.push_index(i);
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
@@ -418,9 +452,16 @@ fn parse_callable_path<'py>(
                 .map_err(ConstructError::from)?;
         }
 
-        // PyCallable 路径：调 Python predicate(elem, list, ctx_proxy)。
-        let stop =
-            call_predicate_with_proxy(py, predicate, elem.bind(py), list.as_any(), &ctx_proxy)?;
+        // v4 V-1：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
+        let ctx_proxy = build_context_proxy(py, &container_cls, ctx, path)?;
+        let stop = call_repeat_predicate(
+            py,
+            predicate,
+            elem.bind(py),
+            list.as_any(),
+            &ctx_proxy,
+            path,
+        )?;
         if stop {
             return Ok(());
         }
@@ -448,101 +489,110 @@ fn eval_expr_predicate(
     Ok(v != 0)
 }
 
-/// 调用谓词（使用预创建的 proxy），返回是否应终止。
+/// 构造 Container proxy（每次迭代调用）。
 ///
-/// 与 [`call_repeat_predicate`] 的区别：调用方预创建 proxy 并管理 `_index` 更新，
-/// 避免每次迭代 `PyDict::new_bound` 开销。
-fn call_predicate_with_proxy(
+/// v4 V-1 修正（`docs/模块设计-Array.md` §4.3.3 + §2.5 决策 A5 v4 +
+/// `docs/设计决策记录.md` Phase 4 决策 4）。
+///
+/// 1. 构造临时 PyDict，浅复制 `ctx.fields()` 全部字段；
+/// 2. 写入 `_index`（对齐 Python `context._index = i`，RU-9）；
+/// 3. 用 Container 类包装（`Container.__init__` 自动执行 `self.__dict__ = self`，
+///    使 attribute 访问与 item 访问等价）。
+///
+/// # 为什么必须是 Container 而非 PyDict
+///
+/// Container 通过 `__dict__ = self`（containers.py L110）使
+/// `ctx_proxy.threshold` 与 `ctx_proxy['threshold']` 等价。Python
+/// `RepeatUntil._parse/_build`（core.py L2681/L2697）直接把 Container
+/// 传给谓词，用户写 `lambda x, lst, ctx: x > ctx.threshold` 是 Python
+/// 文档示明的核心用法。仅传 PyDict 会让 attribute 访问静默失败
+/// （`AttributeError: 'dict' object has no attribute 'threshold'`），
+/// 属于"隐性破坏"，违反 AGENTS.md §0 Python 兼容性核心目标。
+///
+/// # 性能开销（每迭代）
+///
+/// - PyDict::new_bound + 字段复制：~200-400ns（字段数 N）
+/// - Container 实例化（`Container.__init__`）：~200-500ns
+/// - 合计：~400-900ns/iter（详见 §8.5 关键依赖 4）
+///
+/// PyCallable 是兜底路径（Expr 路径 ≥10x），行为正确性优先于性能。
+fn build_context_proxy<'py>(
+    py: Python<'py>,
+    container_cls: &Bound<'py, PyType>,
+    ctx: &Context<'_>,
+    path: &mut Path,
+) -> Result<Bound<'py, PyAny>, ConstructError> {
+    // 1. 构造临时 PyDict，复制 ctx.fields() 全部字段（浅复制）。
+    let dict = PyDict::new_bound(py);
+    if let Some(fields) = ctx.fields() {
+        for item in fields.iter() {
+            let (key, value) = item;
+            // set_item 失败极少见（key 不可哈希等），包装为 Generic + path。
+            dict.set_item(&key, &value)
+                .map_err(|e| ConstructError::Generic {
+                    message: format!("RepeatUntil build_context_proxy: set_item failed: {}", e),
+                    path: path.to_string(),
+                })?;
+        }
+    }
+    // 2. 写入 _index（对齐 Python `context._index = i`）。
+    match ctx.index() {
+        Some(i) => {
+            dict.set_item("_index", i.into_py(py).bind(py))
+                .map_err(|e| ConstructError::Generic {
+                    message: format!("RepeatUntil build_context_proxy: set _index failed: {}", e),
+                    path: path.to_string(),
+                })?;
+        }
+        None => {
+            dict.set_item("_index", py.None().bind(py))
+                .map_err(|e| ConstructError::Generic {
+                    message: format!(
+                        "RepeatUntil build_context_proxy: set _index=None failed: {}",
+                        e
+                    ),
+                    path: path.to_string(),
+                })?;
+        }
+    }
+    // 3. 用 Container 包装（Container.__init__ 接受 dict，自动 __dict__ = self）。
+    container_cls
+        .call1((dict,))
+        .map_err(|e| ConstructError::Generic {
+            message: format!("RepeatUntil build_context_proxy: Container() failed: {}", e),
+            path: path.to_string(),
+        })
+        .map(|obj| obj.into_any())
+}
+
+/// 调用 RepeatUntil 谓词（PyCallable 路径），返回是否应终止。
+///
+/// 对齐 Python `predicate(obj, list, context)`（core.py L2681/L2697）。
+///
+/// # v4 V-1
+///
+/// `ctx_proxy` 必须是 Container 实例（由 [`build_context_proxy`] 构造），
+/// 支持 attribute 与 item 双重访问。详见 [`build_context_proxy`] 文档。
+fn call_repeat_predicate(
     py: Python<'_>,
     predicate: &Bound<'_, PyAny>,
     elem: &Bound<'_, PyAny>,
     list: &Bound<'_, PyAny>,
-    ctx_proxy: &Bound<'_, PyDict>,
+    ctx_proxy: &Bound<'_, PyAny>,
+    path: &mut Path,
 ) -> Result<bool, ConstructError> {
     let _ = py;
     let result = predicate
         .call1((elem, list, ctx_proxy))
         .map_err(|e| ConstructError::Generic {
             message: format!("RepeatUntil predicate raised: {}", e),
-            path: String::new(),
+            path: path.to_string(),
         })?;
     let truthy = result.is_truthy().map_err(|e| ConstructError::Generic {
         message: format!("RepeatUntil predicate returned non-bool: {}", e),
-        path: String::new(),
+        path: path.to_string(),
     })?;
     Ok(truthy)
-}
-
-/// 调用 RepeatUntil 谓词（PyCallable 路径，自管理 proxy 版本），返回是否应终止。
-///
-/// 对齐 Python `predicate(obj, list, context)`。
-///
-/// # 性能优化
-///
-/// 仅构造最小 context proxy（只含 `_index`），不复制 ctx.fields()。
-/// 大多数谓词不访问 context 字段（仅依赖 x、lst），此优化使每次迭代开销
-/// 从 ~500ns 降至 ~100ns。谓词若访问 `_index` 之外的字段会得到 KeyError
-/// （Python construct 也允许这种语义模糊性）。
-#[allow(dead_code)] // 保留供未来需要每次迭代新建 proxy 的场景使用
-fn call_repeat_predicate(
-    py: Python<'_>,
-    predicate: &Bound<'_, PyAny>,
-    elem: &Bound<'_, PyAny>,
-    list: &Bound<'_, PyAny>,
-    ctx: &Context<'_>,
-) -> Result<bool, ConstructError> {
-    // 最小 context proxy：仅 _index 字段。
-    // 避免每次迭代复制整个 ctx.fields()（设计 §4.3.4 性能优化）。
-    //
-    // 性能权衡：仅 _index，谓词访问其他字段会 KeyError。
-    // 大多数 RepeatUntil 谓词只依赖 (x, lst)，不访问 ctx —— 这是合理优化。
-    // 用户若需访问 ctx 字段，应改用 Struct 字段表达式（FieldRef/ExprRef），
-    // 编译器自动编译为 ExprProgram（Expr 路径，零 FFI）。
-    let ctx_proxy = PyDict::new_bound(py);
-    if let Some(i) = ctx.index() {
-        let _ = ctx_proxy.set_item("_index", i.into_py(py).bind(py));
-    } else {
-        let _ = ctx_proxy.set_item("_index", py.None().bind(py));
-    }
-    let result =
-        predicate
-            .call1((elem, list, &ctx_proxy))
-            .map_err(|e| ConstructError::Generic {
-                message: format!("RepeatUntil predicate raised: {}", e),
-                path: String::new(),
-            })?;
-    let truthy = result.is_truthy().map_err(|e| ConstructError::Generic {
-        message: format!("RepeatUntil predicate returned non-bool: {}", e),
-        path: String::new(),
-    })?;
-    Ok(truthy)
-}
-
-/// 构造 context proxy（PyDict），仅用于测试与调试。
-///
-/// 复制当前 ctx.fields() 内容（若存在）+ 写入 `_index`。
-/// 注意：生产路径（[`call_repeat_predicate`]）使用最小 proxy（仅 `_index`）
-/// 以避免每次迭代的 dict 复制开销。
-#[cfg(test)]
-fn build_context_proxy<'py>(py: Python<'py>, ctx: &Context<'_>) -> PyResult<Bound<'py, PyDict>> {
-    let proxy = PyDict::new_bound(py);
-    if let Some(fields) = ctx.fields() {
-        // 浅拷贝当前层字段。
-        for item in fields.iter() {
-            let (key, value) = item;
-            proxy.set_item(&key, &value)?;
-        }
-    }
-    // 写入 _index（对齐 Python `context._index = i`）。
-    match ctx.index() {
-        Some(i) => {
-            proxy.set_item("_index", i.into_py(py).bind(py))?;
-        }
-        None => {
-            proxy.set_item("_index", py.None().bind(py))?;
-        }
-    }
-    Ok(proxy)
 }
 
 /// 从 iterable（list / tuple / 任意 iterable）收集元素到 Vec。
@@ -607,7 +657,15 @@ mod tests {
     fn ensure_python() {
         use std::sync::Once;
         static INIT: Once = Once::new();
-        INIT.call_once(pyo3::prepare_freethreaded_python);
+        INIT.call_once(|| {
+            pyo3::prepare_freethreaded_python();
+            Python::with_gil(|py| {
+                // v4 V-1：测试前确保 Container 类缓存已初始化。
+                // 失败不致命——某些环境（无 construct.lib.containers）下会回落，
+                // 但 RepeatUntil PyCallable 测试需要 Container 才能正常工作。
+                let _ = crate::container_cache::init_container_class(py);
+            });
+        });
     }
 
     fn with_py<F, R>(f: F) -> R
@@ -897,6 +955,207 @@ mod tests {
                 .expect("build");
             // 第 3 个元素后 partial=[1,0,0]，满足 lst[-2:]==[0,0]
             assert_eq!(stream.as_bytes(), &[1, 0, 0]);
+        });
+    }
+
+    // ======================================================================
+    // RU-9: PyCallable 谓词访问 context 字段（v4 V-1 修正）
+    // ======================================================================
+
+    /// 创建一个访问 context attribute 的谓词：`lambda x, lst, ctx: x > ctx.threshold`
+    fn make_lambda_ctx_threshold_attr() -> Py<PyAny> {
+        with_py(|py| {
+            py.eval_bound("lambda x, lst, ctx: x > ctx.threshold", None, None)
+                .expect("lambda")
+                .extract::<Py<PyAny>>()
+                .expect("Py<PyAny>")
+        })
+    }
+
+    /// 创建一个访问 context item 的谓词：`lambda x, lst, ctx: x > ctx['threshold']`
+    fn make_lambda_ctx_threshold_item() -> Py<PyAny> {
+        with_py(|py| {
+            py.eval_bound("lambda x, lst, ctx: x > ctx['threshold']", None, None)
+                .expect("lambda")
+                .extract::<Py<PyAny>>()
+                .expect("Py<PyAny>")
+        })
+    }
+
+    /// 创建一个访问 context _index 的谓词：`lambda x, lst, ctx: ctx._index >= 2`
+    fn make_lambda_ctx_index_at_least(n: i64) -> Py<PyAny> {
+        with_py(|py| {
+            let code = format!("lambda x, lst, ctx: ctx._index >= {}", n);
+            py.eval_bound(&code, None, None)
+                .expect("lambda")
+                .extract::<Py<PyAny>>()
+                .expect("Py<PyAny>")
+        })
+    }
+
+    #[test]
+    fn parse_callable_predicate_accesses_context_field_attr() {
+        // RU-9: 谓词 `lambda x, lst, ctx: x > ctx.threshold`（attribute 访问）
+        // v4 V-1：proxy 必须是 Container（__dict__ = self 支持 attribute 访问）
+        // ctx.threshold = 5，data = [1, 2, 3, 4, 5, 6, 7] → 6 时满足（x > 5）
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let py_pred = make_lambda_ctx_threshold_attr();
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            // 设置 context 字段 threshold = 5
+            let threshold_val = 5i64.into_py(py);
+            ctx.set_field("threshold", threshold_val.bind(py))
+                .expect("set threshold");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // x > 5：1,2,3,4,5,6 → 6 时满足（6 > 5）
+            assert_eq!(list.len(), 6);
+            let last: i64 = list.get_item(5).unwrap().extract().unwrap();
+            assert_eq!(last, 6);
+            assert_eq!(stream.tell(), 6);
+        });
+    }
+
+    #[test]
+    fn parse_callable_predicate_accesses_context_field_item() {
+        // RU-9: 谓词 `lambda x, lst, ctx: x > ctx['threshold']`（item 访问）
+        // 同样需要 Container（Container 继承 dict，item 访问可用）
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let py_pred = make_lambda_ctx_threshold_item();
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let threshold_val = 5i64.into_py(py);
+            ctx.set_field("threshold", threshold_val.bind(py))
+                .expect("set threshold");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 6);
+        });
+    }
+
+    #[test]
+    fn parse_callable_predicate_accesses_context_index() {
+        // RU-9 变体：谓词 `lambda x, lst, ctx: ctx._index >= 2`（_index 字段）
+        // data = [9, 9, 9, 9] → 在 i=2 时满足（index=2 >= 2）
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let py_pred = make_lambda_ctx_index_at_least(2);
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let mut stream = ParseStream::new(&[9, 9, 9, 9]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3); // i=0,1,2 → i=2 满足
+        });
+    }
+
+    #[test]
+    fn build_callable_predicate_accesses_context_field() {
+        // RU-9 build 方向：谓词访问 context attribute
+        // ctx.threshold = 3，obj = [1, 2, 3, 4, 5, 6] → 在 4 时满足（4 > 3）
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let py_pred = make_lambda_ctx_threshold_attr();
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let obj = py
+                .eval_bound("[1, 2, 3, 4, 5, 6]", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let threshold_val = 3i64.into_py(py);
+            ctx.set_field("threshold", threshold_val.bind(py))
+                .expect("set threshold");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            // x > 3：1,2,3,4 → 在 4 时满足
+            assert_eq!(stream.as_bytes(), &[1, 2, 3, 4]);
+        });
+    }
+
+    #[test]
+    fn parse_callable_proxy_is_container_instance() {
+        // RU-9 类型检查：谓词收到的 ctx_proxy isinstance(ctx_proxy, Container) 为 True
+        // 这是 Python 用户可能写的类型检查（如调试场景）
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            // 用模块级 def 让 Container 进入函数 __globals__
+            let code = concat!(
+                "Container = __import__('construct.lib.containers', fromlist=['Container']).Container\n",
+                "def p(x, lst, ctx):\n",
+                "    return isinstance(ctx, Container) and x > 200\n",
+            );
+            py.run_bound(code, None, None).expect("def");
+            let py_pred = py
+                .eval_bound("p", None, None)
+                .expect("p")
+                .extract::<Py<PyAny>>()
+                .expect("Py");
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 255]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // x > 200：1,2,3,255 → 在 255 时满足（255 > 200）
+            assert_eq!(list.len(), 4);
+        });
+    }
+
+    #[test]
+    fn parse_callable_proxy_reflects_index_change_per_iteration() {
+        // RU-9 关键不变量：每次迭代 proxy._index 反映当前 i
+        // 谓词记录每次收到的 _index，验证递增序列
+        with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            // 模块级 def + recorder 列表，函数 __globals__ 可见
+            let code = concat!(
+                "recorder = []\n",
+                "def p(x, lst, ctx):\n",
+                "    recorder.append(ctx._index)\n",
+                "    return x >= 2\n",
+            );
+            py.run_bound(code, None, None).expect("def");
+            let py_pred = py
+                .eval_bound("p", None, None)
+                .expect("p")
+                .extract::<Py<PyAny>>()
+                .expect("Py");
+            let node =
+                RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
+            let mut stream = ParseStream::new(&[0, 1, 2, 3]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3); // 0,1,2 → 在 i=2 时 x=2>=2 满足
+                                       // 验证 recorder 记录的是 [0, 1, 2]
+            let recorder_bound = py.eval_bound("recorder", None, None).expect("recorder");
+            let recorder = recorder_bound.downcast::<PyList>().expect("list");
+            let indices: Vec<i64> = recorder.iter().map(|b| b.extract().unwrap()).collect();
+            assert_eq!(indices, vec![0, 1, 2]);
         });
     }
 
@@ -1231,29 +1490,52 @@ mod tests {
     #[test]
     fn build_context_proxy_copies_fields_and_index() {
         // 验证 build_context_proxy 正确复制 ctx.fields() 与 _index
+        // v4 V-1：proxy 是 Container 实例（attribute + item 双重访问）
         with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let container_cls =
+                crate::container_cache::container_class(py).expect("container class");
+
             let mut ctx = Context::new_root(py).expect("ctx");
             let val = 42i64.into_py(py);
             ctx.set_field("myfield", val.bind(py)).expect("set");
             ctx.set_index(7);
 
-            let proxy = build_context_proxy(py, &ctx).expect("proxy");
-            // _index 应为 7
+            let mut path = Path::new();
+            let proxy = build_context_proxy(py, &container_cls, &ctx, &mut path).expect("proxy");
+
+            // isinstance(proxy, Container) → True（V-1 RU-9）
+            assert!(proxy
+                .is_instance(&container_cls)
+                .expect("is_instance Container"));
+
+            // item 访问（PyAny::get_item 返回 PyResult<Bound>，非 Option）
             let idx: i64 = proxy
                 .get_item("_index")
                 .expect("get _index")
-                .expect("has _index")
                 .extract()
                 .expect("i64");
             assert_eq!(idx, 7);
-            // myfield 应被复制
             let v: i64 = proxy
                 .get_item("myfield")
                 .expect("get myfield")
-                .expect("has myfield")
                 .extract()
                 .expect("i64");
             assert_eq!(v, 42);
+
+            // attribute 访问（V-1 RU-9：Container.__dict__ = self）
+            let idx_attr: i64 = proxy
+                .getattr("_index")
+                .expect("attr _index")
+                .extract()
+                .expect("i64");
+            assert_eq!(idx_attr, 7);
+            let v_attr: i64 = proxy
+                .getattr("myfield")
+                .expect("attr myfield")
+                .extract()
+                .expect("i64");
+            assert_eq!(v_attr, 42);
         });
     }
 
@@ -1261,13 +1543,15 @@ mod tests {
     fn build_context_proxy_handles_none_index() {
         // _index 为 None 时，proxy._index 应为 Py_None
         with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let container_cls =
+                crate::container_cache::container_class(py).expect("container class");
+
             let ctx = Context::new_root(py).expect("ctx");
             // ctx.index() 默认 None
-            let proxy = build_context_proxy(py, &ctx).expect("proxy");
-            let idx_obj = proxy
-                .get_item("_index")
-                .expect("get _index")
-                .expect("has _index");
+            let mut path = Path::new();
+            let proxy = build_context_proxy(py, &container_cls, &ctx, &mut path).expect("proxy");
+            let idx_obj = proxy.get_item("_index").expect("get _index");
             assert!(idx_obj.is_none());
         });
     }
@@ -1296,6 +1580,10 @@ mod tests {
         // 验证 build_context_proxy 的 dict 迭代不会 panic
         // （迭代 PyDict 时返回 PyResult，处理潜在错误）
         with_py(|py| {
+            crate::container_cache::init_container_class(py).expect("init container");
+            let container_cls =
+                crate::container_cache::container_class(py).expect("container class");
+
             let mut ctx = Context::new_root(py).expect("ctx");
             // 写入多个字段
             for i in 0..5i64 {
@@ -1304,8 +1592,11 @@ mod tests {
                 ctx.set_field(&key, v.bind(py)).expect("set");
             }
             ctx.set_index(0);
-            let proxy = build_context_proxy(py, &ctx).expect("proxy");
-            assert_eq!(proxy.len(), 6); // 5 字段 + _index
+            let mut path = Path::new();
+            let proxy = build_context_proxy(py, &container_cls, &ctx, &mut path).expect("proxy");
+            // Container 继承 dict，len() 走 dict.__len__，返回 usize（无 Option 包装）
+            let n = proxy.len().expect("len");
+            assert_eq!(n, 6); // 5 字段 + _index
         });
     }
 }
