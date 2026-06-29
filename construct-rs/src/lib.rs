@@ -19,6 +19,7 @@
 //! §B.8（错误映射）。
 
 pub mod compile;
+pub mod container_cache;
 pub mod context;
 pub mod descriptors;
 pub mod error;
@@ -63,7 +64,9 @@ fn version() -> &'static str {
 ///
 /// 模块初始化时还会调用 [`error::init_exception_classes`]，从 `construct._errors`
 /// 缓存 Python 异常类引用，使 `From<ConstructError> for PyErr` 能按变体映射到
-/// `StreamError` 等（§B.8）。
+/// `StreamError` 等（§B.8）。Phase 4.5 V-1 修正后还会调用
+/// [`container_cache::init_container_class`] 缓存 `Container` 类，供 RepeatUntil
+/// PyCallable 谓词路径构造 context proxy（设计决策记录 Phase 4 决策 4）。
 #[pymodule]
 fn _construct_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -100,6 +103,25 @@ fn _construct_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
                     (format!(
                         "construct-rs: 警告——无法初始化 Python 异常类缓存，\
                          错误将回退到 ValueError：{}\n",
+                        e
+                    ),),
+                )
+            });
+    }
+
+    // 缓存 Container 类引用（Phase 4.5 V-1 修正）。
+    // 失败不致命：未初始化时 RepeatUntil PyCallable 路径会返回 ImportError；
+    // 但记录到 stderr 帮助调试。
+    if let Err(e) = container_cache::init_container_class(py) {
+        let _ = py
+            .import_bound("sys")
+            .and_then(|sys| sys.getattr("stderr"))
+            .and_then(|stderr| {
+                stderr.call_method1(
+                    "write",
+                    (format!(
+                        "construct-rs: 警告——无法初始化 Container 类缓存，\
+                         RepeatUntil PyCallable 谓词路径将不可用：{}\n",
                         e
                     ),),
                 )
