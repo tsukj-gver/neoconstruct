@@ -703,6 +703,162 @@ def PrefixedArray(countfield, subcon):
     return PrefixedArrayDescriptor(countfield, subcon)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 子任务 4.4: Index / StopIf 描述符
+#
+# 设计依据：``docs/模块设计-Array.md`` §4.4 / §4.5 / §6.3。
+#
+# - ``Index()``：取当前数组迭代下标（对应 Python construct 的 ``Index``）。
+#   construct-rs 中 IndexNode 是用户访问数组下标的唯一机制（v3 决策 §3.3），
+#   直接调 ``ctx.index()`` 读取，不走 ExprProgram。
+#
+# - ``StopIf(condfunc)``：早停信号（对应 Python construct 的 ``StopIf``）。
+#   条件为 true 时抛 StopFieldError 哨兵，被外层 Struct / GreedyRange 捕获，
+#   停止后续字段/迭代。
+#   condfunc 支持：
+#   - Python bool 常量（True/False）→ StopIfCondition::Always / Never
+#   - FieldRef/ExprRef 表达式 → StopIfCondition::Expr
+# ---------------------------------------------------------------------------
+
+
+class IndexDescriptor:
+    """``Index()`` 描述符。
+
+    取当前数组迭代下标。对应 Python construct 的 ``Index``。
+
+    必须在 ``Array`` / ``GreedyRange`` / ``RepeatUntil`` / ``PrefixedArray``
+    内使用。在数组外使用时 parse 返回 ``None``（对齐 Python
+    ``context.get("_index", None)``）。
+
+    ``_expr_params`` 协议返回空 dict：Index 无表达式参数（v3 决策，§3.3）。
+    """
+
+    __slots__ = ()
+
+    # 类级别常量：Index 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Index()"
+
+
+def Index():
+    """创建一个 Index 描述符。
+
+    取当前数组迭代下标。对应 Python construct 的 ``Index``。
+
+    使用方式::
+
+        @dataclass
+        class Item(StructMixin):
+            i: int = rfield(Index())      # 当前下标
+            v: int = field(Int8ub)
+
+        @dataclass
+        class Packet(StructMixin):
+            items: list = field(Array(3, Item))
+
+        Packet.parse(b"\\x01\\x02\\x03")
+        # items = [Item(i=0, v=1), Item(i=1, v=2), Item(i=2, v=3)]
+
+    在数组外使用时，``Index()`` parse 返回 ``None``（IX-2）：
+
+    ::
+
+        @dataclass
+        class Top(StructMixin):
+            idx: int = rfield(Index())    # 不在数组内，parse 得到 None
+
+    在表达式中引用下标（v3 决策，§3.3）：先用 Index 字段声明，再用字段名引用::
+
+        @dataclass
+        class Item(StructMixin):
+            i: int = rfield(Index())
+            v: bytes = field(Bytes(i + 1))   # 引用字段名 i，编译为 [GetInt(0), Const(1), Add]
+
+    :return: ``IndexDescriptor`` 实例。
+    """
+    return IndexDescriptor()
+
+
+class StopIfDescriptor:
+    """``StopIf(condfunc)`` 描述符。
+
+    早停信号：检查条件，条件为真时返回 ``StopFieldError`` 哨兵，
+    被外层 ``Struct`` / ``GreedyRange`` 捕获，停止后续字段/迭代。
+
+    对应 Python construct 的 ``StopIf``。
+
+    ``_expr_params`` 协议：当 ``condfunc`` 是 bool 常量时返回 ``{}``（跳过编译）；
+    当 condfunc 是 FieldRef/ExprRef 时返回 ``{"cond": self.condfunc}``（编译为 ExprOp 列表）。
+
+    :param condfunc: 条件（``True`` / ``False`` / FieldRef / ExprRef 表达式）。
+    """
+
+    __slots__ = ("condfunc",)
+
+    def __init__(self, condfunc):
+        """初始化 StopIf 描述符。
+
+        :param condfunc: 条件。``True`` 永远停止（调试用），``False`` 永远不停止（调试用），
+                         或 FieldRef/ExprRef 表达式（如 ``x == 0``）。
+        """
+        self.condfunc = condfunc
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 ComputedDescriptor._expr_params 同模式）。
+
+        返回 ``{"cond": self.condfunc}``。当 condfunc 是 bool 时，
+        ``_extract_and_compile_exprs`` 跳过编译；当 condfunc 是 FieldRef/ExprRef 时
+        编译为 ExprOp 列表。
+        """
+        if isinstance(self.condfunc, bool):
+            return {}
+        return {"cond": self.condfunc}
+
+    def __repr__(self):
+        return "StopIf({!r})".format(self.condfunc)
+
+
+def StopIf(condfunc):
+    """创建一个 StopIf 描述符。
+
+    早停信号。对应 Python construct 的 ``StopIf``。
+
+    使用方式（在 Struct 中）::
+
+        @dataclass
+        class Packet(StructMixin):
+            x: int = field(Int8ub)
+            stop = rfield(StopIf(x == 0))    # x 为 0 时停止
+            y: int = field(Int8ub)           # 仅在 x != 0 时解析
+
+        Packet.parse(b"\\x00")              # x=0, stop 触发，y 不解析
+        # Packet(x=0, y=None)
+        Packet.parse(b"\\x05\\x99")         # x=5, 不停, y=0x99
+        # Packet(x=5, y=0x99)
+
+    使用方式（在 GreedyRange 中，GR-4）::
+
+        @dataclass
+        class Item(StructMixin):
+            x: int = field(Int8ub)
+            stop = rfield(StopIf(x == 0xFF))   # 0xFF 为终止符
+
+        items = GreedyRange(Item)
+        items.parse(b"\\x01\\x02\\xFF")
+        # [Item(x=1), Item(x=2), Item(x=0xFF)]
+
+    注：``StopIf`` 在 ``Array`` 内不捕获（设计 SI-3，Array 是固定次数，
+    StopIf 在 Array 内是用户误用，错误向上传播）。
+
+    :param condfunc: 条件（``True`` / ``False`` / 字段名引用表达式）。
+    :return: ``StopIfDescriptor`` 实例。
+    """
+    return StopIfDescriptor(condfunc)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -750,4 +906,9 @@ __all__ = [
     "GreedyRange",
     "PrefixedArrayDescriptor",
     "PrefixedArray",
+    # Phase 4 Index / StopIf
+    "IndexDescriptor",
+    "Index",
+    "StopIfDescriptor",
+    "StopIf",
 ]

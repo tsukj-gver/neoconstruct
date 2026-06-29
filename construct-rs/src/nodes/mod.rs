@@ -36,8 +36,10 @@ pub mod computed;
 pub mod format_field;
 pub mod greedy_bytes;
 pub mod greedy_range;
+pub mod index;
 pub mod padding;
 pub mod prefixed_array;
+pub mod stop_if;
 pub mod struct_node;
 pub mod struct_ref;
 pub mod tell;
@@ -58,9 +60,11 @@ use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use greedy_range::GreedyRangeNode;
+use index::IndexNode;
 use padding::PaddingNode;
 use prefixed_array::PrefixedArrayNode;
 use pyo3::prelude::*;
+use stop_if::StopIfNode;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
 use tell::TellNode;
@@ -204,6 +208,15 @@ pub enum Node {
     /// 得到 count，再循环 count 次 inner.parse；build 先取 list 长度 build countfield，
     /// 再遍历 list build inner。
     PrefixedArray(PrefixedArrayNode),
+    /// 取当前数组迭代下标的节点（对应 Python construct `Index`）。
+    /// Phase 4 新增（设计 §4.4）。直接调 `ctx.index()` 读取，不走 ExprProgram
+    /// （v3 决策，§3.3）。parse 返回 PyLong 或 Py_None；build 是 no-op；sizeof=0。
+    Index(IndexNode),
+    /// 早停信号节点（对应 Python construct `StopIf(condfunc)`）。
+    /// Phase 4 新增（设计 §4.5）。条件为真时返回 `ConstructError::StopField` 哨兵，
+    /// 被外层 StructNode / GreedyRangeNode 捕获，停止后续字段/迭代。
+    /// 条件可为编译期常量（Always / Never）或表达式（Expr）。
+    StopIf(StopIfNode),
 }
 
 impl Node {
@@ -225,6 +238,8 @@ impl Node {
             Node::Array(a) => a.has_expressions(),
             Node::GreedyRange(g) => g.has_expressions(),
             Node::PrefixedArray(p) => p.has_expressions(),
+            Node::Index(i) => i.has_expressions(),
+            Node::StopIf(s) => s.has_expressions(),
             _ => false,
         }
     }
@@ -270,11 +285,23 @@ impl Node {
                 let v = crate::expr::eval_expr_int(c.expr(), ctx, py)?;
                 Ok(v.into_py(py))
             }
+            // Phase 4：Index 作为 RO 字段时，返回 ctx.index()（PyLong 或 Py_None）。
+            // 与 IndexNode.parse 行为一致（设计 §4.4.2 / §6.1.2）。
+            // 典型用法：`idx: int = rfield(Index())`——build 时不需要用户输入。
+            Node::Index(_) => Ok(ctx.index().into_py(py)),
+            // Phase 4：StopIf 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // （实际条件检查由 StopIfNode.build 完成，compute_ro_value 仅占位）。
+            // 设计 §6.1.2 注释：「StopIfNode 不作为 RO 字段（其 build 行为是检查条件
+            // 而非计算值）」——但实际作为 RO 字段在 build 方向是兼容的：
+            // compute_ro_value 返回 None（占位），随后 StructNode 调 StopIfNode.build
+            // 执行条件检查（可能抛 StopField 哨兵）。这避免了 Rw 模式下强制 getattr
+            // 「stop」属性的负担（用户不需要为 StopIf 字段提供值）。
+            Node::StopIf(_) => Ok(py.None()),
             // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
             _ => Err(ConstructError::Generic {
                 message: format!(
                     "compute_ro_value: node type {:?} is not a valid RO node. \
-                     RO fields must be Tell, Computed (Const/ContextParam in Phase 3).",
+                     RO fields must be Tell, Computed, Index, StopIf (Const/ContextParam in Phase 3).",
                     self
                 ),
                 path: path.to_string(),

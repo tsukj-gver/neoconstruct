@@ -315,6 +315,10 @@ impl Construct for StructNode {
             for (idx, field) in self.fields.iter().enumerate() {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
+                    // Phase 4 StopField 捕获（设计 §4.7）：StopIf 在 Struct 字段中触发时，
+                    // 停止后续字段，正常返回当前实例（已解析字段在 dict 中，
+                    // 未解析字段不写入——对齐 Python Struct._parse 的 except StopFieldError）。
+                    Err(ConstructError::StopField { .. }) => break,
                     Err(mut e) => {
                         e.push_path_segment(field.name.rust_name());
                         return Err(e);
@@ -339,6 +343,8 @@ impl Construct for StructNode {
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
+                    // Phase 4 StopField 捕获（设计 §4.7）：停止后续字段。
+                    Err(ConstructError::StopField { .. }) => break,
                     Err(mut e) => {
                         e.push_path_segment(field.name.rust_name());
                         return Err(e);
@@ -404,6 +410,9 @@ impl Construct for StructNode {
                     // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
                     match field.node.build(py, &value, stream, ctx, path) {
                         Ok(()) => {}
+                        // Phase 4 StopField 捕获（设计 §4.7）：StopIf 在 build 方向
+                        // 同样停止后续字段。对齐 Python Struct._build 的 except StopFieldError。
+                        Err(ConstructError::StopField { .. }) => break,
                         Err(mut e) => {
                             e.push_path_segment(field.name.rust_name());
                             return Err(e);
@@ -424,6 +433,8 @@ impl Construct for StructNode {
                     // 其他可能写字节，仍递归调用以处理）
                     match field.node.build(py, value_bound, stream, ctx, path) {
                         Ok(()) => {}
+                        // Phase 4 StopField 捕获：RO 路径同样支持（虽然 StopIf 通常不用 RO）。
+                        Err(ConstructError::StopField { .. }) => break,
                         Err(mut e) => {
                             e.push_path_segment(field.name.rust_name());
                             return Err(e);
@@ -1736,6 +1747,259 @@ mod tests {
             node.build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect("build should succeed without 'pos' attribute");
             assert_eq!(stream.as_bytes(), &[5]);
+        });
+    }
+
+    // ======================================================================
+    // Phase 4 StopField 捕获（设计 §4.7 / §6.4）
+    // ======================================================================
+
+    /// 构造 StopIfNode（常量 Always）的便捷函数。
+    fn stop_if_always_node() -> Node {
+        Node::StopIf(crate::nodes::stop_if::StopIfNode::new(
+            crate::nodes::stop_if::StopIfCondition::Always,
+        ))
+    }
+
+    /// 构造 StopIfNode（常量 Never）的便捷函数。
+    fn stop_if_never_node() -> Node {
+        Node::StopIf(crate::nodes::stop_if::StopIfNode::new(
+            crate::nodes::stop_if::StopIfCondition::Never,
+        ))
+    }
+
+    /// 构造 RO 模式的 StopIf StructField（StopIf 作为 RO 字段，不从实例取值）。
+    fn stop_field(py: Python<'_>, name: &str, stop_node: Node) -> StructField {
+        StructField {
+            name: FieldName::new(py, name),
+            node: stop_node,
+            mode: FieldMode::Ro,
+        }
+    }
+
+    #[test]
+    fn parse_stop_if_always_stops_subsequent_fields_no_expr_path() {
+        // SI-1 在 Struct 内：StopIf(Always) 触发 → 后续字段不解析
+        // has_expressions=false 路径（设计 §4.7）
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                // StopIf(Always) 作为 RO 字段（不从实例取值，build 时检查条件）
+                stop_field(py, "stop", stop_if_always_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            // 数据 2 字节，但只应解析 a（b 被跳过）
+            let mut stream = ParseStream::new(&[0x10, 0x20]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse should succeed");
+            let inst = result.bind(py);
+            // a 已解析
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            assert_eq!(a, 0x10);
+            // b 不应被解析（属性不存在）
+            assert!(
+                inst.getattr("b").is_err(),
+                "b should not be parsed after StopIf"
+            );
+            // 流位置应只前进了 1 字节（a 解析，StopIf 不消耗字节）
+            assert_eq!(stream.tell(), 1);
+        });
+    }
+
+    #[test]
+    fn parse_stop_if_always_stops_subsequent_fields_expr_path() {
+        // 同上，has_expressions=true 路径（设计 §4.7）
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                stop_field(py, "stop", stop_if_always_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            // has_expressions=true：触发 init_expr_values 路径
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let mut stream = ParseStream::new(&[0x10, 0x20]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse should succeed");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            assert_eq!(a, 0x10);
+            assert!(
+                inst.getattr("b").is_err(),
+                "b should not be parsed after StopIf"
+            );
+            assert_eq!(stream.tell(), 1);
+        });
+    }
+
+    #[test]
+    fn parse_stop_if_never_does_not_stop() {
+        // SI-6: StopIf(Never) 不停止，后续字段正常解析
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                stop_field(py, "stop", stop_if_never_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x10, 0x20]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0x10);
+            assert_eq!(b, 0x20);
+            assert_eq!(stream.tell(), 2);
+        });
+    }
+
+    #[test]
+    fn parse_stop_if_at_first_field_stops_immediately() {
+        // StopIf 作为第一个字段：实例 dict 为空
+        with_py(|py| {
+            let fields = vec![
+                stop_field(py, "stop", stop_if_always_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x99]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            // b 不应存在
+            assert!(inst.getattr("b").is_err());
+            // 流未消耗
+            assert_eq!(stream.tell(), 0);
+            // 实例 __dict__ 应为空
+            let d = inst.getattr("__dict__").unwrap();
+            let d = d.downcast::<PyDict>().unwrap();
+            assert_eq!(d.len(), 0);
+        });
+    }
+
+    #[test]
+    fn build_stop_if_always_stops_subsequent_fields() {
+        // build 方向：StopIf(Always) 停止后续字段写入
+        // StopIf 作为 RO 字段，不从实例 getattr 'stop'（设计偏离说明：见 §6.1.2）
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                stop_field(py, "stop", stop_if_always_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            // 对象只有 a 和 b 属性（不需要 stop——StopIf 是 RO 字段）
+            let obj = py
+                .eval_bound("type('O', (), {'a': 1, 'b': 2})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed");
+            // 只应写入 a（b 被 StopIf 跳过）
+            assert_eq!(stream.as_bytes(), &[1]);
+        });
+    }
+
+    #[test]
+    fn build_stop_if_never_does_not_stop() {
+        // build 方向：StopIf(Never) 不停止，后续字段正常 build
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                stop_field(py, "stop", stop_if_never_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 1, 'b': 2})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[1, 2]);
+        });
+    }
+
+    #[test]
+    fn parse_round_trip_with_stop_if_never() {
+        // round-trip：StopIf(Never) 不影响数据保存
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                stop_field(py, "stop", stop_if_never_node()),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+
+            // build
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0xAA, 'b': 0xBB})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+            assert_eq!(bytes, &[0xAA, 0xBB]);
+
+            // parse 回来
+            let mut pstream = ParseStream::new(&bytes);
+            let mut pctx = Context::placeholder(py);
+            let mut ppath = Path::new();
+            let result = node
+                .parse(py, &mut pstream, &mut pctx, &mut ppath)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0xAA);
+            assert_eq!(b, 0xBB);
+        });
+    }
+
+    #[test]
+    fn parse_other_errors_still_propagate() {
+        // 非 StopField 错误仍应正常向上传播（不被 StopField 捕获分支吞掉）
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                // 第二字段需要 4 字节但只有 1 字节 → Stream 错误
+                rw_field(
+                    py,
+                    "b",
+                    Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt32Big)),
+                ),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x10]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail with Stream error");
+            // 必须是 Stream 错误，不是被吞掉
+            match err {
+                ConstructError::Stream { .. } => {}
+                other => panic!("expected Stream error, got {:?}", other),
+            }
         });
     }
 }

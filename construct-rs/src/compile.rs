@@ -45,8 +45,10 @@ use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::greedy_range::GreedyRangeNode;
+use crate::nodes::index::IndexNode;
 use crate::nodes::padding::PaddingNode;
 use crate::nodes::prefixed_array::PrefixedArrayNode;
+use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::tell::TellNode;
@@ -519,6 +521,25 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
+        // IndexDescriptor（Phase 4）→ IndexNode。
+        // 对应 Python construct `Index`（core.py L2934）。
+        // IndexNode 直接调 ctx.index() 读取，不走 ExprProgram（v3 决策，§3.3）。
+        // IndexDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
+        "IndexDescriptor" => return Ok(Node::Index(IndexNode::new())),
+        // StopIfDescriptor（Phase 4）→ StopIfNode。
+        // 对应 Python construct `StopIf(condfunc)`（core.py L4079）。
+        // 条件分类（设计 §4.5.1）：
+        //   - Python bool 常量（True / False）→ StopIfCondition::Always / Never
+        //   - FieldRef/ExprRef → StopIfCondition::Expr，从 expr_programs[field_index]["cond"]
+        //     取 ExprOp 列表（与 ComputedDescriptor 的 "func" 同模式）。
+        "StopIfDescriptor" => {
+            return Ok(Node::StopIf(build_stop_if_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
         _ => {}
     }
 
@@ -922,6 +943,93 @@ fn build_prefixed_array_node(
         build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
 
     Ok(PrefixedArrayNode::new(countfield_node, inner_node))
+}
+
+/// 从 `StopIfDescriptor` 构建 `StopIfNode`（设计 §4.5 / §6.2.2）。
+///
+/// 编译路径（参照 ComputedDescriptor 的 "func" 模式）：
+///
+/// 1. 从 desc 读取 `condfunc` 属性。
+/// 2. 分类：
+///    - Python `True` / `False`（或 int 1/0）→ [`StopIfCondition::Always`] / [`StopIfCondition::Never`]。
+///    - 其他（FieldRef/ExprRef 等）→ 从 `expr_programs[field_index]["cond"]` 取
+///      ExprOp 列表 → [`StopIfCondition::Expr`]。
+///
+/// # 限制（设计 §6.2.2 P3.1）
+///
+/// StopIf 作为 Struct 直接字段时支持表达式（如 `rfield(StopIf(x == 0))`，
+/// `x` 是字段名引用），从 `expr_programs[field_index]["cond"]` 取。
+/// 但作为包装型描述符（Bitwise/Array/...）的 inner 子描述符时不支持
+/// （Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+fn build_stop_if_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<StopIfNode, ConstructError> {
+    let cond_obj = desc
+        .getattr("condfunc")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "StopIfDescriptor missing 'condfunc' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    // 1. 尝试常量分类：True → Always，False → Never。
+    //    Python 的 True/False 在 extract::<bool>() 时与 1/0 等价；这里严格区分
+    //    bool 与 int 表达式：先用 is_true/is_none 检查 PyLong，避免把表达式误判为常量。
+    //    实际上 Python 侧 IndexDescriptor/StopIfDescriptor 的 condfunc 是 bool 时
+    //    一定是常量；FieldRef/ExprRef 不是 bool/int。
+    if let Ok(b) = cond_obj.extract::<bool>() {
+        let cond = if b {
+            StopIfCondition::Always
+        } else {
+            StopIfCondition::Never
+        };
+        return Ok(StopIfNode::new(cond));
+    }
+
+    // 2. 表达式路径：从 expr_programs[field_index]["cond"] 取 ExprOp 列表。
+    //    与 ComputedDescriptor 的 "func" / ArrayDescriptor 的 "count" 同模式。
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "StopIf field has non-constant condfunc but no expression program was provided \
+                 (field index {})",
+                field_index
+            ),
+        })?;
+
+    let field_exprs_dict =
+        field_exprs
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "StopIf expression program must be a dict".to_string(),
+            })?;
+
+    let ops_list = field_exprs_dict
+        .get_item("cond")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get 'cond' from StopIf expression programs: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "StopIf field has non-constant condfunc but 'cond' key missing in expression \
+                 program (field index {})",
+                field_index
+            ),
+        })?;
+
+    let ops = parse_expr_ops_from_py(&ops_list)?;
+    let program = ExprProgram::new(ops);
+    Ok(StopIfNode::new(StopIfCondition::Expr(program)))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。

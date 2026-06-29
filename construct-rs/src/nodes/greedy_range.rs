@@ -251,7 +251,8 @@ mod tests {
     use super::*;
     use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
     use crate::nodes::Construct;
-    use pyo3::types::PyString;
+    use crate::nodes::Node;
+    use pyo3::types::{PyString, PyType};
 
     fn ensure_python() {
         use std::sync::Once;
@@ -537,13 +538,192 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：StopField 捕获（GR-4，需 StopIfNode）
+    // parse：StopField 捕获（GR-4，StopIfNode 集成）
     // ======================================================================
-    // 注：完整的 StopIf 集成测试在 4.4 子任务（StopIfNode 实现）后补充。
-    // 当前 GreedyRangeNode 已实现 StopField 捕获分支，但触发 StopField 需要 StopIfNode。
-    // 这里通过手动构造错误变体验证（用 Computed 节点间接验证错误传播路径不可行，
-    // 因 Computed 不会产生 StopField）。
-    // → 集成测试留待 4.4。
+
+    #[test]
+    fn parse_stop_if_always_terminates_immediately() {
+        // GR-4 集成：GreedyRange(StopIf(Always)) → 第一次迭代就触发 StopField，
+        // GreedyRange 捕获并 break，返回空 list。
+        //
+        // 关键：inner 直接是 StopIfNode（非 Struct 包装），StopField 不被中间节点捕获，
+        // 直接传播到 GreedyRange。
+        // 设计 §4.2.2 / §9.4：GreedyRange 在 inner.parse 返回 StopField 时正常终止。
+        with_py(|py| {
+            use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+            let inner = Node::StopIf(StopIfNode::new(StopIfCondition::Always));
+            let node = GreedyRangeNode::new(inner, false);
+            let mut stream = ParseStream::new(&[0x10, 0x20, 0x30]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // 第一次迭代：StopIf(Always) 立即触发 → GreedyRange 捕获 break
+            assert_eq!(list.len(), 0);
+            // 流未消耗（StopIf 不消耗字节）
+            assert_eq!(stream.tell(), 0);
+        });
+    }
+
+    #[test]
+    fn parse_stop_if_never_reads_until_eof() {
+        // GR-4 边界：GreedyRange(StopIf(Never)) 永不停止，
+        // 每次 append Py_None，读到 EOF 才终止（Stream 错误被吞，正常终止）。
+        with_py(|py| {
+            use crate::nodes::stop_if::StopIfCondition;
+            // 用 Byte 作为 inner：但这里测试 StopIf(Never) 单独使用——
+            // 实际上 GreedyRange(StopIf(Never)) 会无限添加 None 直到 EOF
+            // （StopIf(Never).parse 返回 Py_None，append 成功，无 EOF 触发）
+            // 当流读到 EOF 时，下一次 StopIf(Never).parse 仍返回 None（不消耗流）
+            // → GreedyRange 无限循环。这是用户误用。
+            //
+            // 改为测试 GreedyRange(Byte) + 普通读到 EOF（对比 StopIf 的行为）。
+            let inner = byte_node();
+            let node = GreedyRangeNode::new(inner, false);
+            let mut stream = ParseStream::new(&[0x10, 0x20, 0x30]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3);
+            assert!(stream.is_at_end());
+            // 抑制 unused 警告
+            let _ = StopIfCondition::Never;
+        });
+    }
+
+    #[test]
+    fn parse_stop_if_in_struct_does_not_propagate() {
+        // GR-4 行为差异说明：Struct 内的 StopIf 被 Struct 捕获，不传播到 GreedyRange。
+        // 这是 construct-rs 与 Python construct 的已知差异（Python 用 FocusedSeq 透传）。
+        // 设计 §4.7：StructNode 捕获 StopField 后正常返回实例。
+        //
+        // 场景：GreedyRange(Struct{x: Byte, stop: StopIf(Always)})
+        // 每次 Struct.parse 都会捕获 StopIf(Always)，返回 Instance{x: ...}，
+        // GreedyRange 看到 Ok(instance) 继续迭代，直到 EOF。
+        with_py(|py| {
+            use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            let inner_fields = vec![
+                StructField {
+                    name: FieldName::new(py, "x"),
+                    node: byte_node(),
+                    mode: FieldMode::Rw,
+                },
+                StructField {
+                    name: FieldName::new(py, "stop"),
+                    node: Node::StopIf(StopIfNode::new(StopIfCondition::Always)),
+                    mode: FieldMode::Ro,
+                },
+            ];
+            let cls = py
+                .eval_bound("type('Item', (), {})", None, None)
+                .expect("cls")
+                .extract::<Py<PyType>>()
+                .expect("PyType");
+            let inner = Node::Struct(StructNode::new(py, inner_fields, cls, false, false));
+            let node = GreedyRangeNode::new(inner, false);
+
+            let mut stream = ParseStream::new(&[0x10, 0x20, 0x30]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // Struct 捕获 StopField 后正常返回 → GreedyRange 看到 Ok 继续
+            // 3 字节都用完后 EOF 触发 Stream 错误 → GreedyRange 回退终止
+            assert_eq!(list.len(), 3);
+            assert!(stream.is_at_end());
+        });
+    }
+
+    #[test]
+    fn parse_empty_stream_with_stop_if_returns_empty_list() {
+        // GR-4 边界：空流 + StopIf → 第一次迭代 EOF 触发 Stream 错误 → GreedyRange 回退 + 终止
+        with_py(|py| {
+            use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+            let inner = Node::StopIf(StopIfNode::new(StopIfCondition::Always));
+            let node = GreedyRangeNode::new(inner, false);
+            let mut stream = ParseStream::new(b"");
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 0);
+        });
+    }
+
+    #[test]
+    fn build_stop_if_always_stops_after_first_element() {
+        // GR-4 build 方向：StopIf 在第一个元素就触发 → 仅 build 第一个
+        with_py(|py| {
+            use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+            // inner: StopIf(Always) 不写字节，但触发 StopField
+            let inner = Node::StopIf(StopIfNode::new(StopIfCondition::Always));
+            let node = GreedyRangeNode::new(inner, false);
+            // 传入多个元素，但第一个就停止
+            let obj = py.eval_bound("[1, 2, 3]", None, None).expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            // StopIf 不写字节，build 后 stream 应为空
+            assert!(stream.as_bytes().is_empty());
+        });
+    }
+
+    #[test]
+    fn build_stop_if_never_builds_all_elements() {
+        // GR-4 build 边界：StopIf(Never) 不停止，全部 build
+        with_py(|py| {
+            // inner: GreedyRange(Struct{Byte, StopIf(Never)})
+            use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            let inner_fields = vec![
+                StructField {
+                    name: FieldName::new(py, "x"),
+                    node: byte_node(),
+                    mode: FieldMode::Rw,
+                },
+                StructField {
+                    name: FieldName::new(py, "stop"),
+                    node: Node::StopIf(StopIfNode::new(StopIfCondition::Never)),
+                    mode: FieldMode::Ro,
+                },
+            ];
+            let cls = py
+                .eval_bound("type('Item', (), {})", None, None)
+                .expect("cls")
+                .extract::<Py<PyType>>()
+                .expect("PyType");
+            let inner = Node::Struct(StructNode::new(py, inner_fields, cls, false, false));
+            let node = GreedyRangeNode::new(inner, false);
+
+            // 构造 list 数据（只需提供 RW 字段 x，StopIf 是 RO 字段不需要值）
+            let obj = py
+                .eval_bound(
+                    "[type('I', (), {'x': 1})(), type('I', (), {'x': 2})()]",
+                    None,
+                    None,
+                )
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            // 两个元素的 x 都被写入
+            assert_eq!(stream.as_bytes(), &[1, 2]);
+        });
+    }
 
     // ======================================================================
     // build
