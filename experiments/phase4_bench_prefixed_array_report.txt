@@ -1,0 +1,79 @@
+﻿
+===================================================================================================================
+#     鍦烘櫙                                                N   bytes/call      Py ns/call      Rs ns/call       鍔犻€熸瘮      鏂瑰悜
+-------------------------------------------------------------------------------------------------------------------
+p1_i8_PrefixedArray(Byte, Int8ub) N=64                 64           65        17763 ns         1347 ns   13.19x   parse
+        鈹斺攢 build                                       64           65        17745 ns         1058 ns   16.77x   build
+p2_i8_PrefixedArray(Byte, Int8ub) N=255               255          256        62008 ns         4447 ns   13.94x   parse
+        鈹斺攢 build                                      255          256        61804 ns         2862 ns   21.59x   build
+p3_i8_PrefixedArray(Int16ub, Int8ub) N=1024          1024         1026       242386 ns        15195 ns   15.95x   parse
+        鈹斺攢 build                                     1024         1026       246910 ns        10113 ns   24.42x   build
+p4_i8_PrefixedArray(Int16ub, Int8ub) N=4096          4096         4098       969489 ns        55858 ns   17.36x   parse
+        鈹斺攢 build                                     4096         4098       983548 ns        39347 ns   25.00x   build
+p5_i32PrefixedArray(Int16ub, Int32ub) N=256           256         1026        71496 ns         5685 ns   12.58x   parse
+        鈹斺攢 build                                      256         1026        67481 ns         3027 ns   22.29x   build
+p6_bytPrefixedArray(Int16ub, Bytes(8)) N=128          128         1026        30520 ns         3044 ns   10.03x   parse
+        鈹斺攢 build                                      128         1026        34985 ns         2100 ns   16.66x   build
+p7_strPrefixedArray(Int16ub, Struct{2}) N=512         512         1026      1047.96 us        65977 ns   15.88x   parse
+        鈹斺攢 build                                      512         1026       953452 ns        24705 ns   38.59x   build
+p8_bytPrefixedArray(Byte, Struct{2}) N=100            100          201       202165 ns        13245 ns   15.26x   parse
+        鈹斺攢 build                                      100          201       191498 ns         5245 ns   36.51x   build
+-------------------------------------------------------------------------------------------------------------------
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 1锛氬姞閫熸瘮鎸夊満鏅帓搴忥紙鐢遍珮鍒颁綆锛?鈹€鈹€鈹€
+  PrefixedArray(Int16ub, Struct{2}) N=512 build            38.59x
+  PrefixedArray(Byte, Struct{2}) N=100 build               36.51x
+  PrefixedArray(Int16ub, Int8ub) N=4096 build              25.00x
+  PrefixedArray(Int16ub, Int8ub) N=1024 build              24.42x
+  PrefixedArray(Int16ub, Int32ub) N=256 build              22.29x
+  PrefixedArray(Byte, Int8ub) N=255 build                  21.59x
+  PrefixedArray(Int16ub, Int8ub) N=4096 parse              17.36x
+  PrefixedArray(Byte, Int8ub) N=64 build                   16.77x
+  PrefixedArray(Int16ub, Bytes(8)) N=128 build             16.66x
+  PrefixedArray(Int16ub, Int8ub) N=1024 parse              15.95x
+  PrefixedArray(Int16ub, Struct{2}) N=512 parse            15.88x
+  PrefixedArray(Byte, Struct{2}) N=100 parse               15.26x
+  PrefixedArray(Byte, Int8ub) N=255 parse                  13.94x
+  PrefixedArray(Byte, Int8ub) N=64 parse                   13.19x
+  PrefixedArray(Int16ub, Int32ub) N=256 parse              12.58x
+  PrefixedArray(Int16ub, Bytes(8)) N=128 parse             10.03x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 2锛歱arse/build 姣旂巼锛堝悓瀹炵幇鍐呴儴锛?鈹€鈹€鈹€
+  鍦烘櫙                                                N    py p/b    rs p/b        鏂瑰悜涓€鑷?
+  PrefixedArray(Byte, Int8ub) N=64                 64     1.00x     1.27x           Y
+  PrefixedArray(Byte, Int8ub) N=255               255     1.00x     1.55x           Y
+  PrefixedArray(Int16ub, Int8ub) N=1024          1024     0.98x     1.50x           N
+  PrefixedArray(Int16ub, Int8ub) N=4096          4096     0.99x     1.42x           N
+  PrefixedArray(Int16ub, Int32ub) N=256           256     1.06x     1.88x           Y
+  PrefixedArray(Int16ub, Bytes(8)) N=128          128     0.87x     1.45x           N
+  PrefixedArray(Int16ub, Struct{2}) N=512         512     1.10x     2.67x           Y
+  PrefixedArray(Byte, Struct{2}) N=100            100     1.06x     2.53x           Y
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 3锛欼nt16ub cf 瑙勬ā鎵╁睍锛坣s/鍏冪礌锛?鈹€鈹€鈹€
+        N    py parse ns/elem    rs parse ns/elem    py build ns/elem    rs build ns/elem
+  cf 绫诲瀷               N    py parse ns/elem    rs parse ns/elem    py build ns/elem    rs build ns/elem
+  Byte cf            64             277.55              21.05             277.27              16.53
+  Byte cf           255             243.17              17.44             242.37              11.22
+  Int16ub cf       1024             236.71              14.84             241.12               9.88
+  Int16ub cf       4096             236.69              13.64             240.12               9.61
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 4锛氱瓑瀛楄妭閲忕骇锛垀1KB锛夊厓绱犵被鍨嬪姣旓紙Int16ub cf锛?鈹€鈹€鈹€
+  鍏冪礌绫诲瀷                     N elems       parse 鍔犻€熸瘮       build 鍔犻€熸瘮
+  Int8ub (1B)                 1024          15.95x          24.42x
+  Int32ub (4B)                 256          12.58x          22.29x
+  Bytes(8) (8B)                128          10.03x          16.66x
+  Struct{2} (2B)               512          15.88x          38.59x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 5锛歝ountfield 绫诲瀷瀵规瘮锛圔yte vs Int16ub锛?鈹€鈹€鈹€
+  countfield    鍏冪礌               N elems       parse 鍔犻€熸瘮       build 鍔犻€熸瘮
+  Byte (1B)     Int8ub                64          13.19x          16.77x
+  Byte (1B)     Int8ub               255          13.94x          21.59x
+  Int16ub (2B)  Int8ub              1024          15.95x          24.42x
+  Int16ub (2B)  Int8ub              4096          17.36x          25.00x
+
+鈹€鈹€鈹€ 寮傚父椤规娴?鈹€鈹€鈹€
+  [PASS] 鍏ㄩ儴鍦烘櫙 >= 4x
+
+鈹€鈹€鈹€ S-PERF 鍑哄彛鏍囧噯 (鈮?0.0x) 鈹€鈹€鈹€
+  [PASS] 鍏ㄩ儴 16 涓満鏅?>= 10.0x
+===================================================================================================================
