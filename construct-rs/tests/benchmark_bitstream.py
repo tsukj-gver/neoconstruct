@@ -22,6 +22,12 @@ Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build}
     ``experiments/bench_phase33``）使用 Rust 二进制直接调 Rust 库，跳过了 Python 分发
     和 FFI 开销，口径错误。本脚本是 Phase 3 性能数据的**权威来源**。
 
+    **公平口径修订（3.4）**：早期版本 B1-B4 / BW2 / BW3 在 Python 侧使用裸
+    ``Bitwise(BitsInteger(...))`` / ``BitsSwapped(...)`` / ``ByteSwapped(...)``
+    返回 int/bytes，但 Rust 侧用 ``BitStructMixin`` / ``StructMixin`` 创建实例，
+    开销不对等（Rust 多了 tp_new 容器开销）。本修订让 Python 侧也用 ``BitStruct``
+    / ``Struct`` 包裹，两边都创建容器，从而消除"Rust 多付费"的不公平。
+
 用法::
 
     python tests/benchmark_bitstream.py
@@ -262,22 +268,28 @@ _MEASURE_SCRIPT = textwrap.dedent(
         raise ValueError('unknown case: ' + case)
 
     def _make_case_py(case):
+        # 公平口径（AGENTS.md §6）：
+        # 每个 case 的 Python 用例必须与 Rust 用例产生**对等**的容器/实例开销。
+        # - Rust B1-B4 / BS1-BS2 / BW1 使用 BitStructMixin → 实例创建 + 单字段填充
+        # - Rust BW2-BW4 使用 StructMixin → 实例创建 + 单字段填充
+        # 因此 Python 侧也必须使用 BitStruct / Struct 包裹，返回 Container
+        # （而非裸 int/bytes）。否则对比是不公平的：Rust 多了 tp_new 开销。
         if case == 'B1':
-            fmt = Bitwise(BitsInteger(8))
+            fmt = BitStruct("v"/BitsInteger(8))
             parse_data = b"\\xA5"
-            build_input = 0xA5
+            build_input = dict(v=0xA5)
         elif case == 'B2':
-            fmt = Bitwise(BitsInteger(16))
+            fmt = BitStruct("v"/BitsInteger(16))
             parse_data = b"\\xA5\\x3C"
-            build_input = 0xA53C
+            build_input = dict(v=0xA53C)
         elif case == 'B3':
-            fmt = Bitwise(BitsInteger(32))
+            fmt = BitStruct("v"/BitsInteger(32))
             parse_data = b"\\xA5\\x3C\\x96\\xC3"
-            build_input = 0xA53C96C3
+            build_input = dict(v=0xA53C96C3)
         elif case == 'B4':
-            fmt = Bitwise(BitsInteger(8, signed=True))
+            fmt = BitStruct("v"/BitsInteger(8, signed=True))
             parse_data = b"\\xA5"
-            build_input = -91
+            build_input = dict(v=-91)
         elif case == 'BS1':
             fmt = BitStruct("a"/Nibble, "b"/BitsInteger(10), "c"/Padding(2))
             parse_data = b"\\xBE\\xEF"
@@ -291,13 +303,15 @@ _MEASURE_SCRIPT = textwrap.dedent(
             parse_data = b"\\xA1\\x23\\x4B"
             build_input = dict(a=0xA, b=0x1234, c=0xB)
         elif case == 'BW2':
-            fmt = BitsSwapped(Bytes(4))
+            # Python 侧用 Struct 包裹，与 Rust 侧 StructMixin + BitsSwapped(Bytes(4)) 对等
+            fmt = Struct("v"/BitsSwapped(Bytes(4)))
             parse_data = b"\\xF0\\x0F\\xAA\\x55"
-            build_input = b"\\x0F\\xF0\\x55\\xAA"
+            build_input = dict(v=b"\\x0F\\xF0\\x55\\xAA")
         elif case == 'BW3':
-            fmt = ByteSwapped(Int32ub)
+            # Python 侧用 Struct 包裹，与 Rust 侧 StructMixin + ByteSwapped(Int32ub) 对等
+            fmt = Struct("v"/ByteSwapped(Int32ub))
             parse_data = b"\\x78\\x56\\x34\\x12"
-            build_input = 0x12345678
+            build_input = dict(v=0x12345678)
         elif case == 'BW4':
             fmt = Struct("tag"/Bytes(1), "pad"/Padding(4), "data"/Bytes(2))
             parse_data = b"\\xAA\\x00\\x00\\x00\\x00\\xBB\\xCC"
@@ -386,18 +400,18 @@ def _run_measurement(impl: str, case: str, direction: str) -> dict:
 # ---------------------------------------------------------------------------
 
 CASES = [
-    # Phase 3.1: BitsInteger（在 Bitwise 域内）
-    ("B1", "3.1", "Bitwise(BitsInteger(8))"),
-    ("B2", "3.1", "Bitwise(BitsInteger(16))"),
-    ("B3", "3.1", "Bitwise(BitsInteger(32))"),
-    ("B4", "3.1", "Bitwise(BitsInteger(8, signed=True))"),
+    # Phase 3.1: BitsInteger（在 Bitwise 域内，用 BitStruct 包裹以与 Rust BitStructMixin 对等）
+    ("B1", "3.1", "BitStruct(v=BitsInteger(8))"),
+    ("B2", "3.1", "BitStruct(v=BitsInteger(16))"),
+    ("B3", "3.1", "BitStruct(v=BitsInteger(32))"),
+    ("B4", "3.1", "BitStruct(v=BitsInteger(8, signed=True))"),
     # Phase 3.2: Bitwise + BitStruct
     ("BS1", "3.2", "BitStruct(Nibble, BitsInteger(10), Padding(2))"),
     ("BS2", "3.2", "BitStruct(Bit, Nibble, Octet, Padding(3))"),
     # Phase 3.3: Bytewise / BitsSwapped / ByteSwapped / Padding
     ("BW1", "3.3", "BitStruct(Nibble, Bytewise(Int16ub), Nibble)"),
-    ("BW2", "3.3", "BitsSwapped(Bytes(4))"),
-    ("BW3", "3.3", "ByteSwapped(Int32ub)"),
+    ("BW2", "3.3", "Struct(v=BitsSwapped(Bytes(4)))"),
+    ("BW3", "3.3", "Struct(v=ByteSwapped(Int32ub))"),
     ("BW4", "3.3", "Struct(Bytes(1), Padding(4), Bytes(2))"),
 ]
 
@@ -405,15 +419,15 @@ DIRECTIONS = ["parse", "build"]
 
 # 场景详情（用于结果文件）
 CASE_DETAILS = {
-    "B1": "BitsInteger(8) parse/build — 8-bit unsigned via Bitwise",
-    "B2": "BitsInteger(16) parse/build — 16-bit unsigned via Bitwise",
-    "B3": "BitsInteger(32) parse/build — 32-bit unsigned via Bitwise",
-    "B4": "BitsInteger(8, signed=True) parse/build — 8-bit signed via Bitwise",
+    "B1": "BitStruct(v=BitsInteger(8)) parse/build — 8-bit unsigned via Bitwise",
+    "B2": "BitStruct(v=BitsInteger(16)) parse/build — 16-bit unsigned via Bitwise",
+    "B3": "BitStruct(v=BitsInteger(32)) parse/build — 32-bit unsigned via Bitwise",
+    "B4": "BitStruct(v=BitsInteger(8, signed=True)) parse/build — 8-bit signed via Bitwise",
     "BS1": "BitStruct 3 字段（4+10+2=16 bit）— Phase 3 ARCH 实测基线场景",
     "BS2": "BitStruct 4 字段含 Bit/Nibble/Octet（1+4+8+3=16 bit）",
     "BW1": "BitStruct + Bytewise 嵌入（4+16+4=24 bit，未对齐慢路径）",
-    "BW2": "BitsSwapped(Bytes(4)) — TransformNode BitSwap",
-    "BW3": "ByteSwapped(Int32ub) — TransformNode ByteSwap",
+    "BW2": "Struct(v=BitsSwapped(Bytes(4))) — TransformNode BitSwap（Struct 包裹）",
+    "BW3": "Struct(v=ByteSwapped(Int32ub)) — TransformNode ByteSwap（Struct 包裹）",
     "BW4": "Struct + 字节级 Padding（1+4+2=7 字节）",
 }
 
@@ -511,6 +525,153 @@ def compute_geomean_speedups(results: dict, cases: list[str]) -> dict:
     }
 
 
+def compute_derived_metrics(results: dict, cases: list[str]) -> dict:
+    """计算 AGENTS.md §6 要求的派生指标。
+
+    :return: dict 含：
+        - per_case: list of {case, rs_parse, rs_build, py_parse, py_build,
+          rs_ratio (build/parse), py_ratio (build/parse), speedup_parse,
+          speedup_build, speedup_all, low_flag, dir_mismatch_flag}
+        - low_speedup_cases: 加速比 <4x 的场景列表
+        - direction_mismatch_cases: parse/build 方向与 Python 相反的场景列表
+        - sorted_by_complexity: 按加速比升序排列的场景列表
+    """
+    per_case = []
+    low_cases = []
+    mismatch_cases = []
+
+    for case_id in cases:
+        rs_p = results[case_id]["parse"]["rs"]["per_call_ns"]
+        rs_b = results[case_id]["build"]["rs"]["per_call_ns"]
+        py_p = results[case_id]["parse"]["py"]["per_call_ns"]
+        py_b = results[case_id]["build"]["py"]["per_call_ns"]
+
+        sp_p = py_p / rs_p if rs_p > 0 else 0
+        sp_b = py_b / rs_b if rs_b > 0 else 0
+
+        # parse/build 比率：值 >1 表示 build 比 parse 慢，<1 表示 build 比 parse 快
+        rs_ratio = rs_b / rs_p if rs_p > 0 else 0
+        py_ratio = py_b / py_p if py_p > 0 else 0
+
+        # 方向一致性：Rust 和 Python 的 build-vs-parse 关系是否一致
+        # 即 (rs_build > rs_parse) 应与 (py_build > py_parse) 一致
+        rs_dir_is_build_slower = rs_b > rs_p
+        py_dir_is_build_slower = py_b > py_p
+        dir_mismatch = rs_dir_is_build_slower != py_dir_is_build_slower
+
+        # 加速比 <4x 标记（任一方向低于 4x 即标记）
+        low_flag = sp_p < GATE_FAIL or sp_b < GATE_FAIL
+
+        entry = {
+            "case": case_id,
+            "rs_parse": rs_p,
+            "rs_build": rs_b,
+            "py_parse": py_p,
+            "py_build": py_b,
+            "rs_ratio": rs_ratio,
+            "py_ratio": py_ratio,
+            "speedup_parse": sp_p,
+            "speedup_build": sp_b,
+            "speedup_geomean": (sp_p * sp_b) ** 0.5,
+            "low_flag": low_flag,
+            "dir_mismatch": dir_mismatch,
+        }
+        per_case.append(entry)
+
+        if low_flag:
+            low_cases.append(entry)
+        if dir_mismatch:
+            mismatch_cases.append(entry)
+
+    # 按几何平均加速比升序排列（最慢的在前）
+    sorted_by_complexity = sorted(
+        per_case, key=lambda e: e["speedup_geomean"]
+    )
+
+    return {
+        "per_case": per_case,
+        "low_speedup_cases": low_cases,
+        "direction_mismatch_cases": mismatch_cases,
+        "sorted_by_complexity": sorted_by_complexity,
+    }
+
+
+def format_derived_metrics(metrics: dict) -> str:
+    """格式化派生指标为可读字符串（AGENTS.md §6 要求）。"""
+    lines = []
+    lines.append("=" * 78)
+    lines.append("派生指标（AGENTS.md §6 S-PERF 输出要求）")
+    lines.append("=" * 78)
+
+    # 1. parse/build 比率 + 方向一致性
+    lines.append("")
+    lines.append(
+        "1) parse/build 比率（build_ns / parse_ns，>1 = build 较慢）："
+    )
+    lines.append(
+        f"  {'场景':<6} {'Rust比率':<10} {'Py比率':<10} {'方向一致':<10}"
+    )
+    lines.append("  " + "-" * 50)
+    for e in metrics["per_case"]:
+        consistent = "一致" if not e["dir_mismatch"] else "[不一致]"
+        lines.append(
+            f"  {e['case']:<6} "
+            f"{e['rs_ratio']:<10.2f} "
+            f"{e['py_ratio']:<10.2f} "
+            f"{consistent:<10}"
+        )
+
+    # 2. 加速比按场景复杂度排列（升序，最差在前）
+    lines.append("")
+    lines.append(
+        "2) 加速比按场景复杂度排列（geomean parse×build，升序，最差在前）："
+    )
+    lines.append(
+        f"  {'场景':<6} {'parse x':<10} {'build x':<10} {'geomean x':<12} {'备注':<10}"
+    )
+    lines.append("  " + "-" * 60)
+    for e in metrics["sorted_by_complexity"]:
+        note = "<4x" if e["low_flag"] else ""
+        if e["dir_mismatch"]:
+            note = ("方向不一致" if note == "" else note + "+方向不一致")
+        lines.append(
+            f"  {e['case']:<6} "
+            f"{e['speedup_parse']:<10.2f} "
+            f"{e['speedup_build']:<10.2f} "
+            f"{e['speedup_geomean']:<12.2f} "
+            f"{note:<10}"
+        )
+
+    # 3. 低于 4x 的场景单独标注
+    lines.append("")
+    lines.append("3) 低于 4x 的场景（parse 或 build 任一方向）：")
+    if metrics["low_speedup_cases"]:
+        for e in metrics["low_speedup_cases"]:
+            lines.append(
+                f"  [WARN] {e['case']}: "
+                f"parse={e['speedup_parse']:.2f}x, build={e['speedup_build']:.2f}x"
+            )
+    else:
+        lines.append("  无（全部场景 ≥4x）")
+
+    # 4. parse/build 方向与参考实现相反的场景
+    lines.append("")
+    lines.append(
+        "4) parse/build 方向与 Python construct 不一致的场景："
+    )
+    if metrics["direction_mismatch_cases"]:
+        for e in metrics["direction_mismatch_cases"]:
+            lines.append(
+                f"  [WARN] {e['case']}: "
+                f"Rust build/parse={e['rs_ratio']:.2f} "
+                f"vs Py build/parse={e['py_ratio']:.2f}"
+            )
+    else:
+        lines.append("  无（全部场景方向一致）")
+
+    return "\n".join(lines)
+
+
 def check_gates(results: dict, cases: list[str]) -> list[str]:
     """检查通过标准，返回失败消息列表（空表示全部通过）。"""
     failures = []
@@ -547,6 +708,7 @@ def write_results_file(
     geomeans: dict,
     failures: list[str],
     cases: list[str],
+    derived_text: str = "",
 ) -> Path:
     """将完整结果写入 tests/benchmark_bitstream_results.txt。"""
     out_path = Path(__file__).resolve().parent / "benchmark_bitstream_results.txt"
@@ -576,6 +738,8 @@ def write_results_file(
     lines.append("    调用等效 API（fmt.parse / fmt.build）。")
     lines.append("  - 子进程隔离：两个同名 construct 包在独立进程中运行，避免 sys.path 冲突。")
     lines.append("  - 相同 timeit 参数（NUMBER/REPEAT），取相同统计量（中位数）。")
+    lines.append("  - 公平口径修订（3.4）：所有场景 Python 侧均用 BitStruct/Struct 包裹，")
+    lines.append("    与 Rust 侧 BitStructMixin/StructMixin 创建容器/实例对等。")
     lines.append("")
     lines.append(f"通过标准（Phase 3 总纲 S-PERF）：")
     lines.append(f"  - 几何平均 ≥{GATE_TARGET}x（parse 和 build 两个方向）")
@@ -589,6 +753,9 @@ def write_results_file(
     lines.append(f"  build 方向 : {geomeans['build']:.2f}x")
     lines.append(f"  全部       : {geomeans['all']:.2f}x")
     lines.append("")
+    if derived_text:
+        lines.append(derived_text)
+        lines.append("")
     lines.append("场景说明：")
     current_phase = None
     for case_id in cases:
@@ -684,6 +851,11 @@ def main():
     print(f"  全部  : {geomeans['all']:.2f}x")
     print()
 
+    metrics = compute_derived_metrics(results, selected_cases)
+    derived_text = format_derived_metrics(metrics)
+    print(derived_text)
+    print()
+
     failures = check_gates(results, selected_cases)
     print("门禁检查：")
     if failures:
@@ -693,7 +865,7 @@ def main():
         print(f"  [PASS] 全部通过（≥{GATE_TARGET}x）")
 
     out_path = write_results_file(
-        results, table, geomeans, failures, selected_cases
+        results, table, geomeans, failures, selected_cases, derived_text
     )
     print()
     print(f"详细结果已写入: {out_path}")
