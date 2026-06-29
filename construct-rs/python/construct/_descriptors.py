@@ -544,6 +544,81 @@ def Array(count, subcon, discard=False):
     return ArrayDescriptor(count, subcon, discard)
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 子任务 4.2: GreedyRange 描述符
+#
+# 设计依据：``docs/模块设计-Array.md`` §4.2 / §6.3。
+#
+# ``GreedyRange(subcon, discard=False)`` 是读到流结束的数组描述符，对应 Python
+# construct 的 ``GreedyRange``。construct-rs 通过 type name "GreedyRangeDescriptor"
+# 识别，构建 ``Node::GreedyRange(GreedyRangeNode)``。
+#
+# parse 终止条件：
+# - 子构造器返回错误（EOF、字节不足等）：seek 回 fallback + 正常终止
+# - StopField（StopIf 触发）：seek 回 fallback + 正常终止
+# ---------------------------------------------------------------------------
+
+
+class GreedyRangeDescriptor:
+    """``GreedyRange(subcon, discard=False)`` 描述符。
+
+    读到流结束的数组：解析零或多个 ``subcon`` 元素到 Python list，
+    直到流末尾或子构造器解析失败。对应 Python construct 的 ``GreedyRange``。
+
+    ``_expr_params`` 协议返回空 dict：GreedyRange 无表达式参数（无 count，
+    subcon 由递归处理）。
+
+    :param subcon: 元素子构造器（描述符）。
+    :param discard: 若为 True，解析时仍消耗流但不收集结果（返回空 list）。
+    """
+
+    __slots__ = ("subcon", "discard")
+
+    def __init__(self, subcon, discard=False):
+        """初始化 GreedyRange 描述符。
+
+        :param subcon: 元素子构造器。
+        :param discard: 是否丢弃解析结果。
+        """
+        self.subcon = subcon
+        self.discard = discard
+
+    # 类级别常量：GreedyRange 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "GreedyRange(subcon={!r}, discard={!r})".format(self.subcon, self.discard)
+
+
+def GreedyRange(subcon, discard=False):
+    """创建一个 GreedyRange 描述符。
+
+    读到流结束的数组。对应 Python construct 的 ``GreedyRange``。
+
+    使用方式::
+
+        @dataclass
+        class Packet(StructMixin):
+            magic: int = field(Int8ub)
+            payload: list = field(GreedyRange(Int8ub))  # 读到 EOF
+
+    parse 行为：
+    - 子构造器解析失败（如 EOF、字节不足）：seek 回最后一次成功位置，正常终止
+    - StopIf 触发（StopField 哨兵）：正常终止
+
+    限制（Phase 4）：
+    - sizeof 永远返回 ``SizeofError``（元素数量运行时未知）
+    - 嵌套 ``GreedyRange(GreedyRange(...))`` 在 EOF 时会无限循环（与 Python
+      construct 行为一致），属用户误用。请改用 ``GreedyRange(Array(N, ...))``
+      或 ``Array(N, GreedyRange(...))``。
+
+    :param subcon: 元素子构造器。
+    :param discard: 若为 True，解析返回空 list 但仍消耗流。
+    :return: ``GreedyRangeDescriptor`` 实例。
+    """
+    return GreedyRangeDescriptor(subcon, discard)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -584,7 +659,9 @@ __all__ = [
     "BitsSwapped",
     "ByteSwappedDescriptor",
     "ByteSwapped",
-    # Phase 4 Array
+    # Phase 4 Array / GreedyRange
     "ArrayDescriptor",
     "Array",
+    "GreedyRangeDescriptor",
+    "GreedyRange",
 ]

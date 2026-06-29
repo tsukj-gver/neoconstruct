@@ -35,6 +35,7 @@ pub mod bytewise;
 pub mod computed;
 pub mod format_field;
 pub mod greedy_bytes;
+pub mod greedy_range;
 pub mod padding;
 pub mod struct_node;
 pub mod struct_ref;
@@ -55,6 +56,7 @@ use computed::ComputedNode;
 use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
+use greedy_range::GreedyRangeNode;
 use padding::PaddingNode;
 use pyo3::prelude::*;
 use struct_node::StructNode;
@@ -192,6 +194,9 @@ pub enum Node {
     /// 固定次数数组节点（对应 Python construct `Array(count, subcon, discard)`）。
     /// Phase 4 新增。inner 用 `Box<Node>`，count 可为常量或 ExprProgram。
     Array(ArrayNode),
+    /// 读到流结束的数组节点（对应 Python construct `GreedyRange(subcon, discard)`）。
+    /// Phase 4 新增。inner 用 `Box<Node>`，parse 直到流末尾或子构造器失败。
+    GreedyRange(GreedyRangeNode),
 }
 
 impl Node {
@@ -211,6 +216,7 @@ impl Node {
             Node::Bytewise(b) => b.inner().has_expressions(),
             Node::Transform(t) => t.inner().has_expressions(),
             Node::Array(a) => a.has_expressions(),
+            Node::GreedyRange(g) => g.has_expressions(),
             _ => false,
         }
     }

@@ -44,6 +44,7 @@ use crate::nodes::bytewise::BytewiseNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
+use crate::nodes::greedy_range::GreedyRangeNode;
 use crate::nodes::padding::PaddingNode;
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
@@ -487,6 +488,18 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
+        // GreedyRangeDescriptor（Phase 4）→ GreedyRangeNode。
+        // 对应 Python `GreedyRange(subcon, discard)`。无 count（读到流结束），
+        // 无表达式参数（GreedyRangeDescriptor._expr_params = {}）。
+        // 设计依据：`docs/模块设计-Array.md` §6.2.3。
+        "GreedyRangeDescriptor" => {
+            return Ok(Node::GreedyRange(build_greedy_range_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
         _ => {}
     }
 
@@ -803,6 +816,46 @@ fn build_array_node(
         .unwrap_or(false);
 
     Ok(ArrayNode::new(inner_node, count, discard))
+}
+
+/// 从 `GreedyRangeDescriptor` 构建 `GreedyRangeNode`（设计 §6.2.3 / §4.2）。
+///
+/// 编译路径：
+///
+/// 1. 从 desc 读取 subcon / discard。
+/// 2. 递归编译 subcon（沿用同一个 field_index 和 expr_programs 切片，
+///    与 BitwiseDescriptor / BytewiseDescriptor / ArrayDescriptor 同模式）。
+/// 3. 提取 discard 标志（默认 false）。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// inner subcon 不支持含表达式的子描述符（如 `GreedyRange(Bytes(this.m))`）。
+/// Python 侧 `_extract_and_compile_exprs` 不递归 inner subcon。
+fn build_greedy_range_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<GreedyRangeNode, ConstructError> {
+    // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "GreedyRangeDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+
+    // 2. discard 标志（默认 false）。
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
+
+    Ok(GreedyRangeNode::new(inner_node, discard))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
@@ -3951,6 +4004,268 @@ class {name}:
                 .unwrap()
                 .as_bytes();
             assert_eq!(v, &[0x0F, 0xF0]);
+        });
+    }
+
+    // ======================================================================
+    // Phase 4 子任务 4.2：GreedyRangeDescriptor 识别与编译
+    // ======================================================================
+
+    /// 创建一个 GreedyRangeDescriptor Python 实例（模拟 Python 侧 `GreedyRange(subcon, discard)`）。
+    fn make_greedy_range_descriptor(py: Python<'_>, subcon: Py<PyAny>, discard: bool) -> Py<PyAny> {
+        let globals = PyDict::new_bound(py);
+        let code = concat!(
+            "class GreedyRangeDescriptor:\n",
+            "    __slots__ = ('subcon', 'discard')\n",
+            "    def __init__(self, subcon, discard):\n",
+            "        self.subcon = subcon\n",
+            "        self.discard = discard\n",
+            "    _expr_params = {}\n",
+            "    def __repr__(self):\n",
+            "        return 'GreedyRange(subcon={!r}, discard={!r})'.format(self.subcon, self.discard)\n",
+        );
+        py.run_bound(code, Some(&globals), None)
+            .expect("define GreedyRangeDescriptor");
+        let cls = globals
+            .get_item("GreedyRangeDescriptor")
+            .expect("get ok")
+            .expect("exists");
+        cls.call((subcon, discard), None)
+            .expect("instantiate")
+            .unbind()
+    }
+
+    /// 创建一个 Int8ub 内层描述符（用于 GreedyRange 测试）。
+    fn make_int8ub_descriptor(py: Python<'_>) -> Py<PyAny> {
+        Py::new(
+            py,
+            FormatFieldDescriptor::new("Int8ub", PythonFormat::UnsignedInt8Big),
+        )
+        .expect("Py::new")
+        .into_any()
+    }
+
+    /// 创建一个 Int16ub 内层描述符（用于 GreedyRange 部分回退测试）。
+    fn make_int16ub_descriptor(py: Python<'_>) -> Py<PyAny> {
+        Py::new(
+            py,
+            FormatFieldDescriptor::new("Int16ub", PythonFormat::UnsignedInt16Big),
+        )
+        .expect("Py::new")
+        .into_any()
+    }
+
+    #[test]
+    fn compile_greedy_range_descriptor_produces_greedy_range_node() {
+        // GreedyRange(Int8ub) → Node::GreedyRange(GreedyRangeNode { inner: FormatField })
+        with_py(|py| {
+            let cls = make_dummy_class(py, "GreedyRangeTest");
+            let inner = make_int8ub_descriptor(py);
+            let desc = make_greedy_range_descriptor(py, inner, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["items".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => {
+                    assert_eq!(s.len(), 1);
+                    match &s.fields()[0].node {
+                        Node::GreedyRange(g) => {
+                            assert!(!g.discard());
+                            // inner 应是 FormatField
+                            match g.inner() {
+                                Node::FormatField(_) => {}
+                                other => {
+                                    panic!(
+                                        "expected FormatField inside GreedyRange, got {:?}",
+                                        other
+                                    )
+                                }
+                            }
+                        }
+                        other => panic!("expected GreedyRange, got {:?}", other),
+                    }
+                }
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_greedy_range_descriptor_with_discard_flag() {
+        // GreedyRange(Int8ub, discard=True) → discard 标志传递正确
+        with_py(|py| {
+            let cls = make_dummy_class(py, "GreedyRangeDiscard");
+            let inner = make_int8ub_descriptor(py);
+            let desc = make_greedy_range_descriptor(py, inner, true).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["items".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            match schema.root() {
+                Node::Struct(s) => match &s.fields()[0].node {
+                    Node::GreedyRange(g) => assert!(g.discard(), "discard should be true"),
+                    other => panic!("expected GreedyRange, got {:?}", other),
+                },
+                other => panic!("expected Struct, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn compile_greedy_range_descriptor_missing_subcon_returns_error() {
+        // GreedyRangeDescriptor 无 subcon 属性 → Compilation error
+        with_py(|py| {
+            let cls = make_dummy_class(py, "BadGreedyRange");
+            // 创建一个空的 GreedyRangeDescriptor（无 subcon 属性）
+            let desc = py
+                .eval_bound(
+                    "type('GreedyRangeDescriptor', (), {'_expr_params': {}})()",
+                    None,
+                    None,
+                )
+                .expect("create empty GreedyRangeDescriptor")
+                .unbind();
+
+            let err = compile_schema(
+                py,
+                &cls,
+                vec!["v".to_string()],
+                vec![desc.into_any()],
+                None,
+                None,
+                false,
+            )
+            .expect_err("should fail");
+            let msg = err.to_string();
+            assert!(
+                msg.contains("subcon") || msg.contains("GreedyRangeDescriptor"),
+                "message should mention subcon: {}",
+                msg
+            );
+        });
+    }
+
+    #[test]
+    fn compile_greedy_range_end_to_end_round_trip() {
+        // 端到端：GreedyRange(Int8ub) parse + build 往返
+        // Struct { items: GreedyRange(Int8ub) }
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "GreedyRangeE2E");
+            let inner = make_int8ub_descriptor(py);
+            let desc = make_greedy_range_descriptor(py, inner, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["items".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // parse 5 字节 → items = [1, 2, 3, 4, 5]
+            let parse_data = &[0x01, 0x02, 0x03, 0x04, 0x05];
+            let data = pyo3::types::PyBytes::new_bound(py, parse_data);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let items_binding = parsed.getattr("items").unwrap();
+            let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
+            assert_eq!(items.len(), 5);
+            let v: i64 = items.get_item(0).unwrap().extract().unwrap();
+            assert_eq!(v, 1);
+            let v: i64 = items.get_item(4).unwrap().extract().unwrap();
+            assert_eq!(v, 5);
+
+            // build back
+            let kwargs = pyo3::types::PyDict::new_bound(py);
+            kwargs
+                .set_item("items", pyo3::types::PyList::new_bound(py, [1, 2, 3, 4, 5]))
+                .unwrap();
+            let obj = cls.call((), Some(&kwargs)).expect("obj");
+            let built = schema._build_raw(py, &obj).expect("build");
+            assert_eq!(built.as_bytes(), parse_data);
+        });
+    }
+
+    #[test]
+    fn compile_greedy_range_end_to_end_partial_fallback() {
+        // 端到端：GreedyRange(Int16ub) 解析 5 字节 → 前 2 个元素（4 字节），第 5 字节回退
+        // 验证 GR-3 边界：第 N 个元素失败回退
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "GreedyRangeFallback");
+            let inner = make_int16ub_descriptor(py);
+            let desc = make_greedy_range_descriptor(py, inner, false).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["items".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            // 5 字节：0x0102, 0x0304, 0x05（残留）
+            let parse_data = &[0x01, 0x02, 0x03, 0x04, 0x05];
+            let data = pyo3::types::PyBytes::new_bound(py, parse_data);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let items_binding = parsed.getattr("items").unwrap();
+            let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
+            // 应得到 2 个元素（前 4 字节），第 5 字节回退
+            assert_eq!(items.len(), 2);
+            let v0: i64 = items.get_item(0).unwrap().extract().unwrap();
+            let v1: i64 = items.get_item(1).unwrap().extract().unwrap();
+            assert_eq!(v0, 0x0102);
+            assert_eq!(v1, 0x0304);
+        });
+    }
+
+    #[test]
+    fn compile_greedy_range_end_to_end_discard_returns_empty_list() {
+        // 端到端：GreedyRange(Int8ub, discard=True) 解析 5 字节 → 空 list 但消耗所有字节
+        with_py(|py| {
+            let cls = make_structmixin_class_with_init(py, "GreedyRangeDiscardE2E");
+            let inner = make_int8ub_descriptor(py);
+            let desc = make_greedy_range_descriptor(py, inner, true).into_any();
+
+            let schema = compile_schema(
+                py,
+                &cls,
+                vec!["items".to_string()],
+                vec![desc],
+                None,
+                None,
+                false,
+            )
+            .expect("compile");
+
+            let parse_data = &[0x01, 0x02, 0x03];
+            let data = pyo3::types::PyBytes::new_bound(py, parse_data);
+            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let items_binding = parsed.getattr("items").unwrap();
+            let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
+            // discard=True：返回空 list
+            assert_eq!(items.len(), 0);
         });
     }
 }

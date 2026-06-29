@@ -95,9 +95,11 @@ try:
         BitsSwappedDescriptor,
         ByteSwapped,
         ByteSwappedDescriptor,
-        # Phase 4: Array
+        # Phase 4: Array / GreedyRange
         Array,
         ArrayDescriptor,
+        GreedyRange,
+        GreedyRangeDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -160,9 +162,11 @@ __all__ = [
     "BitsSwappedDescriptor",
     "ByteSwapped",
     "ByteSwappedDescriptor",
-    # Phase 4: Array
+    # Phase 4: Array / GreedyRange
     "Array",
     "ArrayDescriptor",
+    "GreedyRange",
+    "GreedyRangeDescriptor",
     # 编译产物
     "CompiledSchema",
     # 异常
