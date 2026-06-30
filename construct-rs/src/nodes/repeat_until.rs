@@ -169,21 +169,29 @@ impl RepeatUntilNode {
 
     /// has_expressions 判断（设计 §6.1.1）。
     ///
-    /// Expr 谓词路径返回 true（防御性）：确保父 Struct 走 has_expressions=true
-    /// 路径，使 ctx 在进入 RepeatUntil 时已初始化 expr_values_buf。
+    /// **始终返回 true**（v4 V-1 修正）。
     ///
-    /// **当前 GetElem 不读 expr_values_buf**（V-5 修正：原注释误述"避免 GetElem
-    /// 之外的指令意外命中空 buf"，但 GetElem 走 [`Context::current_elem_ptr`]，
-    /// 不读 expr_values_buf；[`eval_expr_int`] 也仅在 GetInt 指令下读 buf）。
-    /// 此处的 true 是**防御性编码**：
-    /// - 若未来 ExprProgram 扩展引入 GetInt（如谓词 `x > field_name`），
-    ///   父 Struct 必须已初始化 buf，否则 GetInt 在空 buf 上返回 ExprFieldMissing。
-    /// - 保留 true 避免未来扩展时遗漏 init。开销 ~5-10ns（仅一次 Vec::with_capacity）。
+    /// # 理由
     ///
-    /// PyCallable 谓词路径递归 inner：谓词本身在 Python 中求值，不依赖 expr_values_buf，
-    /// 但 inner 子树可能含表达式（如 `RepeatUntil(Byte, Bytes(m))` 的 Bytes(m)）。
+    /// RepeatUntil 无论走 Expr 还是 PyCallable 谓词路径，都依赖外层 Struct
+    /// 通过 [`Context::inject_fields`] 注入实例 dict 到 ctx.fields()：
+    ///
+    /// - **Expr 路径**：[`eval_expr_predicate`] 通过 [`Context::set_current_elem_ptr`]
+    ///   设置当前元素指针；当前不读 expr_values_buf，但保留 true 作为防御性编码，
+    ///   避免未来 ExprProgram 扩展引入 GetInt（如谓词 `x > field_name`）时遗漏 init。
+    /// - **PyCallable 路径**（v4 V-1）：[`build_context_proxy`] 需要从 ctx.fields()
+    ///   浅复制 Struct 字段构造 Container proxy，谓词访问 `ctx.threshold` 才能工作。
+    ///   若 has_expressions=false，外层 Struct 走 "无表达式路径" 直接操作 dict
+    ///   而不 inject_fields，导致 ctx.fields() == None，proxy 仅含 _index（无字段）。
+    ///
+    /// 开销 ~5-10ns（一次 Vec::with_capacity），相对 PyCallable 路径 ~575-1125ns/iter
+    /// 可忽略。
     pub fn has_expressions(&self) -> bool {
-        self.inner.has_expressions() || self.predicate.is_expr()
+        // 始终 true（v4 V-1）：保证外层 Struct inject_fields，使 ctx.fields() 可用。
+        // inner.has_expressions() / predicate.is_expr() 短路求值无意义，
+        // 此处显式返回 true 表达意图。
+        let _ = (self.inner.has_expressions(), self.predicate.is_expr());
+        true
     }
 }
 
@@ -746,10 +754,15 @@ mod tests {
 
     #[test]
     fn has_expressions_callable_predicate_returns_inner_value() {
+        // v4 V-1：has_expressions 始终返回 true（即便 callable 谓词 + 无表达式 inner）。
+        // 理由：PyCallable 谓词可能访问 ctx 字段，外层 Struct 必须 inject_fields
+        // 使 ctx.fields() 可用，否则 build_context_proxy 拿不到字段。
         let py_pred = with_py(|_py| make_lambda_gt(5));
         let node = RepeatUntilNode::new(byte_node(), RepeatPredicate::PyCallable(py_pred), false);
-        // callable 谓词 + 无表达式 inner → false
-        assert!(!node.has_expressions());
+        assert!(
+            node.has_expressions(),
+            "v4 V-1: RepeatUntil.has_expressions should always be true"
+        );
     }
 
     // ======================================================================

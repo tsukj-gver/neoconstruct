@@ -153,7 +153,10 @@ pub fn compile_schema(
 
     // 1c. 计算 has_expressions：expr_programs 中任一字段为 Some → true。
     //     当前 2.3 阶段不解析表达式内容，仅设置标志（具体解析在 2.5/2.6）。
-    let has_expressions = expr_programs
+    //     v4 V-1 修正：PyCallable RepeatUntil 谓词访问 ctx 字段需要外层 Struct
+    //     inject_fields，此处先按 expr_programs 初步判断，节点树构建后再次提升
+    //     （详见步骤 4 之后的二次扫描）。
+    let has_expressions_from_programs = expr_programs
         .as_ref()
         .map(|progs| progs.iter().any(|p| p.is_some()))
         .unwrap_or(false);
@@ -199,6 +202,15 @@ pub fn compile_schema(
     }
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
+    //    v4 V-1 修正：has_expressions 由两部分组合——
+    //    (1) Python 侧 expr_programs 检测（字段表达式：Bytes(m)、Computed(...) 等）
+    //    (2) Rust 侧节点树扫描（RepeatUntil 的 PyCallable 谓词访问 ctx 字段
+    //        需要外层 Struct inject_fields，否则 build_context_proxy 拿不到字段）。
+    //    两者任一为 true → Struct 走 has_expressions=true 路径，确保 ctx.fields()
+    //    注入实例 dict。
+    let has_expressions_from_tree = fields.iter().any(|f| f.node.has_expressions());
+    let has_expressions = has_expressions_from_programs || has_expressions_from_tree;
+
     let struct_root = Node::Struct(StructNode::new(
         py,
         fields,

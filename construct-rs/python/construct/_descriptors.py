@@ -900,12 +900,14 @@ def _try_compile_repeat_predicate(predicate):
         lambda x, _, _: x OP N
         lambda x, _, _: N OP x   # 常量在左
 
-    其中 OP ∈ {>, >=, ==, !=, <, <=}，N 是整数常量。
+    其中 OP ∈ {>, >=, ==, !=, <, <=}，N 是整数常量（V-4 起支持负整数，
+    如 ``lambda x, _, _: x > -1``、``lambda x, _, _: x != -1`` 哨兵终止模式）。
 
     :param predicate: Python callable。
-    :return: ExprOp 元组列表（如 ``[("getelem",), ("const", 5), ("gt",)]`），
+    :return: ExprOp 元组列表（如 ``[("getelem",), ("const", 5), ("gt",)]``），
              无法识别时返回 None（回落到 PyCallable 路径）。
     """
+    # V-3 包装在 RepeatUntilDescriptor.__init__ 完成，此处 predicate 必为 callable。
     if not callable(predicate):
         return None
 
@@ -969,17 +971,40 @@ def _try_compile_repeat_predicate(predicate):
         return isinstance(node, ast.Name) and node.id == first_arg_name
 
     def _is_int_const(node):
-        return isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool)
+        # V-4 修正：识别负整数常量（如 ``x > -1``、``x != -1``）。
+        # Python AST 中 ``-1`` 是 ``UnaryOp(USub, Constant(1))``，不是 ``Constant(-1)``。
+        # 形式 1：``-N`` → UnaryOp(op=USub | UAdd, operand=Constant(int))
+        # 形式 2（罕见）：嵌套负号 ``--N`` → 不识别（回落 PyCallable，安全）
+        # ``bool`` 是 ``int`` 子类，但 ``True == 1`` 不应作为谓词常量，
+        # 排除（``isinstance(True, int)`` 为 True，需 ``not isinstance(node.value, bool)``）。
+        if isinstance(node, ast.Constant) and isinstance(node.value, int) and not isinstance(node.value, bool):
+            return True
+        if isinstance(node, ast.UnaryOp) and isinstance(node.op, (ast.USub, ast.UAdd)):
+            return _is_int_const(node.operand)
+        return False
+
+    def _extract_int_const(node):
+        """从 AST 节点提取整数值（与 _is_int_const 配套）。"""
+        if isinstance(node, ast.Constant):
+            return node.value
+        # UnaryOp：USub 取负、UAdd 取正（无变化）
+        if isinstance(node, ast.UnaryOp):
+            inner = _extract_int_const(node.operand)
+            if isinstance(node.op, ast.USub):
+                return -inner
+            return inner  # UAdd
+        # 不应到达此处（_is_int_const 已过滤）
+        raise AssertionError("non-int-const node passed to _extract_int_const")
 
     if _is_arg(left) and _is_int_const(comparator):
         # 形式 1: x OP N → [GetElem, Const(N), OP]
-        n = comparator.value
+        n = _extract_int_const(comparator)
         return [("getelem",), ("const", n), (op_name,)]
     elif _is_int_const(left) and _is_arg(comparator):
         # 形式 2: N OP x → 翻转操作符
         # N < x ⟺ x > N；N > x ⟺ x < N；N <= x ⟺ x >= N；N >= x ⟺ x <= N
         # N == x ⟺ x == N；N != x ⟺ x != N
-        n = left.value
+        n = _extract_int_const(left)
         flip = {
             "gt": "lt",
             "ge": "le",
@@ -1004,18 +1029,40 @@ class RepeatUntilDescriptor:
 
     - **Expr 路径**（性能优）：predicate 是简单 lambda（如 ``lambda x,_,_: x > 5``），
       编译期识别为 ExprProgram ``[GetElem, Const(N), Op]``，运行时零 FFI。
-      仅支持整数元素 + 6 种比较运算。
+      仅支持整数元素 + 6 种比较运算。V-4 起支持负整数常量（``x != -1`` 哨兵模式）。
     - **PyCallable 路径**（功能完整）：predicate 是复杂 lambda，每次迭代跨 FFI
-      调用 ``predicate(obj, list, context)``。
+      调用 ``predicate(obj, list, context)``。谓词收到的 context 是
+      ``construct.lib.containers.Container`` 实例（V-1 v4），
+      支持 attribute + item 双重访问（如 ``ctx.threshold`` / ``ctx['threshold']``），
+      包含外层 Struct 全部字段 + ``_index``。
+
+    谓词形式兼容（V-3 v4）：
+
+    - **callable**（标准）：``lambda x, lst, ctx: x > ctx.threshold``
+    - **非 callable**（兼容 Python 未文档化特性）：``True`` / ``False`` / 任意常量值
+      会被包装为 ``lambda _1, _2, _3: value``，对齐 Python construct core.py L2673-2674。
+      ``RepeatUntil(True, Byte)`` → parse 第一个元素即终止；
+      ``RepeatUntil(False, Byte)`` → build 永远抛 RepeatError。
 
     ``_expr_params`` 协议：
 
     - 简单 lambda 时返回 ``{"predicate": [ops_list]}``（已预编译为 ExprOp 元组列表）。
       注意：与其他描述符不同，这里的 value 是已编译的 ops list（不是 FieldRef/ExprRef），
       ``_mixin._extract_and_compile_exprs`` 直接透传。
-    - 复杂 lambda 时返回 ``{}``（PyCallable 路径，Rust 侧从 desc.predicate 读 callable）。
+    - 复杂 lambda / 非 callable 谓词时返回 ``{}``（PyCallable 路径，Rust 侧从
+      desc.predicate 读 callable）。
 
-    :param predicate: 终止谓词 ``(obj, list, context) -> bool``。
+    已知行为差异（V-2，设计 §9.5 RU-build-2）：
+
+    - **build partial 收集 elem 而非 buildret**：Python core.py L2693-2696 中
+      ``partiallist.append(buildret)``（``buildret`` 是 ``subcon._build`` 返回值），
+      construct-rs 的 ``Construct::build`` 返回 ``()``，因此收集的是用户输入 ``e``。
+      对 FormatField / Bytes 内部（绝大多数场景）``buildret == e`` 无差异；
+      对 Adapter 系（如 Enum）作为 inner 时行为可能不同。Adapter-as-inner-RepeatUntil
+      是罕见场景，行为差异在此文档化。
+
+    :param predicate: 终止谓词 ``(obj, list, context) -> bool`` 或非 callable 常量值
+                     （V-3 包装为常量谓词）。
     :param subcon: 元素子构造器（描述符）。
     :param discard: 若为 True，parse 返回空 list 但仍消耗流；build 时 partial list 始终为空。
     """
@@ -1029,6 +1076,23 @@ class RepeatUntilDescriptor:
         :param subcon: 元素子构造器。
         :param discard: 是否丢弃解析结果。
         """
+        # V-3 修正：非 callable 谓词（如 ``True`` / ``False``）兼容。
+        # 对齐 Python construct core.py L2673-2674 / L2687-2688：
+        #   if not callable(predicate):
+        #       predicate = lambda _1,_2,_3: predicate
+        # 包装为常量谓词，使 ``RepeatUntil(True, Byte)`` 在 parse 第一个元素即终止，
+        # ``RepeatUntil(False, Byte)`` 在 build 时永远抛 RepeatError（无元素满足）。
+        # Expr 路径不识别常量谓词（_try_compile_repeat_predicate 仅识别简单 lambda），
+        # 因此常量谓词走 PyCallable 路径（开销 ~1.5x，但常量谓词极少在性能敏感场景使用）。
+        if not callable(predicate):
+            # 捕获常量值（避免闭包晚期绑定陷阱）
+            const_value = predicate
+
+            def _const_predicate(_x, _lst, _ctx, _v=const_value):
+                return _v
+
+            predicate = _const_predicate
+
         self.predicate = predicate
         self.subcon = subcon
         self.discard = discard
