@@ -140,10 +140,10 @@ impl super::Construct for PrefixedArrayNode {
             path.push_index(i);
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
-                Err(mut e) => {
+                Err(e) => {
                     path.pop();
-                    // 错误路径附加 [i] 上下文，恢复 _index。
-                    e.push_path_segment(&format!("[{}]", i));
+                    // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
+                    // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                     restore_index(ctx, old_index);
                     return Err(e);
                 }
@@ -210,9 +210,10 @@ impl super::Construct for PrefixedArrayNode {
             ctx.set_index(i);
             path.push_index(i);
             let elem_bound = elem.bind(py);
-            if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+            if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 path.pop();
-                e.push_path_segment(&format!("[{}]", i));
+                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
+                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                 restore_index(ctx, old_index);
                 return Err(e);
             }
@@ -646,8 +647,19 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // 错误应携带 [0] 路径段
-            assert!(err.path().unwrap_or("").contains("[0]"));
+            // O1 修复（4.6）：path 应为 "root[0]"（inner.build 在 path 栈含 Index(0)
+            // 时已生成），不再有 "root.[0][0]" 双重标记。
+            let p = err.path().unwrap_or("");
+            assert!(
+                p == "root[0]" || p.ends_with("[0]"),
+                "O1 path format: expected 'root[0]' or ending with '[0]', got '{}'",
+                p
+            );
+            assert!(
+                !p.contains(".["),
+                "O1 path format: dot before '[' is invalid (got '{}')",
+                p
+            );
         });
     }
 

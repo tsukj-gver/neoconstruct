@@ -267,9 +267,10 @@ impl super::Construct for RepeatUntilNode {
                     ctx.set_index(i);
                     path.push_index(i);
                     let elem_bound = elem.bind(py);
-                    if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+                    if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                         path.pop();
-                        e.push_path_segment(&format!("[{}]", i));
+                        // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
+                        // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                         restore_index(ctx, old_index);
                         return Err(e);
                     }
@@ -343,9 +344,10 @@ impl super::Construct for RepeatUntilNode {
 
                     path.push_index(i);
                     let elem_bound = &elem;
-                    if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+                    if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                         path.pop();
-                        e.push_path_segment(&format!("[{}]", i));
+                        // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
+                        // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                         restore_index(ctx, old_index);
                         return Err(e);
                     }
@@ -422,10 +424,11 @@ fn parse_expr_path<'py>(
         path.push_index(i);
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
-            Err(mut e) => {
+            Err(e) => {
                 path.pop();
                 // RU-1: 失败直接上抛（不像 GreedyRange 回退）
-                e.push_path_segment(&format!("[{}]", i));
+                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
+                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                 return Err(e);
             }
         };
@@ -497,9 +500,10 @@ fn parse_callable_path<'py>(
         path.push_index(i);
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
-            Err(mut e) => {
+            Err(e) => {
                 path.pop();
-                e.push_path_segment(&format!("[{}]", i));
+                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
+                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                 return Err(e);
             }
         };

@@ -207,9 +207,10 @@ impl super::Construct for GreedyRangeNode {
                     restore_index(ctx, old_index);
                     return Ok(());
                 }
-                Err(mut e) => {
+                Err(e) => {
                     path.pop();
-                    e.push_path_segment(&format!("[{}]", i));
+                    // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
+                    // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                     restore_index(ctx, old_index);
                     return Err(e);
                 }
@@ -786,8 +787,20 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // 错误应携带 [0] 路径段（GreedyRange build 错误路径附加）
-            assert!(err.path().unwrap_or("").contains("[0]"));
+            // O1 修复（4.6）：path 应为 "root[0]"——inner.build 在 path 栈含
+            // Index(0) 时已生成 "root[0]"，GreedyRange 不再补充。
+            // 验证不出现 "root.[0][0]" 双重标记或 "[0]" 在 path 中段。
+            let p = err.path().unwrap_or("");
+            assert!(
+                p == "root[0]" || p.ends_with("[0]"),
+                "O1 path format: expected 'root[0]' or ending with '[0]', got '{}'",
+                p
+            );
+            assert!(
+                !p.contains(".["),
+                "O1 path format: dot before '[' is invalid (got '{}')",
+                p
+            );
         });
     }
 

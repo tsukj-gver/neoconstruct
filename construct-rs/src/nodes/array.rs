@@ -163,10 +163,12 @@ impl super::Construct for ArrayNode {
             path.push_index(i);
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
-                Err(mut e) => {
+                Err(e) => {
                     path.pop();
-                    // 错误路径附加 _index 上下文，恢复 _index。
-                    e.push_path_segment(&format!("[{}]", i));
+                    // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
+                    // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"，
+                    // 此处再 push_path_segment 会生成 "root.[i][i]" 双重标记。
+                    // path.pop 仅为栈平衡；error.path 已正确。
                     restore_index(ctx, old_index);
                     return Err(e);
                 }
@@ -240,9 +242,10 @@ impl super::Construct for ArrayNode {
             ctx.set_index(i);
             path.push_index(i);
             let elem_bound = elem.bind(py);
-            if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+            if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 path.pop();
-                e.push_path_segment(&format!("[{}]", i));
+                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
+                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
                 restore_index(ctx, old_index);
                 return Err(e);
             }
@@ -445,8 +448,50 @@ mod tests {
                 .expect_err("should fail");
             // AR-5: 子构造器失败时错误向上传播
             match err {
-                ConstructError::Stream { message, .. } => {
+                ConstructError::Stream { message, path: p } => {
                     assert!(message.contains("expected 1"), "got: {}", message);
+                    // O1 修复（4.6）：path 应为 "root[2]"——inner.parse 在
+                    // path 栈含 Index(2) 时已经把 path 写成 "root[2]"，
+                    // ArrayNode 不再补充。验证不出现 "root.[2][2]" 双重标记。
+                    assert!(
+                        p == "root[2]",
+                        "O1 path format: expected 'root[2]', got '{}'",
+                        p
+                    );
+                }
+                other => panic!("expected Stream, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_const_error_path_no_double_index_marker() {
+        // O1 专项测试（4.6）：嵌套场景验证 path 格式无双重 [i] 标记。
+        // 场景：Array(3, Array(2, Byte)) 解析到不完整流时，
+        // 内层 Array 在 i=1 时失败，错误 path 应为 "root[1][1]"。
+        with_py(|py| {
+            let inner = ArrayNode::new(byte_node(), CountSource::Const(2), false);
+            let outer = ArrayNode::new(
+                crate::nodes::Node::Array(inner),
+                CountSource::Const(3),
+                false,
+            );
+            // 仅提供 3 字节：外层 [0] 完整（2B），外层 [1] 内层 [0] 完整，
+            // 外层 [1] 内层 [1] EOF 失败。
+            let mut stream = ParseStream::new(&[0x01, 0x02, 0x03]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = outer
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail on incomplete inner array");
+            match err {
+                ConstructError::Stream { path: p, .. } => {
+                    // O1 修复：正确 path 应为 "root[1][1]"，不出现 "root.[1][1].[1][1]" 等。
+                    assert!(
+                        p == "root[1][1]",
+                        "nested O1 path format: expected 'root[1][1]', got '{}'",
+                        p
+                    );
                 }
                 other => panic!("expected Stream, got {:?}", other),
             }
