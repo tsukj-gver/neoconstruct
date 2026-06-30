@@ -110,4 +110,4 @@ print(f"V-4 (AST):    ops for `x != -1`: {ops2}")
 assert ops2 == [("getelem",), ("const", -1), ("ne",)], f"got {ops2}"
 
 print()
-print("✅ All V-1~V-5 smoke tests passed!")
+print("[OK] All V-1~V-5 smoke tests passed!")
