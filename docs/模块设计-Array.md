@@ -18,14 +18,15 @@
 >   StopIf L4079、PrefixedArray L4934）、`construct/construct/lib/containers.py`（ListContainer）
 >
 > **角色**：ARCH
-> **状态**：DESIGNING（v3，REV 决策记录对照驳回后第三次修订，等待重新检视）
+> **状态**：DESIGNING（v4，VET 驳回 V-1 后第四次修订，等待重新检视）
 > **创建时间**：2026-06-29
 > **修订时间**：2026-06-29（v2 修正 REV 驳回的 P1/P2/P3 + M1-M4；
->   v3 修正 REV 决策记录对照驳回的 V1/V2/V3/V4）
+>   v3 修正 REV 决策记录对照驳回的 V1/V2/V3/V4；
+>   2026-06-30 v4 修正 VET 驳回的 V-1 PyCallable context proxy 不完整）
 
 ---
 
-## 0. REV 驳回修正摘要
+## 0. REV/VET 驳回修正摘要
 
 ### 0.1 v2 修正（P1/P2/P3 + M1-M4）
 
@@ -69,6 +70,36 @@ REV 在 v2 复审通过后，对照 `docs/设计决策记录.md` 全部 12 条�
 > **D1/D2/D3 文档小问题**（v2 复审附注）：D1（§4.1.4 sizeof 伪代码反例）、
 > D2（§8.2 交叉引用笔误 "§8.5" 应为 "§8.3"）、D3（§6.2.1 调用 build_array_node
 > 少传参数）仍然有效，v3 不在驳回范围，留作后续清理。
+
+### 0.3 v4 修正（V-1 —— VET 驳回 PyCallable context proxy 不完整）
+
+VET 在 4.5 子任务代码审查中驳回 1 个阻断性问题（V-1）+ 4 个次要问题（V-2~V-5）。
+V-1 是行为破坏性变更：DEV 实现的 PyCallable 路径 context proxy 仅含 `_index`，
+跳过了 ctx.fields() 字段复制，且 proxy 是 PyDict 而非 Container（不支持 attribute 访问）。
+v4 逐项修正（V-2~V-5 留待 DEV 在 V-1 修复批次中附带处理，本节聚焦 V-1）：
+
+| 编号 | 问题 | 修正位置 | 修正内容 |
+|------|------|---------|---------|
+| V-1 | PyCallable 路径 proxy 仅含 `_index`，谓词无法访问 ctx 字段；proxy 是 dict 不支持 attribute 访问 | §2.5、§4.3.3、§4.3.4、§7.3 RU-9、§8.3、设计决策记录 Phase 4 决策 4 | **决策：proxy 必须用 Container 包装 + 复制 ctx.fields() 全部字段 + 写 _index**（方案 A）。Container 通过 `__dict__ = self` 支持 attribute 访问，对齐 Python `predicate(e, list, context)` 中 context 是 Container 的语义。性能预期从 ≥3x 下调到 ≥1.5x（PyCallable 是兜底路径，Expr 路径 ≥10x 已达标） |
+
+附加修正（连带）：
+- §2.5 决策 A5 补充 PyCallable proxy 规范（从"DEV 决策"明确为硬性约束）
+- §4.3.3 `call_repeat_predicate` + `build_context_proxy` 改为 Container 包装的硬性约束 + 实现伪代码
+- §4.3.4 build PyCallable 路径同步更新
+- §7.3 新增 RU-9 边界（谓词 context 访问）
+- §8.1/§8.2/§8.3 更新 PyCallable 路径性能预期（≥3x → ≥1.5x）
+- 新增 `docs/设计决策记录.md` Phase 4 决策 4（PyCallable proxy 用 Container 包装）
+- §9.5 不新增已知差异条目（方案 A 行为对齐 Python，无差异）
+
+> **V-2/V-3/V-4/V-5 不在本次设计修正范围**：
+> - V-2（build partial 收集 elem 而非 buildret）：Adapter-as-inner-RepeatUntil 场景，
+>   由 DEV 在 §9.5 新增 RU-build-2 条目文档化（与 NE-expr-1/2 同模式）。
+> - V-3（非 callable 谓词）：Python 未文档化特性，由 DEV 在 §9.5 新增 RU-3b 条目文档化，
+>   或在 RepeatUntilDescriptor.__init__ 兼容（DEV 决策）。
+> - V-4（AST 谓词识别不支持负整数）：由 DEV 扩展 `_is_int_const` 识别 `UnaryOp(USub, Constant(int))`。
+> - V-5（has_expressions 注释误导）：由 DEV 修正注释。
+>
+> 以上 4 项均为实现/文档层面，不需 ARCH 设计决策。
 
 ---
 
@@ -280,6 +311,28 @@ pub enum RepeatPredicate {
 > `Expr` 快路径作为性能优化延后到 Phase 4 收尾或独立子任务。
 > 这样 S-FUNC 先达成，S-PERF 在 Expr 路径补全后达成 ≥10x。
 > 具体决策由 PM 在子任务拆分时确定。
+
+> **v4 决策（V-1 修正，写入设计决策记录 Phase 4 决策 4）**：PyCallable 路径
+> 传给谓词的 context proxy **必须**满足以下硬性约束（消除 v3 §4.3.3 "DEV 决策"
+> 的模糊空间，防止再次偏离）：
+>
+> 1. **proxy 类型**：必须是 Python `construct.lib.containers.Container` 实例
+>    （不是原生 `dict`）。理由：Python `RepeatUntil._parse/_build` 直接把 Container
+>    传给谓词（core.py L2681 `predicate(e, obj, context)` / L2697），Container 通过
+>    `self.__dict__ = self`（containers.py L110）支持 attribute 访问。用户写
+>    `lambda x, lst, ctx: x > ctx.threshold` 是 Python construct 文档示明的核心用法。
+> 2. **proxy 内容**：必须包含 `ctx.fields()` 全部字段（浅复制）+ `_index`（每次迭代更新）。
+>    理由：对齐 Python context 的字段可见性。仅含 `_index` 会使谓词访问任何 Struct 字段
+>    时触发 `KeyError` / `AttributeError`，是行为破坏性变更。
+> 3. **Container 类缓存**：Rust 侧在模块初始化（`_construct_rust`）时从
+>    `construct.lib.containers` import `Container` 类并缓存为 `Py<PyType>`
+>    （参照 `error.rs::init_exception_classes` 的 `ExceptionClasses` 模式）。
+>    每次 proxy 构造时 `Container.call1((dict,))` 包装 dict。
+> 4. **性能预期下调**：PyCallable 路径 S-PERF 目标从 ≥3x 下调到 **≥1.5x**
+>    （§8.3 更新）。理由：Container 实例化 + 字段复制增加 ~400-700ns/iter 开销。
+>    PyCallable 是兜底路径（Expr 路径 ≥10x 已达标），性能下降换取行为正确性。
+>
+> 详见 §4.3.3 / §4.3.4 实现伪代码。
 
 ### 2.6 决策 A6：PrefixedArray 用独立 Node（不依赖未实现的 FocusedSeq/Rebuild）
 
@@ -998,6 +1051,8 @@ fn parse<'py>(...) -> Result<Py<PyAny>, ConstructError> {
         RepeatPredicate::PyCallable(p) => p.bind(py),
         RepeatPredicate::Expr(_) => unreachable!("Expr 路径未实现（§4.3.2 简化）"),
     };
+    // v4：缓存 Container 类（模块初始化时已缓存，此处取用，零开销）
+    let container_cls = crate::container_cache::container_class(py)?;
     let mut i: usize = 0;
 
     loop {
@@ -1018,14 +1073,15 @@ fn parse<'py>(...) -> Result<Py<PyAny>, ConstructError> {
             list.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
         }
 
-        // 调用谓词：predicate(elem, list, context_proxy)
-        // Python 签名：(obj, list, context) -> bool
-        let stop = call_repeat_predicate(py, predicate, &elem, list.as_any(), ctx)?;
+        // v4：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
+        // 对齐 Python `predicate(e, obj, context)` 中 context 是 Container。
+        let ctx_proxy = build_context_proxy(py, &container_cls, ctx)?;
+        let stop = call_repeat_predicate(py, predicate, elem.bind(py), list.as_any(), &ctx_proxy)?;
         if stop {
             break;      // RU-2: 谓词为真时终止（最后元素被包含）
         }
 
-        i += 1;
+        i = i.saturating_add(1);
     }
 
     match old_index { Some(idx) => ctx.set_index(idx), None => ctx.clear_index() }
@@ -1038,30 +1094,75 @@ fn parse<'py>(...) -> Result<Py<PyAny>, ConstructError> {
 ```rust
 /// 调用 RepeatUntil 谓词，返回是否应终止。
 /// 对齐 Python `predicate(obj, list, context)`。
+///
+/// # v4 决策（V-1 修正）
+///
+/// context proxy **必须**是 `construct.lib.containers.Container` 实例（不是 dict），
+/// 包含 `ctx.fields()` 全部字段（浅复制）+ `_index`。理由：
+/// - Python `RepeatUntil._parse/_build` 把 Container 直接传给谓词（core.py L2681/L2697）；
+/// - Container 通过 `self.__dict__ = self`（containers.py L110）支持 attribute 访问；
+/// - 用户 `lambda x, lst, ctx: x > ctx.threshold` 是文档示明的核心用法，必须可用。
+///
+/// Container 类在模块初始化时缓存为 `Py<PyType>`（参照 init_exception_classes）。
 fn call_repeat_predicate(
     py: Python<'_>,
     predicate: &Bound<'_, PyAny>,
-    elem: &Py<PyAny>,
+    elem: &Bound<'_, PyAny>,
     list: &Bound<'_, PyAny>,
-    ctx: &Context<'_>,
+    ctx_proxy: &Bound<'_, PyAny>,   // Container 实例（由 build_context_proxy 构造）
 ) -> Result<bool, ConstructError> {
-    // 构造 context proxy 传给 Python 谓词。
-    // 简化：复用现有 ctx.fields() 或构造临时 dict。
-    // 性能注意：每次迭代构造 context 是开销来源（~200-500ns）。
-    let ctx_proxy = build_context_proxy(py, ctx)?;
-    let result = predicate.call1((elem.bind(py), list, &ctx_proxy))?;
+    let result = predicate.call1((elem, list, ctx_proxy))?;
     let truthy: bool = result.is_truthy()?;
     Ok(truthy)
 }
 ```
 
-> **`build_context_proxy` 设计选择**（DEV 决策）：
-> - 简单方案：每次构造新 PyDict，从 ctx.fields() 复制字段 + 写 _index。
->   开销 ~500ns/次，N 次迭代 = N×500ns。
-> - 复用方案：在 ctx 中维护一个长生命周期的 PyDict proxy，每次更新 _index。
->   复杂度高，需管理引用计数。
+> **`build_context_proxy` 设计（v4 硬性约束，原 "DEV 决策" 删除）**：
 >
-> Phase 4 首版用简单方案，性能不达标再优化。
+> 每次迭代构造 Container proxy，包含 `ctx.fields()` 全部字段（浅复制）+ `_index`。
+>
+> ```rust
+> /// 构造 Container proxy（每次迭代调用）。
+> ///
+> /// v4 决策（V-1）：proxy 必须是 Container 实例，对齐 Python 谓词收到的 context。
+> fn build_context_proxy<'py>(
+>     py: Python<'py>,
+>     container_cls: &Bound<'py, PyType>,  // 缓存的 Container 类
+>     ctx: &Context<'_>,
+> ) -> PyResult<Bound<'py, PyAny>> {
+>     // 1. 构造临时 PyDict，复制 ctx.fields() + 写 _index。
+>     let dict = PyDict::new_bound(py);
+>     if let Some(fields) = ctx.fields() {
+>         for item in fields.iter() {
+>             let (key, value) = item;
+>             dict.set_item(&key, &value)?;
+>         }
+>     }
+>     match ctx.index() {
+>         Some(i) => { dict.set_item("_index", i.into_py(py).bind(py))?; }
+>         None => { dict.set_item("_index", py.None().bind(py))?; }
+>     }
+>     // 2. 用 Container 包装 dict（Container(__init__) 接受 dict，自动 __dict__ = self）。
+>     container_cls.call1((dict,)).map(|obj| obj.into_any())
+> }
+> ```
+>
+> **性能开销估算**（每迭代）：
+> - PyDict::new_bound + 字段复制：~200-400ns（字段数 N）
+> - Container 实例化（`Container.__init__` 调用）：~200-500ns
+> - 合计：~400-900ns/iter
+> - 加上原有 PyCallable FFI 调用（~175-225ns/iter），总开销 ~575-1125ns/iter
+> - Python 原版每元素 ~270-300ns/iter，预期加速比 ~1.5-2.5x（PyCallable 路径）。
+>
+> **优化方向（可选，非 Phase 4 必需）**：在节点入口预创建一个长生命周期 Container，
+> 每次迭代 `Container.clear()` + 字段更新 + `_index` 设置。但 Container.clear() +
+> 逐字段 set_item 的开销可能与新建 Container 相当，且增加代码复杂度。首版用
+> "每次新建 Container" 简单方案，性能不达标再优化。
+>
+> **为什么不用原生 dict**：dict 不支持 `ctx.threshold`（attribute 访问），仅支持
+> `ctx['threshold']`（item 访问）。Python Container 两者都支持。即使文档说明
+> "仅支持 item 访问"，用户的 `ctx.threshold` 写法会静默失败——属于"隐性破坏"，
+> 不可接受。详见 §0.3 v4 修正 V-1 决策依据。
 
 #### 4.3.4 build 流程
 
@@ -1075,6 +1176,8 @@ fn build(...) -> Result<(), ConstructError> {
         RepeatPredicate::PyCallable(p) => p.bind(py),
         RepeatPredicate::Expr(_) => unreachable!(),
     };
+    // v4：缓存 Container 类（模块初始化时已缓存，此处取用，零开销）
+    let container_cls = crate::container_cache::container_class(py)?;
 
     let mut matched = false;
     let mut partial = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
@@ -1104,7 +1207,9 @@ fn build(...) -> Result<(), ConstructError> {
             partial.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
         }
 
-        let stop = call_repeat_predicate(py, predicate, elem_bound, partial.as_any(), ctx)?;
+        // v4：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
+        let ctx_proxy = build_context_proxy(py, &container_cls, ctx)?;
+        let stop = call_repeat_predicate(py, predicate, elem_bound, partial.as_any(), &ctx_proxy)?;
         if stop {
             matched = true;
             break;
@@ -1975,6 +2080,7 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | RU-6 | sizeof | 永远 Err |
 | RU-7 | parse 方向 discard=True | 仍调谓词（用空 list），不收集元素到 obj list |
 | RU-8 | build 方向 discard=True（P2 修正） | partiallist 始终为空，谓词收到空 list；对 `lambda x,lst,c: lst[-2:]==[0,0]` 这类依赖 list 内容的谓词会产生与 discard=False 不同的终止时机（对齐 Python core.py L2694-2696） |
+| RU-9 | PyCallable 谓词访问 context 字段（v4 新增）<br>例：`lambda x, lst, ctx: x > ctx.threshold` | proxy 是 Container（含 ctx.fields() 全部字段 + `_index`），attribute 与 item 访问均可用。对齐 Python core.py L2681/L2697（Container 通过 `__dict__ = self` 支持 attribute 访问）。详见 §2.5 决策 A5 v4 补充 + §4.3.3 `build_context_proxy` |
 
 ### 7.4 PrefixedArray 边界
 
@@ -2067,8 +2173,8 @@ construct-rs `ArrayNode.parse` 的预期开销：
 | Array(100, Struct{2 fields}) parse | ≥8x | Struct 内层有更多 C API 开销 | ✅ 纳入 |
 | GreedyRange(Byte) parse 100 元素 | ≥8x | seek 开销 + 动态长度 | ✅ 纳入 |
 | PrefixedArray(Byte, Byte) parse 100 元素 | ≥10x | 等同 Array + 1 次 countfield | ✅ 纳入 |
-| RepeatUntil(lambda x,l,c: x>50, Byte) parse（PyCallable） | ≥3x | PyCallable 路径慢 | ⚠️ 见 §8.5 |
-| RepeatUntil 同上（Expr 谓词） | ≥8x | Expr 路径消除 FFI | ⚠️ 见 §8.5 |
+| RepeatUntil(lambda x,l,c: x>50, Byte) parse（PyCallable） | ≥1.5x | v4：Container proxy + 字段复制开销；PyCallable 是兜底路径 | ⚠️ 见 §8.3 |
+| RepeatUntil 同上（Expr 谓词） | ≥8x | Expr 路径消除 FFI | ⚠️ 见 §8.3 |
 | Index（在 Array 内） | ≥20x | 仅读 ctx 字段 | ✅ 纳入 |
 
 **证伪条件**：
@@ -2086,9 +2192,17 @@ RepeatUntil 因谓词跨 FFI 的固有特性，单独评估。
 
 **S-PERF 出口对 RepeatUntil 的判定规则**：
 
-1. **PyCallable 路径（首版）**：≥3x 即视为可接受（不要求 ≥10x）。
-   理由：谓词每次迭代跨 FFI 调 Python callable（~500-1000ns/次），N=100 时
-   仅 FFI 开销 = 50-100μs，已接近 Python 总耗时。3-5x 是 PyCallable 路径的物理上限。
+1. **PyCallable 路径（首版）**：**≥1.5x** 即视为可接受（v4 下调，原 ≥3x）。
+   理由（v4 修正）：
+   - v4 决策（V-1）要求 PyCallable 路径 proxy 必须是 Container 实例（含 ctx.fields()
+     全部字段 + _index），对齐 Python Container 语义。Container 实例化 + 字段复制
+     增加 ~400-700ns/iter 开销。
+   - 加上原有 FFI 调用 Python callable（~175-225ns/iter），总开销 ~575-1125ns/iter。
+   - Python 原版每元素 ~270-300ns/iter，预期加速比 ~1.5-2.5x（取下限 ≥1.5x 作为出口）。
+   - **PyCallable 是兜底路径**：仅当用户写复杂谓词（依赖 list 内容或 context 字段）
+     时才走此路径。简单谓词（绝大多数场景）自动编译为 Expr 路径（≥10x）。
+   - 行为正确性优先于性能（AGENTS.md §0）：Python 兼容性是核心目标，
+     不允许为性能砍掉 `ctx.threshold` 这种 Python 文档示明的用法。
 
 2. **Expr 谓词路径（4.5b）**：≥8x。理由：Expr 路径消除 FFI（谓词在 Rust 内求值），
    加速比应接近 Array 的水平。Expr 路径**应作为 Phase 4 内的必要子任务**，
@@ -2096,7 +2210,9 @@ RepeatUntil 因谓词跨 FFI 的固有特性，单独评估。
 
 3. **S-PERF 基准报告**：S-PERF 阶段需对 RepeatUntil 分别测量 PyCallable 与 Expr
    两条路径，单独列出。若仅 PyCallable 路径，需在报告中明确标注
-   "RepeatUntil 当前仅 PyCallable，性能 3-5x；Expr 路径待 4.5b"。
+   "RepeatUntil 当前仅 PyCallable，性能 1.5-2.5x；Expr 路径待 4.5b"。
+   v4 后报告还需测量"谓词访问 ctx 字段"场景（如 `lambda x, lst, ctx: x > ctx.threshold`），
+   验证 Container proxy 行为正确。
 
 **子任务拆分建议（更新 §12.1）**：
 - 4.5a：RepeatUntilNode PyCallable 路径（功能完整，3-5x）
@@ -2154,9 +2270,11 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 3. **path push/pop 开销**：当前每次迭代调用。
    - 若 path.push_index 的 Vec::push 成本 ~10ns 累积过大（N=100 时 1μs），可改为
      P0-3 风格（成功路径不维护，错误时重建）。首版保留 push/pop，性能不达标再优化。
-4. **RepeatUntil 的 PyCallable 路径**：每次迭代跨 FFI。
-   - N=100 时 100 次 Python 调用 = ~50-100μs，仅 3-5x 加速。
-   - Expr 路径补全后消除 FFI，预期 ≥8x。
+4. **RepeatUntil 的 PyCallable 路径**：每次迭代跨 FFI + Container proxy 构造。
+   - N=100 时 100 次 Python 调用 + 100 次 Container 实例化 = ~50-110μs，仅 1.5-2.5x 加速。
+   - v4 后开销结构（每 iter）：FFI 调用 ~175-225ns + Container 实例化 + 字段复制
+     ~400-700ns + 其他（list.append / path push）~50ns = ~625-975ns/iter。
+   - Expr 路径补全后消除 FFI 与 Container proxy，预期 ≥8x。
 
 ---
 
@@ -2434,6 +2552,20 @@ LazyStruct 同阶段）。
 | V3 | §12.2 PM 决策点 2 表格 `this.xxx` 是否标注 Python 语法？ | ✅ 表前加语法约定 |
 | V4 | §4.5.1 StopIfCondition::Expr 注释 `this.x == 0` 是否改为 construct-rs 语法？ | ✅ 改为 `x == 0` + 编译产物说明 |
 
+### 11.8 VET 驳回修正自检（v4 新增）
+
+| 编号 | 自检项 | 结论 |
+|------|--------|------|
+| V-1 | §2.5 决策 A5 是否补充 PyCallable proxy 硬性约束（Container + 字段复制）？ | ✅ 补充 4 条约束 + 决策依据 |
+| V-1 | §4.3.3 `build_context_proxy` 是否改为 Container 包装的硬性约束（删除"DEV 决策"模糊空间）？ | ✅ 提供完整实现伪代码 + 性能估算 |
+| V-1 | §4.3.3 / §4.3.4 伪代码是否传 container_cls 并构造 Container proxy？ | ✅ parse / build 均更新 |
+| V-1 | §7.3 是否新增 RU-9（谓词访问 context 字段）边界？ | ✅ |
+| V-1 | §8.2/§8.3 是否更新 PyCallable 路径性能预期（≥3x → ≥1.5x）？ | ✅ 含 v4 决策依据说明 |
+| V-1 | §8.5 关键依赖 4 是否更新开销结构（含 Container 实例化）？ | ✅ |
+| V-1 | §9.5 是否需要新增已知差异条目？ | ✅ 不新增（方案 A 行为对齐 Python，无差异） |
+| V-1 | 设计决策记录 Phase 4 是否新增决策 4？ | ✅ "PyCallable proxy 必须用 Container 包装" |
+| V-2~V-5 | 是否明确这些次要问题由 DEV 在 V-1 修复批次中附带处理？ | ✅ §0.3 末尾说明 |
+
 ---
 
 ## 12. 遗留问题与 PM 决策点
@@ -2446,9 +2578,9 @@ LazyStruct 同阶段）。
 不可延后到 Phase 5+。
 
 理由（详见 §8.3 S-PERF 适用性）：
-- PyCallable 路径（4.5a）功能完整、行为正确，但性能仅 3-5x（物理上限）。
+- PyCallable 路径（4.5a）功能完整、行为正确，但性能仅 1.5-2.5x（v4 后物理上限）。
 - 若仅交付 PyCallable，RepeatUntil 不满足 S-PERF 出口标准。
-- Expr 路径（4.5b）消除 FFI，预期 ≥8x，满足出口标准。
+- Expr 路径（4.5b）消除 FFI 与 Container proxy 开销，预期 ≥8x，满足出口标准。
 - 4.5b 工作量：`_current_elem` 槽位 + `ExprOp::GetElem`（仅整数元素）+
   Python 编译器识别简单谓词模式 + 端到端测试。约 1-2 个子任务。
 
