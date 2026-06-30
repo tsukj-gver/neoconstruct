@@ -252,9 +252,6 @@ impl super::Construct for RepeatUntilNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 收集 obj（list/tuple/任意 iterable）。
-        let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
-
         let old_index = ctx.index();
 
         // partial list：传给谓词的 list 参数。discard=True 时始终为空（P2 修正）。
@@ -264,6 +261,8 @@ impl super::Construct for RepeatUntilNode {
 
         match &self.predicate {
             RepeatPredicate::Expr(program) => {
+                // Expr 路径：物化 obj 到 Vec（谓词在 Rust 内求值，需 owned 元素引用）。
+                let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
                 for (i, elem) in items.iter().enumerate() {
                     ctx.set_index(i);
                     path.push_index(i);
@@ -300,10 +299,50 @@ impl super::Construct for RepeatUntilNode {
                         path: path.to_string(),
                     })?;
 
-                for (i, elem) in items.iter().enumerate() {
+                // 优化：入口处一次性构造 Container proxy（含 ctx.fields() 字段 + 初始 _index）。
+                // 每次迭代仅更新 _index（~20ns），避免每次构造新 Container（~300ns）。
+                let ctx_proxy = match build_context_proxy(py, &container_cls, ctx, path) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        restore_index(ctx, old_index);
+                        return Err(e);
+                    }
+                };
+
+                // V-2 性能优化：对 PyCallable 谓词路径用惰性迭代，避免提前物化整个 list。
+                // Python `for i, e in enumerate(obj)` 在谓词满足时立即停止，不消费后续元素。
+                // 对 N 很大但谓词早停的场景，节省 N - k 次 iter() 调用 + list materialize 开销。
+                let py_iter = match obj.iter() {
+                    Ok(it) => it,
+                    Err(e) => {
+                        return Err(ConstructError::Generic {
+                            message: format!(
+                                "RepeatUntil build expects iterable, got iter() error: {}",
+                                e
+                            ),
+                            path: path.to_string(),
+                        });
+                    }
+                };
+
+                let mut i: usize = 0;
+                for elem_result in py_iter {
+                    let elem = elem_result.map_err(|e| ConstructError::Generic {
+                        message: format!("RepeatUntil build iterable error: {}", e),
+                        path: path.to_string(),
+                    })?;
                     ctx.set_index(i);
+                    // 更新 proxy 中的 _index（Container 继承 dict，set_item 走 dict.__setitem__）
+                    if let Err(e) = ctx_proxy.set_item("_index", i.into_py(py).bind(py)) {
+                        restore_index(ctx, old_index);
+                        return Err(ConstructError::Generic {
+                            message: format!("RepeatUntil build: set _index failed: {}", e),
+                            path: path.to_string(),
+                        });
+                    }
+
                     path.push_index(i);
-                    let elem_bound = elem.bind(py);
+                    let elem_bound = &elem;
                     if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                         path.pop();
                         e.push_path_segment(&format!("[{}]", i));
@@ -317,19 +356,9 @@ impl super::Construct for RepeatUntilNode {
                     // Python L2693-2696 收集 buildret（inner._build 返回值）。
                     // 详见模块顶部"已知差异"段落。
                     if !self.discard {
-                        partial
-                            .append(elem.clone_ref(py))
-                            .map_err(ConstructError::from)?;
+                        partial.append(&elem).map_err(ConstructError::from)?;
                     }
 
-                    // v4 V-1：构造 Container proxy（含 ctx.fields() 字段 + _index）。
-                    let ctx_proxy = match build_context_proxy(py, &container_cls, ctx, path) {
-                        Ok(p) => p,
-                        Err(e) => {
-                            restore_index(ctx, old_index);
-                            return Err(e);
-                        }
-                    };
                     let stop = call_repeat_predicate(
                         py,
                         pred_bound,
@@ -342,6 +371,7 @@ impl super::Construct for RepeatUntilNode {
                         matched = true;
                         break;
                     }
+                    i = i.saturating_add(1);
                 }
             }
         }
@@ -417,12 +447,19 @@ fn parse_expr_path<'py>(
     }
 }
 
-/// PyCallable 路径的 parse 内部实现（v4 V-1）。
+/// PyCallable 路径的 parse 内部实现（v4 V-1，含优化）。
 ///
-/// 每次迭代构造 Container proxy（含 ctx.fields() 全部字段 + _index），
-/// 调用 Python predicate(elem, list, ctx_proxy)。
+/// **优化**（设计 §4.3.3 v4 优化方向）：在节点入口预创建一个 Container proxy，
+/// 每次迭代仅更新 `_index` 字段（PyDict_SetItem 快路径，~20ns），避免每次迭代
+/// 都重新构造 Container 实例（~300-500ns/iter）。
 ///
-/// 设计依据：`docs/模块设计-Array.md` §4.3.3 v4 伪代码 + §2.5 决策 A5 v4。
+/// 这对齐 Python `RepeatUntil._parse` 的语义——Python 直接复用同一个 context 对象，
+/// 仅修改 `context._index = i`（core.py L2677）。
+///
+/// 字段集在入口处从 `ctx.fields()` 一次性复制（对齐 Python 一次构造 Container），
+/// 迭代过程中不再同步 ctx 可能的字段变更（罕见场景：inner.parse 修改外层字段）。
+///
+/// 设计依据：`docs/模块设计-Array.md` §4.3.3 v4 + §2.5 决策 A5 v4 + §8.5 关键依赖 4。
 #[allow(clippy::too_many_arguments)]
 fn parse_callable_path<'py>(
     py: Python<'py>,
@@ -441,9 +478,22 @@ fn parse_callable_path<'py>(
             path: path.to_string(),
         })?;
 
+    // 优化：入口处一次性构造 Container proxy（包含外层 ctx.fields() 字段 + 初始 _index）。
+    // 每次迭代仅更新 _index 字段（~20ns），避免每次构造新 Container（~300ns）。
+    // 对齐 Python `RepeatUntil._parse` 复用同一个 context 对象的语义。
+    let ctx_proxy = build_context_proxy(py, &container_cls, ctx, path)?;
+
     let mut i: usize = 0;
     loop {
         ctx.set_index(i);
+        // 更新 proxy 中的 _index（Container 继承 dict，set_item 直接走 dict.__setitem__）
+        ctx_proxy
+            .set_item("_index", i.into_py(py).bind(py))
+            .map_err(|e| ConstructError::Generic {
+                message: format!("RepeatUntil parse: set _index failed: {}", e),
+                path: path.to_string(),
+            })?;
+
         path.push_index(i);
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
@@ -460,8 +510,7 @@ fn parse_callable_path<'py>(
                 .map_err(ConstructError::from)?;
         }
 
-        // v4 V-1：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
-        let ctx_proxy = build_context_proxy(py, &container_cls, ctx, path)?;
+        // v4 V-1：复用同一 Container proxy，调用谓词。
         let stop = call_repeat_predicate(
             py,
             predicate,

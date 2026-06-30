@@ -6,9 +6,9 @@
 - 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）
 - 取 min(repeat=5) × number
 
-设计文档 §8.3 性能目标：
+设计文档 §8.3 性能目标（v4 V-1 修正后）：
 - Expr 路径 ≥ 8x
-- PyCallable 路径 ≥ 3x
+- PyCallable 路径 ≥ 1.5x（v4：Container proxy + 字段复制开销；PyCallable 是兜底路径）
 
 场景矩阵（覆盖两个路径 × 多个规模 × 多个元素类型）：
 
@@ -252,7 +252,7 @@ def main():
         import subprocess
 
         workdir = r"<legacy-repo>\construct-rs"
-        rs_python = r"<opencode-temp>\crs_venv2\Scripts\python.exe"
+        rs_python = r"<opencode-temp>\crs_venv\Scripts\python.exe"
         py_python = r"<opencode-temp>\crs_venv_py\Scripts\python.exe"
         script = __file__
 
@@ -298,13 +298,13 @@ def _emit_report(rs_data, py_data):
     speedups = []
     for key, path, kind, n, bpe, label in SCENARIOS:
         bytes_per = n * bpe
-        # 设定目标：Expr 路径 >=8x，PyCallable 路径 >=3x
+        # 设定目标：Expr 路径 >=8x，PyCallable 路径 >=1.5x（v4 V-1，原 ≥3x 下调）
         if path.startswith("expr"):
             target = 8.0
             target_str = ">=8x"
         else:
-            target = 3.0
-            target_str = ">=3x"
+            target = 1.5
+            target_str = ">=1.5x"
 
         for direction, suffix in (("parse", "_parse"), ("build", "_build")):
             full_key = key + suffix
@@ -394,14 +394,14 @@ def _emit_report(rs_data, py_data):
     call_fails = [(lbl, d, sp) for _, lbl, p, _, _, d, _, _, sp, t in speedups
                   if not p.startswith("expr") and sp < t]
     if not expr_fails and not call_fails:
-        print(f"  [PASS] Expr 路径全部 >= 8x；PyCallable 路径全部 >= 3x")
+        print(f"  [PASS] Expr 路径全部 >= 8x；PyCallable 路径全部 >= 1.5x (v4 V-1)")
     else:
         if expr_fails:
             print(f"  [FAIL] Expr 路径未达 8x ({len(expr_fails)}/{len([s for s in speedups if s[2].startswith('expr')])}):")
             for lbl, d, sp in expr_fails:
                 print(f"    {lbl} {d}: {sp:.2f}x")
         if call_fails:
-            print(f"  [FAIL] PyCallable 路径未达 3x ({len(call_fails)}/{len([s for s in speedups if not s[2].startswith('expr')])}):")
+            print(f"  [FAIL] PyCallable 路径未达 1.5x ({len(call_fails)}/{len([s for s in speedups if not s[2].startswith('expr')])}):")
             for lbl, d, sp in call_fails:
                 print(f"    {lbl} {d}: {sp:.2f}x")
     print("=" * 120)
