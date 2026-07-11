@@ -18,13 +18,15 @@
 >   StopIf L4079、PrefixedArray L4934）、`construct/construct/lib/containers.py`（ListContainer）
 >
 > **角色**：ARCH
-> **状态**：DESIGNING（v5，用户打回 v4 后第五次修订，RepeatUntil 终止表达式重设计，等待重新检视）
+> **状态**：DESIGNING（v5 实施质疑回应完成，2026-07-11；等待 VET 代码审查）
 > **创建时间**：2026-06-29
 > **修订时间**：2026-06-29（v2 修正 REV 驳回的 P1/P2/P3 + M1-M4；
 >   v3 修正 REV 决策记录对照驳回的 V1/V2/V3/V4；
 >   2026-06-30 v4 修正 VET 驳回的 V-1 PyCallable context proxy 不完整；
 >   2026-06-30 v5 用户打回——PyCallable 路径全删，终止表达式 = Phase 2 表达式，
->   引入 Element() 字段）
+>   引入 Element() 字段；
+>   2026-07-11 v5 实施质疑回应——澄清 set_field_at 双写语义 + 新增
+>   set_expr_value_only API + Index 字段在 RepeatUntil 内的支持 + RU-13 重写）
 
 ---
 
@@ -149,6 +151,34 @@ v5 逐项修正（**全文性变更**，涉及多处重写）：
 > 4. 禁止性能假设中用"物理上限"作为门禁豁免理由
 > 5. 禁止自建 RepeatUntil 专属表达式机制
 > 6. 禁止接受任何形式的"用户不可见的决策路径"
+
+### 0.5 v5 实施质疑回应（DEV 在 4.5 v5 编码中提出的 [设计质疑]）
+
+DEV 在 4.5 v5 实施过程中提出 2 处技术性 [设计质疑]（第 3 处 S-PERF 边缘场景
+门禁已被 PM 打回，用户硬约束不容质疑，不在本节范围）。ARCH 经独立审查后回应：
+
+| 编号 | 质疑内容 | ARCH 回应 | 文档更新位置 |
+|------|---------|----------|------------|
+| 质疑 1 | `Context::set_field_at` 实际写 PyDict（与 §4.3.2 描述不符）；Element 字段在 Packet 实例中应保持 None 还是其他？ | **DEV 修复正确**：新增 `Context::set_expr_value_only` API（仅写 buf，不写 PyDict），RepeatUntilNode 改用此方法借用 Element 字段槽位。Element 字段在 Packet 实例中**始终为 None**（语义：引用入口，不持有真实数据）。详见 §4.3.2 / §4.3.5 / §4.7.1 | §4.3.1（数据结构）/ §4.3.2（parse 流程）/ §4.3.3（build 流程）/ §4.3.5（新增 API 说明）/ §4.7.1 / §4.7.2 / §4.7.3 / §7.3.1（EL-1/EL-2） |
+| 质疑 2 | RU-13 "终止表达式必须引用 Element 字段"过于严格——用户面样例 `(e + i) >= 10` 需要 Element + Index 组合 | **DEV 放宽合理**：终止表达式合法形式 = "至少 1 个 Element 字段 + 任意 Index/普通字段 + 常量运算组合"。"必须含 Element 字段"通过编译期校验 `element_field_idx` 必填实现（未放宽）。Index 字段通过 `index_field_indices` + `sync_index_fields` 在每次迭代同步当前下标到 buf 槽位。详见 §4.3.5 / §7.3.a / §7.3 RU-13/RU-19/RU-20 | §4.3.1（数据结构 + index_field_indices）/ §4.3.5（Index 字段支持）/ §7.3（RU-13 重写 + 新增 RU-19/RU-20/RU-21） |
+
+**关键澄清**：
+- 质疑 1 的根因是 §4.3.2 的初版描述错误（误称 set_field_at "不写 PyDict"），实际
+  set_field_at 双写。DEV 的 set_expr_value_only 修复是必要的（不仅是性能优化，
+  更是语义正确性要求）。ARCH 确认此修复与 Element 字段语义（始终为 None）一致。
+- 质疑 2 的"放宽"实际上**未放松 RU-13 的核心约束**（必须含 Element 字段引用）。
+  放宽的是允许终止表达式中**额外引用 Index 字段**（通过 sync_index_fields 同步）
+  和**额外引用普通字段**（保留 StructNode 写入的稳定值）。这是设计文档原 RU-13
+  表述含糊导致的误解——原表述"必须引用 Element 字段"易被理解为"只能引用 Element
+  字段"。v5 实施澄清为"必须含 Element 字段 + 可含其他字段"。
+
+**未触发新的跨阶段决策**：上述回应均在 Phase 4 决策 5（Element 仅作为构造器字段）
++ 决策 4'（RepeatUntil 终止表达式 = Phase 2 表达式）的框架内，不引入新约束。
+设计决策记录无需更新。
+
+**对 4.5 v5 验收的影响**：**不阻塞 VET**。DEV 的实现（set_expr_value_only +
+sync_index_fields + index_field_indices）与本文档更新后的设计一致，可通过
+代码审查。
 
 ---
 
@@ -400,11 +430,16 @@ pub struct RepeatUntilNode {
     /// 求值结果非零即终止。零 FFI（Rust 内部栈式 VM 求值）。
     terminator: ExprProgram,
     /// Element 字段在当前 Struct 的 expr_values_buf 中的索引（编译期确定）。
-    /// RepeatUntil 每次迭代调 `ctx.set_field_at(element_field_idx, elem, ...)`
-    /// 把当前元素写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
+    /// RepeatUntil 每次迭代调 `ctx.set_expr_value_only(element_field_idx, elem)`
+    /// 把当前元素借用为该槽位（仅写 buf，不写 PyDict），终止表达式中的
+    /// GetInt(element_field_idx) 即取到此值。
     element_field_idx: usize,
-    /// Element 字段名（interned PyString，用于 set_field_at 的 key）。
+    /// Element 字段名（interned PyString）。
+    /// **v5 实施注**：保留用于未来扩展 / 调试；当前 parse/build 路径不使用
+    /// （set_expr_value_only 不需要 name 参数）。
     element_field_name: Py<PyString>,
+    /// Index 字段索引列表（v5 实施新增，详见 §4.3.1 / §4.3.5）。
+    index_field_indices: Vec<usize>,
     /// 是否丢弃解析结果（仍消耗流）。
     discard: bool,
 }
@@ -422,10 +457,15 @@ v4 实施版本中，RepeatUntilNode 通过 `ctx.set_current_elem_ptr(elem.as_pt
    保证存活，是 SAFETY 风险。
 
 v5 设计：终止表达式通过 GetInt(element_field_idx) 从 `expr_values_buf` 取值，
-RepeatUntil 每次迭代把当前元素 `set_field_at` 到该槽位（strong reference，
-PyObject 引用计数管理）。这与 Bytes(count) 中 count 字段引用、Computed(end - start)
-中 end/start 字段引用完全同模式——所有引用统一走 `_FieldDescriptor` + `GetInt`，
-表达式系统输入类型保持纯粹（仅 `_FieldDescriptor` / `_ExprRef` / `int`）。
+RepeatUntil 每次迭代把当前元素 `set_expr_value_only` 借用到该槽位（borrowed
+指针，PyObject 由 Vec 持有保证存活）。这与 Bytes(count) 中 count 字段引用、
+Computed(end - start) 中 end/start 字段引用完全同模式——所有引用统一走
+`_FieldDescriptor` + `GetInt`，表达式系统输入类型保持纯粹（仅 `_FieldDescriptor`
+/ `_ExprRef` / `int`）。
+
+> **v5 实施澄清**（DEV 质疑 1 回应）：本段初稿称 `set_field_at`（strong reference），
+> 实际 `set_field_at` 双写（PyDict + buf），会污染 Packet 实例 `__dict__`。
+> 改用 `set_expr_value_only`（仅写 buf 的 borrowed 指针）。详见 §4.3.5。
 
 #### 2.5.3 与 Phase 4 决策 3（Index 仅作为构造器字段）的一致性论证
 
@@ -435,7 +475,7 @@ PyObject 引用计数管理）。这与 Bytes(count) 中 count 字段引用、Co
 | 表达式引用方式 | 字段名引用：`Bytes(i + 1)` → `[GetInt(idx_of_i), Const(1), Add]` | 字段名引用：`RepeatUntil(e > 5, ...)` → `[GetInt(idx_of_e), Const(5), Gt]` |
 | 表达式系统输入类型 | `_FieldDescriptor` / `_ExprRef` / `int`（不引入新节点类型） | `_FieldDescriptor` / `_ExprRef` / `int`（不引入新节点类型） |
 | ExprOp 指令 | 不引入新 ExprOp（GetInt 已足够） | 不引入新 ExprOp（GetInt 已足够） |
-| 值生命周期 | Struct 单次 parse 周期（IndexNode.parse 一次性写入 ctx.fields） | RepeatUntil 单次迭代周期（RepeatUntilNode 迭代时主动 set_field_at 覆盖） |
+| 值生命周期 | Struct 单次 parse 周期（IndexNode.parse 一次性写入 dict+buf；若被 RepeatUntil 终止表达式引用，再由 sync_index_fields 每次迭代覆盖 buf） | RepeatUntil 单次迭代周期（RepeatUntilNode 迭代时主动 set_expr_value_only 借用 buf 槽位，不写 dict） |
 | 在 Array/RepeatUntil 之外 | IndexNode.parse 返回 None（对齐 Python `context.get("_index", None)`） | ElementNode.parse 返回 None（对齐 Element 字段不持有真实数据） |
 | sizeof | 0（不消耗字节） | 0（不消耗字节） |
 
@@ -687,7 +727,7 @@ pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
 > |---------|------------------|---------|
 > | 取当前下标值（作为字段） | `i: int = rfield(Index())` | IndexNode.parse 读 `ctx.index()` |
 > | 在表达式中引用下标 | 先声明 Index 字段，再用字段名引用：`v: bytes = field(Bytes(i + 1))` | `[GetInt(idx_of_i), Const(1), Add]` |
-> | 取 RepeatUntil 当前元素值（作为字段） | `e: int = rfield(Element())` | ElementNode.parse 在 RepeatUntil 之外返回 None；RepeatUntilNode 迭代时 set_field_at 覆盖该槽位 |
+> | 取 RepeatUntil 当前元素值（作为字段） | `e: int = rfield(Element())` | ElementNode.parse 在 RepeatUntil 之外返回 None；RepeatUntilNode 迭代时 set_expr_value_only 借用该槽位（仅写 buf） |
 > | 在 RepeatUntil 终止表达式中引用当前元素 | 先声明 Element 字段，再用字段名引用：`RepeatUntil(e > 5, subcon)` | `[GetInt(idx_of_e), Const(5), Gt]` |
 >
 > 这与 Phase 2 "字段名即引用、废弃 this" 的精神一致——所有引用统一走
@@ -1169,9 +1209,13 @@ fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
 ///
 /// 每次迭代：
 /// 1. inner.parse → elem（失败直接上抛，RU-1）
-/// 2. `ctx.set_field_at(element_field_idx, elem, ...)` 把当前元素借用为 Element 字段槽位
-/// 3. 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
-/// 4. 表达式非零 → 终止（最后元素包含在内，RU-2）；零 → 继续迭代
+/// 2. `ctx.set_expr_value_only(element_field_idx, elem)` 把当前元素借用为 Element
+///    字段槽位（仅写 expr_values_buf，不写 PyDict——保证 Packet 实例 Element
+///    字段值始终为 None）
+/// 3. 若终止表达式引用 Index 字段，`sync_index_fields` 同步当前 ctx._index 到
+///    这些槽位（同样仅写 buf）
+/// 4. 求值终止表达式（GetInt(element_field_idx) / GetInt(idx_of_i) 从 buf 取值）
+/// 5. 表达式非零 → 终止（最后元素包含在内，RU-2）；零 → 继续迭代
 ///
 /// 终止表达式求值全程在 Rust 内部栈式 VM 执行，零 FFI。
 #[derive(Debug)]
@@ -1182,11 +1226,26 @@ pub struct RepeatUntilNode {
     /// 求值结果非零即终止。
     terminator: ExprProgram,
     /// Element 字段在当前 Struct 的 `expr_values_buf` 中的索引（编译期确定）。
-    /// RepeatUntil 每次迭代调 `ctx.set_field_at(element_field_idx, ...)` 把当前元素
-    /// 写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
+    /// RepeatUntil 每次迭代调 `ctx.set_expr_value_only(element_field_idx, elem)`
+    /// 把当前元素写入该槽位（仅写 buf，不写 PyDict），终止表达式中的
+    /// GetInt(element_field_idx) 即取到此值。
     element_field_idx: usize,
-    /// Element 字段名（interned PyString，set_field_at 的 key 参数）。
+    /// Element 字段名（interned PyString）。
+    /// **注**：v5 实施版本中此字段保留（用于未来扩展 / 调试），当前 parse/build
+    /// 路径不使用——`set_expr_value_only` 不需要 name 参数。
     element_field_name: Py<PyString>,
+    /// Index 字段索引列表（v5 实施新增，DEV 质疑 2 回应）。
+    ///
+    /// 编译期从终止表达式中提取的 Index 字段索引（不含 element_field_idx）。
+    /// RepeatUntil 每次迭代通过 `sync_index_fields` 把这些槽位同步为当前
+    /// `ctx._index` 值（仅写 buf），使终止表达式中引用的 Index 字段能取到
+    /// 当前迭代下标。
+    ///
+    /// 典型场景：`RepeatUntil((e + i) >= 10, Int8ub)`（e 是 Element，i 是 Index）
+    /// → `index_field_indices = [idx_of_i]`。
+    ///
+    /// 详见 §4.3.5「Index 字段在 RepeatUntil 内的支持」。
+    index_field_indices: Vec<usize>,
     /// 是否丢弃解析结果（仍消耗流）。
     discard: bool,
 }
@@ -1197,6 +1256,7 @@ impl RepeatUntilNode {
         terminator: ExprProgram,
         element_field_idx: usize,
         element_field_name: Py<PyString>,
+        index_field_indices: Vec<usize>,
         discard: bool,
     ) -> Self {
         Self {
@@ -1204,6 +1264,7 @@ impl RepeatUntilNode {
             terminator,
             element_field_idx,
             element_field_name,
+            index_field_indices,
             discard,
         }
     }
@@ -1211,7 +1272,7 @@ impl RepeatUntilNode {
     /// has_expressions 判断（设计 §6.1.1）。
     ///
     /// **始终返回 true**（v5）：终止表达式始终引用 Element 字段，需要外层 Struct
-    /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_field_at` 可用。
+    /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_expr_value_only` 可用。
     ///
     /// 此外，inner 子树可能含表达式（虽 Phase 4 暂不支持 inner 表达式，但
     /// 防御性返回 true 避免未来扩展时遗漏 init）。
@@ -1227,15 +1288,23 @@ RepeatUntil 与 Element 字段是**两个独立的 Node**，通过 `element_fiel
 `expr_values_buf` 中"借用"同一个槽位实现通信：
 
 - StructNode.parse 处理 `e` 字段时：ElementNode.parse 返回 None（因为不在
-  RepeatUntil 内），StructNode 把 None set_field_at(idx_of_e) 到 buf。
+  RepeatUntil 内），StructNode 把 None set_field_at(idx_of_e) 到 buf + PyDict。
 - StructNode.parse 处理 `payload` 字段时：RepeatUntilNode.parse 接管，
-  每次迭代 set_field_at(idx_of_e, elem, ...) **覆盖**该槽位为当前元素，
-  求值终止表达式（GetInt(idx_of_e) 取到 elem），下次迭代再覆盖。
+  每次迭代 set_expr_value_only(idx_of_e, elem) **覆盖 buf 槽位**为当前元素
+  （不覆盖 PyDict），求值终止表达式（GetInt(idx_of_e) 从 buf 取到 elem），
+  下次迭代再覆盖。
 
 `element_field_idx` 是编译期从 Element 字段在 Struct 中的声明顺序推导的常量，
 运行时零开销查找。
 
 #### 4.3.2 parse 流程（v5）
+
+> **v5 实施修正（DEV 质疑 1）**：本节初版伪代码使用 `ctx.set_field_at` 借用
+> Element 字段槽位，但 `set_field_at` 实际**双写**（PyDict + expr_values_buf，
+> 见 §3.2.3 / `context.rs` L231-249）。若用于 RepeatUntil 借用，每次迭代会
+> 覆盖实例 `__dict__` 中 Element 字段的值，破坏"Element 字段在 Packet 实例
+> 中始终为 None"的语义（详见 §4.7.1）。DEV 新增 [`Context::set_expr_value_only`]
+> API（仅写 buf，不写 PyDict），RepeatUntilNode 改用此方法。详见 §4.3.5。
 
 对齐 Python `RepeatUntil._parse`（core.py L2670-2682），但终止条件用 Phase 2
 表达式（零 FFI）：
@@ -1248,79 +1317,74 @@ fn parse<'py>(
     ctx: &mut Context<'py>,
     path: &mut Path,
 ) -> Result<Py<PyAny>, ConstructError> {
-    let list = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
+    // 4.7 PyList Vec 中转：count 未知（终止条件运行时求值），用 Vec::new() 起步。
+    let mut elems: Vec<Py<PyAny>> = Vec::new();
+
+    // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
     let old_index = ctx.index();
-    let elem_name = self.element_field_name.bind(py);
 
-    let result = self.parse_loop(py, stream, ctx, path, &list, elem_name);
-
-    restore_index(ctx, old_index);
-    match result {
-        Ok(()) => Ok(list.into_any().unbind()),
-        Err(e) => Err(e),
-    }
-}
-
-fn parse_loop<'py>(
-    &self,
-    py: Python<'py>,
-    stream: &mut ParseStream<'_>,
-    ctx: &mut Context<'py>,
-    path: &mut Path,
-    list: &Bound<'py, PyList>,
-    elem_name: &Bound<'py, PyString>,
-) -> Result<(), ConstructError> {
     let mut i: usize = 0;
     loop {
         ctx.set_index(i);
-        path.push_index(i);
+        // 4.7 lazy path：成功路径不调 path.push_index/pop。
 
         let elem = match self.inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
-            Err(e) => {
-                path.pop();
-                // RU-1: 失败直接上抛（不像 GreedyRange 回退）
+            Err(mut e) => {
+                // RU-1: 失败直接上抛（不像 GreedyRange 回退）。
+                e.push_path_index(i);
+                ctx.restore_index(old_index);
                 return Err(e);
             }
         };
-        path.pop();
 
         if !self.discard {
-            list.append(elem.clone_ref(py))
-                .map_err(ConstructError::from)?;
+            elems.push(elem.clone_ref(py));
         }
 
-        // 把当前元素写入 Element 字段槽位（借用模式）。
+        // 把当前元素借用为 Element 字段槽位（仅写 expr_values_buf，不写 PyDict）。
         // 终止表达式中的 GetInt(element_field_idx) 会从此槽位取值。
-        // set_field_at 内部走 expr_values_buf（栈分配内联数组），零 PyDict 开销。
-        ctx.set_field_at(self.element_field_idx, elem_name, elem.bind(py), py)
-            .map_err(|e| ConstructError::Generic {
-                message: format!("RepeatUntil parse: set_field_at failed: {}", e),
-                path: path.to_string(),
-            })?;
+        // **关键**：必须用 set_expr_value_only（而非 set_field_at）——后者会
+        // 同步写 PyDict，导致 Packet 实例的 Element 字段值被覆盖为最后迭代的
+        // 元素，违反"Element 字段是引用入口、不持有真实数据"的语义（§4.7.1）。
+        ctx.set_expr_value_only(self.element_field_idx, elem.bind(py));
+
+        // 同步 Index 字段槽位（使终止表达式中引用的 Index 字段取到当前下标）。
+        // 详细说明见 §4.3.5「Index 字段在 RepeatUntil 内的支持」。
+        self.sync_index_fields(ctx, py, i);
 
         // 求值终止表达式（零 FFI，Rust 内部栈式 VM）。
-        // 表达式非零即终止（最后元素已包含在 list 中，RU-2）。
-        let stop_v = crate::expr::eval_expr_int(&self.terminator, ctx, py)?;
+        // 表达式非零即终止（最后元素已包含在 Vec 中，RU-2）。
+        let stop_v = eval_expr_int(&self.terminator, ctx, py)?;
         if stop_v != 0 {
-            return Ok(());
+            break;
         }
 
         i = i.saturating_add(1);
     }
+
+    // 一次性创建 PyList（pyo3 内部用 PyList_New + PyList_SET_ITEM）。
+    let list = PyList::new_bound(py, elems);
+
+    ctx.restore_index(old_index);
+    Ok(list.into_any().unbind())
 }
 ```
 
 **性能要点**：
-- `ctx.set_field_at`：直接写入 `expr_values_buf[idx]`（栈分配内联数组），
-  无 PyDict 操作，~5-10ns/iter
+- `ctx.set_expr_value_only`：直接写入 `expr_values_buf[idx]`（栈分配内联数组），
+  不写 PyDict，~1-2ns/iter（vs `set_field_at` 双写 ~10-15ns/iter）
+- `sync_index_fields`：仅当终止表达式引用 Index 字段时执行（`index_field_indices`
+  非空），每次迭代 ~3-5ns/iter（每个 Index 字段一次 `set_expr_value_only`）
 - `eval_expr_int`：栈式 VM 求值，~15-25ns/iter（典型终止表达式 3 个 ExprOp）
 - 无 PyCallable FFI 调用、无 Container proxy 构造、无 ctx 字段浅复制
 
-> **build 方向的 set_field_at 副作用**：parse 方向 RepeatUntilNode 主动覆盖
-> Element 字段槽位。**StructNode.parse 完成后**，Element 字段在 PyDict 中的值
-> 仍是 StructNode 在处理 e 字段时写入的 None（因为 set_field_at 不写 PyDict，
-> 只写 expr_values_buf）。因此 Packet 实例的 e 属性 = None（语义正确）。
+> **Packet 实例的 Element 字段值**：parse 方向 RepeatUntilNode 通过
+> `set_expr_value_only` **仅借用 buf 槽位**，不写实例 `__dict__`。StructNode.parse
+> 处理 `e` 字段时 ElementNode.parse 返回 `Py_None` 并写入 `__dict__`（这是
+> Packet 实例属性的真实来源）。RepeatUntil 迭代期间的 buf 借用不影响 `__dict__`，
+> 因此 **Packet 实例的 Element 字段值始终为 None**（语义正确：Element 字段是引用
+> 入口，不持有真实数据）。详见 §4.7.1 / §4.3.5。
 
 #### 4.3.3 build 流程（v5）
 
@@ -1336,32 +1400,31 @@ fn build(
     path: &mut Path,
 ) -> Result<(), ConstructError> {
     let old_index = ctx.index();
-    let elem_name = self.element_field_name.bind(py);
 
     // 收集 obj（list/tuple/任意 iterable）到 Vec。
     // 注意：与 v4 不同，v5 必须物化到 Vec——终止表达式求值需要 owned elem 引用
     // 写入 expr_values_buf。但仅在终止表达式满足前需要物化，可优化为惰性迭代
     // （性能不达标再优化，§10.2）。
-    let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
+    // 实现使用 nodes/common.rs 的 collect_obj_to_vec 公共 helper（P1-1 整合）。
+    let items: Vec<Py<PyAny>> = collect_obj_to_vec(obj, "RepeatUntil", path)?;
 
     let mut matched = false;
     for (i, elem) in items.iter().enumerate() {
         ctx.set_index(i);
-        path.push_index(i);
+        // 4.7 lazy path：成功路径不调 path.push_index/pop。
         let elem_bound = elem.bind(py);
-        if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
-            path.pop();
-            restore_index(ctx, old_index);
+        if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+            e.push_path_index(i);
+            ctx.restore_index(old_index);
             return Err(e);
         }
-        path.pop();
 
-        // 把当前元素写入 Element 字段槽位（与 parse 同模式）。
-        ctx.set_field_at(self.element_field_idx, elem_name, elem_bound, py)
-            .map_err(|e| ConstructError::Generic {
-                message: format!("RepeatUntil build: set_field_at failed: {}", e),
-                path: path.to_string(),
-            })?;
+        // 把当前元素借用为 Element 字段槽位（与 parse 同模式，仅写 expr_values_buf）。
+        // 必须用 set_expr_value_only 而非 set_field_at（详见 §4.3.2 / §4.3.5）。
+        ctx.set_expr_value_only(self.element_field_idx, elem_bound);
+
+        // 同步 Index 字段槽位（与 parse 同模式，详见 §4.3.5）。
+        self.sync_index_fields(ctx, py, i);
 
         // 求值终止表达式。
         let stop_v = crate::expr::eval_expr_int(&self.terminator, ctx, py)?;
@@ -1371,7 +1434,7 @@ fn build(
         }
     }
 
-    restore_index(ctx, old_index);
+    ctx.restore_index(old_index);
 
     if !matched {
         // RU-3: 无元素满足终止表达式
@@ -1412,6 +1475,163 @@ fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
     })
 }
 ```
+
+#### 4.3.5 Element 字段借用 API（`set_expr_value_only`）+ Index 字段在 RepeatUntil 内的支持
+
+> **v5 实施修正新增**（DEV 质疑 1 回应）：澄清 `set_field_at` 的双写语义 +
+> 介绍 DEV 新增的 `Context::set_expr_value_only` API + Index 字段在终止表达式
+> 中的支持机制（DEV 质疑 2 回应）。
+
+##### set_field_at 的双写语义（澄清）
+
+`Context::set_field_at(idx, name, value, py)` 的实现（见 `context.rs` L231-249）：
+
+```rust
+pub fn set_field_at(...) -> PyResult<()> {
+    if let Some(fields) = &self.fields {
+        fields.set_item(name.bind(py), value)?;          // ① 写 PyDict
+        if idx < self.expr_values_len {
+            self.expr_values_buf[idx] = value.as_ptr();  // ② 写 buf（borrowed 指针）
+        }
+    }
+    Ok(())
+}
+```
+
+**`set_field_at` 同时写 PyDict 和 buf**——这是为了在普通字段（RW/RO）写入路径上
+保持 dict 与 buf 同步：dict 是 Packet 实例 `__dict__` 的最终来源，buf 是 GetInt
+的快速读路径。StructNode.parse/build 处理每个 RW/RO 字段时调用此方法。
+
+##### `set_expr_value_only` API（v5 新增）
+
+**用途**：仅借用 buf 槽位供 GetInt 读取，不污染 PyDict。
+
+**签名**（`context.rs` L251-278）：
+
+```rust
+/// 仅写入 `expr_values_buf`，不修改 PyDict。
+///
+/// 用于 RepeatUntilNode.parse/build 在迭代时把当前元素借用为 Element 字段
+/// 槽位，终止表达式中的 GetInt(element_field_idx) 会从此槽位取值。
+///
+/// # Safety
+///
+/// `value.as_ptr()` 是 borrowed 指针（不 incref）。调用方需保证 value 存活到
+/// 下次 set_expr_value_only / set_field_at 调用前。RepeatUntilNode 的生产路径
+/// 中 value 是迭代 elem（owned by Vec<Py<PyAny>>），其生命周期覆盖整个终止
+/// 表达式求值过程，GIL 持有期间无并发释放。
+#[inline]
+pub fn set_expr_value_only(&mut self, idx: usize, value: &Bound<'_, PyAny>) {
+    if idx < self.expr_values_len {
+        self.expr_values_buf[idx] = value.as_ptr();
+    }
+}
+```
+
+**性能**：~1-2ns（直接指针写入栈分配内联数组），零 PyDict 开销。
+
+**为什么 RepeatUntil 必须用 `set_expr_value_only` 而非 `set_field_at`**：
+
+1. **语义正确性**：Element 字段（`e: int = rfield(Element())`）是 RepeatUntil
+   终止表达式的"当前元素引用入口"，**不持有真实数据**。ElementNode.parse 始终
+   返回 `Py_None`（§4.7.3），StructNode.parse 把 None 写入 Packet 实例的
+   `__dict__`。若 RepeatUntil 用 `set_field_at` 借用，每次迭代会**覆盖**
+   `__dict__` 中 e 字段的值，最终 Packet 实例的 e 属性 = 最后迭代的元素
+   （而非 None），违反 §4.7.1 语义。
+
+2. **性能**：`set_field_at` 双写（dict ~10-15ns + buf ~1-2ns），`set_expr_value_only`
+   仅写 buf ~1-2ns。RepeatUntil 终止表达式只通过 GetInt 读 buf，不需要 dict
+   同步。节省的开销 N=100 元素约 1-1.5μs。
+
+3. **生命周期安全**：borrowed 指针（不 incref）依赖调用方契约。RepeatUntilNode
+   的生产路径中，elem 由 `Vec<Py<PyAny>>::push` 持有（owned 引用计数 +1），
+   整个迭代 + 终止表达式求值过程 elem 存活。下次迭代时 `set_expr_value_only`
+   覆盖槽位（前一次 elem 仍由 Vec 持有，不影响）。安全模型清晰。
+
+**是否作为 Context 正式 API**：**是**。`set_expr_value_only` 是 Context 的公开
+方法（非 RepeatUntilNode 内部 helper），与 `set_field_at` / `set_index` / `inject_fields`
+并列。原因：
+- 该方法体现了"借用 buf 槽位供表达式求值"的通用语义，未来其他场景（如惰性字段、
+  延迟求值字段）可能复用
+- 命名明确（`_only` 后缀提示与 `set_field_at` 的区别），文档完整
+- 不引入新概念（仍是 expr_values_buf 的写入路径之一）
+
+**当前使用范围**：仅 RepeatUntilNode（parse + build 方向，Element 字段借用 +
+Index 字段同步）。其他 Node 不使用此方法。
+
+##### Index 字段在 RepeatUntil 终止表达式中的支持（DEV 质疑 2 回应）
+
+**用户面场景**（§13.2）：
+
+```python
+@dataclass
+class E3(StructMixin):
+    i: int = rfield(Index())                            # Index 字段
+    e: int = rfield(Element())                          # Element 字段
+    payload: list = field(RepeatUntil((e + i) >= 10, Int8ub))  # 终止表达式引用两者
+```
+
+**问题**：Index 字段在 StructNode.parse 处理 `i` 时一次性写入 buf。此时
+ctx._index 是继承自外层的值（若 E3 在 Array 内）或 None（若 E3 在顶层）。但
+RepeatUntil 迭代期间，ctx._index 通过 `ctx.set_index(i)` 不断变化。终止表达式
+中的 `GetInt(idx_of_i)` 应取到**当前迭代下标**，而非 StructNode.parse 时刻的
+快照。
+
+**解决方案**：RepeatUntilNode 数据结构新增 `index_field_indices: Vec<usize>`
+字段（编译期从终止表达式中提取的 Index 字段索引列表，不含 element_field_idx）。
+每次迭代通过 `sync_index_fields` 方法把这些槽位同步为当前 `ctx._index` 值：
+
+```rust
+#[inline]
+fn sync_index_fields(&self, ctx: &mut Context<'_>, py: Python<'_>, i: usize) {
+    if self.index_field_indices.is_empty() {
+        return;
+    }
+    let idx_py = i.into_py(py);
+    let idx_bound = idx_py.bind(py);
+    for &field_idx in &self.index_field_indices {
+        ctx.set_expr_value_only(field_idx, idx_bound);
+    }
+}
+```
+
+**编译期提取**：Python 侧 `_mixin._compile_expressions` 扫描终止表达式引用的
+字段，识别其中的 Index 字段（通过 Element/Index 字段的元数据标记），收集到
+`index_field_indices` 列表，通过 `expr_programs[field_index]["index_field_indices"]`
+注入 Rust 侧（compile.rs L1245-1268）。
+
+**语义对照**（Element 字段 vs Index 字段在 RepeatUntil 内的借用模式）：
+
+| 维度 | Element 字段 | Index 字段 |
+|------|-------------|-----------|
+| 借用来源 | 当前迭代的 inner.parse/build 结果（elem） | 当前 ctx._index（i） |
+| 同步方法 | `set_expr_value_only(element_field_idx, elem)` | `sync_index_fields` → 对每个 `idx` 调 `set_expr_value_only(idx, i)` |
+| 在 Packet 实例中的值 | None（ElementNode.parse 返回 None） | 反映 IndexNode.parse 时刻的 _index 快照（通常 None，若 E3 在顶层） |
+| 编译期识别 | 通过 Element 字段元数据（element_field_idx 必填） | 通过 Index 字段元数据（index_field_indices 列表） |
+
+**Packet 实例的 Index 字段值（在 RepeatUntil 同级 Struct 中）**：
+
+- 若 Index 字段在 RepeatUntil 同级 Struct 中（如 E3），IndexNode.parse 时刻
+  ctx._index 通常是 None（RepeatUntil 还未开始迭代，无外层数组）→ Packet 实例
+  的 i 属性 = None
+- 若 Index 字段在 Array 内的 Item Struct 中（如 Array(3, Struct{i: Index, ...})），
+  IndexNode.parse 时刻 ctx._index 已由 ArrayNode 设置 → Packet 实例的 i 属性 =
+  当前下标
+- **RepeatUntil 迭代期间的 Index 字段借用不影响 Packet 实例属性**（与 Element
+  字段同模式：仅写 buf，不写 PyDict）
+
+##### 终止表达式的合法形式（详见 §7.3 RU-13）
+
+终止表达式必须满足：
+1. **至少引用 1 个 Element 字段**（编译期校验，element_field_idx 必填）
+2. 可引用任意数量的 Index 字段（编译期收集到 index_field_indices）
+3. 可引用任意数量的普通字段（RW/RO，保留 StructNode 写入的稳定值）
+4. 可含常量 + 算术/位/比较运算组合
+
+**禁止**：纯常量表达式（如 `RepeatUntil(1, Int8ub)`）——编译期失败
+（element_field_idx missing）。
+
+详见 §7.3 RU-13（v5 重写）。
 
 ### 4.4 IndexNode（P4，取当前下标）
 
@@ -1475,6 +1695,15 @@ impl Construct for IndexNode {
 > `i + 1` 表达式求值时 GetInt 会因 None 无法 extract 为 i64 抛 `ExprType` 错误。
 > 这与 Python `this._index + 1`（**Python 语法**）在非数组上下文抛 TypeError
 > 的行为一致——无需特殊处理。
+>
+> **在 RepeatUntil 终止表达式中引用 Index 字段**（v5 实施新增，DEV 质疑 2 回应）：
+> 当 Index 字段被同 Struct 的 RepeatUntil 终止表达式引用时（如
+> `RepeatUntil((e + i) >= 10, Int8ub)`），RepeatUntilNode 在每次迭代时通过
+> `sync_index_fields` 把当前 `ctx._index` 值同步到 Index 字段 buf 槽位
+> （仅写 buf，不写 PyDict），使终止表达式中的 `GetInt(idx_of_i)` 取到当前下标。
+> 此时 IndexNode.parse 在 StructNode 处理 `i` 字段时返回的值（None 或继承的
+> 外层 _index）被覆盖在 buf 中，但**不影响 Packet 实例的 i 属性**（保留
+> IndexNode.parse 时刻的快照）。详见 §4.3.5「Index 字段在 RepeatUntil 内的支持」。
 
 ### 4.5 StopIfNode（P5，早停信号）
 
@@ -1690,9 +1919,35 @@ class Packet(StructMixin):
 ```
 
 - `e` 是 Packet 的字段（不是 RepeatUntil 内部字段），与其他字段同等地位
-- ElementNode.parse 返回 None（Element 字段不持有真实数据）
-- RepeatUntilNode 在迭代时**借用** Element 字段槽位（`set_field_at(idx_of_e, elem)`），
-  使终止表达式中的 `e` 引用能取到当前元素值
+- **ElementNode.parse 始终返回 `Py_None`**——这是 Packet 实例 e 属性的真实来源
+  （StructNode.parse 处理 e 字段时把 None 写入实例 `__dict__`）
+- **RepeatUntilNode 在迭代时通过 `set_expr_value_only(idx_of_e, elem)` 借用
+  Element 字段槽位**（仅写 `expr_values_buf`，**不写 PyDict**），使终止表达式
+  中的 `GetInt(idx_of_e)` 能取到当前元素值。借用不影响 Packet 实例的 e 属性
+  （始终为 None）
+
+**Element 字段在 Packet 实例中的语义**（v5 实施澄清，DEV 质疑 1 回应）：
+
+> **Element 字段在 Packet 实例中始终为 None**。
+
+理由：
+1. ElementNode.parse 始终返回 Py_None（§4.7.3），StructNode.parse 把 None
+   写入实例 `__dict__`——这是 Packet 实例 e 属性的**唯一来源**
+2. RepeatUntilNode 借用模式用 `set_expr_value_only`（仅写 buf），**不污染
+   `__dict__`**——这是 v5 实施的关键修正（详见 §4.3.2 / §4.3.5）
+3. 若误用 `set_field_at`（双写），每次迭代会覆盖 `__dict__` 中 e 字段的值，
+   最终 Packet 实例的 e 属性 = 最后迭代的元素（语义错误）
+
+**对照**：
+- **Element 字段**（在 RepeatUntil 同级 Struct 中）：Packet 实例属性 = None
+  （引用入口，不持有真实数据）
+- **Index 字段**（在 Array 内的 Item Struct 中）：Packet 实例属性 = 当前下标
+  （IndexNode.parse 时刻 _index 已设置，是真实数据）
+- **Index 字段**（在 RepeatUntil 同级 Struct 中）：Packet 实例属性 = None
+  （IndexNode.parse 时刻 _index 未设置，与 Element 字段同模式——是引用入口，
+  RepeatUntil 内部通过 sync_index_fields 借用 buf）
+- **Tell/Computed**（RO 字段）：Packet 实例属性 = 计算结果（真实数据，由
+  TellNode/ComputedNode.parse 计算）
 
 **ElementNode 与 IndexNode 的语义差异**：
 
@@ -1701,8 +1956,9 @@ class Packet(StructMixin):
 | 用户面写法 | `i: int = rfield(Index())` | `e: int = rfield(Element())` |
 | 值的来源 | `ctx._index`（Array 系列节点设置） | `ctx.expr_values_buf[idx_of_e]`（RepeatUntilNode 借用） |
 | parse 在 Array/RepeatUntil 之外 | 返回 None（对齐 Python `context.get("_index", None)`） | 返回 None（Element 字段不持有真实数据） |
-| parse 在 Array/RepeatUntil 内 | 返回当前下标（Array 节点已 set_index） | 返回 None（RepeatUntil 不调 ElementNode.parse，直接 set_field_at） |
-| Packet 实例属性值 | 当前下标（Index 在 Array 内的 Item Struct 中） | None（Element 在 Packet 顶层，RepeatUntil 内部借用） |
+| parse 在 Array/RepeatUntil 内 | Array Item Struct 内返回当前下标（Array 节点已 set_index）；RepeatUntil 同级 Struct 内返回 None（_index 未设置） | 返回 None（RepeatUntil 不调 ElementNode.parse，直接 set_expr_value_only 借用 buf） |
+| RepeatUntil 内的借用机制 | 通过 `sync_index_fields` + `set_expr_value_only`（§4.3.5） | 通过 `set_expr_value_only`（§4.3.2） |
+| Packet 实例属性值 | Index 在 Array Item Struct 中 = 当前下标；Index 在 RepeatUntil 同级 Struct 中 = None（与 Element 字段同模式） | None（始终，RepeatUntil 内部借用不影响 `__dict__`） |
 
 #### 4.7.2 数据结构
 
@@ -1714,9 +1970,15 @@ class Packet(StructMixin):
 ///
 /// # parse 行为
 ///
-/// 始终返回 `Py_None`——ElementNode.parse 在用户面不可见。Element 字段的值
-/// 由 RepeatUntilNode 在迭代时通过 `ctx.set_field_at(element_field_idx, elem, ...)`
-/// 借用设置，终止表达式通过 `GetInt(element_field_idx)` 取值。
+/// 始终返回 `Py_None`——这是 Packet 实例 Element 字段属性的真实来源
+/// （StructNode.parse 处理 e 字段时把 None 写入实例 `__dict__`）。
+///
+/// Element 字段的"借用值"（当前迭代元素）由 RepeatUntilNode 在迭代时通过
+/// `ctx.set_expr_value_only(element_field_idx, elem)` 写入 `expr_values_buf`
+/// （**仅写 buf，不写 PyDict**），终止表达式通过 `GetInt(element_field_idx)`
+/// 从 buf 取值。借用不影响 Packet 实例的 e 属性（始终为 None）。
+///
+/// 详见 §4.3.2 / §4.3.5 / §4.7.1。
 ///
 /// # build 行为
 ///
@@ -1756,8 +2018,12 @@ impl super::Construct for ElementNode {
         _ctx: &mut Context<'py>,
         _path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 始终返回 Py_None。Element 字段的值由 RepeatUntilNode 借用设置，
-        // 不在 StructNode.parse 处理 Element 字段时取值。
+        // 始终返回 Py_None。这是 Packet 实例 Element 字段属性的真实来源
+        // （StructNode.parse 把 None 写入实例 __dict__）。
+        //
+        // RepeatUntilNode 在迭代时通过 set_expr_value_only 借用 buf 槽位
+        // （仅写 expr_values_buf，不写 PyDict），因此 Packet 实例的 e 属性
+        // 在 RepeatUntil 完成后仍为 None（语义正确）。详见 §4.3.2 / §4.7.1。
         Ok(py.None())
     }
 
@@ -1925,7 +2191,7 @@ impl GreedyRangeNode {
 impl RepeatUntilNode {
     /// v5：始终返回 true（终止表达式始终引用 Element 字段）。
     /// RepeatUntil 必须触发 StructNode 通过 init_expr_values 初始化
-    /// expr_values_buf，使 set_field_at(element_field_idx, ...) 可用。
+    /// expr_values_buf，使 set_expr_value_only(element_field_idx, ...) 可用。
     pub fn has_expressions(&self) -> bool {
         true
     }
@@ -2333,7 +2599,8 @@ class ElementDescriptor:
 
     必须在 ``rfield()`` 中使用（RO 模式），且必须声明在 RepeatUntil 字段之前。
     Element 字段在 Packet 实例中始终为 None（不持有真实数据）——其值由
-    RepeatUntilNode 在迭代时通过 set_field_at 借用设置。
+    RepeatUntilNode 在迭代时通过 set_expr_value_only 借用 buf 槽位（仅写
+    expr_values_buf，不写 PyDict），借用不影响 Packet 实例属性。
 
     ``_expr_params`` 协议返回空 dict：Element 无表达式参数。
     """
@@ -2618,8 +2885,63 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 
 ### 7.3 RepeatUntil 边界（v5 重写）
 
-> **v5 变更**：删除 RU-4/RU-7/RU-8/RU-9（PyCallable 相关），新增 RU-10~RU-15
-> （终止表达式 / Element 字段相关）。
+> **v5 变更**：删除 RU-4/RU-7/RU-8/RU-9（PyCallable 相关），新增 RU-10~RU-18
+> （终止表达式 / Element 字段 / Index 字段相关）。
+>
+> **v5 实施修正（DEV 质疑 2 回应）**：RU-13 重写——澄清终止表达式的合法形式
+> （必须含 Element 字段引用 + 可含 Index 字段 / 普通字段 / 常量）。
+> 新增 RU-19（Index 字段在终止表达式中的支持）。
+
+#### 7.3.a 终止表达式合法形式（RU-13 规范说明）
+
+**合法形式**：终止表达式（terminator）必须满足以下全部条件：
+
+1. **至少引用 1 个 Element 字段**（编译期校验：Python 侧 `_mixin._compile_expressions`
+   扫描终止表达式 AST，识别 Element 字段引用，填入 `element_field_idx`。Rust 侧
+   `build_repeat_until_node` 把 `element_field_idx` 作为必填字段校验，缺失则
+   编译错误 `RepeatUntil missing 'element_field_idx' in expression programs`）
+2. **可引用任意数量的 Index 字段**（编译期收集到 `index_field_indices` 列表；
+   运行时 RepeatUntil 通过 `sync_index_fields` 同步当前 ctx._index 到这些槽位）
+3. **可引用任意数量的普通字段**（RW/RO 字段，保留 StructNode.parse 一次性写入
+   的稳定值）
+4. **可含常量 + 算术/位/比较运算组合**
+
+**正例**（全部合法）：
+
+| 用户面写法 | 编译结果 | 说明 |
+|-----------|---------|------|
+| `RepeatUntil(e > 5, Int8ub)` | `[GetInt(idx_of_e), Const(5), Gt]` | 单 Element 字段引用 |
+| `RepeatUntil((e + 1) > 7, Int8ub)` | `[GetInt(idx_of_e), Const(1), Add, Const(7), Gt]` | Element 字段 + 常量算术 |
+| `RepeatUntil(e > threshold, Int8ub)` | `[GetInt(idx_of_e), GetInt(idx_of_threshold), Gt]` | Element + 普通字段 |
+| `RepeatUntil((e & 0xFF) == 0, Int8ub)` | `[GetInt(idx_of_e), Const(255), BitAnd, Const(0), Eq]` | Element + 位运算 |
+| `RepeatUntil((e + i) >= 10, Int8ub)`（i 是 Index） | `[GetInt(idx_of_e), GetInt(idx_of_i), Add, Const(10), Ge]` | Element + Index 字段 |
+| `RepeatUntil(-e > -5, Int8ub)` | `[GetInt(idx_of_e), Neg, Const(-5), Gt]` | Element + 一元负 |
+| `RepeatUntil(((e + offset) & mask) == sentinel, Int8ub)` | `[GetInt(idx_of_e), GetInt(idx_of_offset), Add, Const(mask), BitAnd, Const(sentinel), Eq]` | Element + 普通字段 + 常量（最复杂） |
+
+**反例**（编译期失败）：
+
+| 用户面写法 | 失败原因 |
+|-----------|---------|
+| `RepeatUntil(1, Int8ub)` | 纯常量，未引用 Element 字段 → `element_field_idx missing` |
+| `RepeatUntil(0, Int8ub)` | 同上（且永不终止） |
+| `RepeatUntil(i >= 10, Int8ub)`（i 是 Index，无 Element） | 未引用 Element 字段 → `element_field_idx missing` |
+| `RepeatUntil(threshold > 5, Int8ub)`（threshold 是普通字段，无 Element） | 同上 |
+| `RepeatUntil(lambda x,_,_: x > 5, Int8ub)` | callable 被禁（用户硬约束 #1）→ RU-16 |
+
+**纯常量禁止的理由**（保留 v5 原论证）：
+- 纯常量非零（如 `RepeatUntil(1, Int8ub)`）：第一次迭代立即终止，等价于单元素
+  Array，是用户误用（应直接用 `Array(1, ...)`）
+- 纯常量零（如 `RepeatUntil(0, Int8ub)`）：永不终止，parse 因 EOF 失败，build
+  必抛 RepeatError
+
+**"必须含 Element 字段"的设计动机**：
+- Element 字段是 RepeatUntil 与"当前迭代元素"的唯一桥梁。若终止表达式不引用
+  Element 字段，则其求值结果与"当前迭代元素"无关——要么是常量（误用），要么
+  只依赖 Index/普通字段（这些值在 RepeatUntil 整个迭代过程中不变——除了 Index
+  字段通过 sync_index_fields 同步——但若仅依赖 Index，等价于"读到第 N 个元素
+  时终止"，应该用 Array(N, ...) 替代）
+
+#### 7.3.b 边界条件表
 
 | ID | 场景 | 预期行为 |
 |----|------|---------|
@@ -2631,19 +2953,26 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | RU-10 | 终止表达式求值为 0 | 继续下一次迭代（不终止） |
 | RU-11 | 终止表达式求值为负数 | 视为非零，**终止**（与 Python truthy 语义对齐：非零即真） |
 | RU-12 | 终止表达式引用的 Element 字段未被 RepeatUntil 借用（理论不发生） | GetInt 取到 StructNode.parse 初始写入的 None，extract i64 失败，返回 `ExprType` 错误 |
-| RU-13 | 终止表达式不引用任何 Element 字段（如 `RepeatUntil(1, Int8ub)`，常量表达式） | **编译期失败**：`terminator must reference an Element field`。理由：常量终止表达式要么永远终止（无意义）、要么永不终止（build 必抛 RepeatError），都是用户误用 |
+| **RU-13**（v5 实施重写） | 终止表达式不引用任何 Element 字段（含纯常量、仅 Index/普通字段引用） | **编译期失败**：`RepeatUntil missing 'element_field_idx' in expression programs`。合法形式见 §7.3.a |
 | RU-14 | Element 字段未声明在 RepeatUntil 字段之前 | **编译期失败**：前向引用约束（`_check_forward_reference`） |
 | RU-15 | Element 字段类型不是 `rfield(Element())`（如 `field(Element())` RW 模式） | **编译期失败**：Element 字段必须 RO 模式 |
 | RU-16 | RepeatUntil 用户面 API 传入 Python lambda | **编译期失败**：`RepeatUntilDescriptor.__init__` 检查 `callable(terminator)`，报错 "must be a Phase 2 expression" |
 | RU-17 | parse 方向 discard=True | 仍消耗字节、求值终止表达式，但不收集元素到 list（返回空 list） |
 | RU-18 | build 方向 discard=True | 不影响终止表达式求值（终止表达式不接收 list 参数），与 discard=False 行为一致 |
+| **RU-19**（v5 实施新增） | 终止表达式引用 Index 字段（如 `(e + i) >= 10`，i 是 `rfield(Index())`） | RepeatUntil 每次迭代通过 `sync_index_fields` 把当前 ctx._index 同步到 Index 字段 buf 槽位（仅写 buf，不写 PyDict），使 GetInt(idx_of_i) 取到当前下标。详见 §4.3.5 |
+| **RU-20**（v5 实施新增） | 终止表达式引用普通字段（如 `e > threshold`，threshold 是 RW 字段） | 普通字段值由 StructNode.parse 一次性写入 buf（稳定），RepeatUntil 不修改。GetInt(idx_of_threshold) 取到 StructNode.parse 时刻的快照 |
+| **RU-21**（v5 实施新增） | Element 字段值通过 set_expr_value_only 借用（仅写 buf） | Packet 实例的 Element 字段属性始终为 None（ElementNode.parse 返回 None + 借用不污染 PyDict）。详见 §4.3.2 / §4.7.1 |
 
 ### 7.3.1 Element 边界（v5 新增）
 
+> **v5 实施修正**（DEV 质疑 1 回应）：EL-1 / EL-2 澄清 Packet 实例 Element
+> 字段值的语义来源（始终为 None，由 ElementNode.parse + set_expr_value_only
+> 借用共同保证）。
+
 | ID | 场景 | 预期行为 |
 |----|------|---------|
-| EL-1 | `rfield(Element())` 在 RepeatUntil 之外（如同 Struct 单独存在） | ElementNode.parse 返回 None；Packet 实例的 Element 字段属性 = None |
-| EL-2 | Element 字段被 RepeatUntil 终止表达式引用 | RepeatUntil 在迭代时 set_field_at 借用槽位，终止表达式 GetInt 取到当前元素值 |
+| EL-1 | `rfield(Element())` 在 RepeatUntil 之外（如同 Struct 单独存在） | ElementNode.parse 返回 None；StructNode.parse 把 None 写入实例 `__dict__`；**Packet 实例的 Element 字段属性 = None** |
+| EL-2 | Element 字段被 RepeatUntil 终止表达式引用 | RepeatUntil 在迭代时 `set_expr_value_only` **仅借用 buf 槽位**（不写 PyDict），终止表达式 GetInt 取到当前元素值；**Packet 实例的 Element 字段属性仍为 None**（借用不污染 `__dict__`） |
 | EL-3 | sizeof | 返回 0（不消耗字节） |
 | EL-4 | build | no-op（不写字节） |
 | EL-5 | Element 字段不在 RepeatUntil 终止表达式中引用（声明但未用） | 编译期 warning（不报错）；Packet 实例 Element 字段属性 = None（语义：未使用） |
@@ -2744,30 +3073,43 @@ construct-rs `RepeatUntilNode.parse`（终止表达式 = Phase 2 ExprProgram）�
 | `self.inner.parse(py, stream, ctx, path)`（FormatField 分派 + read 1 byte + PyLong 创建） | ~15-25 | Phase 1-3 实测 |
 | `ctx.set_index(i)`（栈字段写入） | ~1 | 直接赋值 |
 | `path.push_index/pop`（Vec::push + format!） | ~20-30 | format!("[{i}]") 是主要开销 |
-| `list.append(elem)`（PyList C API） | ~30-50 | PyList_Append |
-| `ctx.set_field_at(idx, name, elem, py)`（写入 expr_values_buf 内联数组） | ~5-10 | 直接指针赋值 + 引用计数 incr |
+| `elems.push(elem.clone_ref(py))`（Vec push + 引用计数 incr） | ~5-10 | Vec amortized push + Py_INCREF |
+| `ctx.set_expr_value_only(idx, elem)`（仅写 expr_values_buf 内联数组，不写 PyDict） | ~1-2 | 直接指针赋值（不 incref，borrowed） |
+| `sync_index_fields`（若终止表达式引用 Index 字段，每个 Index 字段一次 set_expr_value_only） | ~3-5（典型 1 个 Index 字段） | 同上，按字段数线性 |
 | `eval_expr_int(&terminator, ctx, py)`（栈式 VM 求值，~3 个 ExprOp） | ~15-25 | i64 栈数组 + match 分派 |
 | 循环控制（loop + saturating_add） | ~2-5 | 编译期常量 |
-| **单次迭代合计** | **~88-146** | |
-| **N=100 总耗时** | **~8.8-14.6 μs** | |
+| **单次迭代合计**（无 Index 字段） | **~64-103** | |
+| **单次迭代合计**（含 1 个 Index 字段） | **~67-108** | |
+| **N=100 总耗时** | **~6.4-10.8 μs** | |
 
-#### 8.1.3 加速比数值推导（v5）
+#### 8.1.3 加速比数值推导（v5，2026-07-11 v5 实施质疑回应同步更新）
 
 ```
 加速比 = Python 总耗时 / Rust 总耗时
 
-保守估计（取 Python 下限、Rust 上限）：
-  加速比 = 153 μs / 14.6 μs ≈ 10.5x
+保守估计（取 Python 下限、Rust 上限，无 Index 字段场景）：
+  加速比 = 153 μs / 10.8 μs ≈ 14.2x
 
-理想估计（取 Python 上限、Rust 下限）：
-  加速比 = 225 μs / 8.8 μs ≈ 25.6x
+理想估计（取 Python 上限、Rust 下限，无 Index 字段场景）：
+  加速比 = 225 μs / 6.4 μs ≈ 35.2x
 
-中位数估计：
-  加速比 = 189 μs / 11.7 μs ≈ 16.2x
+中位数估计（无 Index 字段场景）：
+  加速比 = 189 μs / 8.6 μs ≈ 22.0x
+
+含 1 个 Index 字段场景（sync_index_fields 额外 ~3-5 ns/iter，N=100 = 0.3-0.5μs）：
+  加速比降幅 < 5%，仍在 ≥10x 硬门禁内（保守估计 ~13.5x）
 ```
 
-**结论**：RepeatUntil v5 设计预期加速比 **10.5x - 25.6x**，中位数 ~16x，
-满足 S-PERF ≥10x 硬门禁（用户硬约束 #5：禁止"物理上限"豁免）。
+**结论**：RepeatUntil v5 设计预期加速比 **14.2x - 35.2x**（无 Index 字段场景），
+中位数 ~22x；含 1 个 Index 字段场景保守估计 ~13.5x。**所有场景满足 S-PERF ≥10x
+硬门禁**（用户硬约束 #5：禁止"物理上限"豁免）。
+
+> **v5 实施质疑回应的同步修订**（2026-07-11）：原 §8.1.3 基于 `set_field_at`
+> 双写估算（~5-10ns/iter），v5 实施改用 `set_expr_value_only`（~1-2ns/iter），
+> 节省 ~4-8 ns/iter。同时把 PyList.append（~30-50ns）改为 Vec push（~5-10ns，
+> 4.7 PyList Vec 中转模式），节省 ~20-40 ns/iter。合计 Rust 端 N=100 总耗时
+> 从 ~8.8-14.6 μs 降到 ~6.4-10.8 μs，加速比上限从 25.6x 提升到 35.2x。
+> 实际性能以 VET 实测为准，本节仅作为设计阶段的可证伪预测。
 
 #### 8.1.4 Array / GreedyRange / PrefixedArray 开销分析（不变，沿用 v4）
 
@@ -2813,7 +3155,7 @@ construct-rs `ArrayNode.parse` 的预期开销：
 **证伪条件**：
 - 若 RepeatUntil 任意场景加速比 < 10x，视为性能未达标，需排查：
   - `eval_expr_int` 是否意外走 FFI（应全程 Rust 内部栈）
-  - `set_field_at` 是否走 PyDict 路径（应直接写 expr_values_buf 内联数组）
+  - RepeatUntil 是否误用 `set_field_at`（双写 PyDict + buf）而非 `set_expr_value_only`（仅写 buf）—— 应使用 set_expr_value_only
   - `terminator` 表达式 ExprOp 数量是否超预期（典型 3-5 个）
   - inner.parse 是否被错误地走多一层 FFI
 - 若加速比 < 4x（S-PERF 硬目标的下限），视为架构失败，回退设计。
@@ -2850,7 +3192,7 @@ construct-rs `ArrayNode.parse` 的预期开销：
 **典型终止表达式（3 个 ExprOp）总开销**：~10-15 ns
 **最复杂终止表达式（7 个 ExprOp）总开销**：~30-40 ns
 
-#### 8.3.2 RepeatUntil ≥10x 的逐项推导
+#### 8.3.2 RepeatUntil ≥10x 的逐项推导（v5 实施质疑回应同步更新）
 
 参考 §8.1.2（Rust 端开销），关键依赖：
 
@@ -2858,27 +3200,38 @@ construct-rs `ArrayNode.parse` 的预期开销：
 |-------|----------|------------|
 | inner.parse（FormatField） | 15-25 | 否（必需的流读 + PyLong 创建） |
 | ctx.set_index | 1 | 否（栈字段写入，零开销） |
-| path.push_index/pop | 20-30 | **可优化**（P0-3 风格，§10.2） |
-| list.append | 30-50 | 否（PyList C API 已最快） |
-| ctx.set_field_at（借用 Element 槽位） | 5-10 | 否（栈数组写入） |
+| elems.push（Vec amortized push + Py_INCREF） | 5-10 | 否（Vec 中转 PyList 模式已最快） |
+| ctx.set_expr_value_only（借用 Element 槽位，仅写 buf） | 1-2 | 否（栈数组 borrowed 指针写入） |
+| sync_index_fields（仅 Index 字段引用时） | 0（无）/ 3-5（1 个 Index） | 否（按需） |
 | eval_expr_int | 10-40 | 否（零 FFI 栈式 VM） |
 | 循环控制 | 2-5 | 否 |
 
-**未优化总开销**：~83-161 ns/iter → 加速比 10-27x
-**P0-3 优化后总开销**（消除 path push/pop）：~63-131 ns/iter → 加速比 12-35x
+**v5 实施版本**（已采用 P0-3 lazy path：成功路径不维护 path）：
+- 无 Index 字段场景总开销：~34-83 ns/iter → 加速比 18-66x
+- 含 1 个 Index 字段场景总开销：~37-88 ns/iter → 加速比 17-62x
 
-**结论**：即使最保守估计（取 Rust 上限 + Python 下限），加速比 ~10x。
-P0-3 优化（成功路径不维护 path）可进一步提升至 ~12x+。**满足 ≥10x 硬门禁**。
+**结论**：v5 实施版本预期加速比 **17-66x**（无 Index 字段）/ **17-62x**（含 1 个
+Index 字段）。即使最保守估计（取 Rust 上限 + Python 下限），加速比 ≥14x。
+**满足 ≥10x 硬门禁**。
+
+> **vs 原估算的改进来源**（v5 实施质疑回应）：
+> - 4.7 PyList Vec 中转模式：`elems.push` ~5-10ns 替代 `list.append` ~30-50ns，节省 ~20-40 ns/iter
+> - set_expr_value_only：~1-2ns 替代 set_field_at 双写 ~5-10ns，节省 ~4-8 ns/iter
+> - P0-3 lazy path：成功路径零 path 开销（原 ~20-30 ns/iter path.push_index/pop）
+> - 合计节省 ~44-78 ns/iter，使保守估计加速比从原 ~10x 提升到 ~14-18x
+
 
 #### 8.3.3 性能假设的关键依赖
 
-1. **`ctx.set_field_at` 必须走 expr_values_buf**（栈分配内联数组），不走 PyDict。
-   - 若误用 `ctx.set_field(name, value)`（PyDict 路径），每次迭代多 ~50-80 ns
-   - 100 元素 = 5-8 μs 额外开销，加速比从 ~16x 降到 ~10x（仍达标，但余量小）
+1. **`ctx.set_expr_value_only` 必须仅写 expr_values_buf**（栈分配内联数组），不走 PyDict。
+   - 若误用 `ctx.set_field_at`（双写 PyDict + buf），每次迭代多 ~10-15 ns + 污染 Packet 实例 `__dict__`（语义错误）
+   - 若误用 `ctx.set_field`（仅写 PyDict），GetInt 取到旧值（buf 未同步），逻辑错误
+   - **正确实现**：`ctx.set_expr_value_only(element_field_idx, elem)`（borrowed 指针写入 buf，不 incref）
 2. **`eval_expr_int` 必须全程 Rust 内部栈式 VM**（无 FFI）。
    - 若误用 PyCallable 路径（v5 已删除），每次迭代跨 FFI ~270-300 ns
-   - 100 元素 = 27-30 μs 额外开销，加速比从 ~16x 降到 ~5-6x（不达标）
-3. **`path.push_index/pop` 首版保留**，若性能不达标再用 P0-3 风格优化。
+   - 100 元素 = 27-30 μs 额外开销，加速比从 ~22x 降到 ~5-6x（不达标）
+3. **P0-3 lazy path**（v5 实施版本已采用）：成功路径不维护 path，错误路径通过
+   `ConstructError::push_path_index` 重建。节省 ~20-30 ns/iter。
 4. **inner.parse 的 FormatField 分派开销**（~15-25 ns）不可消除，
    这是 Rust 实现的下限。
 
@@ -2937,12 +3290,13 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 4. **RepeatUntil 终止表达式求值必须全程 Rust 内部栈式 VM**（v5 关键依赖）。
    - 单次迭代终止表达式求值开销：~10-40 ns（3-7 个 ExprOp，§8.3.1）
    - N=100 时 100 次求值 = ~1-4 μs（占总耗时 ~10-30%）
-   - **关键不变量**：`ctx.set_field_at` 必须走 `expr_values_buf`（栈分配内联数组），
-     绝不走 PyDict。`eval_expr_int` 全程在 Rust 内部，无 FFI。
-   - 若误走 PyDict 路径：每次迭代多 ~50-80 ns，100 元素 = 5-8 μs，加速比从 ~16x
-     降到 ~10x（仍达标但余量小）。
+   - **关键不变量**：RepeatUntil 借用 Element/Index 字段必须用 `ctx.set_expr_value_only`
+     （仅写 expr_values_buf，不走 PyDict）；`eval_expr_int` 全程在 Rust 内部，无 FFI。
+   - 若误用 `set_field_at`（双写 PyDict + buf）：每次迭代多 ~10-15 ns + 污染
+     Packet 实例 `__dict__`（语义错误，详见 §4.3.5）。
+   - 若误用 `set_field`（仅写 PyDict）：GetInt 取到旧值（buf 未同步），逻辑错误。
    - 若误引入 FFI（如 v4 PyCallable 路径）：每次迭代多 ~270-300 ns，100 元素 =
-     27-30 μs，加速比从 ~16x 降到 ~5-6x（**不达标**）。
+     27-30 μs，加速比从 ~22x 降到 ~5-6x（**不达标**）。
    - 验证：profile 检查 RepeatUntil 迭代中无 PyObject_Call 调用（PyCallable 已删除）。
 
 ---
@@ -3101,10 +3455,11 @@ construct-rs 把所有非 StopField 错误都视为"流终止信号"（回退 + 
 
 RepeatUntil v5 终止表达式路径已满足 ≥10x（§8.3 推导）。可选的进一步优化：
 
-1. **path push/pop 优化（P0-3 风格）**：见 §10.2。
-2. **`ctx.set_field_at` 内联**：当前 `set_field_at` 是 Context 方法调用，
+1. **path push/pop 优化（P0-3 风格）**：v5 实施版本已采用（成功路径不维护 path）。
+2. **`ctx.set_expr_value_only` 内联**：当前 `set_expr_value_only` 是 Context 方法调用，
    可在 RepeatUntilNode 中直接写 `ctx.expr_values_buf[self.element_field_idx] = elem.as_ptr()`
-   （需要 Context 暴露 `expr_values_buf_mut` unsafe 访问器）。预期节省 ~2-3 ns/iter。
+   （需要 Context 暴露 `expr_values_buf_mut` unsafe 访问器）。预期节省 ~1-2 ns/iter
+   （收益有限，因 set_expr_value_only 本身已 ~1-2ns）。
 3. **terminator ExprProgram 特化**：若 terminator 是固定模式（如 `[GetInt, Const, Gt]`），
    可在编译期识别为"哨兵比较"，运行时直接调 `inner.parse + PyLong_AsLongLong + 比较`，
    绕过栈式 VM 开销。预期节省 ~5-10 ns/iter。但增加编译器复杂度，YAGNI。
