@@ -42,6 +42,7 @@ use crate::nodes::bitwise::BitwiseNode;
 use crate::nodes::bytes::BytesNode;
 use crate::nodes::bytewise::BytewiseNode;
 use crate::nodes::computed::ComputedNode;
+use crate::nodes::element::ElementNode;
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::greedy_range::GreedyRangeNode;
@@ -539,6 +540,13 @@ fn build_node_from_descriptor(
         // IndexNode 直接调 ctx.index() 读取，不走 ExprProgram（v3 决策，§3.3）。
         // IndexDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
         "IndexDescriptor" => return Ok(Node::Index(IndexNode::new())),
+        // ElementDescriptor（Phase 4.5 v5 新增）→ ElementNode。
+        // construct-rs 新增（Python construct 无对应物）。Element 字段为 RepeatUntil
+        // 终止表达式提供"当前元素"引用入口，parse 返回 None（值由 RepeatUntilNode
+        // 借用设置），build 是 no-op，sizeof=0。
+        // 设计依据：`docs/模块设计-Array.md` §4.7。
+        // ElementDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
+        "ElementDescriptor" => return Ok(Node::Element(ElementNode::new())),
         // RepeatUntilDescriptor（Phase 4.5）→ RepeatUntilNode。
         // 对应 Python construct `RepeatUntil(predicate, subcon, discard)`（core.py L2637）。
         // 谓词分类（设计 §4.3.1）：

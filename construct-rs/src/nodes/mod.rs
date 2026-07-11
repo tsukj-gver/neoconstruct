@@ -34,6 +34,7 @@ pub mod bytes;
 pub mod bytewise;
 pub mod common;
 pub mod computed;
+pub mod element;
 pub mod format_field;
 pub mod greedy_bytes;
 pub mod greedy_range;
@@ -58,6 +59,7 @@ use bitwise::BitwiseNode;
 use bytes::BytesNode;
 use bytewise::BytewiseNode;
 use computed::ComputedNode;
+use element::ElementNode;
 use enum_dispatch::enum_dispatch;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
@@ -225,6 +227,11 @@ pub enum Node {
     /// 被外层 StructNode / GreedyRangeNode 捕获，停止后续字段/迭代。
     /// 条件可为编译期常量（Always / Never）或表达式（Expr）。
     StopIf(StopIfNode),
+    /// RepeatUntil 当前元素引用入口节点（v5 新增；Python construct 无对应物）。
+    /// Phase 4.5 v5 新增（设计 §4.7）。parse 始终返回 Py_None，值由
+    /// RepeatUntilNode 在迭代时 set_field_at 借用设置；build 是 no-op；
+    /// sizeof 返回 0；has_expressions 返回 false。
+    Element(ElementNode),
 }
 
 impl Node {
@@ -249,6 +256,7 @@ impl Node {
             Node::RepeatUntil(r) => r.has_expressions(),
             Node::Index(i) => i.has_expressions(),
             Node::StopIf(s) => s.has_expressions(),
+            Node::Element(e) => e.has_expressions(),
             _ => false,
         }
     }
@@ -306,6 +314,10 @@ impl Node {
             // 执行条件检查（可能抛 StopField 哨兵）。这避免了 Rw 模式下强制 getattr
             // 「stop」属性的负担（用户不需要为 StopIf 字段提供值）。
             Node::StopIf(_) => Ok(py.None()),
+            // Phase 4.5 v5：Element 作为 RO 字段时返回 None（Element 字段不持有
+            // 真实数据——值由 RepeatUntilNode 在迭代时借用设置）。
+            // 设计 §4.7.4。
+            Node::Element(_) => Ok(py.None()),
             // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
             _ => Err(ConstructError::Generic {
                 message: format!(

@@ -781,6 +781,72 @@ def Index():
     return IndexDescriptor()
 
 
+# ---------------------------------------------------------------------------
+# Phase 4 子任务 4.5 v5: Element 描述符（v5 新增）
+#
+# 设计依据：``docs/模块设计-Array.md`` §4.7 / §6.3.1。
+#
+# ``Element()`` 是 RepeatUntil 终止表达式中"当前元素"的引用入口。
+# 与 Index 字段平行（Index 是 Array 内"当前下标"引用入口）。
+# 必须在 ``rfield()`` 中使用（RO 模式），声明在 RepeatUntil 字段之前。
+# ---------------------------------------------------------------------------
+
+
+class ElementDescriptor:
+    """``Element()`` 描述符（v5 新增）。
+
+    RepeatUntil 终止表达式中"当前元素"的引用入口。无参数。
+
+    必须在 ``rfield()`` 中使用（RO 模式），且必须声明在 RepeatUntil 字段之前。
+    Element 字段在 Packet 实例中始终为 None（不持有真实数据）——其值由
+    RepeatUntilNode 在迭代时通过 set_field_at 借用设置。
+
+    与 Index 字段平行（设计决策记录 Phase 4 决策 3 + 决策 5）：用户面形式一致
+    （``rfield(<构造器字段>())`` + 字段名引用），表达式系统输入类型保持纯粹
+    （仅 ``_FieldDescriptor`` / ``_ExprRef`` / ``int``，不引入新 ExprOp 指令）。
+
+    ``_expr_params`` 协议返回空 dict：Element 无表达式参数。
+
+    设计依据：``docs/模块设计-Array.md`` §4.7。
+    """
+
+    __slots__ = ()
+
+    # 类级别常量：Element 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Element()"
+
+
+def Element():
+    """创建一个 Element 描述符（v5 新增）。
+
+    RepeatUntil 终止表达式中"当前元素"的引用入口。
+
+    使用方式（在 RepeatUntil 终止表达式中引用当前元素）::
+
+        @dataclass
+        class Packet(StructMixin):
+            e: int = rfield(Element())                # Element 字段
+            payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+        Packet.parse(b"\\x01\\x02\\x06\\xAA")
+        # Packet(e=None, payload=[1, 2, 6])    # 最后元素 6 满足 e > 5
+
+    Element 字段在 Packet 实例中始终为 None（值由 RepeatUntilNode 借用设置）。
+
+    限制（Phase 4.5 v5）：
+
+    - 必须为 RO 模式（``rfield(Element())``），编译期校验
+    - 必须声明在 RepeatUntil 字段之前（前序字段引用约束）
+    - 同 Struct 内建议 ≤1 个 Element 字段（多个无意义）
+
+    :return: ``ElementDescriptor`` 实例。
+    """
+    return ElementDescriptor()
+
+
 class StopIfDescriptor:
     """``StopIf(condfunc)`` 描述符。
 
@@ -998,4 +1064,7 @@ __all__ = [
     "StopIf",
     "RepeatUntilDescriptor",
     "RepeatUntil",
+    # Phase 4.5 v5 Element
+    "ElementDescriptor",
+    "Element",
 ]
