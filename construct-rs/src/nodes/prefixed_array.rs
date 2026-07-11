@@ -36,7 +36,7 @@ use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::PyList;
 
 // ---------------------------------------------------------------------------
 // PrefixedArrayNode
@@ -167,31 +167,8 @@ impl super::Construct for PrefixedArrayNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 1. 收集 obj（list/tuple/任意 iterable）。
-        let items: Vec<Py<PyAny>> = if let Ok(list) = obj.downcast::<PyList>() {
-            list.iter().map(|b| b.unbind()).collect()
-        } else if let Ok(tuple) = obj.downcast::<PyTuple>() {
-            tuple.iter().map(|b| b.unbind()).collect()
-        } else {
-            // 兜底：尝试 iter() 收集。性能差，仅在用户传入非 list/tuple 时触发。
-            let iter = obj.iter().map_err(|e| ConstructError::Generic {
-                message: format!(
-                    "PrefixedArray build expects list/tuple, got {} (iter error: {})",
-                    obj.get_type()
-                        .name()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|_| "<unknown>".to_string()),
-                    e
-                ),
-                path: path.to_string(),
-            })?;
-            let collected: PyResult<Vec<Py<PyAny>>> =
-                iter.map(|b| b.map(|bound| bound.unbind())).collect();
-            collected.map_err(|e| ConstructError::Generic {
-                message: format!("PrefixedArray build iterable error: {}", e),
-                path: path.to_string(),
-            })?
-        };
+        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        let items = super::common::collect_obj_to_vec(obj, "PrefixedArray", path)?;
 
         let count = items.len();
 

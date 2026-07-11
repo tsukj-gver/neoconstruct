@@ -32,6 +32,7 @@ pub mod bits_integer;
 pub mod bitwise;
 pub mod bytes;
 pub mod bytewise;
+pub mod common;
 pub mod computed;
 pub mod format_field;
 pub mod greedy_bytes;

@@ -27,7 +27,7 @@ use crate::expr::{eval_expr_int, ExprProgram};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
-use pyo3::types::{PyList, PyTuple};
+use pyo3::types::PyList;
 
 // ---------------------------------------------------------------------------
 // CountSource
@@ -198,38 +198,10 @@ impl super::Construct for ArrayNode {
     ) -> Result<(), ConstructError> {
         let count = self.eval_count(ctx, py)?;
 
-        // 校验 obj 是 list/tuple/iterable，并取长度。
-        // 优先快路径（list/tuple），回落到通用 iterable（性能差）。
-        let (obj_len, items): (usize, Vec<Py<PyAny>>) = if let Ok(list) = obj.downcast::<PyList>() {
-            let len = list.len();
-            let v: Vec<Py<PyAny>> = list.iter().map(|b| b.unbind()).collect();
-            (len, v)
-        } else if let Ok(tuple) = obj.downcast::<PyTuple>() {
-            let len = tuple.len();
-            let v: Vec<Py<PyAny>> = tuple.iter().map(|b| b.unbind()).collect();
-            (len, v)
-        } else {
-            // 兜底：尝试 iter() 收集。性能差，仅在用户传入非 list/tuple 时触发。
-            let iter = obj.iter().map_err(|e| ConstructError::Generic {
-                message: format!(
-                    "Array build expects list/tuple, got {} (iter error: {})",
-                    obj.get_type()
-                        .name()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|_| "<unknown>".to_string()),
-                    e
-                ),
-                path: path.to_string(),
-            })?;
-            let collected: PyResult<Vec<Py<PyAny>>> = iter
-                .map(|b| b.map(|bound| bound.unbind()))
-                .collect::<PyResult<Vec<_>>>();
-            let v = collected.map_err(|e| ConstructError::Generic {
-                message: format!("Array build iterable error: {}", e),
-                path: path.to_string(),
-            })?;
-            (v.len(), v)
-        };
+        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        // ArrayNode 的 obj_len 需求通过 vec.len() 获取（O(1)）。
+        let items = super::common::collect_obj_to_vec(obj, "Array", path)?;
+        let obj_len = items.len();
 
         // AR-3: 长度校验
         if obj_len != count {
