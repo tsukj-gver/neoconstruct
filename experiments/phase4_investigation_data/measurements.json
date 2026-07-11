@@ -1,0 +1,19 @@
+{
+  "e01_empty_build": {
+    "label": "Array(0, Index()) 空数组 build",
+    "n": 0,
+    "rs": {
+      "PARSE_NS": 253.90999702115852,
+      "BUILD_NS": 149.56333519270024
+    },
+    "py_bare": {
+      "PARSE_NS": 766.5433300038178,
+      "BUILD_NS": 796.0400000835458
+    },
+    "py_struct": {
+      "PARSE_NS": 2102.113328874111,
+      "BUILD_NS": 2053.079994705816
+    },
+    "rs_number": 30000
+  }
+}
