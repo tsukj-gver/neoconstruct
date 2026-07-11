@@ -1150,7 +1150,6 @@ fn parse_expr_ops_from_py(ops_list: &Bound<'_, PyAny>) -> Result<Vec<ExprOp>, Co
                     })?;
                 ExprOp::GetInt(idx)
             }
-            "getelem" => ExprOp::GetElem,
             "const" => {
                 let val: i64 = tuple
                     .get_item(1)

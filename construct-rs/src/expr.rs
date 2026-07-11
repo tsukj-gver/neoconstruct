@@ -46,13 +46,6 @@ pub enum ExprOp {
     /// 执行：`ctx.get_int_at(idx, py)` → `stack.push(i64)`。
     GetInt(usize),
 
-    /// 从 context 取 RepeatUntil 当前元素值（仅 Expr 谓词路径使用，Phase 4.5b）。
-    ///
-    /// 执行：`ctx.current_elem_as_i64(py)` → `stack.push(i64)`。
-    /// 仅支持整数元素（PyLong_AsLongLong）。元素非整数时返回 `ExprType` 错误。
-    /// `ctx._current_elem == None`（不在 RepeatUntil Expr 路径中）时返回 `ExprContext` 错误。
-    GetElem,
-
     /// 压入编译期常量整数。
     Const(i64),
 
@@ -173,7 +166,7 @@ fn compute_max_stack(ops: &[ExprOp]) -> usize {
     let mut max: usize = 0;
     for op in ops {
         match op {
-            ExprOp::GetInt(_) | ExprOp::Const(_) | ExprOp::GetElem => {
+            ExprOp::GetInt(_) | ExprOp::Const(_) => {
                 depth += 1;
                 if depth > max {
                     max = depth;
@@ -270,13 +263,6 @@ pub fn eval_expr_int(
         match op {
             ExprOp::GetInt(idx) => {
                 let val = ctx.get_int_at(*idx, py)?;
-                stack_buf[stack_len] = val;
-                stack_len += 1;
-            }
-            ExprOp::GetElem => {
-                // RepeatUntil Expr 谓词路径：从 ctx._current_elem 取当前元素值。
-                // 仅支持整数元素（PyLong_AsLongLong）。元素非整数返回 ExprType 错误。
-                let val = ctx.current_elem_as_i64(py)?;
                 stack_buf[stack_len] = val;
                 stack_len += 1;
             }
