@@ -277,6 +277,41 @@ impl<'py> Context<'py> {
         // idx >= expr_values_len：防御性忽略（不 panic）。
     }
 
+    /// 仅写入 `expr_values_buf`（raw ptr 版本，避免 RepeatUntil 热路径 clone_ref）。
+    ///
+    /// 与 [`Context::set_expr_value_only`] 等价，但接收 `&Py<PyAny>` 而非
+    /// `&Bound<'_, PyAny>`，使调用方能直接传 `elems.last()`（borrow from Vec）
+    /// 或 `&elem`（仍 owned 的本地变量），无需 clone_ref 维持 Bound 生命周期。
+    ///
+    /// # 性能动机（4.5 v5.1）
+    ///
+    /// 原 `set_expr_value_only(elem.bind(py))` 路径中 `elem` 在 push 后必须
+    /// 存活到 set_expr_value_only 调用，需要 `elems.push(elem.clone_ref(py))`
+    /// 维持两份引用（vec 一份 + 本地一份）。clone_ref+drop 各一次 Py_INCREF/
+    /// DECREMENT C 调用（~5-10ns/iter），N=10 时累积 50-100ns。
+    ///
+    /// 改用本方法后，parse 路径可：
+    /// ```ignore
+    /// let elem = inner.parse(...)?;
+    /// let elem_ptr = elem.as_ptr();
+    /// if !discard { elems.push(elem); }  // move
+    /// ctx.set_expr_value_py(self.element_field_idx, ...);
+    /// ```
+    /// 零 incref/decref。
+    ///
+    /// # Safety
+    ///
+    /// 同 [`Context::set_expr_value_only`]：value 存活到下次写入或 GetInt 读。
+    #[inline]
+    pub fn set_expr_value_py(&mut self, idx: usize, value: &Py<PyAny>) {
+        if idx < self.expr_values_len {
+            // SAFETY: value.as_ptr() 返回 underlying PyObject 指针，
+            // 由 value（&Py<PyAny>）保证存活。
+            self.expr_values_buf[idx] = value.as_ptr();
+        }
+        // idx >= expr_values_len：防御性忽略（不 panic）。
+    }
+
     /// 存入字段（parse/build 每个字段完成后调用）。
     ///
     /// 对齐 Python construct `Struct._parse` 中的 `context[sc.name] = subobj`。

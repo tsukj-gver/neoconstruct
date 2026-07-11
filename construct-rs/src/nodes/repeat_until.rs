@@ -216,6 +216,24 @@ impl RepeatUntilNode {
             ctx.set_expr_value_only(field_idx, idx_bound);
         }
     }
+
+    /// 求值终止表达式（4.5 v5.1：快速路径 + 通用路径兜底）。
+    ///
+    /// 先尝试 `try_eval_simple_cmp` 命中常见模式（`e > K` / `e > threshold` 等 3-op
+    /// 单/双字段比较），命中则内联求值（避免函数调用 + stack_buf 分配，每迭代省 ~10ns）。
+    /// 未命中走通用 [`eval_expr_int`]（5-op `(e&0xFF)==0` / 4-op `-e>-5` 等）。
+    #[inline]
+    fn eval_terminator(
+        &self,
+        ctx: &mut Context<'_>,
+        py: Python<'_>,
+    ) -> Result<i64, ConstructError> {
+        if let Some(fast) = self.terminator.try_eval_simple_cmp(ctx, py) {
+            fast
+        } else {
+            eval_expr_int(&self.terminator, ctx, py)
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -230,9 +248,10 @@ impl super::Construct for RepeatUntilNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 4.7 PyList Vec 中转：count 未知（终止条件运行时求值），用 Vec::new() 起步。
+        // 4.7 PyList Vec 中转：count 未知（终止条件运行时求值）。
+        // 4.5 v5.1：初始容量 8，避免小 N 时的多次 realloc（N=10 仅 1 次 realloc）。
         // Rust Vec 增长策略（doubling）比 CPython list（~1.125x）高效。
-        let mut elems: Vec<Py<PyAny>> = Vec::new();
+        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(8);
 
         // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
         let old_index = ctx.index();
@@ -252,25 +271,26 @@ impl super::Construct for RepeatUntilNode {
                 }
             };
 
+            // 4.5 v5.1：避免 clone_ref（Py_INCREF+Py_DECREF 各一次 C 调用，~5-10ns/iter）。
+            // 取 elem 的 PyObject 指针（稳定堆地址）后 move elem 到 Vec，
+            // 用 elems.last() 取回引用调 set_expr_value_py。
+            // discard 模式 elem 未 move，直接用 &elem。
             if !self.discard {
-                elems.push(elem.clone_ref(py));
-            }
-
-            // 把当前元素借用为 Element 字段槽位（仅写 expr_values_buf，不写 PyDict）。
-            // 终止表达式中的 GetInt(element_field_idx) 会从此槽位取值。
-            // 不写 PyDict 保证 StructNode.parse 完成后 Element 字段在实例 __dict__
-            // 中仍是 None（语义正确：Element 字段不持有真实数据）。
-            ctx.set_expr_value_only(self.element_field_idx, elem.bind(py));
-
-            // 同步 Index 字段槽位（使终止表达式中引用的 Index 字段取到当前下标）。
-            self.sync_index_fields(ctx, py, i);
-
-            // 求值终止表达式（零 FFI，Rust 内部栈式 VM）。
-            // 表达式非零即终止（最后元素已包含在 Vec 中，RU-2）。
-            let stop_v = eval_expr_int(&self.terminator, ctx, py)?;
-            if stop_v != 0 {
-                // RU-2: 终止表达式为真时终止。
-                break;
+                elems.push(elem);
+                let last = elems.last().expect("just pushed");
+                ctx.set_expr_value_py(self.element_field_idx, last);
+                self.sync_index_fields(ctx, py, i);
+                // 求值终止表达式（4.5 v5.1：快速路径优先，通用路径兜底）。
+                // 表达式非零即终止（最后元素已包含在 Vec 中，RU-2）。
+                if self.eval_terminator(ctx, py)? != 0 {
+                    break;
+                }
+            } else {
+                ctx.set_expr_value_py(self.element_field_idx, &elem);
+                self.sync_index_fields(ctx, py, i);
+                if self.eval_terminator(ctx, py)? != 0 {
+                    break;
+                }
             }
 
             i = i.saturating_add(1);
@@ -311,14 +331,14 @@ impl super::Construct for RepeatUntilNode {
             }
 
             // 把当前元素借用为 Element 字段槽位（与 parse 同模式，仅写 expr_values_buf）。
-            ctx.set_expr_value_only(self.element_field_idx, elem_bound);
+            // 4.5 v5.1：用 set_expr_value_py 避免 elem.bind(py) 重复构造 Bound。
+            ctx.set_expr_value_py(self.element_field_idx, elem);
 
             // 同步 Index 字段槽位（与 parse 同模式）。
             self.sync_index_fields(ctx, py, i);
 
             // 求值终止表达式。
-            let stop_v = eval_expr_int(&self.terminator, ctx, py)?;
-            if stop_v != 0 {
+            if self.eval_terminator(ctx, py)? != 0 {
                 matched = true;
                 break;
             }

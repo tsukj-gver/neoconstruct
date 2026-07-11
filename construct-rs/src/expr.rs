@@ -151,6 +151,77 @@ impl ExprProgram {
     pub fn max_stack(&self) -> usize {
         self.max_stack
     }
+
+    /// 终止表达式快速求值（4.5 v5.1 性能优化）。
+    ///
+    /// 为 RepeatUntilNode 热路径提供常见终止表达式模式的内联求值，避免
+    /// [`eval_expr_int`] 的函数调用 + stack_buf 分配 + match dispatch 开销
+    /// （N=10 小规模场景每迭代 ~10ns）。
+    ///
+    /// # 覆盖模式
+    ///
+    /// - **3-op 单字段比较**：`[GetInt(idx), Const(k), <cmp>]`
+    ///   覆盖场景：`e > 5` / `e < 0` / `e == 0xFF` 等
+    /// - **3-op 双字段比较**：`[GetInt(idx_a), GetInt(idx_b), <cmp>]`
+    ///   覆盖场景：`e > threshold` / `e == expected` 等
+    ///
+    /// 其他模式（`(e & 0xFF) == 0` 5-op / `-e > -5` 4-op）走 [`eval_expr_int`] 通用路径。
+    ///
+    /// # 返回
+    ///
+    /// - `Some(Ok(v))`：命中快速路径，v 为求值结果（0 或 1）
+    /// - `Some(Err(e))`：命中快速路径但 GetInt 失败（如 ExprFieldMissing）
+    /// - `None`：未命中快速路径模式，调用方应走 [`eval_expr_int`]
+    #[inline]
+    pub fn try_eval_simple_cmp(
+        &self,
+        ctx: &Context<'_>,
+        py: Python<'_>,
+    ) -> Option<Result<i64, ConstructError>> {
+        let ops: &[ExprOp] = self.ops.as_slice();
+        if ops.len() != 3 {
+            return None;
+        }
+        // 单字段常量比较
+        if let (ExprOp::GetInt(idx), ExprOp::Const(k), cmp) = (ops[0], ops[1], ops[2]) {
+            let v = match ctx.get_int_at(idx, py) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let result = match cmp {
+                ExprOp::Gt => v > k,
+                ExprOp::Ge => v >= k,
+                ExprOp::Lt => v < k,
+                ExprOp::Le => v <= k,
+                ExprOp::Eq => v == k,
+                ExprOp::Ne => v != k,
+                _ => return None,
+            };
+            return Some(Ok(result as i64));
+        }
+        // 双字段比较
+        if let (ExprOp::GetInt(idx_a), ExprOp::GetInt(idx_b), cmp) = (ops[0], ops[1], ops[2]) {
+            let a = match ctx.get_int_at(idx_a, py) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let b = match ctx.get_int_at(idx_b, py) {
+                Ok(v) => v,
+                Err(e) => return Some(Err(e)),
+            };
+            let result = match cmp {
+                ExprOp::Gt => a > b,
+                ExprOp::Ge => a >= b,
+                ExprOp::Lt => a < b,
+                ExprOp::Le => a <= b,
+                ExprOp::Eq => a == b,
+                ExprOp::Ne => a != b,
+                _ => return None,
+            };
+            return Some(Ok(result as i64));
+        }
+        None
+    }
 }
 
 /// 编译期计算表达式所需的最大栈深度。
