@@ -20,10 +20,13 @@
 //!
 //! ## 性能要点
 //!
-//! - 与 ArrayNode 不同，无法预知元素数量，PyList 动态增长（无预分配）。
+//! - **4.7 lazy path 迁移**：成功路径不调 `path.push_index/pop`（P0-3 模式推广），
+//!   子节点返回 Err 时通过 `ConstructError::push_path_index(i)` 重建索引段。
+//!   特殊：parse 的"吞错误回退"分支丢弃错误，不重建 path（对齐 Python `except Exception`）。
+//! - **4.7 PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
+//!   count 未知用 `Vec::new()` 起步，Rust Vec 增长策略（doubling）比 CPython list（~1.125x）高效。
 //! - 每次迭代记录 `fallback = stream.tell()`（~1ns），失败时 seek 回退。
 //! - `ctx.set_index` 是栈字段写入（~1ns）。
-//! - `path.push_index/pop` 每次迭代调用（与 ArrayNode 一致）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -111,8 +114,10 @@ impl super::Construct for GreedyRangeNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 无法预知容量，PyList 动态增长。
-        let list = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
+        // 4.7 PyList Vec 中转：count 未知，用 Vec::new() 起步。
+        // Rust Vec 增长策略（doubling）比 CPython list（~1.125x）高效，
+        // 对 N=1000 约 ~10 次 realloc vs PyList ~60 次。
+        let mut elems: Vec<Py<PyAny>> = Vec::new();
 
         // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
         let old_index = ctx.index();
@@ -123,20 +128,19 @@ impl super::Construct for GreedyRangeNode {
             let fallback = stream.tell();
 
             ctx.set_index(i);
-            path.push_index(i);
+            // 4.7 lazy path：成功路径不调 path.push_index/pop。
 
             match self.inner.parse(py, stream, ctx, path) {
                 Ok(elem) => {
-                    path.pop();
                     if !self.discard {
-                        list.append(elem).map_err(ConstructError::from)?;
+                        elems.push(elem);
                     }
                     i += 1;
                 }
                 Err(ConstructError::StopField { .. }) => {
                     // StopIf 触发：正常终止（对齐 Python StopFieldError 捕获）。
                     // StopIf 不消耗字节，但仍 seek 回 fallback（防御性，对齐设计 §4.2.2）。
-                    path.pop();
+                    // 错误是哨兵，丢弃；无需重建 path。
                     let _ = stream.seek(fallback, path);
                     break;
                 }
@@ -144,13 +148,17 @@ impl super::Construct for GreedyRangeNode {
                     // 其他错误：seek 回退 + 正常终止。
                     // 对齐 Python L2609-2614 的 `except Exception` 路径
                     // （ExplicitError 暂无等价变体，统一回退，设计 §9.5 GE-1）。
-                    path.pop();
-                    let _ = e; // 错误丢弃（对齐 Python 语义）
+                    // **不调 push_path_index**——错误被丢弃（对齐 Python 语义），
+                    // path 此时为 Root 态，seek 内部不读 path 内容仅传递。
+                    let _ = e;
                     let _ = stream.seek(fallback, path);
                     break;
                 }
             }
         }
+
+        // 一次性创建 PyList。
+        let list = PyList::new_bound(py, elems);
 
         restore_index(ctx, old_index);
         Ok(list.into_any().unbind())
@@ -195,22 +203,19 @@ impl super::Construct for GreedyRangeNode {
 
         for (i, elem) in items.into_iter().enumerate() {
             ctx.set_index(i);
-            path.push_index(i);
+            // 4.7 lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
             match self.inner.build(py, elem_bound, stream, ctx, path) {
-                Ok(()) => {
-                    path.pop();
-                }
+                Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => {
                     // StopIf 触发：停止后续元素构建（对齐 Python L2627-2628）。
-                    path.pop();
+                    // 哨兵被捕获丢弃，无需重建 path。
                     restore_index(ctx, old_index);
                     return Ok(());
                 }
-                Err(e) => {
-                    path.pop();
-                    // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
-                    // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+                Err(mut e) => {
+                    // 其他错误：重建索引段后向上传播。
+                    e.push_path_index(i);
                     restore_index(ctx, old_index);
                     return Err(e);
                 }
@@ -787,20 +792,82 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // O1 修复（4.6）：path 应为 "root[0]"——inner.build 在 path 栈含
-            // Index(0) 时已生成 "root[0]"，GreedyRange 不再补充。
-            // 验证不出现 "root.[0][0]" 双重标记或 "[0]" 在 path 中段。
+            // 4.7 lazy path：error.path 由 inner.build 产生 "root"，GreedyRange 重建为 "root[0]"。
+            // 验证 path 为 "root[0]"，不出现 "root.[0][0]" 双重标记或 ".[" 前缀。
             let p = err.path().unwrap_or("");
             assert!(
                 p == "root[0]" || p.ends_with("[0]"),
-                "O1 path format: expected 'root[0]' or ending with '[0]', got '{}'",
+                "lazy path format: expected 'root[0]' or ending with '[0]', got '{}'",
                 p
             );
             assert!(
                 !p.contains(".["),
-                "O1 path format: dot before '[' is invalid (got '{}')",
+                "lazy path format: dot before '[' is invalid (got '{}')",
                 p
             );
+        });
+    }
+
+    #[test]
+    fn build_struct_inside_greedy_range_error_path() {
+        // 4.7 设计 §6.2：GreedyRange(Struct{x: Byte})，build 时 Struct[1].x 失败
+        // → path 应为 "root[1].x"
+        // 重建顺序（从叶到根）：
+        //   1. leaf FormatField build error path = "root"
+        //   2. Struct.push_segment("x"): "root" → "root.x"
+        //   3. GreedyRange.push_path_index(1): "root.x" → "root[1].x"
+        with_py(|py| {
+            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use pyo3::types::PyType;
+            let inner_struct_fields = vec![StructField {
+                name: FieldName::new(py, "x"),
+                node: byte_node(),
+                mode: FieldMode::Rw,
+            }];
+            let cls = py
+                .eval_bound("type('Item', (), {})", None, None)
+                .expect("cls")
+                .extract::<Py<PyType>>()
+                .expect("PyType");
+            let inner = Node::Struct(StructNode::new(py, inner_struct_fields, cls, false, false));
+            let node = GreedyRangeNode::new(inner, false);
+            // 传入 2 个元素，第 2 个的 x 是 bytes
+            let obj = py
+                .eval_bound(
+                    "[type('I', (), {'x': 1})(), type('I', (), {'x': b'bad'})()]",
+                    None,
+                    None,
+                )
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail on GreedyRange[1].x build");
+            let p = err.path().unwrap_or("");
+            assert!(
+                p == "root[1].x" || p.ends_with("[1].x"),
+                "expected 'root[1].x' or ending with '[1].x', got '{}'",
+                p
+            );
+        });
+    }
+
+    #[test]
+    fn parse_returns_native_list_type() {
+        // 4.7：验证 Vec 中转后返回的仍是原生 list 类型。
+        with_py(|py| {
+            let node = GreedyRangeNode::new(byte_node(), false);
+            let mut stream = ParseStream::new(&[0x01, 0x02, 0x03]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let result_bound = result.bind(py);
+            let is_list: bool = result_bound.is_instance_of::<PyList>();
+            assert!(is_list, "Vec 中转后应返回原生 list");
         });
     }
 

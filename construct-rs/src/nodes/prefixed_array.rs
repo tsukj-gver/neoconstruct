@@ -25,8 +25,10 @@
 //!
 //! ## 性能要点
 //!
-//! - 与 ArrayNode 同：PyList 预分配容量、`ctx.set_index` 栈字段写入、
-//!   `path.push_index/pop` 每次迭代调用（首版保留，性能不达标再优化）。
+//! - **4.7 lazy path 迁移**：成功路径不调 `path.push_index/pop`（P0-3 模式推广），
+//!   子节点返回 Err 时通过 `ConstructError::push_path_index(i)` 重建索引段。
+//!   countfield 错误仍用 `push_path_segment("countfield")`（字段名，非索引）。
+//! - **4.7 PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
 //! - parse 比 ArrayNode 多一次 countfield.parse（~15-30ns）。
 
 use crate::context::Context;
@@ -130,27 +132,28 @@ impl super::Construct for PrefixedArrayNode {
         let count = count_i64 as usize;
 
         // 4. 内联 Array 逻辑（避免构造临时 ArrayNode 实例）。
-        let list = PyList::new_bound(py, Vec::<Py<PyAny>>::with_capacity(count));
+        // 4.7 PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList。
+        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(count);
 
         // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
         let old_index = ctx.index();
 
         for i in 0..count {
             ctx.set_index(i);
-            path.push_index(i);
+            // 4.7 lazy path：成功路径不调 path.push_index/pop。
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
-                Err(e) => {
-                    path.pop();
-                    // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
-                    // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+                Err(mut e) => {
+                    e.push_path_index(i);
                     restore_index(ctx, old_index);
                     return Err(e);
                 }
             };
-            path.pop();
-            list.append(elem).map_err(ConstructError::from)?;
+            elems.push(elem);
         }
+
+        // 一次性创建 PyList。
+        let list = PyList::new_bound(py, elems);
 
         restore_index(ctx, old_index);
         Ok(list.into_any().unbind())
@@ -208,16 +211,13 @@ impl super::Construct for PrefixedArrayNode {
 
         for (i, elem) in items.into_iter().enumerate() {
             ctx.set_index(i);
-            path.push_index(i);
+            // 4.7 lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
-            if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
-                path.pop();
-                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
-                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+            if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+                e.push_path_index(i);
                 restore_index(ctx, old_index);
                 return Err(e);
             }
-            path.pop();
         }
 
         restore_index(ctx, old_index);
@@ -647,17 +647,16 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // O1 修复（4.6）：path 应为 "root[0]"（inner.build 在 path 栈含 Index(0)
-            // 时已生成），不再有 "root.[0][0]" 双重标记。
+            // 4.7 lazy path：error.path 由 inner.build 产生 "root"，PrefixedArray 重建为 "root[0]"。
             let p = err.path().unwrap_or("");
             assert!(
                 p == "root[0]" || p.ends_with("[0]"),
-                "O1 path format: expected 'root[0]' or ending with '[0]', got '{}'",
+                "lazy path format: expected 'root[0]' or ending with '[0]', got '{}'",
                 p
             );
             assert!(
                 !p.contains(".["),
-                "O1 path format: dot before '[' is invalid (got '{}')",
+                "lazy path format: dot before '[' is invalid (got '{}')",
                 p
             );
         });
@@ -700,6 +699,77 @@ mod tests {
             node.build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect("build");
             assert!(ctx.index().is_none());
+        });
+    }
+
+    // ======================================================================
+    // 4.7 lazy path 嵌套组合测试（设计 §6.2）
+    // ======================================================================
+
+    #[test]
+    fn parse_struct_inside_prefixed_array_error_path() {
+        // 4.7 设计 §6.2：PrefixedArray(Byte, Struct{x: Byte})，
+        // Array[1].x EOF → path = "root[1].x"
+        // 重建顺序（从叶到根）：
+        //   1. leaf FormatField error path = "root"
+        //   2. Struct.push_segment("x"): "root" → "root.x"
+        //   3. PrefixedArray.push_path_index(1): "root.x" → "root[1].x"
+        with_py(|py| {
+            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use pyo3::types::PyType;
+            let inner_struct_fields = vec![StructField {
+                name: FieldName::new(py, "x"),
+                node: byte_node(),
+                mode: FieldMode::Rw,
+            }];
+            let cls = py
+                .eval_bound("type('Item', (), {})", None, None)
+                .expect("cls")
+                .extract::<Py<PyType>>()
+                .expect("PyType");
+            let inner = crate::nodes::Node::Struct(StructNode::new(
+                py,
+                inner_struct_fields,
+                cls,
+                false,
+                false,
+            ));
+            let node = PrefixedArrayNode::new(byte_node(), inner);
+            // count=3，仅提供 1 字节 inner 数据 → Array[0].x 成功，Array[1].x EOF
+            // 流布局：[count=3, e0.x=0x10]
+            let mut stream = ParseStream::new(&[0x03, 0x10]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail on PrefixedArray[1].x EOF");
+            match err {
+                ConstructError::Stream { path: p, .. } => {
+                    assert!(
+                        p == "root[1].x",
+                        "expected 'root[1].x', got '{}'",
+                        p
+                    );
+                }
+                other => panic!("expected Stream, got {:?}", other),
+            }
+        });
+    }
+
+    #[test]
+    fn parse_returns_native_list_type() {
+        // 4.7：验证 Vec 中转后返回的仍是原生 list 类型。
+        with_py(|py| {
+            let node = prefixed_byte_byte();
+            let mut stream = ParseStream::new(&[0x03, 0x01, 0x02, 0x03]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let result_bound = result.bind(py);
+            let is_list: bool = result_bound.is_instance_of::<PyList>();
+            assert!(is_list, "Vec 中转后应返回原生 list");
         });
     }
 
