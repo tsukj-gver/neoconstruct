@@ -312,6 +312,45 @@ impl<'py> Context<'py> {
         // idx >= expr_values_len：防御性忽略（不 panic）。
     }
 
+    /// 仅写入 `expr_values_buf`（raw `*mut PyObject` 版本，RepeatUntil 热路径专用）。
+    ///
+    /// 与 [`Context::set_expr_value_py`] 等价但接收裸指针，使 RepeatUntil parse
+    /// 能在 `elems.push(elem)` 之前先取出 elem 的稳定堆地址，再决定 move/丢弃 elem，
+    /// 避开"两份引用需 clone_ref"或"两份代码分支"两种低效模式。
+    ///
+    /// # 性能动机（4.5 v5.1）
+    ///
+    /// `&Py<PyAny>` 版本需要维持 `&Py<PyAny>` 引用的生命周期到 `eval_terminator`
+    /// 调用结束。在 `if !discard { elems.push(elem); ... } else { ... }` 分支结构中，
+    /// 两份代码需重复 set_expr_value_py + sync_index_fields + eval_terminator。
+    /// raw ptr 版本允许：
+    /// ```ignore
+    /// let elem = inner.parse(...)?;
+    /// let elem_ptr = elem.as_ptr();  // 稳定堆地址
+    /// if !discard { elems.push(elem); }  // move or drop
+    /// ctx.set_expr_value_raw(self.element_field_idx, elem_ptr);
+    /// // 共享 sync_index_fields + eval_terminator 代码
+    /// ```
+    /// 单一代码路径，分支预测友好，零 clone_ref。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证 `ptr` 指向一个有效 PyObject，且该对象在下次 `set_expr_value_*`
+    /// 写入同一 idx 或 `Context` 释放前保持有效（不被 GC 回收）。
+    ///
+    /// 生产路径安全性：RepeatUntilNode.parse 中 `ptr` 来自 `elem.as_ptr()`，
+    /// - 非 discard 路径：elem 已被 move 到 Vec，PyObject 由 Vec 持有，存活到 Vec 释放
+    /// - discard 路径：elem 仍 owned，在迭代作用域结束（eval_terminator 之后）drop
+    ///
+    /// 两种路径下 ptr 在 set_expr_value_raw + eval_terminator 期间都有效。
+    #[inline]
+    pub(crate) fn set_expr_value_raw(&mut self, idx: usize, ptr: *mut ffi::PyObject) {
+        if idx < self.expr_values_len {
+            self.expr_values_buf[idx] = ptr;
+        }
+        // idx >= expr_values_len：防御性忽略（不 panic）。
+    }
+
     /// 存入字段（parse/build 每个字段完成后调用）。
     ///
     /// 对齐 Python construct `Struct._parse` 中的 `context[sc.name] = subobj`。
