@@ -115,6 +115,17 @@ def test_set_compiled_expr_params_injects_ops_and_idx():
     assert desc._element_field_idx == 0
     assert desc._expr_params["terminator"] == ops
     assert desc._expr_params["element_field_idx"] == 0
+    # index_field_indices 默认为空列表
+    assert desc._expr_params["index_field_indices"] == []
+
+
+def test_set_compiled_expr_params_with_index_fields():
+    """set_compiled_expr_params 应注入 index_field_indices。"""
+    desc = RepeatUntilDescriptor(5, Int8ub)
+    ops = [("getint", 0), ("getint", 1), ("add",)]
+    desc.set_compiled_expr_params(ops, 0, [1])
+    assert desc._element_field_idx == 0
+    assert desc._expr_params["index_field_indices"] == [1]
 
 
 # ============================================================

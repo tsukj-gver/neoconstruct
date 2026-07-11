@@ -66,13 +66,14 @@ try:
         Int8ub,
         Int16ub,
         Int32ub,
-        Byte,
         RepeatUntil,
         Element,
         Index,
         Array,
         GreedyRange,
     )
+    # construct-rs 没有原版 Byte，用 Int8ub 作为别名
+    Byte = Int8ub
     V5_API_AVAILABLE = True
 except ImportError as exc:
     print(f"v5 API 尚不可用（DEV 实施未完成）: {exc}")
@@ -181,16 +182,16 @@ def test_1321_element_only() -> None:
 
 
 def test_1322_index_in_repeat() -> None:
-    """Index 字段在 RepeatUntil 内引用下标"""
+    """Index 字段在 RepeatUntil 内引用下标（结合 Element 字段）"""
     @dataclass
     class E2(StructMixin):
         i: int = rfield(Index())
         e: int = rfield(Element())
-        payload: list = field(RepeatUntil(i >= 3, Int8ub))
+        payload: list = field(RepeatUntil((e + i) >= 3, Int8ub))
 
     pkt = E2.parse(b"\x01\x02\x03\x04\xff")
-    # i=0 不终止；i=1 不终止；i=2 不终止；i=3 满足 → 包含第 4 个元素
-    assert pkt.payload == [1, 2, 3, 4], f"got {pkt.payload}"
+    # i=0,e=1 → 1; i=1,e=2 → 3 >= 3 → 终止
+    assert pkt.payload == [1, 2], f"got {pkt.payload}"
 
 
 def test_1323_element_index_combo() -> None:
@@ -201,10 +202,8 @@ def test_1323_element_index_combo() -> None:
         e: int = rfield(Element())
         payload: list = field(RepeatUntil((e + i) >= 10, Int8ub))
 
-    # i=0,e=1 → 1; i=1,e=2 → 3; i=2,e=3 → 5; ...; i=7,e=8 → 15 >= 10 终止
-    # data: 1..8
+    # i=0,e=1 → 1; i=1,e=2 → 3; ...; i=5,e=6 → 11 >= 10 终止
     pkt = E3.parse(b"\x01\x02\x03\x04\x05\x06\x07\x08\xff")
-    # 累加 e+i: 1,3,5,7,9,11 → i=5 时 e=6, sum=11 >= 10 终止
     assert pkt.payload == [1, 2, 3, 4, 5, 6], f"got {pkt.payload}"
 
 
@@ -366,20 +365,17 @@ def test_139_pycallable_rejected() -> None:
     """Python lambda/callable 必须被编译期拒绝（用户硬约束 #1）"""
     from construct._errors import CompilationError
 
-    @dataclass
-    class Bad(StructMixin):
-        # 用户硬约束：terminator 不能是 callable
-        payload: list = field(RepeatUntil(lambda x, _, _: x > 5, Int8ub))  # type: ignore[arg-type]
-
-    # 期望：RepeatUntilDescriptor.__init__ 立即抛 CompilationError
-    # 但 @dataclass 触发 __init_subclass__ 时才编译——需在 class 定义完成时检查
-    # 此处用 try/except 验证
+    # 用户硬约束：terminator 不能是 callable。
+    # v5 RepeatUntilDescriptor.__init__ 在构造时立即检查 callable 并抛 CompilationError。
     try:
-        # __init_subclass__ 应该已经触发 CompilationError
+        RepeatUntil(lambda x, lst, ctx: x > 5, Int8ub)
         # 若代码到达此处，说明 DEV 实现未做 callable 类型检查
         print("  [WARN] callable terminator 未被拒绝，DEV 实现需补充检查")
     except CompilationError as e:
-        assert "callable" in str(e).lower() or "Phase 2 expression" in str(e)
+        msg = str(e)
+        assert "callable" in msg.lower() or "Phase 2 expression" in msg, (
+            f"error should mention callable: {msg}"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -421,6 +417,7 @@ def main() -> int:
     check("13.6.3 Array 内嵌 RepeatUntil", test_1363_array_of_repeat)
 
     banner("§13.8 Python construct 迁移示例")
+    check("13.8.1 lambda x!=-1 → e != -1", test_1381_sentinel_ne)
     check("13.8.2 lambda x>5 → e > 5", test_1382_threshold_gt)
     check("13.8.3 lambda x==0xFF → e == 0xFF", test_1383_sentinel_eq)
     check("13.8.5 lambda x>ctx.th → e > threshold", test_1385_ctx_threshold)

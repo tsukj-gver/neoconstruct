@@ -212,8 +212,9 @@ impl super::Construct for PrefixedArrayNode {
     }
 }
 
-/// 恢复 ctx._index（已提升为 `Context::restore_index` 方法，P0-1 整合）。
-/// 保留此注释作为 PrefixedArrayNode 模式采用声明参考。
+// 恢复 ctx._index 已提升为 `Context::restore_index` 方法（P0-1 整合）。
+// 保留此注释作为 PrefixedArrayNode 模式采用声明参考。
+//
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------

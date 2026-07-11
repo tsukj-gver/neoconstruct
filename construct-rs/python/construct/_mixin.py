@@ -659,9 +659,11 @@ def _compile_expressions(descriptors, field_index_map):
 def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descriptors):
     """v5：完成 RepeatUntilDescriptor 的编译期参数注入。
 
-    从 terminator ops 中提取第一个 getint 索引作为 element_field_idx，
-    调 ``desc.set_compiled_expr_params(ops, element_field_idx)``，
-    并把 element_field_idx 写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
+    从 terminator ops 中提取所有 getint 索引：
+    - 第一个 getint 索引作为 element_field_idx（Element 字段）
+    - 其余 getint 索引作为 index_field_indices（Index 字段，每次迭代同步下标）
+    调 ``desc.set_compiled_expr_params(ops, element_field_idx, index_field_indices)``，
+    并把编译产物写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
 
     设计依据：``docs/模块设计-Array.md`` §6.3.1 DEV 实现要点。
 
@@ -676,15 +678,17 @@ def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descripto
             )
         )
 
-    # 提取第一个 getint 索引作为 element_field_idx。
-    # 终止表达式必须引用 Element 字段（设计 §7.3 RU-13）。
-    element_field_idx = None
+    # 提取所有 getint 索引（按出现顺序，去重）。
+    all_getint_indices = []
+    seen = set()
     for op in ops:
         if op[0] == "getint":
-            element_field_idx = op[1]
-            break
+            idx = op[1]
+            if idx not in seen:
+                seen.add(idx)
+                all_getint_indices.append(idx)
 
-    if element_field_idx is None:
+    if not all_getint_indices:
         raise CompilationError(
             "RepeatUntil terminator in field '{}' (index {}) does not reference any "
             "field. terminator must reference an Element field declared before "
@@ -692,6 +696,9 @@ def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descripto
                 field_name, field_index
             )
         )
+
+    # 第一个 getint 索引作为 element_field_idx（Element 字段）。
+    element_field_idx = all_getint_indices[0]
 
     # 校验 element_field_idx 引用的字段确实是 Element 字段（设计 §7.3 RU-15）。
     if element_field_idx >= len(descriptors):
@@ -703,22 +710,40 @@ def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descripto
         )
     elem_name, elem_desc = descriptors[element_field_idx]
     elem_subcon = elem_desc.subcon
-    from ._descriptors import ElementDescriptor
+    from ._descriptors import ElementDescriptor, IndexDescriptor
 
     if not isinstance(elem_subcon, ElementDescriptor):
         raise CompilationError(
             "RepeatUntil terminator in field '{}' (index {}) references field '{}' "
-            "(index {}) which is not an Element field. Use rfield(Element()) to "
-            "declare an Element field for RepeatUntil terminator.".format(
+            "(index {}) which is not an Element field. The first field reference in "
+            "terminator must be an Element field (rfield(Element())) — this is the "
+            "field that gets updated with the current element each iteration.".format(
                 field_name, field_index, elem_name, element_field_idx
             )
         )
 
+    # 其余 getint 索引分类：
+    # - Index 字段（rfield(Index())）：每次迭代同步为当前下标
+    # - 其他字段（普通 RW/RO 字段）：保留 StructNode.parse 写入的值（稳定值）
+    #   终止表达式可读，但不随迭代变化。
+    index_field_indices = []
+    for idx in all_getint_indices[1:]:
+        if idx >= len(descriptors):
+            # 越界：保留 element_field_idx 校验已在上方完成，其他字段越界
+            # 也应报错。但为容错（普通字段引用），仅跳过。
+            continue
+        _ref_name, ref_desc = descriptors[idx]
+        ref_subcon = ref_desc.subcon
+        if isinstance(ref_subcon, IndexDescriptor):
+            index_field_indices.append(idx)
+        # 其他类型字段（Element/普通字段）：保留原值，不加入 index_field_indices。
+
     # 注入编译产物到描述符（供 Rust 侧 build_repeat_until_node 读取）。
-    desc.set_compiled_expr_params(ops, element_field_idx)
-    # 同步更新 field_exprs：替换 terminator 值为已编译 ops + 新增 element_field_idx。
+    desc.set_compiled_expr_params(ops, element_field_idx, index_field_indices)
+    # 同步更新 field_exprs：替换 terminator 值为已编译 ops + 新增编译产物键。
     field_exprs["terminator"] = ops
     field_exprs["element_field_idx"] = element_field_idx
+    field_exprs["index_field_indices"] = index_field_indices
 
 
 def _expr_programs_to_list(expr_programs, field_count):

@@ -1018,16 +1018,21 @@ class RepeatUntilDescriptor:
         # 会替换为含 element_field_idx 的版本。
         self._expr_params = {"terminator": terminator}
 
-    def set_compiled_expr_params(self, ops, element_field_idx):
-        """编译期由 _compile_expressions 调用，注入已编译的 ops 和 Element 字段索引。
+    def set_compiled_expr_params(self, ops, element_field_idx, index_field_indices=None):
+        """编译期由 _compile_expressions 调用，注入已编译的 ops 和 Element/Index 字段索引。
 
         :param ops: 编译后的 ExprOp 元组列表（如 ``[("getint", 0), ("const", 5), ("gt",)]``）。
         :param element_field_idx: Element 字段在 Struct 中的索引。
+        :param index_field_indices: Index 字段索引列表（终止表达式中引用的 Index 字段，
+                                     不含 element_field_idx）。每次迭代同步为当前下标。
         """
         self._element_field_idx = element_field_idx
+        if index_field_indices is None:
+            index_field_indices = []
         self._expr_params = {
             "terminator": ops,
             "element_field_idx": element_field_idx,
+            "index_field_indices": index_field_indices,
         }
 
     def __repr__(self):

@@ -264,10 +264,10 @@ impl super::Construct for ArrayNode {
     }
 }
 
-/// 恢复 ctx._index 到 ArrayNode 入口时的值（已提升为 `Context::restore_index` 方法，
-/// P0-1 整合）。保留此注释作为 ArrayNode 模式采用声明参考。
-///
-/// 设计 §3.2.2 嵌套数组语义：调用 `ctx.restore_index(old_index)` 即可。
+// 恢复 ctx._index 已提升为 `Context::restore_index` 方法（P0-1 整合）。
+// 保留此注释作为 ArrayNode 模式采用声明参考。
+// 设计 §3.2.2 嵌套数组语义：调用 `ctx.restore_index(old_index)` 即可。
+//
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------

@@ -1240,6 +1240,33 @@ fn build_repeat_until_node(
                 ),
             })?;
 
+    // 2c. 取 Index 字段索引列表（可选，默认空 Vec）。终止表达式中引用的 Index 字段
+    // 索引（不含 element_field_idx），每次迭代同步为当前下标。
+    let index_field_indices: Vec<usize> = match field_exprs_dict
+        .get_item("index_field_indices")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get 'index_field_indices' from RepeatUntil expression programs: {} (field index {})",
+                e, field_index
+            ),
+        })? {
+        Some(obj) => {
+            if obj.is_none() {
+                Vec::new()
+            } else {
+                obj.extract::<Vec<usize>>().map_err(|_| {
+                    ConstructError::Compilation {
+                        message: format!(
+                            "RepeatUntil 'index_field_indices' must be list of int (field index {})",
+                            field_index
+                        ),
+                    }
+                })?
+            }
+        }
+        None => Vec::new(),
+    };
+
     // 3. 取 Element 字段名（intern PyString，set_field_at 的 key 参数）。
     let element_field_name_str =
         field_names
@@ -1264,6 +1291,7 @@ fn build_repeat_until_node(
         terminator,
         element_field_idx,
         element_field_name,
+        index_field_indices,
         discard,
     ))
 }

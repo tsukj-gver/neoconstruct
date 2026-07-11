@@ -88,6 +88,14 @@ use pyo3::types::PyString;
 ///
 /// 终止表达式求值全程在 Rust 内部栈式 VM 执行，零 FFI。
 ///
+/// # Index 字段在终止表达式中的支持
+///
+/// 若终止表达式引用了 Index 字段（如 `(e + i) >= 10`，i 是 `rfield(Index())`），
+/// RepeatUntilNode 会在每次迭代时通过 `set_expr_value_only` 把当前 `ctx._index`
+/// 值同步到 Index 字段槽位。这使 Index 字段在终止表达式中能取到当前迭代下标。
+///
+/// 设计依据：`docs/模块设计-Array.md` §3.2.2 / §4.3.2 / §4.4。
+///
 /// # parse 行为
 ///
 /// 对齐 Python `RepeatUntil._parse`（core.py L2670-2682），但终止条件用 Phase 2
@@ -113,6 +121,11 @@ pub struct RepeatUntilNode {
     element_field_idx: usize,
     /// Element 字段名（interned PyString，set_field_at 的 key 参数）。
     element_field_name: Py<PyString>,
+    /// Index 字段索引列表（编译期从终止表达式中提取的 Index 字段索引，
+    /// 不含 element_field_idx）。RepeatUntil 每次迭代把这些槽位同步为当前
+    /// `ctx._index` 值，使终止表达式中引用的 Index 字段能取到当前下标。
+    /// 设计依据：§4.3.2 Index 字段在 RepeatUntil 内的支持。
+    index_field_indices: Vec<usize>,
     /// 是否丢弃解析结果（仍消耗流）。
     discard: bool,
 }
@@ -126,12 +139,15 @@ impl RepeatUntilNode {
     /// - `terminator`：终止表达式（Phase 2 ExprProgram）。
     /// - `element_field_idx`：Element 字段在 Struct 中的索引。
     /// - `element_field_name`：Element 字段名（interned PyString）。
+    /// - `index_field_indices`：Index 字段索引列表（终止表达式中引用的 Index 字段，
+    ///   不含 element_field_idx）。每次迭代同步为当前 `ctx._index` 值。
     /// - `discard`：是否丢弃解析结果。
     pub fn new(
         inner: crate::nodes::Node,
         terminator: ExprProgram,
         element_field_idx: usize,
         element_field_name: Py<PyString>,
+        index_field_indices: Vec<usize>,
         discard: bool,
     ) -> Self {
         Self {
@@ -139,6 +155,7 @@ impl RepeatUntilNode {
             terminator,
             element_field_idx,
             element_field_name,
+            index_field_indices,
             discard,
         }
     }
@@ -163,6 +180,11 @@ impl RepeatUntilNode {
         &self.element_field_name
     }
 
+    /// 返回 Index 字段索引列表引用。
+    pub fn index_field_indices(&self) -> &[usize] {
+        &self.index_field_indices
+    }
+
     /// 是否丢弃解析结果。
     pub fn discard(&self) -> bool {
         self.discard
@@ -177,6 +199,22 @@ impl RepeatUntilNode {
     /// 防御性返回 true 避免未来扩展时遗漏 init）。
     pub fn has_expressions(&self) -> bool {
         true
+    }
+
+    /// 把当前迭代下标同步到 Index 字段槽位（仅写 expr_values_buf，不写 PyDict）。
+    ///
+    /// 使终止表达式中引用的 Index 字段能取到当前下标。
+    /// 设计依据：§4.3.2 Index 字段在 RepeatUntil 内的支持。
+    #[inline]
+    fn sync_index_fields(&self, ctx: &mut Context<'_>, py: Python<'_>, i: usize) {
+        if self.index_field_indices.is_empty() {
+            return;
+        }
+        let idx_py = i.into_py(py);
+        let idx_bound = idx_py.bind(py);
+        for &field_idx in &self.index_field_indices {
+            ctx.set_expr_value_only(field_idx, idx_bound);
+        }
     }
 }
 
@@ -223,6 +261,9 @@ impl super::Construct for RepeatUntilNode {
             // 不写 PyDict 保证 StructNode.parse 完成后 Element 字段在实例 __dict__
             // 中仍是 None（语义正确：Element 字段不持有真实数据）。
             ctx.set_expr_value_only(self.element_field_idx, elem.bind(py));
+
+            // 同步 Index 字段槽位（使终止表达式中引用的 Index 字段取到当前下标）。
+            self.sync_index_fields(ctx, py, i);
 
             // 求值终止表达式（零 FFI，Rust 内部栈式 VM）。
             // 表达式非零即终止（最后元素已包含在 Vec 中，RU-2）。
@@ -271,6 +312,9 @@ impl super::Construct for RepeatUntilNode {
 
             // 把当前元素借用为 Element 字段槽位（与 parse 同模式，仅写 expr_values_buf）。
             ctx.set_expr_value_only(self.element_field_idx, elem_bound);
+
+            // 同步 Index 字段槽位（与 parse 同模式）。
+            self.sync_index_fields(ctx, py, i);
 
             // 求值终止表达式。
             let stop_v = eval_expr_int(&self.terminator, ctx, py)?;
@@ -347,7 +391,14 @@ mod tests {
             ExprOp::Gt,
         ]);
         let elem_name = with_py(|py| intern_pystring(py, "e"));
-        RepeatUntilNode::new(byte, terminator, element_field_idx, elem_name, false)
+        RepeatUntilNode::new(
+            byte,
+            terminator,
+            element_field_idx,
+            elem_name,
+            vec![],
+            false,
+        )
     }
 
     /// 创建一个含 2 字段的 ctx（threshold: i64, e: 占位）。
@@ -379,7 +430,7 @@ mod tests {
     fn discard_flag_stored() {
         let terminator = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Gt]);
         let elem_name = with_py(|py| intern_pystring(py, "e"));
-        let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, true);
+        let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, vec![], true);
         assert!(node.discard());
     }
 
@@ -400,28 +451,20 @@ mod tests {
     fn parse_terminator_match_at_element() {
         // e > 5：[1, 2, 3, 4, 5, 6] → 6 时满足，返回 [1,2,3,4,5,6]
         with_py(|py| {
-            let node = make_ru_gt(byte_node(), 5, 0);
+            // element_field_idx=1（e 字段），threshold_field_idx=0（占位）
+            let node = make_ru_gt(byte_node(), 5, 1);
             let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7, 8]);
-            let mut ctx = setup_ctx(py, 0); // threshold 不参与，仅占位
-                                            // 注：element_field_idx=0 与 setup_ctx 的 threshold 字段冲突。
-                                            // 改用直接构造 ctx：element_field_idx=1
-            let mut ctx2 = Context::new_root(py).expect("ctx");
-            ctx2.init_expr_values(2);
-            let key0 = PyString::new_bound(py, "threshold").unbind();
-            let v0 = 0i64.into_py(py);
-            ctx2.set_field_at(0, &key0, v0.bind(py), py).unwrap();
+            let mut ctx = setup_ctx(py, 0);
             let mut path = Path::new();
-            // 重新构造 node 用 element_field_idx=1
-            let node2 = make_ru_gt(byte_node(), 5, 1);
-            let result = node2
-                .parse(py, &mut stream, &mut ctx2, &mut path)
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
             let list = result.bind(py).downcast::<PyList>().expect("list");
             assert_eq!(list.len(), 6);
             let last: i64 = list.get_item(5).unwrap().extract().unwrap();
             assert_eq!(last, 6);
             assert_eq!(stream.tell(), 6);
-            assert!(ctx2.index().is_none());
+            assert!(ctx.index().is_none());
         });
     }
 
@@ -457,7 +500,7 @@ mod tests {
             let terminator =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(3), ExprOp::Eq]);
             let elem_name = intern_pystring(py, "e");
-            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, vec![], false);
             let mut stream = ParseStream::new(&[1, 2, 3, 4, 5]);
             let mut ctx = Context::new_root(py).expect("ctx");
             ctx.init_expr_values(1);
@@ -482,7 +525,7 @@ mod tests {
                 ExprOp::Eq,
             ]);
             let elem_name = intern_pystring(py, "e");
-            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, vec![], false);
             let mut stream = ParseStream::new(&[1, 2, 0, 9]);
             let mut ctx = Context::new_root(py).expect("ctx");
             ctx.init_expr_values(1);
@@ -507,7 +550,7 @@ mod tests {
                 ExprOp::Gt,
             ]);
             let elem_name = intern_pystring(py, "e");
-            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, vec![], false);
             let mut stream = ParseStream::new(&[1, 2, 3, 6, 0xFF]);
             let mut ctx = Context::new_root(py).expect("ctx");
             ctx.init_expr_values(1);
@@ -532,7 +575,7 @@ mod tests {
                 ExprOp::Gt,
             ]);
             let elem_name = intern_pystring(py, "e");
-            let node = RepeatUntilNode::new(byte_node(), terminator, 1, elem_name, false);
+            let node = RepeatUntilNode::new(byte_node(), terminator, 1, elem_name, vec![], false);
             let mut stream = ParseStream::new(&[1, 2, 3, 4, 0xFF]);
             let mut ctx = setup_ctx(py, 3); // threshold=3
             let mut path = Path::new();
@@ -556,7 +599,7 @@ mod tests {
             let terminator =
                 ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Gt]);
             let elem_name = intern_pystring(py, "e");
-            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, true);
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, vec![], true);
             let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7]);
             let mut ctx = Context::new_root(py).expect("ctx");
             ctx.init_expr_values(1);
