@@ -19,9 +19,9 @@
 //!
 //! ## parse 行为（对齐 Python L2670-2682）
 //!
-//! 1. 创建空 PyList
+//! 1. 创建空 PyList（Expr 路径用 Vec 中转，PyCallable 路径保持 PyList）
 //! 2. `loop`：
-//!    - 设置 `ctx._index = i`、`path.push_index(i)`
+//!    - 设置 `ctx._index = i`（4.7 lazy path：成功路径不调 path.push_index/pop）
 //!    - inner.parse → elem（失败直接上抛，RU-1，**不**像 GreedyRange 回退）
 //!    - 若 `!discard`，append elem 到 list
 //!    - 评估谓词（Expr / PyCallable）：
@@ -207,41 +207,42 @@ impl super::Construct for RepeatUntilNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        let list = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
         let old_index = ctx.index();
 
-        let result = match &self.predicate {
-            RepeatPredicate::Expr(program) => parse_expr_path(
-                py,
-                stream,
-                ctx,
-                path,
-                &self.inner,
-                program,
-                &list,
-                self.discard,
-            ),
-            RepeatPredicate::PyCallable(predicate) => parse_callable_path(
-                py,
-                stream,
-                ctx,
-                path,
-                &self.inner,
-                predicate.bind(py),
-                &list,
-                self.discard,
-            ),
+        // 4.7 Item 8：Expr 路径用 Vec 中转（谓词不读 list），PyCallable 路径保持 PyList
+        // （谓词签名 `(obj, list, ctx)` 需要实时 list 参数）。
+        let result_list: Py<PyAny> = match &self.predicate {
+            RepeatPredicate::Expr(program) => {
+                let elems = parse_expr_path(
+                    py,
+                    stream,
+                    ctx,
+                    path,
+                    &self.inner,
+                    program,
+                    self.discard,
+                )?;
+                PyList::new_bound(py, elems).into_any().unbind()
+            }
+            RepeatPredicate::PyCallable(predicate) => {
+                // PyCallable 路径保持 PyList（谓词需要实时 list 参数）。
+                let list = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
+                parse_callable_path(
+                    py,
+                    stream,
+                    ctx,
+                    path,
+                    &self.inner,
+                    predicate.bind(py),
+                    &list,
+                    self.discard,
+                )?;
+                list.into_any().unbind()
+            }
         };
 
         restore_index(ctx, old_index);
-        match result {
-            Ok(()) => Ok(list.into_any().unbind()),
-            Err(e) => {
-                // 错误路径：path 在循环内 push 但失败分支已 pop，
-                // 这里直接返回（错误已携带上下文）。
-                Err(e)
-            }
-        }
+        Ok(result_list)
     }
 
     fn build(
@@ -265,16 +266,13 @@ impl super::Construct for RepeatUntilNode {
                 let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
                 for (i, elem) in items.iter().enumerate() {
                     ctx.set_index(i);
-                    path.push_index(i);
+                    // 4.7 lazy path：成功路径不调 path.push_index/pop。
                     let elem_bound = elem.bind(py);
-                    if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
-                        path.pop();
-                        // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
-                        // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+                    if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+                        e.push_path_index(i);
                         restore_index(ctx, old_index);
                         return Err(e);
                     }
-                    path.pop();
 
                     // P2 修正：仅非 discard 时 append 到 partial。
                     if !self.discard {
@@ -342,16 +340,14 @@ impl super::Construct for RepeatUntilNode {
                         });
                     }
 
-                    path.push_index(i);
+                    // 4.7 lazy path：成功路径不调 path.push_index/pop。
                     let elem_bound = &elem;
-                    if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
-                        path.pop();
-                        // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.build
-                        // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+                    if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
+                        // 错误路径重建索引段。
+                        e.push_path_index(i);
                         restore_index(ctx, old_index);
                         return Err(e);
                     }
-                    path.pop();
 
                     // P2 修正：仅非 discard 时 append 到 partial。
                     // V-2 已知差异：partial 收集的是 elem（用户输入），
@@ -403,10 +399,12 @@ impl super::Construct for RepeatUntilNode {
 // 内部辅助：parse 路径
 // ---------------------------------------------------------------------------
 
-/// Expr 路径的 parse 内部实现。
+/// Expr 路径的 parse 内部实现（4.7：Vec 中转 + lazy path）。
 ///
 /// 通过 `ctx.set_current_elem_ptr` 设置当前元素指针，调 `eval_expr_int`，
 /// 求值后立即 `clear_current_elem_ptr`。
+///
+/// 返回收集到的元素 `Vec`，由调用方一次性创建 PyList。
 #[allow(clippy::too_many_arguments)]
 fn parse_expr_path<'py>(
     py: Python<'py>,
@@ -415,35 +413,32 @@ fn parse_expr_path<'py>(
     path: &mut Path,
     inner: &crate::nodes::Node,
     program: &ExprProgram,
-    list: &Bound<'py, PyList>,
     discard: bool,
-) -> Result<(), ConstructError> {
+) -> Result<Vec<Py<PyAny>>, ConstructError> {
+    // 4.7 Item 8：用 Vec 中转收集元素。Expr 谓词不读 list，仅读 ctx._current_elem_ptr。
+    let mut elems: Vec<Py<PyAny>> = Vec::new();
     let mut i: usize = 0;
     loop {
         ctx.set_index(i);
-        path.push_index(i);
+        // 4.7 lazy path：成功路径不调 path.push_index/pop。
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
-            Err(e) => {
-                path.pop();
-                // RU-1: 失败直接上抛（不像 GreedyRange 回退）
-                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
-                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+            Err(mut e) => {
+                // RU-1: 失败直接上抛（不像 GreedyRange 回退）。
+                e.push_path_index(i);
                 return Err(e);
             }
         };
-        path.pop();
 
         if !discard {
-            list.append(elem.clone_ref(py))
-                .map_err(ConstructError::from)?;
+            elems.push(elem.clone_ref(py));
         }
 
         // Expr 路径谓词求值：设置 _current_elem_ptr → eval → clear。
         let stop = eval_expr_predicate(py, ctx, elem.bind(py), program)?;
         if stop {
-            // RU-2: 谓词为真时终止（最后元素已包含在 list 中）。
-            return Ok(());
+            // RU-2: 谓词为真时终止（最后元素已包含在 Vec 中）。
+            return Ok(elems);
         }
 
         i = i.saturating_add(1);
@@ -497,17 +492,15 @@ fn parse_callable_path<'py>(
                 path: path.to_string(),
             })?;
 
-        path.push_index(i);
+        // 4.7 lazy path：成功路径不调 path.push_index/pop。
         let elem = match inner.parse(py, stream, ctx, path) {
             Ok(v) => v,
-            Err(e) => {
-                path.pop();
-                // O1 修复（4.6）：不再调用 push_path_segment("[i]")——inner.parse
-                // 在 path 栈含 Index(i) 时已经把错误 path 写成 "root[i]"。
+            Err(mut e) => {
+                // RU-1: 失败直接上抛。
+                e.push_path_index(i);
                 return Err(e);
             }
         };
-        path.pop();
 
         if !discard {
             list.append(elem.clone_ref(py))
