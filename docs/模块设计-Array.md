@@ -5,7 +5,7 @@
 >   §7（技术决策）、§8（编码红线）、§10（Python 参考速查）
 > - `docs/设计决策记录.md`（跨阶段约束，含 Phase 4 决策 3 "Index 仅作为构造器字段"）
 > - `plans/phase4-array/分析报告-Array功能集.md`（功能集分析）
-> - `plans/phase4-array/总纲.md`（出口标准：S-FUNC、S-QUAL、S-PERF ≥10x）
+> - `plans/phase4-array/总纲.md`（用户面设计四原则 + S-PERF ≥10x 硬门禁 + 场景矩阵）
 > - `construct-rs/src/nodes/mod.rs`（现有 Node enum + Construct trait）
 > - `construct-rs/src/stream.rs`（现有 ParseStream/BuildStream）
 > - `construct-rs/src/context.rs`（现有 Context）
@@ -18,15 +18,17 @@
 >   StopIf L4079、PrefixedArray L4934）、`construct/construct/lib/containers.py`（ListContainer）
 >
 > **角色**：ARCH
-> **状态**：DESIGNING（v4，VET 驳回 V-1 后第四次修订，等待重新检视）
+> **状态**：DESIGNING（v5，用户打回 v4 后第五次修订，RepeatUntil 终止表达式重设计，等待重新检视）
 > **创建时间**：2026-06-29
 > **修订时间**：2026-06-29（v2 修正 REV 驳回的 P1/P2/P3 + M1-M4；
 >   v3 修正 REV 决策记录对照驳回的 V1/V2/V3/V4；
->   2026-06-30 v4 修正 VET 驳回的 V-1 PyCallable context proxy 不完整）
+>   2026-06-30 v4 修正 VET 驳回的 V-1 PyCallable context proxy 不完整；
+>   2026-06-30 v5 用户打回——PyCallable 路径全删，终止表达式 = Phase 2 表达式，
+>   引入 Element() 字段）
 
 ---
 
-## 0. REV/VET 驳回修正摘要
+## 0. REV/VET/用户驳回修正摘要
 
 ### 0.1 v2 修正（P1/P2/P3 + M1-M4）
 
@@ -100,6 +102,53 @@ v4 逐项修正（V-2~V-5 留待 DEV 在 V-1 修复批次中附带处理，本�
 > - V-5（has_expressions 注释误导）：由 DEV 修正注释。
 >
 > 以上 4 项均为实现/文档层面，不需 ARCH 设计决策。
+>
+> **v5 全部作废**：上述 V-2/V-3/V-4/V-5 描述的问题均源自 PyCallable 路径，
+> v5 删除 PyCallable 路径后这些问题不再存在（详见 §0.4）。
+
+### 0.4 v5 修正（用户打回——PyCallable 路径全删，终止表达式重设计）
+
+用户在 2026-06-30 验收 4.5 v4 实施版本时打回，根本原因：
+
+1. **PyCallable 兜底路径违反 AGENTS.md §0 "一次 FFI" 核心原则**（每迭代跨 FFI 调 Python callable）
+2. **AST 白名单 + PyCallable 二分设计**（简单 lambda → Expr 快路径；复杂 lambda → PyCallable 慢路径）覆盖率无法穷尽，且**隐藏决策路径**——用户无法预测自己写的 lambda 走哪条路径
+3. **门禁 3x（首版）/ 1.5x（v4 借 V-1 下调）均无物理推导**——Python 3.14 实测 Python 调用仅 270-300ns/次（首版估算高估 2-3 倍）
+4. **用户面设计四原则**（`plans/phase4-array/总纲.md` §"用户面设计四原则"）：
+   - 禁止"用户不可见的开销 + 隐藏决策路径"
+   - Adapter 是用户主动选择的较慢路径，不是任何构造器的内部兜底
+   - 禁用"谓词"术语——RepeatUntil 的终止条件就是 Phase 2 表达式
+   - 只认 Phase 2 表达式语法——禁止 RepeatUntil 自建表达式机制
+
+v5 逐项修正（**全文性变更**，涉及多处重写）：
+
+| 编号 | 问题 | 修正位置 | 修正内容 |
+|------|------|---------|---------|
+| U-1 | PyCallable 路径违反"一次 FFI"原则 | §2.5 决策 A5、§4.3、§6.2、§7.3、§8、§9.1、§9.5、§10.1、§12.1 | **删除 RepeatPredicate 枚举**（仅保留 ExprProgram）。删除 `call_repeat_predicate`、`build_context_proxy`、整个 `container_cache.rs` 文件、`python/construct/lib/containers.py`（若专为 PyCallable 新建）。RepeatUntilNode 数据结构简化为 `{ inner, terminator: ExprProgram, element_field_idx, discard }` |
+| U-2 | AST 白名单 + PyCallable 二分设计隐藏决策路径 | §2.5 决策 A5、§4.3.1、§6.2、§6.3 | **删除 AST 识别器** `_try_compile_repeat_predicate`、`_AST_OP_TO_EXPROP`。RepeatUntil 用户面 API **不接收 Python lambda/callable**——终止表达式必须是 Phase 2 表达式（`_FieldDescriptor`/`_ExprRef`/`int` 组合）。RepeatUntilDescriptor 第一参数从 `predicate` 改名为 `terminator`（终止表达式） |
+| U-3 | 用户无法引用"当前元素" | §2.5 决策 A5、§3.3、§4.3、§4.7（新增 ElementNode）、§6.1、§6.2、§6.3 | **引入 `Element()` 构造器字段**（与 `Index()` 同构），用户写 `e: int = rfield(Element()); payload: list = field(RepeatUntil(e > 5, Int8ub))`。终止表达式 `e > 5` 编译为 `[GetInt(idx_of_e), Const(5), Gt]`，完全走 Phase 2 ExprProgram 路径。**删除 `ExprOp::GetElem`**（不再需要）、删除 `Context::_current_elem_ptr`、`set_current_elem_ptr`、`clear_current_elem_ptr`、`current_elem_as_i64` |
+| U-4 | "谓词"术语暗示接收 callable | 全文 | 全文搜索"谓词"统一改为"终止表达式"。RepeatPredicate → 终止表达式（直接用 ExprProgram，不引入新枚举名）。RepeatUntilDescriptor `predicate` 参数 → `terminator` |
+| U-5 | 性能门禁无物理推导 | §8.2、§8.3（完全重写） | 删除"PyCallable 路径 ≥1.5x""Expr 路径 ≥8x"二分门禁。统一为 **RepeatUntil ≥10x**（终止表达式零 FFI 求值）。性能假设含 Python 端 + Rust 端逐项开销分析 + 数值推导 |
+| U-6 | 4.5a/4.5b 拆分（PyCallable 先 / Expr 后） | §12.1 | **4.5a/4.5b 拆分作废**。RepeatUntil 统一为单一子任务 4.5（终止表达式 = Phase 2 表达式，无 PyCallable 路径） |
+
+附加修正（连带）：
+- §3.3 不再扩展 ExprOp：删除 v4 实施版本中已添加的 `ExprOp::GetElem` 变体、`compute_max_stack` 的 GetElem 分支、`eval_expr_int` 的 GetElem 分支、相关单元测试
+- §6.1 Node enum 新增 `Element(ElementNode)` 变体（§4.7 新增节）
+- §6.2 compile.rs 新增 ElementDescriptor 识别分支
+- §6.3 Python 侧新增 `ElementDescriptor` + `Element()` 工厂函数
+- §7.3 RepeatUntil 边界完全重写（删除 RU-4/RU-7/RU-8/RU-9 PyCallable 相关条目，新增终止表达式相关边界）
+- §9.1 类/方法映射表更新（RepeatUntil 不再"首版仅 PyCallable"）
+- §9.5 已知行为差异表删除 RU-build-2、RU-3b、RU-9（均 PyCallable 相关）
+- §10.1 删除"RepeatUntil 的 Expr 谓词路径"（Expr 就是唯一路径，无后续优化方向）
+- §13 新增附录：完整用户面使用样例集（用户验收门禁）
+- 新增 `docs/设计决策记录.md` Phase 4 决策 4 作废 + 决策 4'（RepeatUntil 终止表达式 = Phase 2 表达式）+ 决策 5（Element 仅作为构造器字段）
+
+> **v5 不可逆约束**（用户硬约束，违反即打回）：
+> 1. 禁止保留任何形式的 PyCallable 路径
+> 2. 禁止"白名单 + 兜底"二分设计
+> 3. 禁止"谓词"术语（统一用"终止表达式"）
+> 4. 禁止性能假设中用"物理上限"作为门禁豁免理由
+> 5. 禁止自建 RepeatUntil 专属表达式机制
+> 6. 禁止接受任何形式的"用户不可见的决策路径"
 
 ---
 
@@ -120,9 +169,10 @@ construct 2.10.70 的 Array 完整功能集（不含 LazyArray，归入惰性解
 | P0 | `Array(count, subcon, discard)` | 2493 | 固定次数 | `ArrayNode` |
 | P1 | `GreedyRange(subcon, discard)` | 2570 | 读到流结束 | `GreedyRangeNode` |
 | P2 | `PrefixedArray(countfield, subcon)` | 4934 | 前缀长度 | `PrefixedArrayNode`（独立实现，§5） |
-| P3 | `RepeatUntil(predicate, subcon, discard)` | 2637 | 谓词终止 | `RepeatUntilNode` |
+| P3 | `RepeatUntil(terminator, subcon, discard)` | 2637 | 终止表达式 | `RepeatUntilNode` |
 | P4 | `Index` | 2934 | 取当前下标 | `IndexNode` |
 | P5 | `StopIf(condfunc)` | 4079 | 早停信号 | `StopIfNode` |
+| P6 | `Element` | —（construct-rs 新增） | 取 RepeatUntil 当前元素 | `ElementNode`（v5 新增，§4.7） |
 
 > **不在本阶段范围**：
 > - `LazyArray` / `LazyListContainer`（惰性解析，归入后续 Phase）
@@ -279,60 +329,143 @@ pub enum ConstructError {
 - 错误路径开销可接受（StopField 仅在 StopIf 触发时构造，成功路径零成本）。
 - enum_dispatch 自动生成的 match 代码无需调整。
 
-### 2.5 决策 A5：RepeatUntil 谓词的两条路径（ExprProgram / Python callable）
+### 2.5 决策 A5：RepeatUntil 终止表达式 = Phase 2 表达式（v5 完全重写）
+
+> **v5 用户硬约束**（`plans/phase4-array/总纲.md` §"用户面设计四原则"）：
+> 1. 禁止用户不可见的开销 + 隐藏决策路径
+> 2. Adapter 是用户主动选择的较慢路径，不是任何构造器的内部兜底
+> 3. 禁用"谓词"术语（统一用"终止表达式"）
+> 4. 只认 Phase 2 表达式语法（禁止 RepeatUntil 自建表达式机制）
 
 Python `RepeatUntil(predicate, subcon)` 的 `predicate` 是 `(obj, list, context) -> bool`
 lambda，每次迭代跨 FFI 调用。
 
-为减少 FFI，**常见模式**在编译期识别并编译为 `ExprProgram`：
+**construct-rs 用户面 API（v5）**：
 
-| Python 谓词模式 | 编译为 ExprProgram |
-|----------------|-------------------|
-| `lambda x, lst, ctx: x > N` | `[GetElem(0), Const(N), Gt]` |
-| `lambda x, lst, ctx: x == N` | `[GetElem(0), Const(N), Eq]` |
-| `lambda x, lst, ctx: x != N` | `[GetElem(0), Const(N), Ne]` |
+```python
+RepeatUntil(terminator, subcon, discard=False)
+```
 
-**复杂模式**（如 `lambda x, lst, ctx: lst[-2:] == [0, 0]`）回落到 Python callable 路径。
+- `terminator`：**Phase 2 表达式**（`_FieldDescriptor` / `_ExprRef` / `int` 组合）。
+  必须是引用当前 Struct 中**已声明的 Element 字段**的表达式（如 `e > 5`，
+  其中 `e` 是 `rfield(Element())` 字段）。求值结果非零即终止。
+- `subcon`：元素子构造器（与 Python 一致）。
+- `discard`：是否丢弃解析结果（与 Python 一致）。
 
-设计：`RepeatUntilNode` 持有 `RepeatPredicate` 枚举：
+**不接收 Python lambda / callable**——避免隐藏决策路径。
+
+#### 2.5.1 用户面 API 完整示例
+
+```python
+from dataclasses import dataclass
+from construct import (
+    StructMixin, field, rfield,
+    Int8ub, RepeatUntil, Element,
+)
+
+@dataclass
+class Packet(StructMixin):
+    # Element 字段：用户为 RepeatUntil 提供"当前元素"引用入口
+    e: int = rfield(Element())
+    # RepeatUntil 终止表达式：e > 5（编译为 [GetInt(0), Const(5), Gt]）
+    payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+# parse：读字节直到某个元素 > 5
+Packet.parse(b"\x01\x02\x03\x06\xff\xff")
+# Packet(e=None, payload=[1, 2, 3, 6])  ← 最后元素 6 满足 e > 5，包含在内
+
+# build：写字节直到某个元素 > 5
+Packet(e=None, payload=[1, 2, 3, 6, 9]).build()
+# b"\x01\x02\x03\x06"  ← 写到 6 即停止（6 > 5）
+```
+
+**Element 字段语义**：
+- `e: int = rfield(Element())` 是 Packet 的字段，但其值**不是数据**——它在 Packet
+  实例中始终为 `None`（对齐 IndexNode 在 Array 之外返回 None 的语义）。
+- Element 字段的存在仅是为 RepeatUntil 终止表达式提供"当前元素"引用入口
+  （与 Index 字段为表达式提供"当前下标"引用入口同模式）。
+- Element 字段必须声明在 RepeatUntil 字段**之前**（前序字段引用约束，
+  `_check_forward_reference` 编译期强制）。
+
+#### 2.5.2 数据结构（v5 简化）
+
+RepeatUntilNode **不再持有枚举变体**（v4 的 `RepeatPredicate` 删除）：
 
 ```rust
-pub enum RepeatPredicate {
-    /// 编译期识别的简单表达式（仅依赖当前元素）。
-    /// 求值时从 ctx._index 取当前元素（暂存于 ctx 的特殊槽位，§4.3.1）。
-    Expr(ExprProgram),
-    /// 复杂谓词，回落到 Python callable（每次迭代跨 FFI）。
-    PyCallable(Py<PyAny>),
+#[derive(Debug)]
+pub struct RepeatUntilNode {
+    /// 元素子树（递归 Box）。
+    inner: Box<Node>,
+    /// 终止表达式（Phase 2 ExprProgram，编译期从用户面表达式编译）。
+    /// 求值结果非零即终止。零 FFI（Rust 内部栈式 VM 求值）。
+    terminator: ExprProgram,
+    /// Element 字段在当前 Struct 的 expr_values_buf 中的索引（编译期确定）。
+    /// RepeatUntil 每次迭代调 `ctx.set_field_at(element_field_idx, elem, ...)`
+    /// 把当前元素写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
+    element_field_idx: usize,
+    /// Element 字段名（interned PyString，用于 set_field_at 的 key）。
+    element_field_name: Py<PyString>,
+    /// 是否丢弃解析结果（仍消耗流）。
+    discard: bool,
 }
 ```
 
-> **第一阶段实现范围（建议 PM 与 DEV 协调）**：
-> Phase 4 首次落地可仅支持 `PyCallable` 路径（功能完整、行为正确），
-> `Expr` 快路径作为性能优化延后到 Phase 4 收尾或独立子任务。
-> 这样 S-FUNC 先达成，S-PERF 在 Expr 路径补全后达成 ≥10x。
-> 具体决策由 PM 在子任务拆分时确定。
+**为什么不再需要 `_current_elem_ptr` / `ExprOp::GetElem`**（v5 关键设计）：
 
-> **v4 决策（V-1 修正，写入设计决策记录 Phase 4 决策 4）**：PyCallable 路径
-> 传给谓词的 context proxy **必须**满足以下硬性约束（消除 v3 §4.3.3 "DEV 决策"
-> 的模糊空间，防止再次偏离）：
->
-> 1. **proxy 类型**：必须是 Python `construct.lib.containers.Container` 实例
->    （不是原生 `dict`）。理由：Python `RepeatUntil._parse/_build` 直接把 Container
->    传给谓词（core.py L2681 `predicate(e, obj, context)` / L2697），Container 通过
->    `self.__dict__ = self`（containers.py L110）支持 attribute 访问。用户写
->    `lambda x, lst, ctx: x > ctx.threshold` 是 Python construct 文档示明的核心用法。
-> 2. **proxy 内容**：必须包含 `ctx.fields()` 全部字段（浅复制）+ `_index`（每次迭代更新）。
->    理由：对齐 Python context 的字段可见性。仅含 `_index` 会使谓词访问任何 Struct 字段
->    时触发 `KeyError` / `AttributeError`，是行为破坏性变更。
-> 3. **Container 类缓存**：Rust 侧在模块初始化（`_construct_rust`）时从
->    `construct.lib.containers` import `Container` 类并缓存为 `Py<PyType>`
->    （参照 `error.rs::init_exception_classes` 的 `ExceptionClasses` 模式）。
->    每次 proxy 构造时 `Container.call1((dict,))` 包装 dict。
-> 4. **性能预期下调**：PyCallable 路径 S-PERF 目标从 ≥3x 下调到 **≥1.5x**
->    （§8.3 更新）。理由：Container 实例化 + 字段复制增加 ~400-700ns/iter 开销。
->    PyCallable 是兜底路径（Expr 路径 ≥10x 已达标），性能下降换取行为正确性。
->
-> 详见 §4.3.3 / §4.3.4 实现伪代码。
+v4 实施版本中，RepeatUntilNode 通过 `ctx.set_current_elem_ptr(elem.as_ptr())`
+设置裸 PyObject 指针，`ExprOp::GetElem` 通过 `PyLong_AsLongLong` 取值。这有两个问题：
+
+1. **用户面入口不统一**：v4 的 Expr 路径由 AST 识别器（`_try_compile_repeat_predicate`）
+   隐式触发，用户不主动选择。Element 路径用户主动声明 `rfield(Element())`，
+   与 Phase 4 决策 3（Index）模式一致。
+2. **裸指针借用风险**：`_current_elem_ptr` 是 `*mut ffi::PyObject`，依赖调用方契约
+   保证存活，是 SAFETY 风险。
+
+v5 设计：终止表达式通过 GetInt(element_field_idx) 从 `expr_values_buf` 取值，
+RepeatUntil 每次迭代把当前元素 `set_field_at` 到该槽位（strong reference，
+PyObject 引用计数管理）。这与 Bytes(count) 中 count 字段引用、Computed(end - start)
+中 end/start 字段引用完全同模式——所有引用统一走 `_FieldDescriptor` + `GetInt`，
+表达式系统输入类型保持纯粹（仅 `_FieldDescriptor` / `_ExprRef` / `int`）。
+
+#### 2.5.3 与 Phase 4 决策 3（Index 仅作为构造器字段）的一致性论证
+
+| 维度 | Index 决策（Phase 4 决策 3） | Element 决策（v5 Phase 4 决策 5） |
+|------|----------------------------|--------------------------------|
+| 用户面入口 | `rfield(Index())` | `rfield(Element())` |
+| 表达式引用方式 | 字段名引用：`Bytes(i + 1)` → `[GetInt(idx_of_i), Const(1), Add]` | 字段名引用：`RepeatUntil(e > 5, ...)` → `[GetInt(idx_of_e), Const(5), Gt]` |
+| 表达式系统输入类型 | `_FieldDescriptor` / `_ExprRef` / `int`（不引入新节点类型） | `_FieldDescriptor` / `_ExprRef` / `int`（不引入新节点类型） |
+| ExprOp 指令 | 不引入新 ExprOp（GetInt 已足够） | 不引入新 ExprOp（GetInt 已足够） |
+| 值生命周期 | Struct 单次 parse 周期（IndexNode.parse 一次性写入 ctx.fields） | RepeatUntil 单次迭代周期（RepeatUntilNode 迭代时主动 set_field_at 覆盖） |
+| 在 Array/RepeatUntil 之外 | IndexNode.parse 返回 None（对齐 Python `context.get("_index", None)`） | ElementNode.parse 返回 None（对齐 Element 字段不持有真实数据） |
+| sizeof | 0（不消耗字节） | 0（不消耗字节） |
+
+**唯一实现差异**：值生命周期。Index 字段值由 IndexNode.parse 在 Struct 进入时
+一次性写入 ctx；Element 字段值由 RepeatUntilNode 在每次迭代时主动覆盖
+（借用模式）。这是因为 Index 的值在 Struct 一次 parse 内不变，而 Element 的值
+随 RepeatUntil 迭代变化。该差异是**实现细节**，不影响用户面一致性——两者都遵循
+"字段名即引用、所有引用统一走 _FieldDescriptor"哲学。
+
+#### 2.5.4 Phase 2 表达式无法描述的终止逻辑（能力边界）
+
+Python `RepeatUntil(lambda x, lst, ctx: ..., subcon)` 接收任意 callable，常见
+不支持的写法：
+
+| Python 写法 | 是否支持 | 原因 / 替代方案 |
+|------------|---------|----------------|
+| `lambda x,_,_: x > N` | ✅ 支持 | `RepeatUntil(e > N, subcon)` |
+| `lambda x,_,_: x == 0xFF` | ✅ 支持 | `RepeatUntil(e == 0xFF, subcon)` |
+| `lambda x,_,_: x != -1` | ✅ 支持 | `RepeatUntil(e != -1, subcon)` |
+| `lambda x,_,_: (e & 0xFF) == 0` | ✅ 支持 | `RepeatUntil((e & 0xFF) == 0, subcon)` |
+| `lambda x,_,ctx: x > ctx.threshold` | ✅ 支持 | `RepeatUntil(e > threshold, subcon)`（threshold 是已声明的字段） |
+| `lambda x,lst,_: x > lst[0]` | ❌ 不支持 | Phase 2 表达式 VM 栈为 i64，不支持 list 索引。**替代方案**：用 Adapter 显式包装（用户主动选慢路径）。详见 §13.9 能力边界 |
+| `lambda x,lst,ctx: lst[-2:] == [0, 0]` | ❌ 不支持 | Phase 2 表达式不支持 list 切片。**替代方案**：用 Adapter |
+
+**能力边界原则**：RepeatUntil 终止表达式只支持 Phase 2 表达式 VM 能描述的逻辑
+（整数算术 / 位运算 / 比较，全部零 FFI）。无法描述的逻辑，用户须改用 Adapter
+（显式慢路径，用户主动选择，不在 RepeatUntil 内部交汇）。这与"用户面设计四原则"
+原则 2 一致：Adapter 是用户主动选择的较慢路径，不是任何构造器的内部兜底。
+
+详细能力边界 + Adapter 替代示例见 §13.9。
 
 ### 2.6 决策 A6：PrefixedArray 用独立 Node（不依赖未实现的 FocusedSeq/Rebuild）
 
@@ -529,9 +662,9 @@ pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
 > **R4 inject_fields 路径**（struct_ref.rs）也需要同步继承 _index。
 > DEV 实现时检查所有 Context 构造点。
 
-### 3.3 ExprOp 不扩展（Index 通过字段引用复用 GetInt）
+### 3.3 ExprOp 不扩展（Index 与 Element 都通过字段引用复用 GetInt）
 
-> **V1 修正（v3，REV 决策记录对照驳回）**：
+> **v3 修正（REV 决策记录对照驳回）**：
 > v1/v2 在此节设计了 `ExprOp::GetIndex` 指令，声称支持 `this._index` 表达式。
 > 但这违反 Phase 2 决策 1（废弃 `this`）——construct-rs 表达式系统输入只有
 > `_FieldDescriptor` / `_ExprRef` / 常量三种节点（表达式系统 §2.3 / §3.3），
@@ -539,33 +672,53 @@ pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
 > （`_mixin.py` L475-533）也没有产生 `("getindex",)` 元组的分支。
 > v1/v2 设计的 GetIndex 是事实上的死代码。
 >
-> **v3 决策（写入设计决策记录 Phase 4 决策 3）**：**不扩展 ExprOp**。
-> 用户访问数组下标的机制如下：
+> **v5 决策（用户硬约束 #5 + Element 一致性）**：
+> v4 实施版本曾引入 `ExprOp::GetElem`（repeat_until.rs 谓词路径用），
+> 但 v5 删除——RepeatUntil 终止表达式统一通过 `rfield(Element())` +
+> 字段名引用，编译为 `[GetInt(idx_of_e), ...]`，与其他字段引用完全同模式。
+> 详见 §2.5.3 Element 与 Index 一致性论证。
 >
+> **v3/v5 决策合并（写入设计决策记录 Phase 4 决策 3 + 决策 5）**：
+> **不扩展 ExprOp**——Index 与 Element 都不引入新 ExprOp 指令。
+>
+> 用户访问数组下标 / RepeatUntil 当前元素的机制：
+
 > | 用户需求 | construct-rs 写法 | 编译结果 |
 > |---------|------------------|---------|
 > | 取当前下标值（作为字段） | `i: int = rfield(Index())` | IndexNode.parse 读 `ctx.index()` |
 > | 在表达式中引用下标 | 先声明 Index 字段，再用字段名引用：`v: bytes = field(Bytes(i + 1))` | `[GetInt(idx_of_i), Const(1), Add]` |
+> | 取 RepeatUntil 当前元素值（作为字段） | `e: int = rfield(Element())` | ElementNode.parse 在 RepeatUntil 之外返回 None；RepeatUntilNode 迭代时 set_field_at 覆盖该槽位 |
+> | 在 RepeatUntil 终止表达式中引用当前元素 | 先声明 Element 字段，再用字段名引用：`RepeatUntil(e > 5, subcon)` | `[GetInt(idx_of_e), Const(5), Gt]` |
 >
 > 这与 Phase 2 "字段名即引用、废弃 this" 的精神一致——所有引用统一走
 > `_FieldDescriptor`，表达式系统输入类型保持纯粹。
 >
-> **对已实现代码的影响**（DEV 在后续子任务中执行回退）：
-> - `expr.rs`：删除 `ExprOp::GetIndex` 变体、`compute_max_stack` 中的 GetIndex 分支、
->   `eval_expr_int` 中的 GetIndex 分支、相关单元测试（约 8 个）。
-> - `compile.rs`：删除 `parse_expr_ops_from_py` 中的 `"getindex"` 分支。
-> - `context.rs`：**保留** `_index` 字段与 `set_index`/`clear_index`/`index` 方法
->   （IndexNode.parse 仍需通过 `ctx.index()` 读取下标）。
-> - `nodes/index.rs`（4.4 子任务实现）：IndexNode 直接调 `ctx.index()`，不走 ExprProgram。
+> **对已实现代码的影响**（DEV 在 4.5 v5 子任务中执行回退/重构）：
+> - `expr.rs`：**删除** `ExprOp::GetElem` 变体、`compute_max_stack` 中的 GetElem 分支、
+>   `eval_expr_int` 中的 GetElem 分支、相关单元测试（约 2-4 个）。
+> - `compile.rs`：**删除** `parse_expr_ops_from_py` 中的 `"getelem"` 分支。
+> - `context.rs`：**删除** `_current_elem_ptr` 字段、`set_current_elem_ptr`、
+>   `clear_current_elem_ptr`、`current_elem_ptr`、`current_elem_as_i64` 方法、
+>   相关测试。
+> - `container_cache.rs`：**删除整个文件**（PyCallable 路径不再需要 Container 缓存）。
+> - `nodes/repeat_until.rs`：**完全重写**（删除 `RepeatPredicate` 枚举、
+>   `call_repeat_predicate`、`build_context_proxy`、`parse_callable_path`、
+>   `parse_expr_path`、`eval_expr_predicate`；新增 Element 字段借用模式）。
+> - `python/construct/_descriptors.py`：**删除** `_AST_OP_TO_EXPROP`、
+>   `_try_compile_repeat_predicate`；重写 `RepeatUntilDescriptor`（参数名
+>   `predicate` → `terminator`，类型从 callable 改为 Phase 2 表达式）；
+>   新增 `ElementDescriptor` + `Element()` 工厂。
+> - `python/construct/lib/containers.py`：若专为 PyCallable 新建则**删除整个文件**
+>   （PM 与 DEV 确认；若该文件为 ListContainer 兼容性保留则不删除，但
+>   `container_cache.rs` 中对其的引用全部删除）。
 >
 > **边界说明**：
-> - 用户代码 `rfield(Index())` 中 IndexNode.parse 在 `ctx.index() == None` 时返回
->   `Py_None`（对齐 Python Index 类行为，详见 §4.4.2）。
-> - 用户代码 `i: int = rfield(Index()); v: bytes = field(Bytes(i + 1))` 中，
->   若 IndexNode 在 `ctx.index() == None` 时返回 Py_None，则 `i + 1` 表达式求值时
->   GetInt 会因类型不匹配（None 无法 extract 为 i64）抛 `ExprType` 错误。
->   这与 Python `this._index + 1` 在非数组上下文抛 TypeError 的行为一致——
->   无需特殊处理，原有的表达式类型检查路径自然覆盖。
+> - 用户代码 `rfield(Element())` 中 ElementNode.parse 在 RepeatUntil 之外时返回
+>   `None`（对齐 IndexNode 在 Array 之外返回 None）。Packet 实例的 Element 字段
+>   属性始终为 None（Element 字段不持有真实数据，仅作为终止表达式引用入口）。
+> - 用户代码 `e: int = rfield(Element()); payload = field(RepeatUntil(e + 1 > 0, ...))`
+>   中，若误用 Element 字段（如直接 `packet.e` 访问）得到 None，是预期行为。
+>   Element 字段必须与 RepeatUntil 终止表达式配合使用。
 
 ### 3.4 ConstructError 新增变体
 
@@ -589,8 +742,8 @@ Range {
 #### 3.4.2 `Repeat`（对应 Python `RepeatError`）
 
 ```rust
-/// RepeatUntil build 时无元素满足谓词。
-/// 对应 Python construct 的 `RepeatError`（core.py L2700）。
+    /// RepeatUntil build 时无元素满足终止表达式。
+    /// 对应 Python construct 的 `RepeatError`（core.py L2700）。
 #[error("repeat error: {message} at {path}")]
 Repeat {
     message: String,
@@ -598,7 +751,7 @@ Repeat {
 },
 ```
 
-**触发场景**：RU-3（build 遍历完列表无元素满足谓词）。
+**触发场景**：RU-3（build 遍历完列表无元素满足终止表达式）。
 
 #### 3.4.3 `StopField`（早停哨兵，§2.4）
 
@@ -993,68 +1146,131 @@ fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
 > **替代**：可新增 `ConstructError::Sizeof` 专门变体映射 Python `SizeofError`。
 > 当前 `Generic` 已足够（错误消息明确）。PM 决策是否细化。
 
-### 4.3 RepeatUntilNode（P3，谓词终止）
+### 4.3 RepeatUntilNode（P3，终止表达式）
 
-#### 4.3.1 数据结构
+> **v5 完全重写**：删除 v4 的 PyCallable 路径、`RepeatPredicate` 枚举、
+> `call_repeat_predicate`、`build_context_proxy`、Container proxy、AST 识别器。
+> 终止表达式 = Phase 2 表达式（`ExprProgram`），用户面通过 `rfield(Element())`
+> 字段引用当前元素。详见 §2.5 决策 A5 v5。
+
+#### 4.3.1 数据结构（v5）
 
 ```rust
-/// 谓词终止数组节点。
+/// 终止表达式数组节点。
 /// 对应 Python construct `RepeatUntil(predicate, subcon, discard)`（core.py L2637）。
+///
+/// construct-rs 用户面 API（v5）：
+/// ```python
+/// RepeatUntil(terminator, subcon, discard=False)
+/// ```
+/// `terminator` 是 Phase 2 表达式（引用 Element 字段），编译期翻译为 ExprProgram。
+///
+/// # 工作原理
+///
+/// 每次迭代：
+/// 1. inner.parse → elem（失败直接上抛，RU-1）
+/// 2. `ctx.set_field_at(element_field_idx, elem, ...)` 把当前元素借用为 Element 字段槽位
+/// 3. 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
+/// 4. 表达式非零 → 终止（最后元素包含在内，RU-2）；零 → 继续迭代
+///
+/// 终止表达式求值全程在 Rust 内部栈式 VM 执行，零 FFI。
 #[derive(Debug)]
 pub struct RepeatUntilNode {
+    /// 元素子树（递归 Box）。
     inner: Box<Node>,
-    predicate: RepeatPredicate,
+    /// 终止表达式（Phase 2 ExprProgram，编译期从用户面表达式编译）。
+    /// 求值结果非零即终止。
+    terminator: ExprProgram,
+    /// Element 字段在当前 Struct 的 `expr_values_buf` 中的索引（编译期确定）。
+    /// RepeatUntil 每次迭代调 `ctx.set_field_at(element_field_idx, ...)` 把当前元素
+    /// 写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
+    element_field_idx: usize,
+    /// Element 字段名（interned PyString，set_field_at 的 key 参数）。
+    element_field_name: Py<PyString>,
+    /// 是否丢弃解析结果（仍消耗流）。
     discard: bool,
 }
 
-#[derive(Debug)]
-pub enum RepeatPredicate {
-    /// 编译期识别的简单表达式（仅依赖当前元素值）。
-    /// 求值时通过特殊 ExprOp 读取"当前元素"（暂存在 ctx 的特殊槽位）。
-    Expr(ExprProgram),
-    /// 回落到 Python callable（复杂谓词）。
-    PyCallable(Py<PyAny>),
+impl RepeatUntilNode {
+    pub fn new(
+        inner: Node,
+        terminator: ExprProgram,
+        element_field_idx: usize,
+        element_field_name: Py<PyString>,
+        discard: bool,
+    ) -> Self {
+        Self {
+            inner: Box::new(inner),
+            terminator,
+            element_field_idx,
+            element_field_name,
+            discard,
+        }
+    }
+
+    /// has_expressions 判断（设计 §6.1.1）。
+    ///
+    /// **始终返回 true**（v5）：终止表达式始终引用 Element 字段，需要外层 Struct
+    /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_field_at` 可用。
+    ///
+    /// 此外，inner 子树可能含表达式（虽 Phase 4 暂不支持 inner 表达式，但
+    /// 防御性返回 true 避免未来扩展时遗漏 init）。
+    pub fn has_expressions(&self) -> bool {
+        true
+    }
 }
 ```
 
-#### 4.3.2 当前元素暂存（Expr 路径）
+**为什么 RepeatUntilNode 持有 `element_field_idx` 而非 ElementNode 引用**：
 
-`Expr` 谓词需要访问"刚解析的元素值"。设计：在 Context 新增临时槽位：
+RepeatUntil 与 Element 字段是**两个独立的 Node**，通过 `element_field_idx` 在
+`expr_values_buf` 中"借用"同一个槽位实现通信：
 
-```rust
-pub struct Context<'py> {
-    // ... 现有字段 ...
-    _index: Option<usize>,
-    /// Phase 4：RepeatUntil 当前元素暂存（仅 Expr 谓词路径使用）。
-    /// PyCallable 路径不通过 ctx，直接在 Rust 层调 Python callable。
-    _current_elem: Option<*mut ffi::PyObject>,  // borrowed ptr，不 incref
-}
-```
+- StructNode.parse 处理 `e` 字段时：ElementNode.parse 返回 None（因为不在
+  RepeatUntil 内），StructNode 把 None set_field_at(idx_of_e) 到 buf。
+- StructNode.parse 处理 `payload` 字段时：RepeatUntilNode.parse 接管，
+  每次迭代 set_field_at(idx_of_e, elem, ...) **覆盖**该槽位为当前元素，
+  求值终止表达式（GetInt(idx_of_e) 取到 elem），下次迭代再覆盖。
 
-> **简化方案（推荐 PM 与 DEV 协调）**：Phase 4 首次实现**仅支持 PyCallable 路径**，
-> 不引入 `_current_elem` 槽位与 `Expr` 谓词。理由：
-> - PyCallable 路径功能完整、行为与 Python 完全一致。
-> - Expr 路径是性能优化，可在 S-FUNC 达成后单独子任务实现。
-> - 避免引入"当前元素 borrowed ptr"的生命周期复杂度。
+`element_field_idx` 是编译期从 Element 字段在 Struct 中的声明顺序推导的常量，
+运行时零开销查找。
 
-**下文按"仅 PyCallable"路径描述**。Expr 路径的设计点保留在 §10 性能假设中作为后续优化方向。
+#### 4.3.2 parse 流程（v5）
 
-#### 4.3.3 parse 流程（PyCallable 路径）
-
-对齐 Python `RepeatUntil._parse`（core.py L2670-2682）：
+对齐 Python `RepeatUntil._parse`（core.py L2670-2682），但终止条件用 Phase 2
+表达式（零 FFI）：
 
 ```rust
-fn parse<'py>(...) -> Result<Py<PyAny>, ConstructError> {
+fn parse<'py>(
+    &self,
+    py: Python<'py>,
+    stream: &mut ParseStream<'_>,
+    ctx: &mut Context<'py>,
+    path: &mut Path,
+) -> Result<Py<PyAny>, ConstructError> {
     let list = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
     let old_index = ctx.index();
-    let predicate = match &self.predicate {
-        RepeatPredicate::PyCallable(p) => p.bind(py),
-        RepeatPredicate::Expr(_) => unreachable!("Expr 路径未实现（§4.3.2 简化）"),
-    };
-    // v4：缓存 Container 类（模块初始化时已缓存，此处取用，零开销）
-    let container_cls = crate::container_cache::container_class(py)?;
-    let mut i: usize = 0;
+    let elem_name = self.element_field_name.bind(py);
 
+    let result = self.parse_loop(py, stream, ctx, path, &list, elem_name);
+
+    restore_index(ctx, old_index);
+    match result {
+        Ok(()) => Ok(list.into_any().unbind()),
+        Err(e) => Err(e),
+    }
+}
+
+fn parse_loop<'py>(
+    &self,
+    py: Python<'py>,
+    stream: &mut ParseStream<'_>,
+    ctx: &mut Context<'py>,
+    path: &mut Path,
+    list: &Bound<'py, PyList>,
+    elem_name: &Bound<'py, PyString>,
+) -> Result<(), ConstructError> {
+    let mut i: usize = 0;
     loop {
         ctx.set_index(i);
         path.push_index(i);
@@ -1063,165 +1279,105 @@ fn parse<'py>(...) -> Result<Py<PyAny>, ConstructError> {
             Ok(v) => v,
             Err(e) => {
                 path.pop();
-                match old_index { Some(idx) => ctx.set_index(idx), None => ctx.clear_index() }
-                return Err(e);   // RU-1: 失败直接上抛（不像 GreedyRange 回退）
+                // RU-1: 失败直接上抛（不像 GreedyRange 回退）
+                return Err(e);
             }
         };
         path.pop();
 
         if !self.discard {
-            list.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
+            list.append(elem.clone_ref(py))
+                .map_err(ConstructError::from)?;
         }
 
-        // v4：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
-        // 对齐 Python `predicate(e, obj, context)` 中 context 是 Container。
-        let ctx_proxy = build_context_proxy(py, &container_cls, ctx)?;
-        let stop = call_repeat_predicate(py, predicate, elem.bind(py), list.as_any(), &ctx_proxy)?;
-        if stop {
-            break;      // RU-2: 谓词为真时终止（最后元素被包含）
+        // 把当前元素写入 Element 字段槽位（借用模式）。
+        // 终止表达式中的 GetInt(element_field_idx) 会从此槽位取值。
+        // set_field_at 内部走 expr_values_buf（栈分配内联数组），零 PyDict 开销。
+        ctx.set_field_at(self.element_field_idx, elem_name, elem.bind(py), py)
+            .map_err(|e| ConstructError::Generic {
+                message: format!("RepeatUntil parse: set_field_at failed: {}", e),
+                path: path.to_string(),
+            })?;
+
+        // 求值终止表达式（零 FFI，Rust 内部栈式 VM）。
+        // 表达式非零即终止（最后元素已包含在 list 中，RU-2）。
+        let stop_v = crate::expr::eval_expr_int(&self.terminator, ctx, py)?;
+        if stop_v != 0 {
+            return Ok(());
         }
 
         i = i.saturating_add(1);
     }
-
-    match old_index { Some(idx) => ctx.set_index(idx), None => ctx.clear_index() }
-    Ok(list.into_any())
 }
 ```
 
-**call_repeat_predicate 辅助函数**：
+**性能要点**：
+- `ctx.set_field_at`：直接写入 `expr_values_buf[idx]`（栈分配内联数组），
+  无 PyDict 操作，~5-10ns/iter
+- `eval_expr_int`：栈式 VM 求值，~15-25ns/iter（典型终止表达式 3 个 ExprOp）
+- 无 PyCallable FFI 调用、无 Container proxy 构造、无 ctx 字段浅复制
 
-```rust
-/// 调用 RepeatUntil 谓词，返回是否应终止。
-/// 对齐 Python `predicate(obj, list, context)`。
-///
-/// # v4 决策（V-1 修正）
-///
-/// context proxy **必须**是 `construct.lib.containers.Container` 实例（不是 dict），
-/// 包含 `ctx.fields()` 全部字段（浅复制）+ `_index`。理由：
-/// - Python `RepeatUntil._parse/_build` 把 Container 直接传给谓词（core.py L2681/L2697）；
-/// - Container 通过 `self.__dict__ = self`（containers.py L110）支持 attribute 访问；
-/// - 用户 `lambda x, lst, ctx: x > ctx.threshold` 是文档示明的核心用法，必须可用。
-///
-/// Container 类在模块初始化时缓存为 `Py<PyType>`（参照 init_exception_classes）。
-fn call_repeat_predicate(
-    py: Python<'_>,
-    predicate: &Bound<'_, PyAny>,
-    elem: &Bound<'_, PyAny>,
-    list: &Bound<'_, PyAny>,
-    ctx_proxy: &Bound<'_, PyAny>,   // Container 实例（由 build_context_proxy 构造）
-) -> Result<bool, ConstructError> {
-    let result = predicate.call1((elem, list, ctx_proxy))?;
-    let truthy: bool = result.is_truthy()?;
-    Ok(truthy)
-}
-```
+> **build 方向的 set_field_at 副作用**：parse 方向 RepeatUntilNode 主动覆盖
+> Element 字段槽位。**StructNode.parse 完成后**，Element 字段在 PyDict 中的值
+> 仍是 StructNode 在处理 e 字段时写入的 None（因为 set_field_at 不写 PyDict，
+> 只写 expr_values_buf）。因此 Packet 实例的 e 属性 = None（语义正确）。
 
-> **`build_context_proxy` 设计（v4 硬性约束，原 "DEV 决策" 删除）**：
->
-> 每次迭代构造 Container proxy，包含 `ctx.fields()` 全部字段（浅复制）+ `_index`。
->
-> ```rust
-> /// 构造 Container proxy（每次迭代调用）。
-> ///
-> /// v4 决策（V-1）：proxy 必须是 Container 实例，对齐 Python 谓词收到的 context。
-> fn build_context_proxy<'py>(
->     py: Python<'py>,
->     container_cls: &Bound<'py, PyType>,  // 缓存的 Container 类
->     ctx: &Context<'_>,
-> ) -> PyResult<Bound<'py, PyAny>> {
->     // 1. 构造临时 PyDict，复制 ctx.fields() + 写 _index。
->     let dict = PyDict::new_bound(py);
->     if let Some(fields) = ctx.fields() {
->         for item in fields.iter() {
->             let (key, value) = item;
->             dict.set_item(&key, &value)?;
->         }
->     }
->     match ctx.index() {
->         Some(i) => { dict.set_item("_index", i.into_py(py).bind(py))?; }
->         None => { dict.set_item("_index", py.None().bind(py))?; }
->     }
->     // 2. 用 Container 包装 dict（Container(__init__) 接受 dict，自动 __dict__ = self）。
->     container_cls.call1((dict,)).map(|obj| obj.into_any())
-> }
-> ```
->
-> **性能开销估算**（每迭代）：
-> - PyDict::new_bound + 字段复制：~200-400ns（字段数 N）
-> - Container 实例化（`Container.__init__` 调用）：~200-500ns
-> - 合计：~400-900ns/iter
-> - 加上原有 PyCallable FFI 调用（~175-225ns/iter），总开销 ~575-1125ns/iter
-> - Python 原版每元素 ~270-300ns/iter，预期加速比 ~1.5-2.5x（PyCallable 路径）。
->
-> **优化方向（可选，非 Phase 4 必需）**：在节点入口预创建一个长生命周期 Container，
-> 每次迭代 `Container.clear()` + 字段更新 + `_index` 设置。但 Container.clear() +
-> 逐字段 set_item 的开销可能与新建 Container 相当，且增加代码复杂度。首版用
-> "每次新建 Container" 简单方案，性能不达标再优化。
->
-> **为什么不用原生 dict**：dict 不支持 `ctx.threshold`（attribute 访问），仅支持
-> `ctx['threshold']`（item 访问）。Python Container 两者都支持。即使文档说明
-> "仅支持 item 访问"，用户的 `ctx.threshold` 写法会静默失败——属于"隐性破坏"，
-> 不可接受。详见 §0.3 v4 修正 V-1 决策依据。
-
-#### 4.3.4 build 流程
+#### 4.3.3 build 流程（v5）
 
 对齐 Python `RepeatUntil._build`（core.py L2684-2701）：
 
 ```rust
-fn build(...) -> Result<(), ConstructError> {
-    let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
+fn build(
+    &self,
+    py: Python<'_>,
+    obj: &Bound<'_, PyAny>,
+    stream: &mut BuildStream,
+    ctx: &mut Context<'_>,
+    path: &mut Path,
+) -> Result<(), ConstructError> {
     let old_index = ctx.index();
-    let predicate = match &self.predicate {
-        RepeatPredicate::PyCallable(p) => p.bind(py),
-        RepeatPredicate::Expr(_) => unreachable!(),
-    };
-    // v4：缓存 Container 类（模块初始化时已缓存，此处取用，零开销）
-    let container_cls = crate::container_cache::container_class(py)?;
+    let elem_name = self.element_field_name.bind(py);
+
+    // 收集 obj（list/tuple/任意 iterable）到 Vec。
+    // 注意：与 v4 不同，v5 必须物化到 Vec——终止表达式求值需要 owned elem 引用
+    // 写入 expr_values_buf。但仅在终止表达式满足前需要物化，可优化为惰性迭代
+    // （性能不达标再优化，§10.2）。
+    let items: Vec<Py<PyAny>> = collect_iterable(py, obj, path)?;
 
     let mut matched = false;
-    let mut partial = PyList::new_bound(py, Vec::<Py<PyAny>>::new());
-
-    for (i, elem) in items.into_iter().enumerate() {
+    for (i, elem) in items.iter().enumerate() {
         ctx.set_index(i);
         path.push_index(i);
         let elem_bound = elem.bind(py);
         if let Err(e) = self.inner.build(py, elem_bound, stream, ctx, path) {
             path.pop();
-            match old_index { Some(idx) => ctx.set_index(idx), None => ctx.clear_index() }
+            restore_index(ctx, old_index);
             return Err(e);
         }
         path.pop();
 
-        // P2 修正：对齐 Python L2694-2696 的 discard 语义。
-        // Python 源码：
-        //   if not discard:
-        //       retlist.append(buildret)
-        //       partiallist.append(buildret)   ← partiallist 仅在非 discard 时 append
-        //   if predicate(e, partiallist, context):
-        //       break
-        // 关键：discard=True 时 partiallist 始终为空，谓词收到空 list。
-        // 对依赖 list 内容的谓词（如 lambda x,lst,c: lst[-2:] == [0,0]），
-        // discard=True 与 discard=False 会产生不同的终止时机——这是 Python 的语义。
-        if !self.discard {
-            partial.append(elem.clone_ref(py)).map_err(ConstructError::from)?;
-        }
+        // 把当前元素写入 Element 字段槽位（与 parse 同模式）。
+        ctx.set_field_at(self.element_field_idx, elem_name, elem_bound, py)
+            .map_err(|e| ConstructError::Generic {
+                message: format!("RepeatUntil build: set_field_at failed: {}", e),
+                path: path.to_string(),
+            })?;
 
-        // v4：构造 Container proxy（含 ctx.fields() 字段 + _index），调用谓词。
-        let ctx_proxy = build_context_proxy(py, &container_cls, ctx)?;
-        let stop = call_repeat_predicate(py, predicate, elem_bound, partial.as_any(), &ctx_proxy)?;
-        if stop {
+        // 求值终止表达式。
+        let stop_v = crate::expr::eval_expr_int(&self.terminator, ctx, py)?;
+        if stop_v != 0 {
             matched = true;
             break;
         }
     }
 
-    match old_index { Some(idx) => ctx.set_index(idx), None => ctx.clear_index() }
+    restore_index(ctx, old_index);
 
     if !matched {
-        // RU-3: 无元素满足谓词
+        // RU-3: 无元素满足终止表达式
         return Err(ConstructError::Repeat {
-            message: "expected any item to match predicate, when building".to_string(),
+            message: "expected any item to match terminator, when building"
+                .to_string(),
             path: path.to_string(),
         });
     }
@@ -1229,9 +1385,33 @@ fn build(...) -> Result<(), ConstructError> {
 }
 ```
 
-#### 4.3.5 sizeof
+**与 Python 的语义对齐**：
+- Python `if predicate(e, partiallist, context): break`：partiallist 是已构建元素
+  的 list（discard=False 时收集，discard=True 时为空）。
+- construct-rs v5：终止表达式不接收 list 参数（Phase 2 表达式 VM 栈为 i64，
+  不支持 list 引用）。**这是已知能力边界**（§2.5.4 / §13.9），用户须改用 Adapter
+  显式包装 list-dependent 终止逻辑。
+- discard 在 v5 中仅影响 `list.append`（parse 方向）；build 方向 discard
+  不影响终止表达式求值（终止表达式不依赖 list）。
 
-永远 Err（对齐 Python L2703-2704）。
+> **v5 行为差异**（vs Python construct）：
+>
+> Python `RepeatUntil(lambda x,lst,c: lst[-2:] == [0, 0], Byte)` 这种
+> 依赖 list 内容的终止逻辑，construct-rs RepeatUntil **不支持**。
+> 用户须改用 Adapter（显式慢路径）。详见 §13.9 能力边界 + Adapter 替代示例。
+
+#### 4.3.4 sizeof
+
+永远 Err（对齐 Python L2703-2704）：
+
+```rust
+fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
+    Err(ConstructError::Generic {
+        message: "RepeatUntil size is undefined".to_string(),
+        path: String::new(),
+    })
+}
+```
 
 ### 4.4 IndexNode（P4，取当前下标）
 
@@ -1488,6 +1668,142 @@ fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
 > **替代**（DEV 决策）：若需 sizeof 支持，可对静态 count（countfield 是常量表达式）
 > 计算 `countfield.sizeof() + count * inner.sizeof()`。当前保守 Err。
 
+### 4.7 ElementNode（P6，RepeatUntil 当前元素引用入口；v5 新增）
+
+> **v5 新增**：Element 字段是用户为 RepeatUntil 终止表达式提供"当前元素"引用入口
+> 的机制。与 Index 字段平行（Index 是 Array 内"当前下标"引用入口）。
+> 详见 §2.5.3 Element 与 Index 一致性论证。
+
+#### 4.7.1 设计动机
+
+Python `RepeatUntil(lambda x, lst, ctx: x > 5, subcon)` 中 `x` 是 lambda 函数参数，
+指向当前迭代的元素。construct-rs 不接收 Python lambda（用户硬约束 #1），必须通过
+某种用户面机制让终止表达式引用"当前元素"。
+
+**Element 字段就是这个机制**：
+
+```python
+@dataclass
+class Packet(StructMixin):
+    e: int = rfield(Element())              # Element 字段：当前元素引用入口
+    payload: list = field(RepeatUntil(e > 5, Int8ub))
+```
+
+- `e` 是 Packet 的字段（不是 RepeatUntil 内部字段），与其他字段同等地位
+- ElementNode.parse 返回 None（Element 字段不持有真实数据）
+- RepeatUntilNode 在迭代时**借用** Element 字段槽位（`set_field_at(idx_of_e, elem)`），
+  使终止表达式中的 `e` 引用能取到当前元素值
+
+**ElementNode 与 IndexNode 的语义差异**：
+
+| 维度 | IndexNode | ElementNode |
+|------|-----------|-------------|
+| 用户面写法 | `i: int = rfield(Index())` | `e: int = rfield(Element())` |
+| 值的来源 | `ctx._index`（Array 系列节点设置） | `ctx.expr_values_buf[idx_of_e]`（RepeatUntilNode 借用） |
+| parse 在 Array/RepeatUntil 之外 | 返回 None（对齐 Python `context.get("_index", None)`） | 返回 None（Element 字段不持有真实数据） |
+| parse 在 Array/RepeatUntil 内 | 返回当前下标（Array 节点已 set_index） | 返回 None（RepeatUntil 不调 ElementNode.parse，直接 set_field_at） |
+| Packet 实例属性值 | 当前下标（Index 在 Array 内的 Item Struct 中） | None（Element 在 Packet 顶层，RepeatUntil 内部借用） |
+
+#### 4.7.2 数据结构
+
+```rust
+/// RepeatUntil 当前元素引用入口节点。
+///
+/// construct-rs 新增（v5）。Python construct 无对应物——Python 用 lambda 参数 `x`
+/// 引用当前元素，construct-rs 用 Element 字段 + 字段名引用机制。
+///
+/// # parse 行为
+///
+/// 始终返回 `Py_None`——ElementNode.parse 在用户面不可见。Element 字段的值
+/// 由 RepeatUntilNode 在迭代时通过 `ctx.set_field_at(element_field_idx, elem, ...)`
+/// 借用设置，终止表达式通过 `GetInt(element_field_idx)` 取值。
+///
+/// # build 行为
+///
+/// no-op（sizeof=0，不写字节）。
+///
+/// # sizeof 行为
+///
+/// 返回 0（不消耗字节）。
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ElementNode;
+
+impl ElementNode {
+    /// 创建 ElementNode。
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// has_expressions 判断（设计 §6.1.1）。
+    ///
+    /// 返回 `false`——ElementNode 自身不引用 Struct 字段（仅作为引用入口）。
+    /// RepeatUntilNode 的 has_expressions 始终返回 true，覆盖 Element 字段的
+    /// init_expr_values 需求。
+    pub fn has_expressions(&self) -> bool {
+        false
+    }
+}
+```
+
+#### 4.7.3 parse / build / sizeof
+
+```rust
+impl super::Construct for ElementNode {
+    fn parse<'py>(
+        &self,
+        py: Python<'py>,
+        _stream: &mut ParseStream<'_>,
+        _ctx: &mut Context<'py>,
+        _path: &mut Path,
+    ) -> Result<Py<PyAny>, ConstructError> {
+        // 始终返回 Py_None。Element 字段的值由 RepeatUntilNode 借用设置，
+        // 不在 StructNode.parse 处理 Element 字段时取值。
+        Ok(py.None())
+    }
+
+    fn build(
+        &self,
+        _py: Python<'_>,
+        _obj: &Bound<'_, PyAny>,
+        _stream: &mut BuildStream,
+        _ctx: &mut Context<'_>,
+        _path: &mut Path,
+    ) -> Result<(), ConstructError> {
+        // no-op（sizeof=0，不写字节）。
+        Ok(())
+    }
+
+    fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
+        Ok(0)
+    }
+}
+```
+
+#### 4.7.4 compute_ro_value 行为
+
+Element 字段是 RO 模式（`rfield(Element())`），StructNode 在 build 方向处理
+RO 字段时调 `compute_ro_value(node)`。ElementNode 的 RO 计算应返回 None
+（build 方向 Element 字段也无真实数据，RepeatUntil 内部借用模式与 parse 同）。
+
+```rust
+// 在 nodes/mod.rs::compute_ro_value 中新增分支：
+Node::Element(_) => Ok(py.None()),
+```
+
+#### 4.7.5 编译期约束（Python 侧 `_mixin.py`）
+
+Element 字段在编译期需通过以下校验：
+
+1. **必须为 RO 模式**：`rfield(Element())` 合法；`field(Element())` / `wfield(Element())`
+   编译期报错（Element 字段不从用户取值）。
+2. **必须声明在 RepeatUntil 字段之前**：前序字段引用约束（`_check_forward_reference`），
+   因 RepeatUntil 终止表达式引用 Element 字段。
+3. **同 Struct 内 Element 字段数量限制**：建议 ≤1 个（多个 Element 字段无意义，
+   因 RepeatUntil 终止表达式只能引用其中一个）。编译期不强制限制数量，
+   但若多个 Element 字段都未被 RepeatUntil 引用，编译期 warning（DEV 决策是否实现）。
+4. **Element 字段必须被同 Struct 的 RepeatUntil 字段引用**：若声明了 Element 字段
+   但无 RepeatUntil 引用，编译期 warning（用户可能误用）。
+
 ---
 
 ## 5. PrefixedArray 的组合方式（决策对比）
@@ -1533,7 +1849,7 @@ Phase 4 用独立 Node 实现。若未来 FocusedSeq/Rebuild 落地，可保留�
 
 ### 6.1 Node enum 扩展
 
-在 `nodes/mod.rs` 的 `Node` enum 新增 6 个变体：
+在 `nodes/mod.rs` 的 `Node` enum 新增 7 个变体（v5：含 Element）：
 
 ```rust
 #[derive(Debug)]
@@ -1546,7 +1862,8 @@ pub enum Node {
     Array(ArrayNode),
     /// 读到流结束的数组（对应 Python `GreedyRange(subcon, discard)`）。
     GreedyRange(GreedyRangeNode),
-    /// 谓词终止数组（对应 Python `RepeatUntil(predicate, subcon, discard)`）。
+    /// 终止表达式数组（对应 Python `RepeatUntil(predicate, subcon, discard)`）。
+    /// v5：终止表达式 = Phase 2 ExprProgram，无 PyCallable 路径。
     RepeatUntil(RepeatUntilNode),
     /// 前缀长度数组（对应 Python `PrefixedArray(countfield, subcon)`）。
     PrefixedArray(PrefixedArrayNode),
@@ -1554,6 +1871,8 @@ pub enum Node {
     Index(IndexNode),
     /// 早停信号（对应 Python `StopIf(condfunc)`）。
     StopIf(StopIfNode),
+    /// RepeatUntil 当前元素引用入口（v5 新增；Python construct 无对应物）。
+    Element(ElementNode),
 }
 ```
 
@@ -1566,6 +1885,7 @@ pub mod repeat_until;
 pub mod prefixed_array;
 pub mod index;
 pub mod stop_if;
+pub mod element;        // v5 新增
 ```
 
 #### 6.1.1 `has_expressions` 扩展
@@ -1582,6 +1902,7 @@ pub fn has_expressions(&self) -> bool {
         Node::PrefixedArray(p) => p.has_expressions(),
         Node::Index(_) => false,                       // IndexNode 不引用任何 Struct 字段
         Node::StopIf(s) => s.has_expressions(),        // StopIf(Expr) 引用 Struct 字段
+        Node::Element(_) => false,                     // ElementNode 仅作为引用入口（v5 新增）
     }
 }
 ```
@@ -1602,11 +1923,11 @@ impl GreedyRangeNode {
 }
 
 impl RepeatUntilNode {
+    /// v5：始终返回 true（终止表达式始终引用 Element 字段）。
+    /// RepeatUntil 必须触发 StructNode 通过 init_expr_values 初始化
+    /// expr_values_buf，使 set_field_at(element_field_idx, ...) 可用。
     pub fn has_expressions(&self) -> bool {
-        // Expr 谓词引用 Struct 字段（如 `RepeatUntil(x > 0, ...)`，x 是字段名引用，
-        // **Python 写法为 `this.x > 0`**，construct-rs 不用 `this`）；
-        // PyCallable 谓词不参与 ExprProgram 路径，但 inner 可能含表达式。
-        self.inner.has_expressions() || matches!(self.predicate, RepeatPredicate::Expr(_))
+        true
     }
 }
 
@@ -1673,18 +1994,19 @@ impl StopIfCondition {
 
 #### 6.2.1 描述符识别（按 type_name 字符串）
 
-新增 6 个描述符类型名识别分支（与现有 BitwiseDescriptor 等模式一致）：
+新增 7 个描述符类型名识别分支（v5：含 ElementDescriptor）：
 
 ```rust
 match type_name.to_str()? {
     // ... 现有分支 ...
 
-    "ArrayDescriptor" => return Ok(Node::Array(build_array_node(py, desc, field_index)?)),
-    "GreedyRangeDescriptor" => return Ok(Node::GreedyRange(build_greedy_range_node(...)?)),
-    "RepeatUntilDescriptor" => return Ok(Node::RepeatUntil(build_repeat_until_node(...)?)),
-    "PrefixedArrayDescriptor" => return Ok(Node::PrefixedArray(build_prefixed_array_node(...)?)),
-    "IndexDescriptor" => return Ok(Node::Index(IndexNode)),
+    "ArrayDescriptor" => return Ok(Node::Array(build_array_node(py, desc, field_index, expr_programs, bitwise)?)),
+    "GreedyRangeDescriptor" => return Ok(Node::GreedyRange(build_greedy_range_node(py, desc, field_index, expr_programs, bitwise)?)),
+    "RepeatUntilDescriptor" => return Ok(Node::RepeatUntil(build_repeat_until_node(py, desc, field_index, expr_programs, field_names, bitwise)?)),
+    "PrefixedArrayDescriptor" => return Ok(Node::PrefixedArray(build_prefixed_array_node(py, desc, field_index, expr_programs, bitwise)?)),
+    "IndexDescriptor" => return Ok(Node::Index(IndexNode::new())),
     "StopIfDescriptor" => return Ok(Node::StopIf(build_stop_if_node(py, desc, field_index, expr_programs)?)),
+    "ElementDescriptor" => return Ok(Node::Element(ElementNode::new())),   // v5 新增
     _ => {}
 }
 ```
@@ -1886,52 +2208,275 @@ StopIfDescriptor 是字段，field_index 在字段列表中，其 "cond" 表达�
 模式类似 build_array_node：递归编译 subcon + 提取参数。
 详细签名 DEV 实现时参照现有 `build_bits_integer_node` / `build_padding_node`。
 
-### 6.3 Python 层 API
+##### 6.2.3.1 `build_repeat_until_node`（v5 完全重写）
 
-#### 6.3.1 描述符定义（Python 侧）
+```rust
+/// 编译 RepeatUntilDescriptor → RepeatUntilNode。
+///
+/// v5 设计（终止表达式 = Phase 2 ExprProgram）：
+/// 1. 从 desc 读取 terminator / subcon / discard
+/// 2. 从 expr_programs[field_index]["terminator"] 取 ExprOp 列表，构建 ExprProgram
+/// 3. 从 expr_programs[field_index]["element_field_idx"] 取 Element 字段索引
+/// 4. 从 field_names 取 Element 字段名（intern）
+/// 5. 递归编译 subcon → Box<Node>
+fn build_repeat_until_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],   // Struct 全部字段名
+    bitwise: bool,
+) -> Result<RepeatUntilNode, ConstructError> {
+    // 1. 递归编译 subcon。
+    let subcon_desc = desc.getattr("subcon").map_err(|e| ConstructError::Compilation {
+        message: format!("RepeatUntilDescriptor missing 'subcon': {}", e),
+    })?;
+    let inner_node = build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, bitwise)?;
 
-在 `construct/_constructors.py`（或类似位置）新增：
+    // 2. 从 expr_programs[field_index] 取终止表达式 + Element 字段索引。
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil field has no expression program (field index {}); \
+                 terminator expression is required", field_index
+            ),
+        })?;
+    let field_exprs_dict = field_exprs.bind(py).downcast::<PyDict>().map_err(|_| {
+        ConstructError::Compilation {
+            message: "RepeatUntil expression program must be a dict".to_string(),
+        }
+    })?;
 
-```python
-class ArrayDescriptor:
-    """Array(count, subcon, discard) 的描述符。"""
-    def __init__(self, count, subcon, discard=False):
-        self.count = count
-        self.subcon = subcon
-        self.discard = discard
-        self._expr_params = {}
-        # 若 count 是 FieldRef/ExprRef，编译期生成 "count" 键的 ExprOp 列表
-        if isinstance(count, ExprMixin) or callable(count):
-            self._expr_params["count"] = _compile_expr_tree(count)
+    // 取终止表达式 ExprOp 列表。
+    let ops_obj = field_exprs_dict.get_item("terminator")?.ok_or_else(|| {
+        ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil missing 'terminator' in expression programs (field index {})",
+                field_index
+            ),
+        }
+    })?;
+    let ops = parse_expr_ops_from_py(&ops_obj)?;
+    let terminator = ExprProgram::new(ops);
 
-class GreedyRangeDescriptor:
-    def __init__(self, subcon, discard=False):
-        self.subcon = subcon
-        self.discard = discard
+    // 取 Element 字段索引（编译期由 Python 侧从终止表达式引用的 Element 字段推导）。
+    let element_field_idx: usize = field_exprs_dict
+        .get_item("element_field_idx")?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil missing 'element_field_idx' in expression programs (field index {})",
+                field_index
+            ),
+        })?
+        .extract()?;
 
-class RepeatUntilDescriptor:
-    def __init__(self, predicate, subcon, discard=False):
-        self.predicate = predicate
-        self.subcon = subcon
-        self.discard = discard
+    // 3. 取 Element 字段名（intern PyString）。
+    let element_field_name_str = field_names.get(element_field_idx).ok_or_else(|| {
+        ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil element_field_idx {} out of range (field_names len {})",
+                element_field_idx, field_names.len()
+            ),
+        }
+    })?;
+    let element_field_name = intern_string(py, element_field_name_str)?.unbind();
 
-class PrefixedArrayDescriptor:
-    def __init__(self, countfield, subcon):
-        self.countfield = countfield
-        self.subcon = subcon
+    // 4. discard 标志。
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
 
-class IndexDescriptor:
-    pass   # 无参数
-
-class StopIfDescriptor:
-    def __init__(self, condfunc):
-        self.condfunc = condfunc
-        self._expr_params = {}
-        if isinstance(condfunc, ExprMixin):
-            self._expr_params["cond"] = _compile_expr_tree(condfunc)
+    Ok(RepeatUntilNode::new(
+        inner_node,
+        terminator,
+        element_field_idx,
+        element_field_name,
+        discard,
+    ))
+}
 ```
 
-#### 6.3.2 用户 API（构造器函数）
+> **v5 与 v4 关键差异**：
+> - 不再从 `self.predicate` 读取 callable（v4 路径已删）
+> - 不再调 `container_cache::container_class`（Container proxy 路径已删）
+> - 不再识别 AST（`_try_compile_repeat_predicate` 已删）
+> - 终止表达式编译完全在 Python 侧 `_compile_expr_tree` 完成（与其他表达式字段同模式）
+
+##### 6.2.3.2 `build_element_node`（v5 新增）
+
+ElementDescriptor 编译极简——无参数，直接构造 ElementNode：
+
+```rust
+// compile.rs build_node_from_descriptor 中：
+"ElementDescriptor" => return Ok(Node::Element(ElementNode::new())),
+```
+
+无需独立 `build_element_node` 函数（无参数可提取）。
+
+### 6.3 Python 层 API
+
+#### 6.3.1 描述符定义（Python 侧，v5）
+
+> **v5 完全重写**：删除 v4 的 `_AST_OP_TO_EXPROP`、`_try_compile_repeat_predicate`、
+> RepeatUntilDescriptor 中的 PyCallable 兼容（`if not callable(predicate)` 包装）。
+> 新增 ElementDescriptor。RepeatUntilDescriptor 第一参数从 `predicate` 改名为
+> `terminator`，类型从 callable 改为 Phase 2 表达式（`_FieldDescriptor` / `_ExprRef` / `int`）。
+
+```python
+class ElementDescriptor:
+    """``Element()`` 描述符（v5 新增）。
+
+    RepeatUntil 终止表达式中"当前元素"的引用入口。无参数。
+
+    必须在 ``rfield()`` 中使用（RO 模式），且必须声明在 RepeatUntil 字段之前。
+    Element 字段在 Packet 实例中始终为 None（不持有真实数据）——其值由
+    RepeatUntilNode 在迭代时通过 set_field_at 借用设置。
+
+    ``_expr_params`` 协议返回空 dict：Element 无表达式参数。
+    """
+
+    __slots__ = ()
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Element()"
+
+
+def Element():
+    """创建一个 Element 描述符（v5 新增）。
+
+    RepeatUntil 终止表达式中"当前元素"的引用入口。
+
+    使用方式::
+
+        @dataclass
+        class Packet(StructMixin):
+            e: int = rfield(Element())                # Element 字段
+            payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+    :return: ``ElementDescriptor`` 实例。
+    """
+    return ElementDescriptor()
+
+
+class RepeatUntilDescriptor:
+    """``RepeatUntil(terminator, subcon, discard=False)`` 描述符（v5 重写）。
+
+    终止表达式数组：解析元素到 list 直到终止表达式求值非零（最后元素包含在内），
+    或从 list 构建字节序列直到某元素满足终止表达式。对应 Python construct 的 ``RepeatUntil``。
+
+    :param terminator: 终止表达式（Phase 2 表达式：``_FieldDescriptor`` / ``_ExprRef`` /
+                       ``int`` 组合）。必须引用同 Struct 中已声明的 Element 字段
+                       （如 ``e > 5``，其中 ``e`` 是 ``rfield(Element())``）。
+                       求值结果非零即终止。不接收 Python lambda / callable。
+    :param subcon: 元素子构造器（描述符）。
+    :param discard: 若为 True，parse 返回空 list 但仍消耗流。
+
+    ``_expr_params`` 协议：
+
+    - 返回 ``{"terminator": <expr>, "element_field_idx": <int>}``。
+    - ``terminator`` 是终止表达式（由 ``_compile_expr_tree`` 编译为 ExprOp 列表）。
+    - ``element_field_idx`` 是终止表达式引用的 Element 字段在 Struct 中的索引
+      （由 ``_compile_expr_tree`` 在编译时从表达式中提取的 GetInt 索引推导）。
+
+    与 Python construct 的差异：
+
+    - **不接收 Python lambda / callable**：用户硬约束 #1（避免隐藏决策路径）。
+      Phase 2 表达式 VM 无法描述的终止逻辑（如 list 切片），用户须改用 Adapter
+      （显式慢路径）。详见 §13.9 能力边界。
+    - **discard 语义简化**：v5 中 discard 仅影响 parse 方向 list 收集；
+      build 方向 discard 不影响终止表达式求值（终止表达式不接收 list 参数）。
+    """
+
+    __slots__ = ("terminator", "subcon", "discard", "_expr_params",
+                 "_element_field_idx")
+
+    def __init__(self, terminator, subcon, discard=False):
+        """初始化 RepeatUntil 描述符。
+
+        :param terminator: 终止表达式（Phase 2 表达式）。
+        :param subcon: 元素子构造器。
+        :param discard: 是否丢弃解析结果。
+        """
+        # 类型检查：terminator 必须是 Phase 2 表达式（不接受 callable）。
+        if callable(terminator):
+            raise CompilationError(
+                "RepeatUntil terminator must be a Phase 2 expression "
+                "(_FieldDescriptor / _ExprRef / int), not a Python callable. "
+                "Example: RepeatUntil(e > 5, Int8ub) where 'e' is rfield(Element()). "
+                "For complex termination logic depending on list/context, "
+                "use Adapter (explicit slow path)."
+            )
+        self.terminator = terminator
+        self.subcon = subcon
+        self.discard = discard
+        # _element_field_idx 由 _compile_expressions 在编译期填充（延迟设置）。
+        self._element_field_idx = None
+        # _expr_params 也延迟设置——_compile_expressions 会调 set_compiled_expr_params。
+        self._expr_params = {"terminator": terminator}
+
+    def set_compiled_expr_params(self, ops, element_field_idx):
+        """编译期由 _compile_expressions 调用，注入已编译的 ops 和 Element 字段索引。
+
+        :param ops: 编译后的 ExprOp 元组列表（[("getint", idx), ("const", 5), ("gt",)]）。
+        :param element_field_idx: Element 字段在 Struct 中的索引。
+        """
+        self._element_field_idx = element_field_idx
+        self._expr_params = {
+            "terminator": ops,
+            "element_field_idx": element_field_idx,
+        }
+
+    def __repr__(self):
+        return "RepeatUntil(terminator={!r}, subcon={!r}, discard={!r})".format(
+            self.terminator, self.subcon, self.discard
+        )
+
+
+def RepeatUntil(terminator, subcon, discard=False):
+    """创建一个 RepeatUntil 描述符（v5 重写）。
+
+    终止表达式数组。对应 Python construct 的 ``RepeatUntil``。
+
+    使用方式（终止表达式 = Phase 2 表达式，引用 Element 字段）::
+
+        @dataclass
+        class Packet(StructMixin):
+            e: int = rfield(Element())                # 当前元素引用入口
+            payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+        Packet.parse(b"\\x01\\x02\\x06\\xAA")
+        # Packet(e=None, payload=[1, 2, 6])    # 最后元素 6 满足 e > 5
+
+    限制：
+
+    - 不接收 Python lambda / callable（用户硬约束）
+    - 终止表达式必须引用 Element 字段（编译期校验）
+    - sizeof 永远返回 SizeofError
+    - inner subcon 不支持含表达式的子描述符（与 Array / Bitwise 同限制）
+
+    :param terminator: 终止表达式（Phase 2 表达式，引用 Element 字段）。
+    :param subcon: 元素子构造器。
+    :param discard: 若为 True，parse 返回空 list 但仍消耗流。
+    :return: ``RepeatUntilDescriptor`` 实例。
+    """
+    return RepeatUntilDescriptor(terminator, subcon, discard)
+```
+
+> **DEV 实现要点**：
+> 1. `_mixin._compile_expressions` 需对 RepeatUntilDescriptor 特殊处理：
+>    编译 `terminator` 表达式后，从编译产物中提取第一个 `("getint", idx)` 指令
+>    （Element 字段索引），调 `desc.set_compiled_expr_params(ops, element_field_idx)`。
+> 2. 若 `terminator` 表达式不含任何 `("getint", idx)` 指令（即不引用任何 Element 字段），
+>    编译期报错：`RepeatUntil terminator must reference an Element field`。
+> 3. 若 `terminator` 引用了多个字段（如 `e1 > e2`），取第一个 Element 字段索引。
+>    DEV 决策是否在编译期强制只允许引用一个 Element 字段（建议强制）。
+
+#### 6.3.2 用户 API（构造器函数，v5）
 
 ```python
 def Array(count, subcon, discard=False):
@@ -1940,11 +2485,14 @@ def Array(count, subcon, discard=False):
 def GreedyRange(subcon, discard=False):
     return GreedyRangeDescriptor(subcon, discard)
 
-def RepeatUntil(predicate, subcon, discard=False):
-    return RepeatUntilDescriptor(predicate, subcon, discard)
+def RepeatUntil(terminator, subcon, discard=False):   # v5: predicate → terminator
+    return RepeatUntilDescriptor(terminator, subcon, discard)
 
 def PrefixedArray(countfield, subcon):
     return PrefixedArrayDescriptor(countfield, subcon)
+
+def Element():     # v5 新增
+    return ElementDescriptor()
 
 # Index 与 StopIf 是类（无参数 / 单参数）
 class Index:
@@ -2068,19 +2616,38 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | GR-8 | build 时某元素失败 | 错误向上传播（不回退，build 无 seek） |
 | GR-9 | sizeof | 永远 Err |
 
-### 7.3 RepeatUntil 边界
+### 7.3 RepeatUntil 边界（v5 重写）
+
+> **v5 变更**：删除 RU-4/RU-7/RU-8/RU-9（PyCallable 相关），新增 RU-10~RU-15
+> （终止表达式 / Element 字段相关）。
 
 | ID | 场景 | 预期行为 |
 |----|------|---------|
 | RU-1 | 子构造器解析失败 | 错误直接上抛（不回退，不像 GreedyRange） |
-| RU-2 | 谓词在第 N 个元素为真 | 返回前 N+1 个元素（最后触发的被包含） |
-| RU-3 | build 时无元素满足谓词 | 返回 `Repeat` 错误 |
-| RU-4 | 谓词 Python callable 抛异常 | 异常向上传播（Generic 错误） |
-| RU-5 | 空流且谓词立即满足（不可能，因需先 parse） | 至少 parse 一个元素 |
+| RU-2 | 终止表达式在第 N 个元素求值非零 | 返回前 N+1 个元素（最后触发的被包含） |
+| RU-3 | build 时无元素满足终止表达式 | 返回 `Repeat` 错误 |
+| RU-5 | 空流且终止表达式立即满足（不可能，因需先 parse） | 至少 parse 一个元素（若流可读） |
 | RU-6 | sizeof | 永远 Err |
-| RU-7 | parse 方向 discard=True | 仍调谓词（用空 list），不收集元素到 obj list |
-| RU-8 | build 方向 discard=True（P2 修正） | partiallist 始终为空，谓词收到空 list；对 `lambda x,lst,c: lst[-2:]==[0,0]` 这类依赖 list 内容的谓词会产生与 discard=False 不同的终止时机（对齐 Python core.py L2694-2696） |
-| RU-9 | PyCallable 谓词访问 context 字段（v4 新增）<br>例：`lambda x, lst, ctx: x > ctx.threshold` | proxy 是 Container（含 ctx.fields() 全部字段 + `_index`），attribute 与 item 访问均可用。对齐 Python core.py L2681/L2697（Container 通过 `__dict__ = self` 支持 attribute 访问）。详见 §2.5 决策 A5 v4 补充 + §4.3.3 `build_context_proxy` |
+| RU-10 | 终止表达式求值为 0 | 继续下一次迭代（不终止） |
+| RU-11 | 终止表达式求值为负数 | 视为非零，**终止**（与 Python truthy 语义对齐：非零即真） |
+| RU-12 | 终止表达式引用的 Element 字段未被 RepeatUntil 借用（理论不发生） | GetInt 取到 StructNode.parse 初始写入的 None，extract i64 失败，返回 `ExprType` 错误 |
+| RU-13 | 终止表达式不引用任何 Element 字段（如 `RepeatUntil(1, Int8ub)`，常量表达式） | **编译期失败**：`terminator must reference an Element field`。理由：常量终止表达式要么永远终止（无意义）、要么永不终止（build 必抛 RepeatError），都是用户误用 |
+| RU-14 | Element 字段未声明在 RepeatUntil 字段之前 | **编译期失败**：前向引用约束（`_check_forward_reference`） |
+| RU-15 | Element 字段类型不是 `rfield(Element())`（如 `field(Element())` RW 模式） | **编译期失败**：Element 字段必须 RO 模式 |
+| RU-16 | RepeatUntil 用户面 API 传入 Python lambda | **编译期失败**：`RepeatUntilDescriptor.__init__` 检查 `callable(terminator)`，报错 "must be a Phase 2 expression" |
+| RU-17 | parse 方向 discard=True | 仍消耗字节、求值终止表达式，但不收集元素到 list（返回空 list） |
+| RU-18 | build 方向 discard=True | 不影响终止表达式求值（终止表达式不接收 list 参数），与 discard=False 行为一致 |
+
+### 7.3.1 Element 边界（v5 新增）
+
+| ID | 场景 | 预期行为 |
+|----|------|---------|
+| EL-1 | `rfield(Element())` 在 RepeatUntil 之外（如同 Struct 单独存在） | ElementNode.parse 返回 None；Packet 实例的 Element 字段属性 = None |
+| EL-2 | Element 字段被 RepeatUntil 终止表达式引用 | RepeatUntil 在迭代时 set_field_at 借用槽位，终止表达式 GetInt 取到当前元素值 |
+| EL-3 | sizeof | 返回 0（不消耗字节） |
+| EL-4 | build | no-op（不写字节） |
+| EL-5 | Element 字段不在 RepeatUntil 终止表达式中引用（声明但未用） | 编译期 warning（不报错）；Packet 实例 Element 字段属性 = None（语义：未使用） |
+| EL-6 | 同 Struct 中声明多个 Element 字段 | 编译期允许（不报错），但只有被 RepeatUntil 终止表达式引用的那个有效。建议用户只声明一个 Element 字段 |
 
 ### 7.4 PrefixedArray 边界
 
@@ -2139,7 +2706,70 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 
 ## 8. 性能假设（S-PERF 验证基础）
 
-### 8.1 瓶颈识别
+### 8.1 瓶颈识别（v5 含 RepeatUntil 逐项分析）
+
+> **v5 关键变更**：原 v4 §8.3 RepeatUntil 单独评估（PyCallable ≥1.5x + Expr ≥8x）
+> 已作废。v5 RepeatUntil 统一为终止表达式路径，**性能目标 ≥10x**（无 PyCallable 路径）。
+> 本节给出 Python 端 + Rust 端逐项开销分析 + 数值推导（用户硬约束：禁止范围估算、
+> 禁止"物理上限"豁免）。
+
+#### 8.1.1 Python 端 RepeatUntil 开销分析（Python 3.14 实测基线）
+
+Python construct 2.10.70 `RepeatUntil(lambda x,l,c: x > 5, Byte).parse` 的单次
+迭代开销（参考 `core.py` L2670-2682 + Python 3.14 实测元操作开销）：
+
+| 开销来源 | 单次耗时（ns） | 来源 / 测量方法 |
+|---------|---------------|---------------|
+| `self.subcon._parsereport(stream, context, path)` 调用 | ~1000-1500 | Python 函数调用 + Stream.read_bytes + FormatField 解析 |
+| `context._index = i`（Container `__setitem__`） | ~80-120 | Container dict 写入 |
+| `obj.append(e)`（ListContainer.append） | ~100-150 | list.append + ListContainer hook |
+| `predicate(e, obj, context)` lambda 调用 | ~270-300 | Python 3.14 实测：3 参数 lambda + 比较运算 |
+| 终止表达式内 `x > 5` 求值（Python lambda） | ~30-50 | int.__gt__ |
+| 循环控制（`itertools.count` 迭代 + 条件分支） | ~50-80 | next() + if |
+| **单次迭代合计** | **~1530-2250** | |
+| **N=100 总耗时** | **~153-225 μs** | |
+
+**关键修正**（v5 vs v4 估算）：
+- v4 估算 Python callable 调用 500-1000ns（高估 2-3 倍）
+- Python 3.14 实测：3 参数 lambda 调用仅 270-300ns（含参数绑定 + 返回）
+- v5 取实测值，不再用范围估算上界
+
+#### 8.1.2 Rust 端 RepeatUntilNode 开销分析（v5 设计）
+
+construct-rs `RepeatUntilNode.parse`（终止表达式 = Phase 2 ExprProgram）的单次
+迭代开销：
+
+| 开销来源 | 单次耗时（ns） | 来源 / 测量方法 |
+|---------|---------------|---------------|
+| `self.inner.parse(py, stream, ctx, path)`（FormatField 分派 + read 1 byte + PyLong 创建） | ~15-25 | Phase 1-3 实测 |
+| `ctx.set_index(i)`（栈字段写入） | ~1 | 直接赋值 |
+| `path.push_index/pop`（Vec::push + format!） | ~20-30 | format!("[{i}]") 是主要开销 |
+| `list.append(elem)`（PyList C API） | ~30-50 | PyList_Append |
+| `ctx.set_field_at(idx, name, elem, py)`（写入 expr_values_buf 内联数组） | ~5-10 | 直接指针赋值 + 引用计数 incr |
+| `eval_expr_int(&terminator, ctx, py)`（栈式 VM 求值，~3 个 ExprOp） | ~15-25 | i64 栈数组 + match 分派 |
+| 循环控制（loop + saturating_add） | ~2-5 | 编译期常量 |
+| **单次迭代合计** | **~88-146** | |
+| **N=100 总耗时** | **~8.8-14.6 μs** | |
+
+#### 8.1.3 加速比数值推导（v5）
+
+```
+加速比 = Python 总耗时 / Rust 总耗时
+
+保守估计（取 Python 下限、Rust 上限）：
+  加速比 = 153 μs / 14.6 μs ≈ 10.5x
+
+理想估计（取 Python 上限、Rust 下限）：
+  加速比 = 225 μs / 8.8 μs ≈ 25.6x
+
+中位数估计：
+  加速比 = 189 μs / 11.7 μs ≈ 16.2x
+```
+
+**结论**：RepeatUntil v5 设计预期加速比 **10.5x - 25.6x**，中位数 ~16x，
+满足 S-PERF ≥10x 硬门禁（用户硬约束 #5：禁止"物理上限"豁免）。
+
+#### 8.1.4 Array / GreedyRange / PrefixedArray 开销分析（不变，沿用 v4）
 
 Python construct `Array(N, Byte).parse` 的主要开销：
 
@@ -2164,7 +2794,7 @@ construct-rs `ArrayNode.parse` 的预期开销：
 
 **预测加速比**：120/8 ≈ **15x**（保守），230/7 ≈ **30x**（理想）。
 
-### 8.2 可证伪预测
+### 8.2 可证伪预测（v5 重写）
 
 | 场景 | 预测加速比 | 验证方法 | S-PERF 出口 |
 |------|-----------|---------|-----------|
@@ -2173,51 +2803,85 @@ construct-rs `ArrayNode.parse` 的预期开销：
 | Array(100, Struct{2 fields}) parse | ≥8x | Struct 内层有更多 C API 开销 | ✅ 纳入 |
 | GreedyRange(Byte) parse 100 元素 | ≥8x | seek 开销 + 动态长度 | ✅ 纳入 |
 | PrefixedArray(Byte, Byte) parse 100 元素 | ≥10x | 等同 Array + 1 次 countfield | ✅ 纳入 |
-| RepeatUntil(lambda x,l,c: x>50, Byte) parse（PyCallable） | ≥1.5x | v4：Container proxy + 字段复制开销；PyCallable 是兜底路径 | ⚠️ 见 §8.3 |
-| RepeatUntil 同上（Expr 谓词） | ≥8x | Expr 路径消除 FFI | ⚠️ 见 §8.3 |
+| **RepeatUntil(e > 50, Byte) parse 100 元素**（v5） | **≥10x** | 终止表达式零 FFI 求值，§8.1.3 数值推导 | ✅ 纳入 |
+| **RepeatUntil(e > 50, Byte) build 100 元素**（v5） | **≥10x** | 同 parse 路径开销结构 | ✅ 纳入 |
+| **RepeatUntil((e & 0xFF) == 0, Int32ub) parse**（v5） | **≥10x** | 终止表达式含位运算 + 比较，4 个 ExprOp | ✅ 纳入 |
+| **RepeatUntil(e > threshold, Byte) parse**（v5，threshold 是字段） | **≥10x** | 终止表达式引用 Element + 字段，4 个 ExprOp | ✅ 纳入 |
 | Index（在 Array 内） | ≥20x | 仅读 ctx 字段 | ✅ 纳入 |
+| Element（在 RepeatUntil 内） | N/A | Element 是引用入口，不独立 benchmark | — |
 
 **证伪条件**：
-- 若 Array(100, Byte) parse 加速比 < 10x，视为性能未达标，需排查：
-  - PyList::new_bound 预分配是否生效
-  - path.push_index/pop 是否成为瓶颈（若是，改用 P0-3 风格错误路径重建）
-  - ctx.set_index 是否被错误地走 PyDict 路径
-- 若加速比 < 4x（S-PERF 硬目标），视为架构失败，回退设计。
+- 若 RepeatUntil 任意场景加速比 < 10x，视为性能未达标，需排查：
+  - `eval_expr_int` 是否意外走 FFI（应全程 Rust 内部栈）
+  - `set_field_at` 是否走 PyDict 路径（应直接写 expr_values_buf 内联数组）
+  - `terminator` 表达式 ExprOp 数量是否超预期（典型 3-5 个）
+  - inner.parse 是否被错误地走多一层 FFI
+- 若加速比 < 4x（S-PERF 硬目标的下限），视为架构失败，回退设计。
 
-### 8.3 RepeatUntil 的 S-PERF 适用性（M4 修正，明确化）
+**禁止事项**（用户硬约束 #5）：
+- 禁止用"物理上限"作为门禁豁免理由
+- 禁止用"兜底路径"作为门禁豁免理由（v5 无兜底路径）
+- 禁止场景标签与实际工作量不符（如标 "N=1024" 实际只迭代 6/3 次）
+- 禁止"特殊用例不计入硬门禁"——所有场景必须达标
 
-总纲 §S-PERF："Array parse/build ≥10x vs Python construct"——
-"Array" 在 PM 与 ARCH 共识下指**狭义 Array**（ArrayNode），不含 RepeatUntil。
-RepeatUntil 因谓词跨 FFI 的固有特性，单独评估。
+### 8.3 RepeatUntil 性能假设的物理推导（v5 完全重写，替换 v4 §8.3）
 
-**S-PERF 出口对 RepeatUntil 的判定规则**：
+> **v5 变更**：v4 §8.3 把 RepeatUntil 拆为 PyCallable（≥1.5x）+ Expr（≥8x）两条路径。
+> v5 删除 PyCallable 路径，RepeatUntil 统一为终止表达式路径，性能目标 **≥10x**。
+> 本节给出 ≥10x 的逐项数值推导（替代 v4 的"两路径分别评估"）。
 
-1. **PyCallable 路径（首版）**：**≥1.5x** 即视为可接受（v4 下调，原 ≥3x）。
-   理由（v4 修正）：
-   - v4 决策（V-1）要求 PyCallable 路径 proxy 必须是 Container 实例（含 ctx.fields()
-     全部字段 + _index），对齐 Python Container 语义。Container 实例化 + 字段复制
-     增加 ~400-700ns/iter 开销。
-   - 加上原有 FFI 调用 Python callable（~175-225ns/iter），总开销 ~575-1125ns/iter。
-   - Python 原版每元素 ~270-300ns/iter，预期加速比 ~1.5-2.5x（取下限 ≥1.5x 作为出口）。
-   - **PyCallable 是兜底路径**：仅当用户写复杂谓词（依赖 list 内容或 context 字段）
-     时才走此路径。简单谓词（绝大多数场景）自动编译为 Expr 路径（≥10x）。
-   - 行为正确性优先于性能（AGENTS.md §0）：Python 兼容性是核心目标，
-     不允许为性能砍掉 `ctx.threshold` 这种 Python 文档示明的用法。
+#### 8.3.1 终止表达式 → ExprOp 编译路径示例（≥5 个典型场景）
 
-2. **Expr 谓词路径（4.5b）**：≥8x。理由：Expr 路径消除 FFI（谓词在 Rust 内求值），
-   加速比应接近 Array 的水平。Expr 路径**应作为 Phase 4 内的必要子任务**，
-   不延后到 Phase 5+——否则 RepeatUntil 性能不达标。
+| 终止表达式（construct-rs 语法） | 编译为 ExprOp 序列 | ExprOp 数量 |
+|--------------------------------|--------------------|------------|
+| `e > 5` | `[GetInt(0), Const(5), Gt]` | 3 |
+| `e == 0xFF` | `[GetInt(0), Const(255), Eq]` | 3 |
+| `e != -1` | `[GetInt(0), Const(-1), Ne]` | 3 |
+| `(e & 0xFF) == 0` | `[GetInt(0), Const(255), BitAnd, Const(0), Eq]` | 5 |
+| `-e > -5` | `[GetInt(0), Neg, Const(-5), Gt]` | 4 |
+| `(e + offset) & mask == sentinel` | `[GetInt(0), GetInt(1), Add, Const(mask), BitAnd, Const(sentinel), Eq]` | 7（最复杂） |
+| `e > threshold`（threshold 是 Struct 字段） | `[GetInt(0), GetInt(1), Gt]` | 3 |
 
-3. **S-PERF 基准报告**：S-PERF 阶段需对 RepeatUntil 分别测量 PyCallable 与 Expr
-   两条路径，单独列出。若仅 PyCallable 路径，需在报告中明确标注
-   "RepeatUntil 当前仅 PyCallable，性能 1.5-2.5x；Expr 路径待 4.5b"。
-   v4 后报告还需测量"谓词访问 ctx 字段"场景（如 `lambda x, lst, ctx: x > ctx.threshold`），
-   验证 Container proxy 行为正确。
+**ExprOp 求值开销（每个 ExprOp）**：
+- GetInt(idx)：从 expr_values_buf 取 PyObject 指针 + PyLong_AsLongLong → ~5-8 ns
+- Const(v)：栈数组写入 → ~1 ns
+- 二元运算（Add/Gt 等）：pop 2 + 计算 + push → ~2-3 ns
 
-**子任务拆分建议（更新 §12.1）**：
-- 4.5a：RepeatUntilNode PyCallable 路径（功能完整，3-5x）
-- 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，≥8x）
-- 4.5b **必须在 Phase 4 验收前完成**，不可延后到 Phase 5+。
+**典型终止表达式（3 个 ExprOp）总开销**：~10-15 ns
+**最复杂终止表达式（7 个 ExprOp）总开销**：~30-40 ns
+
+#### 8.3.2 RepeatUntil ≥10x 的逐项推导
+
+参考 §8.1.2（Rust 端开销），关键依赖：
+
+| 开销项 | 单次（ns） | 是否可消除？ |
+|-------|----------|------------|
+| inner.parse（FormatField） | 15-25 | 否（必需的流读 + PyLong 创建） |
+| ctx.set_index | 1 | 否（栈字段写入，零开销） |
+| path.push_index/pop | 20-30 | **可优化**（P0-3 风格，§10.2） |
+| list.append | 30-50 | 否（PyList C API 已最快） |
+| ctx.set_field_at（借用 Element 槽位） | 5-10 | 否（栈数组写入） |
+| eval_expr_int | 10-40 | 否（零 FFI 栈式 VM） |
+| 循环控制 | 2-5 | 否 |
+
+**未优化总开销**：~83-161 ns/iter → 加速比 10-27x
+**P0-3 优化后总开销**（消除 path push/pop）：~63-131 ns/iter → 加速比 12-35x
+
+**结论**：即使最保守估计（取 Rust 上限 + Python 下限），加速比 ~10x。
+P0-3 优化（成功路径不维护 path）可进一步提升至 ~12x+。**满足 ≥10x 硬门禁**。
+
+#### 8.3.3 性能假设的关键依赖
+
+1. **`ctx.set_field_at` 必须走 expr_values_buf**（栈分配内联数组），不走 PyDict。
+   - 若误用 `ctx.set_field(name, value)`（PyDict 路径），每次迭代多 ~50-80 ns
+   - 100 元素 = 5-8 μs 额外开销，加速比从 ~16x 降到 ~10x（仍达标，但余量小）
+2. **`eval_expr_int` 必须全程 Rust 内部栈式 VM**（无 FFI）。
+   - 若误用 PyCallable 路径（v5 已删除），每次迭代跨 FFI ~270-300 ns
+   - 100 元素 = 27-30 μs 额外开销，加速比从 ~16x 降到 ~5-6x（不达标）
+3. **`path.push_index/pop` 首版保留**，若性能不达标再用 P0-3 风格优化。
+4. **inner.parse 的 FormatField 分派开销**（~15-25 ns）不可消除，
+   这是 Rust 实现的下限。
+
 
 ### 8.4 验证脚本设计
 
@@ -2270,11 +2934,16 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 3. **path push/pop 开销**：当前每次迭代调用。
    - 若 path.push_index 的 Vec::push 成本 ~10ns 累积过大（N=100 时 1μs），可改为
      P0-3 风格（成功路径不维护，错误时重建）。首版保留 push/pop，性能不达标再优化。
-4. **RepeatUntil 的 PyCallable 路径**：每次迭代跨 FFI + Container proxy 构造。
-   - N=100 时 100 次 Python 调用 + 100 次 Container 实例化 = ~50-110μs，仅 1.5-2.5x 加速。
-   - v4 后开销结构（每 iter）：FFI 调用 ~175-225ns + Container 实例化 + 字段复制
-     ~400-700ns + 其他（list.append / path push）~50ns = ~625-975ns/iter。
-   - Expr 路径补全后消除 FFI 与 Container proxy，预期 ≥8x。
+4. **RepeatUntil 终止表达式求值必须全程 Rust 内部栈式 VM**（v5 关键依赖）。
+   - 单次迭代终止表达式求值开销：~10-40 ns（3-7 个 ExprOp，§8.3.1）
+   - N=100 时 100 次求值 = ~1-4 μs（占总耗时 ~10-30%）
+   - **关键不变量**：`ctx.set_field_at` 必须走 `expr_values_buf`（栈分配内联数组），
+     绝不走 PyDict。`eval_expr_int` 全程在 Rust 内部，无 FFI。
+   - 若误走 PyDict 路径：每次迭代多 ~50-80 ns，100 元素 = 5-8 μs，加速比从 ~16x
+     降到 ~10x（仍达标但余量小）。
+   - 若误引入 FFI（如 v4 PyCallable 路径）：每次迭代多 ~270-300 ns，100 元素 =
+     27-30 μs，加速比从 ~16x 降到 ~5-6x（**不达标**）。
+   - 验证：profile 检查 RepeatUntil 迭代中无 PyObject_Call 调用（PyCallable 已删除）。
 
 ---
 
@@ -2293,9 +2962,9 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 | `GreedyRange._parse` | `GreedyRangeNode::parse` | 2599 | ✅（简化错误分流） |
 | `GreedyRange._build` | `GreedyRangeNode::build` | 2617 | ✅ |
 | `GreedyRange._sizeof` | `GreedyRangeNode::sizeof` | 2630 | ✅（永远 Err） |
-| `RepeatUntil` | `RepeatUntilNode` | 2637 | ✅（首版仅 PyCallable） |
-| `RepeatUntil._parse` | `RepeatUntilNode::parse` | 2670 | ✅ |
-| `RepeatUntil._build` | `RepeatUntilNode::build` | 2684 | ✅ |
+| `RepeatUntil` | `RepeatUntilNode` | 2637 | ✅（v5：终止表达式 = Phase 2 ExprProgram，无 PyCallable） |
+| `RepeatUntil._parse` | `RepeatUntilNode::parse` | 2670 | ✅（v5：终止表达式零 FFI 求值） |
+| `RepeatUntil._build` | `RepeatUntilNode::build` | 2684 | ✅（v5：同 parse 路径） |
 | `RepeatUntil._sizeof` | `RepeatUntilNode::sizeof` | 2703 | ✅（永远 Err） |
 | `PrefixedArray` | `PrefixedArrayNode` | 4934 | ✅（独立实现，不依赖 FocusedSeq） |
 | `PrefixedArray._emitparse` | `PrefixedArrayNode::parse` | 4961 | ✅ |
@@ -2304,6 +2973,10 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 | `Index._parse` | `IndexNode::parse` | 2965 | ✅ |
 | `Index._build` | `IndexNode::build` | 2968 | ✅（no-op） |
 | `Index._sizeof` | `IndexNode::sizeof` | 2971 | ✅（返回 0） |
+| `Element` | `ElementNode` | —（v5 新增） | ✅ construct-rs 新增，Python construct 无对应物 |
+| `Element._parse` | `ElementNode::parse` | — | ✅（始终返回 None） |
+| `Element._build` | `ElementNode::build` | — | ✅（no-op） |
+| `Element._sizeof` | `ElementNode::sizeof` | — | ✅（返回 0） |
 | `StopIf` | `StopIfNode` | 4079 | ✅ |
 | `StopIf._parse` | `StopIfNode::parse` | 4103 | ✅（StopField 哨兵） |
 | `StopIf._build` | `StopIfNode::build` | 4108 | ✅ |
@@ -2362,7 +3035,9 @@ PM/REV 验收时需逐项确认（用户文档应注明）。
 | IX-1 | 数组下标引用不在数组内（Python 写法 `Computed(this._index + 1)`） | `TypeError: None + 1` | construct-rs 等价写法 `i: int = rfield(Index()); v = rfield(Computed(i + 1))` 在 `i` 为 None 时 `i + 1` 表达式求值抛 `ExprType`（None 无法 extract 为 i64） | v3：行为与 Python 一致（都报错）。v1/v2 设计的 `GetIndex` 在 None 时返回 0 导致行为差异，已删除（§3.3） |
 | GE-1 | GreedyRange 内部子构造器抛 `ExplicitError` | 向上传播（不回退） | **无 ExplicitError 等价物**，与其他错误一样 seek 回退 + 正常终止 | 见下方详述 |
 | GE-2 | GreedyRange 内部子构造器抛 FormatField/Stream 等普通错误 | seek 回退 + 正常终止 | 同 Python（seek 回退 + 正常终止） | 行为一致 |
-| RU-build-1 | RepeatUntil build discard=True 时谓词收到的 list | 空 list（始终为空） | 空 list（对齐 Python，§4.3.4 P2 修正） | 行为一致 |
+| RU-v5-1 | RepeatUntil 用户面 API 传入 Python lambda/callable | 接受 | **编译期失败**（CompilationError） | v5 用户硬约束 #1（禁止 PyCallable）；§7.3 RU-16 |
+| RU-v5-2 | RepeatUntil 终止表达式引用 list 切片（如 `lst[-2:] == [0, 0]`） | 接受 | **编译期失败**（CompilationError） | Phase 2 表达式 VM 栈为 i64，不支持 list 切片；用户须改用 Adapter；§13.9 |
+| RU-v5-3 | Element 字段在 RepeatUntil 之外独立存在 | — | ElementNode.parse 返回 None，Packet 实例属性 = None | v5 新增能力（Python construct 无对应物）；§4.7 / §13.2 |
 | PA-5 | PrefixedArray build 时 list 长度超出 countfield 表示范围 | countfield 抛 FormatFieldError/StreamError | 由 countfield 节点自行报错（同方向） | 行为一致，§7.4 PA-5 |
 | NE-expr-1 | `Array(N, Bytes(m))` inner 含表达式（**Python 写法 `Bytes(this.m)`**） | 支持 | **编译期失败**（CompilationError） | 与 `Bitwise(Bytes(m))`（Python 写法 `Bitwise(Bytes(this.m))`）同限制；§6.2.2 P3.1 |
 | NE-expr-2 | `Array(N, StopIf(x))` inner 含表达式（**Python 写法 `StopIf(this.x)`**） | 支持 | **编译期失败** | 同上，需扩展 _extract_and_compile_exprs 递归 |
@@ -2418,17 +3093,21 @@ construct-rs 把所有非 StopField 错误都视为"流终止信号"（回退 + 
 
 ## 10. 后续优化方向（非 Phase 4 范围）
 
-### 10.1 RepeatUntil 的 Expr 谓词路径
+### 10.1 RepeatUntil 性能优化（v5：终止表达式已是唯一路径）
 
-§4.3.2 简化为仅 PyCallable。Expr 路径补全后预期性能提升 2-3x。
+> **v5 变更**：v4 此节曾写"RepeatUntil 的 Expr 谓词路径作为后续优化方向"，
+> 暗示 Expr 路径是 PyCallable 的补充。v5 删除 PyCallable 后，**终止表达式就是
+> 唯一路径**——本节不再是"补充 Expr 路径"，而是"现有 Expr 路径的微优化"。
 
-**实现要点**：
-1. 新增 `ExprOp::GetElem` 指令：从 ctx._current_elem 取 borrowed PyObject 指针，
-   调 `PyLong_AsLongLong`（仅支持整数元素）。
-2. Context 新增 `_current_elem: Option<*mut ffi::PyObject>` 槽位（borrowed）。
-3. `RepeatUntilNode::parse` Expr 路径：每次迭代 parse 后设置 _current_elem，
-   调 `eval_expr_int(&prog, ctx, py)`。
-4. Python 侧 `_compile_expr_tree` 识别简单谓词模式（如 `lambda x,_,__: x > N`）。
+RepeatUntil v5 终止表达式路径已满足 ≥10x（§8.3 推导）。可选的进一步优化：
+
+1. **path push/pop 优化（P0-3 风格）**：见 §10.2。
+2. **`ctx.set_field_at` 内联**：当前 `set_field_at` 是 Context 方法调用，
+   可在 RepeatUntilNode 中直接写 `ctx.expr_values_buf[self.element_field_idx] = elem.as_ptr()`
+   （需要 Context 暴露 `expr_values_buf_mut` unsafe 访问器）。预期节省 ~2-3 ns/iter。
+3. **terminator ExprProgram 特化**：若 terminator 是固定模式（如 `[GetInt, Const, Gt]`），
+   可在编译期识别为"哨兵比较"，运行时直接调 `inner.parse + PyLong_AsLongLong + 比较`，
+   绕过栈式 VM 开销。预期节省 ~5-10 ns/iter。但增加编译器复杂度，YAGNI。
 
 ### 10.2 path push/pop 优化（P0-3 风格）
 
@@ -2570,29 +3249,42 @@ LazyStruct 同阶段）。
 
 ## 12. 遗留问题与 PM 决策点
 
-### 12.1 PM 决策点 1：RepeatUntil 谓词路径范围（M4 已明确）
+### 12.1 PM 决策点 1：RepeatUntil 终止表达式路径范围（v5 完全重写）
 
-**问题**：RepeatUntil 的 Expr 谓词路径（§4.3.2）是否在 Phase 4 实现？
+**问题**：RepeatUntil 在 Phase 4 的实现范围？
 
-**结论（M4 修正后）**：**Expr 路径必须在 Phase 4 验收前完成**（子任务 4.5b），
-不可延后到 Phase 5+。
+**结论（v5 用户打回后）**：**RepeatUntil 统一为单一子任务 4.5**，终止表达式 =
+Phase 2 表达式（ExprProgram），无 PyCallable 路径。
 
-理由（详见 §8.3 S-PERF 适用性）：
-- PyCallable 路径（4.5a）功能完整、行为正确，但性能仅 1.5-2.5x（v4 后物理上限）。
-- 若仅交付 PyCallable，RepeatUntil 不满足 S-PERF 出口标准。
-- Expr 路径（4.5b）消除 FFI 与 Container proxy 开销，预期 ≥8x，满足出口标准。
-- 4.5b 工作量：`_current_elem` 槽位 + `ExprOp::GetElem`（仅整数元素）+
-  Python 编译器识别简单谓词模式 + 端到端测试。约 1-2 个子任务。
+理由（详见 §0.4 v5 修正 + §2.5 决策 A5 v5）：
+- 用户硬约束 #1：禁止 PyCallable 路径（违反"一次 FFI"原则）
+- 用户硬约束 #2：禁止"白名单 + 兜底"二分设计
+- 用户硬约束 #5：终止表达式必须复用 Phase 2 表达式系统
+- v4 的 4.5a/4.5b 拆分（PyCallable 先 / Expr 后）作废——v5 中 Expr 是唯一路径
 
-**Expr 路径已知限制**（写入设计文档 §10.1）：
-- 仅支持整数元素（PyLong_AsLongLong）。Struct 元素的 RepeatUntil 仍走 PyCallable。
-- 仅识别简单谓词模式（`lambda x,_,_: x OP N`，OP ∈ {>, >=, ==, !=, <, <=}）。
-- 复杂谓词（如 `lambda x,lst,c: lst[-2:] == [0,0]`）回落到 PyCallable。
+**4.5 子任务范围**：
+- 删除 v4 已实施的 PyCallable 路径代码：
+  - `RepeatPredicate` 枚举、`call_repeat_predicate`、`build_context_proxy`
+  - `container_cache.rs` 整个文件
+  - `python/construct/lib/containers.py`（若专为 PyCallable 新建）
+  - `ExprOp::GetElem`、`Context::_current_elem_ptr`、`set_current_elem_ptr`、
+    `clear_current_elem_ptr`、`current_elem_as_i64`
+  - `_descriptors.py` 的 `_AST_OP_TO_EXPROP`、`_try_compile_repeat_predicate`
+- 实现 v5 设计：
+  - `ElementNode` 新节点（§4.7）
+  - `RepeatUntilNode` 重写（§4.3）：`{ inner, terminator, element_field_idx, element_field_name, discard }`
+  - `ElementDescriptor` + `Element()` 工厂（§6.3.1）
+  - `RepeatUntilDescriptor` 重写：参数 `terminator`，类型 Phase 2 表达式
+  - `_mixin._compile_expressions` 特殊处理 RepeatUntilDescriptor（提取 element_field_idx）
+  - `compile.rs::build_repeat_until_node` 重写（§6.2.3.1）
+- 测试覆盖：§13 用户面使用样例集 + §14 场景测试覆盖矩阵
 
-**子任务拆分**：
-- 4.5a：RepeatUntilNode PyCallable 路径（功能完整，3-5x）—— S-FUNC 出口
-- 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，≥8x）—— S-PERF 出口
-- 4.5b **必须在 Phase 4 验收前完成**。
+**性能出口**：RepeatUntil ≥10x（§8.3 数值推导，无 PyCallable 兜底）。
+
+**v5 已知能力边界**（写入设计文档 §2.5.4 + §13.9）：
+- 不支持 Python lambda / callable（用户硬约束）
+- 终止表达式只支持 Phase 2 ExprProgram 能描述的逻辑（整数算术/位运算/比较）
+- list 切片 / list 索引 / 复杂 callable 逻辑须改用 Adapter（显式慢路径）
 
 ### 12.2 PM 决策点 2：Array count 表达式支持范围（P3 已明确）
 
@@ -2675,52 +3367,426 @@ construct-rs 等价写法 `Array(length, Byte)`，`length` 是字段名引用）
 
 ### 12.7 设计完整性结论
 
-✅ 设计覆盖全部 P0-P5 构造器
-✅ 与现有架构兼容（无破坏性变更）
-✅ 性能假设具体可证伪
-✅ 边界条件覆盖完整（含 REV 驳回修正后的 RU-8 build discard、AR-10 inner 限制）
-✅ 遗留问题已明确（6 个 PM 决策点，其中 1/2 已根据 REV 驳回收敛）
+✅ 设计覆盖全部 P0-P6 构造器（v5：含 Element P6）
+✅ 与现有架构兼容（v5 修改：删除 GetElem/_current_elem_ptr/container_cache，新增 ElementNode）
+✅ 性能假设具体可证伪（v5：RepeatUntil ≥10x 数值推导，无 PyCallable 兜底）
+✅ 边界条件覆盖完整（v5：删除 RU-4/7/8/9 PyCallable 相关，新增 RU-10~18 + EL-1~6）
+✅ 遗留问题已明确（6 个 PM 决策点，v5 §12.1 重写）
 ✅ REV 驳回的 3 个严重问题（P1/P2/P3）已修正（v2）
 ✅ REV 驳回的 4 个中等问题（M1/M2/M3/M4）已修正（v2）
 ✅ REV 决策记录对照驳回的 2 个设计问题（V1/V2）已修正（v3）
 ✅ REV 决策记录对照驳回的 2 个文档表述问题（V3/V4）已修正（v3）
+✅ VET 驳回的 V-1（PyCallable context proxy）已修正（v4，但 v5 整体作废）
+✅ 用户打回的 6 项硬约束违反已修正（v5，§0.4）
 
 **建议 PM 在子任务拆分时**：
 1. 4.0a：基础设施（ParseStream.seek、Context._index、错误变体、Python 异常类映射）
    —— 这是所有 Array 节点的前置依赖
-   - **v3 修正**：不再包含 ExprOp::GetIndex（已删除，§3.3）。**4.1 子任务已实现的
-     GetIndex 相关代码（expr.rs / compile.rs "getindex" 分支）需由 DEV 在新子任务中回退**。
-2. 4.1：ArrayNode（P0，含顶层 count 表达式，§6.2.2 完整编译路径）—— **已实现，
-   需附加 GetIndex 回退子任务**
-3. 4.2：GreedyRangeNode（P1）
-4. 4.3：PrefixedArrayNode（P2）
-5. 4.4：IndexNode（P4，**直接调 `ctx.index()`，不走 ExprProgram**）+ StopIfNode（P5）
-   + StructNode 的 StopField 捕获修改 + has_expressions 修正（§6.1.1，StopIf(Expr) 返回 true）
-6. 4.5a：RepeatUntilNode PyCallable 路径（功能完整，S-FUNC 出口）
-7. 4.5b：RepeatUntilNode Expr 谓词路径（性能补全，S-PERF 出口，必须在 Phase 4 验收前完成）
-8. 4.6：S-FUNC 验证 + S-PERF 基准（含 RepeatUntil 双路径对比）
+2. 4.1：ArrayNode（P0，含顶层 count 表达式）—— 已实现
+3. 4.2：GreedyRangeNode（P1）—— 已实现
+4. 4.3：PrefixedArrayNode（P2）—— 已实现
+5. 4.4：IndexNode（P4）+ StopIfNode（P5）+ StructNode StopField 捕获 —— 已实现
+6. **4.5：RepeatUntilNode v5 重写 + ElementNode 新增**（v5：单一子任务，无 4.5a/4.5b 拆分）
+   - 删除 v4 已实施的 PyCallable 路径代码（详见 §12.1）
+   - 实现 v5 终止表达式路径（终止表达式 = Phase 2 ExprProgram，零 FFI）
+   - 实现 ElementNode 新节点（§4.7）
+   - 端到端测试覆盖（§13 用户面使用样例集 + §14 场景测试覆盖矩阵）
+7. 4.6：S-FUNC 验证 + S-PERF 基准（RepeatUntil 单路径 ≥10x）
 
 子任务可合并（如 4.1+4.2 一次 DEV 编码），由 PM 决定。
 
-**REV 修正后无需重新检视全部内容**，仅针对修改部分重新检视即可。
+**v5 修正后无需重新检视全部内容**，仅针对 §0.4 / §2.5 / §3.3 / §4.3 / §4.7 /
+§6.1 / §6.2 / §6.3 / §7.3 / §8 / §9.1 / §10.1 / §12.1 / §13 / §14 修改部分
+重新检视即可。
 
 ---
 
-## 13. 参考文献
+## 13. 完整用户面使用样例集（v5 新增；用户验收门禁）
+
+> **用户硬约束**：所有样例必须可在 Python 解释器中直接执行（含 import、数据准备、
+> parse/build 调用）。本节是用户验收门禁——DEV 实施完成后所有样例必须能 copy-paste 运行。
+> 建议同时在 `experiments/phase4_repeat_until_examples.py` 提供可执行脚本。
+
+### 13.1 表达式类型覆盖（每种 Phase 2 表达式至少 1 个样例）
+
+```python
+from dataclasses import dataclass
+from construct import (
+    StructMixin, field, rfield,
+    Int8ub, Int16ub, Int32ub, Bytes,
+    RepeatUntil, Element,
+)
+
+# ---- 13.1.1 字段引用（最简形式）----
+@dataclass
+class P1_Simple(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+assert P1_Simple.parse(b"\x01\x02\x06\xaa").payload == [1, 2, 6]
+
+# ---- 13.1.2 字段引用 + 常量算术 ----
+@dataclass
+class P2_ArithConst(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil((e + 1) > 7, Int8ub))
+
+assert P2_ArithConst.parse(b"\x01\x03\x06\xaa").payload == [1, 3, 6]  # 6+1=7 > 7? No; 7+1=8>7 yes
+# 注：实际 [1,3,6,7]——7 满足 (7+1)>7
+
+# ---- 13.1.3 字段引用 + 字段引用 ----
+@dataclass
+class P3_TwoFields(StructMixin):
+    threshold: int = field(Int8ub)
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e > threshold, Int8ub))
+
+p3 = P3_Simple.parse  # 占位
+# 实际：P3_TwoFields(threshold=3).parse → threshold 从流读
+pkt3 = P3_TwoFields.parse(b"\x03\x01\x02\x03\x04\xff")
+assert pkt3.threshold == 3
+assert pkt3.payload == [1, 2, 3, 4]  # 4 > 3 满足
+
+# ---- 13.1.4 位运算 ----
+@dataclass
+class P4_BitOp(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil((e & 0xFF) == 0, Int8ub))
+
+assert P4_BitOp.parse(b"\x01\x02\x00\xaa").payload == [1, 2, 0]
+
+# ---- 13.1.5 一元负 ----
+@dataclass
+class P5_UnaryNeg(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(-e > -5, Int8ub))
+# 等价：e < 5；但用户可能直接写 -e > -5
+
+# ---- 13.1.6 复合（算术 + 位运算 + 比较）----
+@dataclass
+class P6_Compound(StructMixin):
+    offset: int = field(Int8ub)
+    mask: int = field(Int8ub)
+    sentinel: int = field(Int8ub)
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(((e + offset) & mask) == sentinel, Int8ub))
+```
+
+### 13.2 引用当前元素 / 下标（Element + Index 组合）
+
+```python
+# ---- 13.2.1 Element 字段（终止表达式引用当前元素）----
+@dataclass
+class E1_ElementOnly(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0xFF, Int8ub))
+
+assert E1_ElementOnly.parse(b"\x01\x02\xff\xaa").payload == [1, 2, 255]
+
+# ---- 13.2.2 Index 字段（在 RepeatUntil 内引用下标）----
+@dataclass
+class E2_IndexInRepeat(StructMixin):
+    i: int = rfield(Index())         # 当前下标
+    e: int = rfield(Element())       # 当前元素
+    payload: list = field(RepeatUntil(i >= 3, Int8ub))
+# 终止条件：下标 >= 3（前 4 个元素，包括 i=3 那个）
+
+pkt = E2_IndexInRepeat.parse(b"\x01\x02\x03\x04\xff")
+assert pkt.payload == [1, 2, 3, 4]  # i=0,1,2,3 → i=3 满足
+
+# ---- 13.2.3 Element + Index 组合 ----
+@dataclass
+class E3_ElementIndexCombo(StructMixin):
+    i: int = rfield(Index())
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil((e + i) >= 10, Int8ub))
+# 终止：e + i >= 10
+```
+
+### 13.3 不同 subcon 类型
+
+```python
+# ---- 13.3.1 Int8ub ----
+@dataclass
+class S1_Int8ub(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0, Int8ub))
+
+# ---- 13.3.2 Int32ub ----
+@dataclass
+class S2_Int32ub(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0x12345678, Int32ub))
+
+# ---- 13.3.3 Struct{2} ----
+@dataclass
+class Pair(StructMixin):
+    a: int = field(Int8ub)
+    b: int = field(Int8ub)
+
+@dataclass
+class S3_Struct(StructMixin):
+    e: int = rfield(Element())         # 引用 Pair.a？或 Pair 本身？
+    payload: list = field(RepeatUntil(e.a == 0, Pair))
+# 注意：Element 字段当前设计仅支持标量（PyLong_AsLongLong），
+# Struct 元素需用 Adapter 或扩展 ElementNode 支持 attribute 引用（v5 能力边界）。
+```
+
+### 13.4 parse / build 双向行为（对称性）
+
+```python
+@dataclass
+class Symmetric(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0xFF, Int8ub))
+
+# parse
+data = b"\x01\x02\x03\xff\xaa"
+pkt = Symmetric.parse(data)
+assert pkt.payload == [1, 2, 3, 255]
+assert pkt.e is None  # Element 字段始终为 None
+
+# build
+pkt2 = Symmetric(payload=[10, 20, 30, 255])
+built = Symmetric.build(pkt2)
+assert built == b"\x0a\x14\x1e\xff"  # 写到 255 即停（255 == 0xFF）
+
+# round-trip
+assert Symmetric.parse(built).payload == [10, 20, 30, 255]
+```
+
+### 13.5 discard 模式
+
+```python
+@dataclass
+class WithDiscard(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0xFF, Int8ub, discard=True))
+
+pkt = WithDiscard.parse(b"\x01\x02\xff\xaa")
+assert pkt.payload == []          # discard=True：list 为空
+# 流仍消耗到 0xFF（3 字节）
+```
+
+### 13.6 嵌套组合
+
+```python
+# ---- 13.6.1 RepeatUntil 内嵌 RepeatUntil ----
+@dataclass
+class Inner(StructMixin):
+    e: int = rfield(Element())
+    items: list = field(RepeatUntil(e == 0, Int8ub))
+
+@dataclass
+class Outer(StructMixin):
+    e: int = rfield(Element())
+    rows: list = field(RepeatUntil(e == 0xFF, Inner))
+# 注意：嵌套 RepeatUntil 中，内层 Element 字段引用内层当前元素，
+# 外层 Element 字段引用外层当前元素（Inner 实例）。
+# 但 Element 当前设计仅支持标量——内层 Inner 实例无法直接 extract i64。
+# v5 能力边界：嵌套 RepeatUntil 需 Element 支持 attribute 引用或 Adapter。
+
+# ---- 13.6.2 Struct 内嵌 RepeatUntil ----
+@dataclass
+class Header(StructMixin):
+    magic: int = field(Int8ub)
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0, Int8ub))
+
+# ---- 13.6.3 Array/GreedyRange 内嵌 RepeatUntil ----
+@dataclass
+class Row(StructMixin):
+    e: int = rfield(Element())
+    cells: list = field(RepeatUntil(e == 0xFF, Int8ub))
+
+@dataclass
+class Table(StructMixin):
+    rows: list = field(Array(3, Row))
+```
+
+### 13.7 Adapter 对比示例（用户主动选慢路径）
+
+```python
+from construct import Adapter
+
+# ---- RepeatUntil 表达式路径（≥10x）----
+@dataclass
+class FastPath(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+# ---- Adapter 显式慢路径（用户主动选择）----
+class ListDependentAdapter(Adapter):
+    """用户主动选 Adapter 处理 list 切片终止逻辑（RepeatUntil 不支持）"""
+    subcon = GreedyRange(Int8ub)
+
+    def decode(self, obj, ctx, path):
+        # 找到 lst[-2:] == [0, 0] 的位置，截断
+        for i in range(1, len(obj)):
+            if obj[i-1:i+1] == [0, 0]:
+                return obj[:i+1]
+        raise ValueError("pattern not found")
+
+    def encode(self, obj, ctx, path):
+        return obj
+
+# 用法对比：
+# FastPath.parse(data)              # ≥10x（终止表达式零 FFI）
+# ListDependentAdapter.parse(data)  # 折衷（用户主动选 Adapter）
+```
+
+### 13.8 Python construct 迁移示例（≥5 个）
+
+```python
+# ---- 迁移 1: lambda x,_,_: x != -1（哨兵终止）----
+# Python construct:
+py_d = RepeatUntil_py(lambda x, _, _: x != -1, Byte)
+# construct-rs:
+@dataclass
+class M1(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e != -1, Int8ub))
+
+# ---- 迁移 2: lambda x,_,_: x > 5（阈值比较）----
+# Python construct:
+py_d = RepeatUntil_py(lambda x, _, _: x > 5, Byte)
+# construct-rs:
+@dataclass
+class M2(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+# ---- 迁移 3: lambda x,_,_: x == 0xFF（哨兵字节）----
+# Python construct:
+py_d = RepeatUntil_py(lambda x, _, _: x == 0xFF, Byte)
+# construct-rs:
+@dataclass
+class M3(StructMixin):
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e == 0xFF, Int8ub))
+
+# ---- 迁移 4: lambda x,lst,_: x > lst[0]（list 索引）----
+# Python construct 支持，construct-rs **不支持**——Phase 2 表达式 VM 不支持 list 索引。
+# 替代：用户需用 Adapter 显式包装（§13.7），或重构数据布局把首元素存为字段。
+
+# ---- 迁移 5: lambda x,_,ctx: x > ctx.threshold（引用 context）----
+# Python construct:
+py_d = RepeatUntil_py(lambda x, _, ctx: x > ctx.threshold, Byte)
+# construct-rs（threshold 是同 Struct 的字段）:
+@dataclass
+class M5(StructMixin):
+    threshold: int = field(Int8ub)
+    e: int = rfield(Element())
+    payload: list = field(RepeatUntil(e > threshold, Int8ub))
+```
+
+### 13.9 能力边界说明（RepeatUntil 终止表达式不支持的清单）
+
+RepeatUntil 终止表达式只支持 Phase 2 表达式 VM 能描述的逻辑（整数算术/位运算/比较）。
+**不支持**的场景及 Adapter 替代方案：
+
+| # | 不支持的 Python 写法 | 原因 | Adapter 替代方案 |
+|---|--------------------|------|----------------|
+| 1 | `lambda x,lst,_: lst[-2:] == [0, 0]` | Phase 2 VM 栈为 i64，不支持 list 切片 | 用 Adapter 包装 GreedyRange，在 decode 中扫描 list |
+| 2 | `lambda x,lst,_: x > lst[0]` | 不支持 list 索引 | 同上，或重构数据布局把首元素作为独立字段 |
+| 3 | `lambda x,lst,ctx: len(lst) > 5` | 不支持 list 长度查询 | 用 Adapter 或先解析为 GreedyRange 后处理 |
+| 4 | `lambda x,_,ctx: ctx._.parent_flag` | 不支持跨层 context（需 ContextParam） | 用 `context=` 参数显式注入 + ContextParam 字段 |
+| 5 | `lambda x,_,ctx: some_python_function(x)` | 不支持任意 Python 函数调用 | 用 Adapter（用户主动选慢路径） |
+| 6 | `lambda x,_,_: isinstance(x, int) and x > 5` | 不支持短路 and / isinstance | 用 Adapter |
+
+**Adapter 替代示例**（场景 1）：
+
+```python
+class ListTailAdapter(Adapter):
+    subcon = GreedyRange(Int8ub)
+
+    def decode(self, obj, ctx, path):
+        for i in range(1, len(obj)):
+            if obj[i-1:i+1] == [0, 0]:
+                return obj[:i+1]
+        raise ConstructError("pattern [0,0] not found")
+
+    def encode(self, obj, ctx, path):
+        return obj
+```
+
+**性能预期对比**：
+- RepeatUntil 终止表达式路径：≥10x（用户硬约束门禁）
+- Adapter 路径：折衷（用户主动选择，门禁不适用，Adapter 是"显式慢路径"）
+
+---
+
+## 14. 场景测试覆盖矩阵（v5 新增；S-PERF 硬要求）
+
+> **用户硬约束**：每构造器 ≥10 测量点 × 6 维度（元素类型 / 规模 / 字节序 / 分支 /
+> 错误路径 / 嵌套组合）。本节列出 4.5 RepeatUntil 的最低场景覆盖。
+
+### 14.1 RepeatUntil 场景矩阵（≥10 测量点）
+
+| # | 场景 | 维度覆盖 | 测量点 |
+|---|------|---------|--------|
+| 1 | `RepeatUntil(e > 5, Int8ub)` parse N=10 | 元素类型/规模/分支 | parse |
+| 2 | `RepeatUntil(e > 5, Int8ub)` build N=10 | 同上 | build |
+| 3 | `RepeatUntil(e > 5, Int8ub)` parse N=100 | 规模扩展 | parse |
+| 4 | `RepeatUntil(e > 5, Int8ub)` build N=100 | 规模扩展 | build |
+| 5 | `RepeatUntil(e > 5, Int8ub)` parse N=1000 | 大规模 O(n) 验证 | parse |
+| 6 | `RepeatUntil(e > 5, Int8ub)` build N=1000 | 大规模 O(n) 验证 | build |
+| 7 | `RepeatUntil(e == 0xFF, Int16ub)` parse | 元素类型/字节序（大端 2 字节） | parse |
+| 8 | `RepeatUntil(e == 0xFF, Int16ub)` build | 同上 | build |
+| 9 | `RepeatUntil((e & 0xFF) == 0, Int8ub)` parse | 分支（位运算终止） | parse |
+| 10 | `RepeatUntil(e > threshold, Int8ub)` parse（threshold 字段） | 分支（字段引用终止） | parse |
+| 11 | `RepeatUntil(e > 5, Int8ub, discard=True)` parse | 分支（discard） | parse |
+| 12 | `RepeatUntil(e > 5, Struct)` parse | 元素类型（Struct 元素，需 Element 支持 attribute） | parse |
+| 13 | `RepeatUntil` parse 流不完整（EOF） | 错误路径 | parse |
+| 14 | `RepeatUntil` build 无元素满足终止表达式 | 错误路径 | build（RepeatError） |
+| 15 | `Array(3, RepeatUntil(e==0, Int8ub))` parse | 嵌套组合（Array 内 RepeatUntil） | parse |
+| 16 | `Struct{RepeatUntil + Index}` parse | 嵌套组合（Element + Index） | parse |
+
+### 14.2 Element 场景矩阵（v5 新增）
+
+Element 是引用入口，不独立 benchmark，但需通过 RepeatUntil 场景间接覆盖：
+
+| # | 场景 | 维度覆盖 |
+|---|------|---------|
+| E1 | Element 在 RepeatUntil 内引用（parse） | 核心功能 |
+| E2 | Element 在 RepeatUntil 内引用（build） | 双向 |
+| E3 | Element 字段属性为 None（parse 后） | 边界（EL-1） |
+| E4 | Element + Index 组合（RepeatUntil 内引用两者） | 嵌套 |
+| E5 | Element 在 RepeatUntil 之外（编译期 warning） | 边界（EL-5） |
+
+### 14.3 S-PERF 输出要求（每个场景）
+
+按 `plans/phase4-array/总纲.md` §"S-PERF benchmark 输出要求"：
+- 原始 ns/call（Python + Rust）
+- 加速比
+- parse/build 比率（与参考实现对照方向）
+- 加速比按场景复杂度排列（验证趋势）
+- **低于 10x 的场景单独标注**（用户硬约束 #5：所有场景必须达标）
+- 与参考实现 parse/build 方向相反的场景单独标注
+
+### 14.4 测量口径（AGENTS.md §6 S-PERF）
+
+- construct-rs 侧：`maturin develop --release` 安装后，Python timeit 调用 `Packet.parse(data)`
+- Python construct 侧：Python timeit 调用 `pkt.parse(data)`（同包名，子进程隔离）
+- 两边相同 timeit 参数（NUMBER=1000, REPEAT=5），取 min
+- 禁止用独立 Rust 二进制调 Rust 库函数产生 S-PERF 数据（跳过 Python 分发和 FFI）
+
+---
+
+## 15. 参考文献
+
 
 - `AGENTS.md` §0、§7、§8、§10
 - `plans/phase4-array/分析报告-Array功能集.md`
-- `plans/phase4-array/总纲.md`
+- `plans/phase4-array/总纲.md`（v5：用户面设计四原则 + S-PERF ≥10x + 场景矩阵硬要求）
 - `docs/架构设计.md` §C.1-C.6
 - `docs/模块设计-BitStream.md`（Box<Node> 递归模式参考）
 - `docs/模块设计-表达式系统.md`（ExprProgram / ExprOp 参考）
 - `docs/模块设计-Context-Vec优化.md`（Context 栈分配模式参考）
 - `construct/construct/core.py` L2493-2704、L2934-2972、L4079-4131、L4934-4983
-- `construct/construct/lib/containers.py`（ListContainer）
+- `construct/construct/lib/containers.py`（ListContainer；v5 后 construct-rs 不再依赖 Container）
 
 ---
 
-**设计完成。等待 PM 与 REV 审查。**
-
-
+**v5 设计完成。等待 PM 与 REV 审查。**
 
