@@ -145,7 +145,7 @@ impl super::Construct for PrefixedArrayNode {
                 Ok(v) => v,
                 Err(mut e) => {
                     e.push_path_index(i);
-                    restore_index(ctx, old_index);
+                    ctx.restore_index(old_index);
                     return Err(e);
                 }
             };
@@ -155,7 +155,7 @@ impl super::Construct for PrefixedArrayNode {
         // 一次性创建 PyList。
         let list = PyList::new_bound(py, elems);
 
-        restore_index(ctx, old_index);
+        ctx.restore_index(old_index);
         Ok(list.into_any().unbind())
     }
 
@@ -215,12 +215,12 @@ impl super::Construct for PrefixedArrayNode {
             let elem_bound = elem.bind(py);
             if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 e.push_path_index(i);
-                restore_index(ctx, old_index);
+                ctx.restore_index(old_index);
                 return Err(e);
             }
         }
 
-        restore_index(ctx, old_index);
+        ctx.restore_index(old_index);
         Ok(())
     }
 
@@ -235,18 +235,8 @@ impl super::Construct for PrefixedArrayNode {
     }
 }
 
-/// 恢复 ctx._index 到节点入口时的值。
-///
-/// `Some(idx)` → set_index(idx)；`None` → clear_index。
-/// 设计 §3.2.2 嵌套数组语义。
-#[inline]
-fn restore_index(ctx: &mut Context<'_>, old: Option<usize>) {
-    match old {
-        Some(idx) => ctx.set_index(idx),
-        None => ctx.clear_index(),
-    }
-}
-
+/// 恢复 ctx._index（已提升为 `Context::restore_index` 方法，P0-1 整合）。
+/// 保留此注释作为 PrefixedArrayNode 模式采用声明参考。
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------

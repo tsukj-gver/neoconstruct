@@ -160,7 +160,7 @@ impl super::Construct for GreedyRangeNode {
         // 一次性创建 PyList。
         let list = PyList::new_bound(py, elems);
 
-        restore_index(ctx, old_index);
+        ctx.restore_index(old_index);
         Ok(list.into_any().unbind())
     }
 
@@ -210,19 +210,19 @@ impl super::Construct for GreedyRangeNode {
                 Err(ConstructError::StopField { .. }) => {
                     // StopIf 触发：停止后续元素构建（对齐 Python L2627-2628）。
                     // 哨兵被捕获丢弃，无需重建 path。
-                    restore_index(ctx, old_index);
+                    ctx.restore_index(old_index);
                     return Ok(());
                 }
                 Err(mut e) => {
                     // 其他错误：重建索引段后向上传播。
                     e.push_path_index(i);
-                    restore_index(ctx, old_index);
+                    ctx.restore_index(old_index);
                     return Err(e);
                 }
             }
         }
 
-        restore_index(ctx, old_index);
+        ctx.restore_index(old_index);
         Ok(())
     }
 
@@ -236,18 +236,8 @@ impl super::Construct for GreedyRangeNode {
     }
 }
 
-/// 恢复 ctx._index 到节点入口时的值。
-///
-/// `Some(idx)` → set_index(idx)；`None` → clear_index。
-/// 设计 §3.2.2 嵌套数组语义。
-#[inline]
-fn restore_index(ctx: &mut Context<'_>, old: Option<usize>) {
-    match old {
-        Some(idx) => ctx.set_index(idx),
-        None => ctx.clear_index(),
-    }
-}
-
+/// 恢复 ctx._index（已提升为 `Context::restore_index` 方法，P0-1 整合）。
+/// 保留此注释作为 GreedyRangeNode 模式采用声明参考。
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------

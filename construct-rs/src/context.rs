@@ -424,6 +424,21 @@ impl<'py> Context<'py> {
     pub fn index(&self) -> Option<usize> {
         self._index
     }
+
+    /// 恢复 `_index` 到节点入口时的值（嵌套数组支持）。
+    ///
+    /// 替代散落在 Array 系列节点的 free function `restore_index`
+    /// （P0-1 整合，`docs/架构审查-重复代码与抽象质量.md` §4）。
+    ///
+    /// `Some(idx)` → `set_index(idx)`；`None` → `clear_index`。
+    /// 设计依据：`docs/模块设计-Array.md` §3.2.2 嵌套数组语义。
+    #[inline]
+    pub fn restore_index(&mut self, old: Option<usize>) {
+        match old {
+            Some(idx) => self.set_index(idx),
+            None => self.clear_index(),
+        }
+    }
 }
 
 #[cfg(test)]
