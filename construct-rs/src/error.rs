@@ -404,6 +404,46 @@ impl ConstructError {
         self.set_path(new_path);
     }
 
+    /// 在错误路径中插入一个数组索引段（4.7：Array 系列 lazy path 迁移）。
+    ///
+    /// 与 [`push_path_segment`](Self::push_path_segment) 平行，但插入 `[i]` 而非 `.field`。
+    /// 用于 Array 系列节点（Array / GreedyRange / PrefixedArray / RepeatUntil）在
+    /// 子节点返回 `Err` 时重建索引路径段。
+    ///
+    /// # 路径重建规则（INSERT-after-root，与 push_path_segment 一致）
+    ///
+    /// 把新段 `[i]` 插入到 `"root"` 之后、已有 suffix 之前，保证任意嵌套组合
+    /// （Struct↔Array）都能正确重建路径：
+    ///
+    /// - 错误路径为 `None` / `""` / `"root"`（叶节点基线）→ `"root[i]"`。
+    /// - 错误路径形如 `"root.x.y"`（内层 StructNode 已重建）→
+    ///   `"root[i].x.y"`（segment 插入 root 之后）。
+    /// - 错误路径形如 `"root[j]"`（内层 Array 已重建）→ `"root[i][j]"`。
+    /// - 编译期错误（无 path）→ 不变。
+    ///
+    /// 仅在错误路径调用（成功路径零成本），开销可接受。
+    pub fn push_path_index(&mut self, i: usize) {
+        // 编译期错误（Compilation / UnresolvedReference）无 path 字段，
+        // set_path 对其是 no-op。提前返回，跳过无用的 format! 路径计算。
+        if self.path().is_none() {
+            return;
+        }
+        let new_path = match self.path() {
+            Some(p) if p.is_empty() || p == "root" => format!("root[{}]", i),
+            Some(p) => {
+                if let Some(suffix) = p.strip_prefix("root") {
+                    // suffix 为 ""（"root"）或 ".x.y" / "[j]" / ".x[j].y" 等。
+                    format!("root[{}]{}", i, suffix)
+                } else {
+                    // 非标准根，退化为追加（仅防御性，正常路径不触发）。
+                    format!("{}[{}]", p, i)
+                }
+            }
+            None => format!("root[{}]", i),
+        };
+        self.set_path(new_path);
+    }
+
     /// 设置错误路径（内部辅助，仅供 [`push_path_segment`] 使用）。
     ///
     /// 编译期错误（`Compilation` / `UnresolvedReference`）无 path 字段，此方法对其无操作。
@@ -1115,6 +1155,139 @@ mod tests {
         };
         err3.push_path_segment("computed");
         assert_eq!(err3.path(), Some("root.computed"));
+    }
+
+    // ======================================================================
+    // push_path_index（4.7：Array 系列 lazy path 迁移）
+    // ======================================================================
+
+    #[test]
+    fn push_path_index_on_root_base() {
+        // 叶节点错误路径为 "root"，父 ArrayNode 插入数组索引。
+        let mut err = ConstructError::Stream {
+            message: "expected 1".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_index(2);
+        assert_eq!(err.path(), Some("root[2]"));
+    }
+
+    #[test]
+    fn push_path_index_on_empty_base() {
+        // 占位路径（From<PyErr> 路径为空）。
+        let mut err = ConstructError::Generic {
+            message: "x".to_string(),
+            path: String::new(),
+        };
+        err.push_path_index(0);
+        assert_eq!(err.path(), Some("root[0]"));
+    }
+
+    #[test]
+    fn push_path_index_nested_arrays() {
+        // 嵌套 Array：外层 push_index(1) 后内层 push_index(2)
+        // 模拟 Array[2] Array[1] Byte：内层先重建 → "root[2]"，外层再重建 → "root[1][2]"
+        let mut err = ConstructError::Stream {
+            message: "expected 1".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_index(2); // 内层 Array（i=2）
+        assert_eq!(err.path(), Some("root[2]"));
+        err.push_path_index(1); // 外层 Array（i=1）
+        assert_eq!(err.path(), Some("root[1][2]"));
+    }
+
+    #[test]
+    fn push_path_index_then_segment() {
+        // Array 在外层，Struct 在内层：先 push_index(1) 后 push_segment("x")
+        // 模拟 Array[1] Struct{x: Byte}：内层 Struct 先重建 → "root.x"，外层 Array 再重建 → "root[1].x"
+        let mut err = ConstructError::Stream {
+            message: "x".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_segment("x"); // 内层 Struct（字段 x）
+        assert_eq!(err.path(), Some("root.x"));
+        err.push_path_index(1); // 外层 Array（i=1）
+        assert_eq!(err.path(), Some("root[1].x"));
+    }
+
+    #[test]
+    fn push_path_segment_then_index() {
+        // Struct 在外层，Array 在内层：先 push_segment("x") 后 push_index(1)
+        // 模拟 Struct{x: Array[1] Byte}：内层 Array 先重建 → "root[1]"，外层 Struct 再重建 → "root.x[1]"
+        let mut err = ConstructError::Stream {
+            message: "x".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_index(1); // 内层 Array（i=1）
+        assert_eq!(err.path(), Some("root[1]"));
+        err.push_path_segment("x"); // 外层 Struct（字段 x）
+        assert_eq!(err.path(), Some("root.x[1]"));
+    }
+
+    #[test]
+    fn push_path_index_deeply_nested() {
+        // 模拟 Array[1] Struct{x: Array[2] Byte}：叶错误路径重建为 "root[1].x[2]"
+        // 重建顺序（从叶到根）：
+        //   1. innermost Array(2) push_index(2): "root" → "root[2]"
+        //   2. Struct push_segment("x"): "root[2]" → "root.x[2]"
+        //   3. outer Array(1) push_index(1): "root.x[2]" → "root[1].x[2]"
+        let mut err = ConstructError::Stream {
+            message: "expected 1".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_index(2);
+        assert_eq!(err.path(), Some("root[2]"));
+        err.push_path_segment("x");
+        assert_eq!(err.path(), Some("root.x[2]"));
+        err.push_path_index(1);
+        assert_eq!(err.path(), Some("root[1].x[2]"));
+    }
+
+    #[test]
+    fn push_path_index_preserves_message() {
+        // 验证 message 字段不被 push_path_index 修改。
+        let mut err = ConstructError::FormatField {
+            message: "struct '>I' error".to_string(),
+            path: "root".to_string(),
+        };
+        err.push_path_index(3);
+        assert_eq!(err.message(), Some("struct '>I' error"));
+        assert_eq!(err.path(), Some("root[3]"));
+    }
+
+    #[test]
+    fn push_path_index_on_compilation_error_is_noop() {
+        // 编译期错误无 path，push_path_index 不操作。
+        let mut err = ConstructError::Compilation {
+            message: "bad schema".to_string(),
+        };
+        err.push_path_index(5);
+        assert_eq!(err.path(), None);
+    }
+
+    #[test]
+    fn push_path_index_works_on_all_runtime_variants() {
+        // 验证 push_path_index 对所有运行时变体（携带 path 字段）都生效。
+        let mut range_err = ConstructError::Range {
+            message: "x".to_string(),
+            path: "root".to_string(),
+        };
+        range_err.push_path_index(0);
+        assert_eq!(range_err.path(), Some("root[0]"));
+
+        let mut repeat_err = ConstructError::Repeat {
+            message: "x".to_string(),
+            path: "root".to_string(),
+        };
+        repeat_err.push_path_index(1);
+        assert_eq!(repeat_err.path(), Some("root[1]"));
+
+        let mut stopfield_err = ConstructError::StopField {
+            path: "root".to_string(),
+        };
+        stopfield_err.push_path_index(2);
+        assert_eq!(stopfield_err.path(), Some("root[2]"));
     }
 
     // ======================================================================
