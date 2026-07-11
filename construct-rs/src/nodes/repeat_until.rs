@@ -300,3 +300,437 @@ impl super::Construct for RepeatUntilNode {
         })
     }
 }
+
+// ---------------------------------------------------------------------------
+// 单元测试（v5 重写：参考设计 §7.3 RU-v5-1 ~ RU-v5-15）
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::ExprOp;
+    use crate::instance::intern_pystring;
+    use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
+    use crate::nodes::Construct;
+    use crate::nodes::Node;
+    use pyo3::types::PyString;
+
+    fn ensure_python() {
+        use std::sync::Once;
+        static INIT: Once = Once::new();
+        INIT.call_once(pyo3::prepare_freethreaded_python);
+    }
+
+    fn with_py<F, R>(f: F) -> R
+    where
+        F: for<'py> FnOnce(Python<'py>) -> R,
+    {
+        ensure_python();
+        Python::with_gil(f)
+    }
+
+    /// 构造一个 Byte（Int8ub）节点。
+    fn byte_node() -> Node {
+        Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big))
+    }
+
+    /// 构造一个 Int16ub 节点（2 字节）。
+    fn int16ub_node() -> Node {
+        Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big))
+    }
+
+    /// 创建 RepeatUntilNode（terminator: e > N）。
+    fn make_ru_gt(byte: Node, threshold: i64, element_field_idx: usize) -> RepeatUntilNode {
+        let terminator = ExprProgram::new(vec![
+            ExprOp::GetInt(element_field_idx),
+            ExprOp::Const(threshold),
+            ExprOp::Gt,
+        ]);
+        let elem_name = with_py(|py| intern_pystring(py, "e"));
+        RepeatUntilNode::new(byte, terminator, element_field_idx, elem_name, false)
+    }
+
+    /// 创建一个含 2 字段的 ctx（threshold: i64, e: 占位）。
+    /// element_field_idx 为 1（e 字段）。
+    fn setup_ctx<'py>(py: Python<'py>, threshold: i64) -> Context<'py> {
+        let mut ctx = Context::new_root(py).expect("ctx");
+        ctx.init_expr_values(2);
+        let key0 = PyString::new_bound(py, "threshold").unbind();
+        let v0 = threshold.into_py(py);
+        ctx.set_field_at(0, &key0, v0.bind(py), py)
+            .expect("set threshold");
+        // e 字段（idx 1）保持 null（RepeatUntil 会借用 set_expr_value_only）
+        ctx
+    }
+
+    // ======================================================================
+    // 构造器 & 访问器
+    // ======================================================================
+
+    #[test]
+    fn new_stores_fields() {
+        let node = make_ru_gt(byte_node(), 5, 1);
+        assert!(!node.discard());
+        assert_eq!(node.element_field_idx(), 1);
+        assert_eq!(node.terminator().ops().len(), 3);
+    }
+
+    #[test]
+    fn discard_flag_stored() {
+        let terminator = ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Gt]);
+        let elem_name = with_py(|py| intern_pystring(py, "e"));
+        let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, true);
+        assert!(node.discard());
+    }
+
+    #[test]
+    fn has_expressions_returns_true() {
+        let node = make_ru_gt(byte_node(), 5, 0);
+        assert!(
+            node.has_expressions(),
+            "v5 RepeatUntil.has_expressions should always be true"
+        );
+    }
+
+    // ======================================================================
+    // RU-v5-1 / RU-2：parse 终止表达式求值非零时终止
+    // ======================================================================
+
+    #[test]
+    fn parse_terminator_match_at_element() {
+        // e > 5：[1, 2, 3, 4, 5, 6] → 6 时满足，返回 [1,2,3,4,5,6]
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 5, 0);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            let mut ctx = setup_ctx(py, 0); // threshold 不参与，仅占位
+                                            // 注：element_field_idx=0 与 setup_ctx 的 threshold 字段冲突。
+                                            // 改用直接构造 ctx：element_field_idx=1
+            let mut ctx2 = Context::new_root(py).expect("ctx");
+            ctx2.init_expr_values(2);
+            let key0 = PyString::new_bound(py, "threshold").unbind();
+            let v0 = 0i64.into_py(py);
+            ctx2.set_field_at(0, &key0, v0.bind(py), py).unwrap();
+            let mut path = Path::new();
+            // 重新构造 node 用 element_field_idx=1
+            let node2 = make_ru_gt(byte_node(), 5, 1);
+            let result = node2
+                .parse(py, &mut stream, &mut ctx2, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 6);
+            let last: i64 = list.get_item(5).unwrap().extract().unwrap();
+            assert_eq!(last, 6);
+            assert_eq!(stream.tell(), 6);
+            assert!(ctx2.index().is_none());
+        });
+    }
+
+    #[test]
+    fn parse_first_element_matches() {
+        // 边界：第一个元素就满足终止表达式
+        // e > 5：[6, 7, 8] → 6 时满足，返回 [6]
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 5, 0);
+            let mut stream = ParseStream::new(&[6, 7, 8]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 1);
+            let v: i64 = list.get_item(0).unwrap().extract().unwrap();
+            assert_eq!(v, 6);
+            assert_eq!(stream.tell(), 1);
+        });
+    }
+
+    // ======================================================================
+    // RU-v5-3：parse 终止表达式含多种 Phase 2 表达式类型
+    // ======================================================================
+
+    #[test]
+    fn parse_terminator_eq_operator() {
+        // e == 3：[1, 2, 3, 4, 5] → 第 3 个元素满足
+        with_py(|py| {
+            let terminator =
+                ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(3), ExprOp::Eq]);
+            let elem_name = intern_pystring(py, "e");
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 5]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3);
+        });
+    }
+
+    #[test]
+    fn parse_terminator_bit_op() {
+        // (e & 0xFF) == 0：[1, 2, 0, ...] → 0 时满足
+        with_py(|py| {
+            let terminator = ExprProgram::new(vec![
+                ExprOp::GetInt(0),
+                ExprOp::Const(0xFF),
+                ExprOp::BitAnd,
+                ExprOp::Const(0),
+                ExprOp::Eq,
+            ]);
+            let elem_name = intern_pystring(py, "e");
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let mut stream = ParseStream::new(&[1, 2, 0, 9]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3);
+        });
+    }
+
+    #[test]
+    fn parse_terminator_unary_neg() {
+        // -e > -5：等价 e < 5
+        // e=1 时 -1 > -5 = True → 立即终止
+        with_py(|py| {
+            let terminator = ExprProgram::new(vec![
+                ExprOp::GetInt(0),
+                ExprOp::Neg,
+                ExprOp::Const(-5),
+                ExprOp::Gt,
+            ]);
+            let elem_name = intern_pystring(py, "e");
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 6, 0xFF]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // e=1 → -1 > -5 = True → 立即终止（仅第一个元素）
+            assert_eq!(list.len(), 1);
+        });
+    }
+
+    #[test]
+    fn parse_terminator_two_field_refs() {
+        // e > threshold：threshold 字段引用 + Element 字段引用
+        // element_field_idx=1（e 字段），threshold_field_idx=0
+        with_py(|py| {
+            let terminator = ExprProgram::new(vec![
+                ExprOp::GetInt(1), // e (Element)
+                ExprOp::GetInt(0), // threshold
+                ExprOp::Gt,
+            ]);
+            let elem_name = intern_pystring(py, "e");
+            let node = RepeatUntilNode::new(byte_node(), terminator, 1, elem_name, false);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 0xFF]);
+            let mut ctx = setup_ctx(py, 3); // threshold=3
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            // e=1 → 1 > 3 no; e=2 → 2 > 3 no; e=3 → 3 > 3 no; e=4 → 4 > 3 yes
+            assert_eq!(list.len(), 4);
+        });
+    }
+
+    // ======================================================================
+    // RU-v5-5：discard 模式
+    // ======================================================================
+
+    #[test]
+    fn parse_discard_returns_empty_but_consumes() {
+        // discard=True 仍消耗流、求值终止表达式，但不收集元素到 list
+        with_py(|py| {
+            let terminator =
+                ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(5), ExprOp::Gt]);
+            let elem_name = intern_pystring(py, "e");
+            let node = RepeatUntilNode::new(byte_node(), terminator, 0, elem_name, true);
+            let mut stream = ParseStream::new(&[1, 2, 3, 4, 5, 6, 7]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 0);
+            assert_eq!(stream.tell(), 6);
+        });
+    }
+
+    // ======================================================================
+    // RU-v5-1 边界：inner 失败错误传播（lazy path）
+    // ======================================================================
+
+    #[test]
+    fn parse_inner_failure_propagates_error() {
+        // RU-1: 子构造器解析失败 → 错误直接上抛（不像 GreedyRange 回退）
+        // 用 Int16ub（2 字节）作为 inner，流只 1 字节 → 第一次解析就失败
+        with_py(|py| {
+            let node = make_ru_gt(int16ub_node(), 255, 0);
+            let mut stream = ParseStream::new(&[0xFF]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Stream { .. }));
+        });
+    }
+
+    // ======================================================================
+    // build 路径
+    // ======================================================================
+
+    #[test]
+    fn build_terminator_match_stops() {
+        // build 方向：e > 5，list = [1, 2, 3, 4, 5, 6, 7]
+        // 期望：写到第 6 个元素（6 满足）就停止，stream = [1,2,3,4,5,6]
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 5, 0);
+            let obj = py
+                .eval_bound("[1, 2, 3, 4, 5, 6, 7]", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[1, 2, 3, 4, 5, 6]);
+        });
+    }
+
+    #[test]
+    fn build_no_match_returns_repeat_error() {
+        // RU-3: 无元素满足终止表达式 → Repeat 错误
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 100, 0);
+            let obj = py.eval_bound("[1, 2, 3]", None, None).expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Repeat { .. }));
+        });
+    }
+
+    #[test]
+    fn build_empty_list_returns_repeat_error() {
+        // build 时空 list → 无元素满足 → RepeatError
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 0, 0);
+            let obj = py.eval_bound("[]", None, None).expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Repeat { .. }));
+        });
+    }
+
+    #[test]
+    fn build_first_element_matches() {
+        // 边界：第一个元素就满足 → build 第一个即停
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 5, 0);
+            let obj = py.eval_bound("[6, 7, 8]", None, None).expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[6]);
+        });
+    }
+
+    #[test]
+    fn build_iterable_object_works() {
+        // 兜底路径：传入 generator（非 list/tuple）
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 2, 0);
+            let obj = py
+                .eval_bound("(x for x in [1, 2, 3, 4, 5])", None, None)
+                .expect("gen");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[1, 2, 3]);
+        });
+    }
+
+    // ======================================================================
+    // RU-v5-7：parse ↔ build 往返
+    // ======================================================================
+
+    #[test]
+    fn round_trip_preserves_data() {
+        with_py(|py| {
+            let node = make_ru_gt(byte_node(), 100, 0);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            ctx.init_expr_values(1);
+            let mut path = Path::new();
+
+            // build
+            let obj = py.eval_bound("[1, 2, 200]", None, None).expect("obj");
+            let mut stream = BuildStream::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+            assert_eq!(bytes, &[1, 2, 200]);
+
+            // parse 回来
+            let mut pstream = ParseStream::new(&bytes);
+            let result = node
+                .parse(py, &mut pstream, &mut ctx, &mut path)
+                .expect("parse");
+            let list = result.bind(py).downcast::<PyList>().expect("list");
+            assert_eq!(list.len(), 3);
+            let values: Vec<i64> = list.iter().map(|b| b.extract::<i64>().unwrap()).collect();
+            assert_eq!(values, vec![1, 2, 200]);
+        });
+    }
+
+    // ======================================================================
+    // sizeof
+    // ======================================================================
+
+    #[test]
+    fn sizeof_always_returns_error() {
+        // RU-6: sizeof 永远 Err
+        with_py(|py| {
+            let ctx = Context::new_root(py).expect("ctx");
+            let node = make_ru_gt(byte_node(), 5, 0);
+            let err = node.sizeof(&ctx).expect_err("should fail");
+            match err {
+                ConstructError::Generic { message, .. } => {
+                    assert!(message.contains("RepeatUntil"), "got: {}", message);
+                }
+                other => panic!("expected Generic, got {:?}", other),
+            }
+        });
+    }
+}

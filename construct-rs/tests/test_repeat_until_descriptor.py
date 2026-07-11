@@ -1,11 +1,13 @@
-"""Phase 4 子任务 4.5 V-3/V-4 修正：RepeatUntil 描述符单元测试（纯 Python，无 pytest）。
+"""Phase 4 子任务 4.5 v5 RepeatUntil 描述符单元测试（纯 Python，无 pytest）。
 
-测试覆盖：
-- V-3：非 callable 谓词（``True`` / ``False`` / 常量值）兼容
-- V-4：AST 识别负整数常量（``lambda x, _, _: x > -1``、``x != -1``）
+v5 重写后测试覆盖：
+- callable 拒绝（用户硬约束 #1）
+- terminator 表达式编译（Phase 2 表达式系统）
+- _expr_params 协议（terminator + element_field_idx）
+- set_compiled_expr_params 方法
 
-注意：本测试仅检查 Python 侧描述符的编译行为（``_try_compile_repeat_predicate``），
-不涉及 Rust parse/build 路径（由 cargo test 覆盖）。
+注意：本测试仅检查 Python 侧描述符的编译行为（v5），
+不涉及 Rust parse/build 路径（由 cargo test + experiments 覆盖）。
 
 运行方式：``python tests/test_repeat_until_descriptor.py``
 """
@@ -15,115 +17,163 @@ import traceback
 
 
 # ============================================================
-# V-4：AST 识别负整数常量
+# v5 callable 拒绝（用户硬约束 #1）
 # ============================================================
 
-def test_negative_int_const_right_side():
-    # ``x > -1`` → [GetElem, Const(-1), Gt]
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > -1)
-    assert ops == [("getelem",), ("const", -1), ("gt",)], f"got {ops}"
+def test_callable_lambda_rejected():
+    """Python lambda 必须被 RepeatUntilDescriptor.__init__ 拒绝。"""
+    try:
+        RepeatUntilDescriptor(lambda x, l, c: x > 5, Int8ub)
+        raise AssertionError("callable terminator should be rejected")
+    except CompilationError as e:
+        assert "callable" in str(e).lower() or "Phase 2 expression" in str(e), (
+            f"error message should mention callable: {e}"
+        )
 
 
-def test_negative_int_const_neq():
-    # ``x != -1`` → [GetElem, Const(-1), Ne]  —— 常见哨兵终止模式
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x != -1)
-    assert ops == [("getelem",), ("const", -1), ("ne",)], f"got {ops}"
+def test_callable_function_rejected():
+    """Python 函数也必须被拒绝。"""
+
+    def predicate(x, l, c):
+        return x > 5
+
+    try:
+        RepeatUntilDescriptor(predicate, Int8ub)
+        raise AssertionError("callable function should be rejected")
+    except CompilationError:
+        pass  # expected
 
 
-def test_negative_int_const_left_side():
-    # ``-1 < x`` → 翻转 → x > -1 → [GetElem, Const(-1), Gt]
-    ops = _try_compile_repeat_predicate(lambda x, l, c: -1 < x)
-    assert ops == [("getelem",), ("const", -1), ("gt",)], f"got {ops}"
+def test_callable_class_with_call_rejected():
+    """实现 __call__ 的类实例也必须被拒绝。"""
 
+    class CallableClass:
+        def __call__(self, x, l, c):
+            return x > 5
 
-def test_positive_unary_plus_const():
-    # ``x > +5`` → UAdd(Constant(5)) → 5
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > +5)
-    assert ops == [("getelem",), ("const", 5), ("gt",)], f"got {ops}"
-
-
-def test_positive_int_const_still_works():
-    # 回归：正整数仍正常识别
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > 5)
-    assert ops == [("getelem",), ("const", 5), ("gt",)], f"got {ops}"
-
-
-def test_double_negative_recognized():
-    # ``x > --5``（双重负号）→ UnaryOp(USub, UnaryOp(USub, Constant(5))) → 5
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > --5)
-    assert ops == [("getelem",), ("const", 5), ("gt",)], f"got {ops}"
-
-
-def test_bool_not_recognized_as_int_const():
-    # 回归：bool 值不识别为整数常量（``True`` 字面量是 ast.Constant(value=True)）
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > True)
-    assert ops is None, f"expected None, got {ops}"
-
-
-def test_large_negative_int():
-    # ``x > -1000000`` 大负数
-    ops = _try_compile_repeat_predicate(lambda x, l, c: x > -1000000)
-    assert ops == [("getelem",), ("const", -1000000), ("gt",)], f"got {ops}"
+    try:
+        RepeatUntilDescriptor(CallableClass(), Int8ub)
+        raise AssertionError("callable instance should be rejected")
+    except CompilationError:
+        pass  # expected
 
 
 # ============================================================
-# V-3：非 callable 谓词兼容
+# v5 terminator 表达式存储
 # ============================================================
 
-def test_true_predicate_wrapped_as_callable():
-    desc = RepeatUntilDescriptor(True, Int8ub)
-    assert callable(desc.predicate), "predicate should be callable"
+def test_terminator_stored_correctly():
+    """terminator（Phase 2 表达式）应被正确存储为属性。"""
+    from construct import rfield, Element
+    # terminator 是 _FieldDescriptor 引用（e > 5）
+    # 但 Element() 在 class 上下文才有 _FieldDescriptor。这里直接用 int 模拟。
+    desc = RepeatUntilDescriptor(5, Int8ub)  # 5 是 int（非 callable）
+    assert desc.terminator == 5
+    assert desc.subcon is Int8ub
+    assert desc.discard is False
 
 
-def test_false_predicate_wrapped_as_callable():
-    desc = RepeatUntilDescriptor(False, Int8ub)
-    assert callable(desc.predicate), "predicate should be callable"
+def test_discard_flag_stored():
+    desc = RepeatUntilDescriptor(5, Int8ub, discard=True)
+    assert desc.discard is True
 
 
-def test_arbitrary_const_predicate_wrapped():
-    # 任意常量值（如字符串）也包装
-    desc = RepeatUntilDescriptor("sentinel", Int8ub)
-    assert callable(desc.predicate), "predicate should be callable"
-
-
-def test_wrapped_true_predicate_returns_true():
-    desc = RepeatUntilDescriptor(True, Int8ub)
-    assert desc.predicate(0, [], object()) is True
-
-
-def test_wrapped_false_predicate_returns_false():
-    desc = RepeatUntilDescriptor(False, Int8ub)
-    assert desc.predicate(0, [], object()) is False
-
-
-def test_wrapped_const_predicate_uses_default_arg_captures_value():
-    # 验证使用默认参数捕获（避免闭包晚期绑定）
-    desc = RepeatUntilDescriptor(42, Int8ub)
-    assert desc.predicate(0, [], object()) == 42
-    assert desc.predicate(1, [0], object()) == 42
-
-
-def test_wrapped_predicate_goes_pycallable_path():
-    # 非 callable 谓词包装后不识别为 Expr 路径，_expr_params 应为空 dict
-    desc = RepeatUntilDescriptor(True, Int8ub)
-    assert desc._expr_params == {}, f"got {desc._expr_params}"
-
-
-def test_pycallable_lambda_still_works():
-    # 回归：复杂 lambda 仍走 PyCallable 路径
-    desc = RepeatUntilDescriptor(
-        lambda x, lst, ctx: len(lst) >= 2 and lst[-2:] == [0, 0],
-        Int8ub,
+def test_repr_uses_terminator_not_predicate():
+    """__repr__ 应使用 terminator 而非 predicate（禁用谓词术语）。"""
+    desc = RepeatUntilDescriptor(5, Int8ub)
+    repr_str = repr(desc)
+    assert "terminator" in repr_str, f"repr should use 'terminator': {repr_str}"
+    assert "predicate" not in repr_str, (
+        f"repr should not use 'predicate' (禁用谓词术语): {repr_str}"
     )
-    assert desc._expr_params == {}, f"got {desc._expr_params}"
-    assert callable(desc.predicate)
 
 
-def test_wrapping_does_not_break_expr_path_for_lambda():
-    # 回归：简单 lambda 仍走 Expr 路径
-    desc = RepeatUntilDescriptor(lambda x, l, c: x > 5, Int8ub)
-    assert desc._expr_params == {"predicate": [("getelem",), ("const", 5), ("gt",)]}, \
-        f"got {desc._expr_params}"
+# ============================================================
+# v5 _expr_params 协议
+# ============================================================
+
+def test_expr_params_initial_has_terminator():
+    """_expr_params 初始应含 terminator 键（值为原始表达式）。"""
+    desc = RepeatUntilDescriptor(5, Int8ub)
+    assert "terminator" in desc._expr_params, (
+        f"_expr_params should have 'terminator': {desc._expr_params}"
+    )
+    assert desc._expr_params["terminator"] == 5
+
+
+def test_element_field_idx_initial_none():
+    """_element_field_idx 初始为 None（编译期由 _compile_expressions 填充）。"""
+    desc = RepeatUntilDescriptor(5, Int8ub)
+    assert desc._element_field_idx is None
+
+
+def test_set_compiled_expr_params_injects_ops_and_idx():
+    """set_compiled_expr_params 应注入 ops 和 element_field_idx。"""
+    desc = RepeatUntilDescriptor(5, Int8ub)
+    ops = [("getint", 0), ("const", 5), ("gt",)]
+    desc.set_compiled_expr_params(ops, 0)
+    assert desc._element_field_idx == 0
+    assert desc._expr_params["terminator"] == ops
+    assert desc._expr_params["element_field_idx"] == 0
+
+
+# ============================================================
+# 端到端：完整 StructMixin 子类（含 Element 字段）
+# ============================================================
+
+def test_end_to_end_struct_with_element():
+    """端到端：完整的 v5 RepeatUntil + Element StructMixin 子类。"""
+    from dataclasses import dataclass
+    from construct import (
+        StructMixin,
+        field,
+        rfield,
+        RepeatUntil,
+        Element,
+    )
+
+    @dataclass
+    class Packet(StructMixin):
+        e: int = rfield(Element())
+        payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+    pkt = Packet.parse(b"\x01\x02\x06\xaa")
+    assert pkt.payload == [1, 2, 6], f"got {pkt.payload}"
+    assert pkt.e is None, f"Element field must be None, got {pkt.e}"
+
+    # build round-trip
+    built = Packet.build(Packet(payload=[1, 2, 6]))
+    assert built == b"\x01\x02\x06", f"got {built!r}"
+    pkt2 = Packet.parse(built)
+    assert pkt2.payload == [1, 2, 6], f"got {pkt2.payload}"
+
+
+def test_end_to_end_compound_terminator():
+    """复合终止表达式：(e + offset) & mask == sentinel"""
+    from dataclasses import dataclass
+    from construct import (
+        StructMixin,
+        field,
+        rfield,
+        RepeatUntil,
+        Element,
+    )
+
+    @dataclass
+    class P(StructMixin):
+        offset: int = field(Int8ub)
+        mask: int = field(Int8ub)
+        sentinel: int = field(Int8ub)
+        e: int = rfield(Element())
+        payload: list = field(RepeatUntil(((e + offset) & mask) == sentinel, Int8ub))
+
+    # offset=1, mask=0x07, sentinel=0x00
+    # e=0: (0+1)&7=1 != 0
+    # e=1: (1+1)&7=2 != 0
+    # ...
+    # e=7: (7+1)&7=0 == 0 → 终止
+    pkt = P.parse(b"\x01\x07\x00\x00\x01\x02\x03\x07\xff")
+    assert pkt.payload == [0, 1, 2, 3, 7], f"got {pkt.payload}"
 
 
 # ============================================================
@@ -131,18 +181,15 @@ def test_wrapping_does_not_break_expr_path_for_lambda():
 # ============================================================
 
 def main():
-    # 延迟 import 使 assert 错误消息更精确
-    global _try_compile_repeat_predicate, RepeatUntilDescriptor, RepeatUntil, Int8ub
+    global RepeatUntilDescriptor, Int8ub, CompilationError
     from construct._descriptors import (
         RepeatUntilDescriptor as _RUD,
-        RepeatUntil as _RU,
-        _try_compile_repeat_predicate as _tcp,
     )
     from construct import Int8ub as _I8
-    _try_compile_repeat_predicate = _tcp
+    from construct import CompilationError as _CE
     RepeatUntilDescriptor = _RUD
-    RepeatUntil = _RU
     Int8ub = _I8
+    CompilationError = _CE
 
     # 收集所有 test_ 函数
     test_funcs = [
