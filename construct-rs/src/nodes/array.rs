@@ -592,11 +592,7 @@ mod tests {
                 .expect_err("should fail on Array[1].x EOF");
             match err {
                 ConstructError::Stream { path: p, .. } => {
-                    assert!(
-                        p == "root[1].x",
-                        "expected 'root[1].x', got '{}'",
-                        p
-                    );
+                    assert!(p == "root[1].x", "expected 'root[1].x', got '{}'", p);
                 }
                 other => panic!("expected Stream, got {:?}", other),
             }

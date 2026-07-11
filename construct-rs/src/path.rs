@@ -1,6 +1,6 @@
 //! 错误路径追踪栈。
 //!
-//! 设计依据：`docs/架构设计.md` §C.6。
+//! 设计依据：`docs/架构设计.md` §C.6 + `docs/模块设计-Array性能优化.md` §3。
 //!
 //! ## 用途
 //!
@@ -9,10 +9,13 @@
 //! 错误发生时 `to_string()` 生成如 `"root.header.flags"` 的路径字符串，
 //! 嵌入到 `ConstructError` 中以便定位出错字段。
 //!
-//! ## 性能
+//! ## 性能（4.7 lazy path 迁移后）
 //!
-//! `push`/`pop` 是 `Vec` 操作（~5ns），成功路径开销极小。
-//! `to_string` 只在错误路径调用（成功路径零成本，FFI 设计 §7.3）。
+//! - **成功路径**：`Path::new()` 返回 `Path::Root`（零分配），从不 push，从不读。零成本。
+//! - **错误路径**：叶节点读 `to_string()`（`Root` 返回 `"root"` 字面量），
+//!   父节点通过 `ConstructError::push_path_segment` / `push_path_index` 重建路径。
+//!   `Path` 对象本身保持 `Root` 态不变。
+//! - **测试代码**：少量测试显式 `push_field` 验证 path 行为，会触发 `Root → Segments` 转换。
 //!
 //! ## 格式说明
 //!
@@ -50,58 +53,115 @@ pub enum PathSegment {
 /// 错误路径追踪栈。
 ///
 /// 详见模块级文档。
+///
+/// # 4.7 lazy path 迁移：两态 enum（零分配）
+///
+/// 迁移到 lazy path 模式（P0-3）后，生产代码成功路径从不 push。
+/// `Root` 变体覆盖 >99% 场景，零堆分配（`Path::new()` 仅构造 enum 变体）。
+///
+/// - [`Path::Root`]：仅含根段。`new()` / `default()` / 成功路径的常态。
+/// - [`Path::Segments`]：显式 push 后的扩展路径。仅测试代码或（罕见的）eager path
+///   节点触发。内部 `Vec` 的首元素始终是 [`PathSegment::Root`]。
 #[derive(Debug, Clone)]
-pub struct Path {
-    /// 路径段列表。
-    segments: Vec<PathSegment>,
+pub enum Path {
+    /// 仅含根段。零分配。
+    ///
+    /// 这是 lazy path 模式下的常态：成功路径不 push，叶节点读 `to_string()` 得 `"root"`。
+    Root,
+    /// 扩展路径（push 后转换）。
+    ///
+    /// 仅在显式调用 `push_field`/`push_index` 后产生。生产代码不触发（lazy path 模式），
+    /// 保留用于测试代码与未来可能的 eager path 节点。
+    ///
+    /// 内部 `Vec` 的首元素在从 `Root` 转换时被预置为 [`PathSegment::Root`]，
+    /// 后续 push 追加到末尾。`pop` 到仅剩 Root 段时不自动转回 `Root` 变体
+    /// （功能等价，避免多余的状态转换开销）。
+    Segments(Vec<PathSegment>),
 }
 
 impl Path {
-    /// 创建新的路径栈，初始 segment 为 `Root`。
+    /// 创建新的路径栈，初始状态为 `Root` 变体（零分配）。
     ///
     /// 进入执行树时调用一次（parse/build 入口）。
     ///
-    /// 使用 [`PathSegment::Root`] 变体（无 payload），消除每次 parse/build 的
-    /// `String` 堆分配（仅保留一次 `Vec` 分配）。
+    /// 4.7 lazy path 迁移：从 `vec![PathSegment::Root]`（1 次 Vec 堆分配 ~20-30ns）
+    /// 改为 `Path::Root`（enum 构造 ~0ns）。
     pub fn new() -> Self {
-        Self {
-            segments: vec![PathSegment::Root],
-        }
+        Path::Root
     }
 
     /// 在路径末尾追加一个字段段（如进入 `header` 字段时）。
+    ///
+    /// `Root` 变体转换为 `Segments(vec![Root, Field(name)])`；
+    /// `Segments` 变体直接 push。
     pub fn push_field(&mut self, name: &str) {
-        self.segments.push(PathSegment::Field(name.to_string()));
+        match self {
+            Path::Root => {
+                *self = Path::Segments(vec![
+                    PathSegment::Root,
+                    PathSegment::Field(name.to_string()),
+                ]);
+            }
+            Path::Segments(segs) => {
+                segs.push(PathSegment::Field(name.to_string()));
+            }
+        }
     }
 
     /// 在路径末尾追加一个索引段（如进入数组第 2 个元素时）。
+    ///
+    /// `Root` 变体转换为 `Segments(vec![Root, Index(i)])`；
+    /// `Segments` 变体直接 push。
     pub fn push_index(&mut self, i: usize) {
-        self.segments.push(PathSegment::Index(i));
+        match self {
+            Path::Root => {
+                *self = Path::Segments(vec![PathSegment::Root, PathSegment::Index(i)]);
+            }
+            Path::Segments(segs) => {
+                segs.push(PathSegment::Index(i));
+            }
+        }
     }
 
     /// 弹出路径末尾段（离开字段/数组元素时）。
     ///
-    /// 弹出根 segment 不会发生（调用方负责成对 push/pop），但即使发生也不 panic（静默返回）。
+    /// 弹出根 segment 不会发生（调用方负责成对 push/pop），但即使发生也不 panic（静默返回）：
+    /// `Root` 变体的 pop 转换为空的 `Segments(Vec::new())`（零分配）。
     pub fn pop(&mut self) {
-        self.segments.pop();
+        match self {
+            Path::Root => {
+                // 防御性：pop on Root 转换为空 Segments（零分配，Vec::new 不分配）。
+                *self = Path::Segments(Vec::new());
+            }
+            Path::Segments(segs) => {
+                segs.pop();
+            }
+        }
     }
 
     /// 返回当前路径段数（含根 `(root)`）。
+    ///
+    /// `Root` 变体返回 1；`Segments` 返回内部 Vec 长度。
     pub fn len(&self) -> usize {
-        self.segments.len()
+        match self {
+            Path::Root => 1,
+            Path::Segments(segs) => segs.len(),
+        }
     }
 
     /// 路径是否为空（不含任何 segment）。
     ///
-    /// 由于 `new()` 总是预置一个 `(root)` segment，`is_empty()` 在正常使用中始终为 `false`。
-    /// 此方法主要服务于 `Default` 实现与边界测试。
+    /// `Root` 变体始终非空（含 1 个 Root 段）。`Segments` 返回内部 Vec 的 is_empty。
     pub fn is_empty(&self) -> bool {
-        self.segments.is_empty()
+        match self {
+            Path::Root => false,
+            Path::Segments(segs) => segs.is_empty(),
+        }
     }
 }
 
 impl Default for Path {
-    /// `Path` 的默认值与 [`Path::new`] 一致。
+    /// `Path` 的默认值与 [`Path::new`] 一致（`Path::Root`，零分配）。
     fn default() -> Self {
         Self::new()
     }
@@ -111,32 +171,39 @@ impl fmt::Display for Path {
     /// 生成 `"root.field1.field2[0]"` 格式的路径字符串。
     ///
     /// 规则：
-    /// - 初始 `(root)` segment 输出为 `"root"`（剥离括号）。
-    /// - 后续 Field 段用 `.` 分隔。
-    /// - Index 段直接追加 `[N]`（不再加 `.` 分隔，因为索引是前一个对象的成员）。
+    /// - `Root` 变体直接输出 `"root"`（无需遍历，零分配）。
+    /// - `Segments` 变体遍历：
+    ///   - 初始 `(root)` segment 输出为 `"root"`（剥离括号）。
+    ///   - 后续 Field 段用 `.` 分隔。
+    ///   - Index 段直接追加 `[N]`（不再加 `.` 分隔，因为索引是前一个对象的成员）。
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        for (i, seg) in self.segments.iter().enumerate() {
-            match seg {
-                PathSegment::Root => {
-                    // 根段：输出 "root"（无 payload，零分配）。
-                    // 无论位置（i 是否为 0），Root 都输出 "root" 不加前缀点。
-                    f.write_str("root")?;
-                }
-                PathSegment::Field(name) => {
-                    if i == 0 {
-                        // 非根的 Field 段出现在首位（如 pop 后重新 push）原样输出。
-                        f.write_str(name)?;
-                    } else {
-                        f.write_str(".")?;
-                        f.write_str(name)?;
+        match self {
+            Path::Root => f.write_str("root"),
+            Path::Segments(segs) => {
+                for (i, seg) in segs.iter().enumerate() {
+                    match seg {
+                        PathSegment::Root => {
+                            // 根段：输出 "root"（无 payload，零分配）。
+                            // 无论位置（i 是否为 0），Root 都输出 "root" 不加前缀点。
+                            f.write_str("root")?;
+                        }
+                        PathSegment::Field(name) => {
+                            if i == 0 {
+                                // 非根的 Field 段出现在首位（如 pop 后重新 push）原样输出。
+                                f.write_str(name)?;
+                            } else {
+                                f.write_str(".")?;
+                                f.write_str(name)?;
+                            }
+                        }
+                        PathSegment::Index(idx) => {
+                            write!(f, "[{}]", idx)?;
+                        }
                     }
                 }
-                PathSegment::Index(idx) => {
-                    write!(f, "[{}]", idx)?;
-                }
+                Ok(())
             }
         }
-        Ok(())
     }
 }
 
@@ -298,7 +365,8 @@ mod tests {
 
     #[test]
     fn empty_path_displays_as_empty_string() {
-        let p = Path { segments: vec![] };
+        // 4.7 enum 迁移：Path 现在是 enum，直接用 Segments(Vec::new()) 构造空路径。
+        let p = Path::Segments(Vec::new());
         assert!(p.is_empty());
         assert_eq!(p.to_string(), "");
     }
@@ -314,5 +382,57 @@ mod tests {
         p.pop();
         p.pop();
         assert_eq!(p.to_string(), original);
+    }
+
+    // ======================================================================
+    // 4.7 Item 6：enum 零分配测试（设计 §6.3）
+    // ======================================================================
+
+    #[test]
+    fn new_returns_root_variant() {
+        // Path::new() 应返回 Root 变体（零分配）。
+        let p = Path::new();
+        assert!(matches!(p, Path::Root));
+    }
+
+    #[test]
+    fn root_to_string_returns_literal() {
+        // Root 变体直接返回 "root" 字面量，无需遍历。
+        let p = Path::new();
+        assert_eq!(p.to_string(), "root");
+    }
+
+    #[test]
+    fn push_on_root_transitions_to_segments() {
+        // Root 变体 push 后转换为 Segments 变体。
+        let mut p = Path::new();
+        assert!(matches!(p, Path::Root));
+        p.push_field("a");
+        assert!(matches!(p, Path::Segments(_)));
+        assert_eq!(p.to_string(), "root.a");
+
+        let mut p2 = Path::new();
+        p2.push_index(0);
+        assert!(matches!(p2, Path::Segments(_)));
+        assert_eq!(p2.to_string(), "root[0]");
+    }
+
+    #[test]
+    fn pop_on_root_transitions_to_empty_segments() {
+        // Root 变体 pop 转换为空 Segments（零分配，不 panic）。
+        let mut p = Path::new();
+        assert!(matches!(p, Path::Root));
+        p.pop();
+        assert!(matches!(p, Path::Segments(_)));
+        assert!(p.is_empty());
+        assert_eq!(p.len(), 0);
+        assert_eq!(p.to_string(), "");
+    }
+
+    #[test]
+    fn default_returns_root_variant() {
+        // default() 与 new() 一致，返回 Root 变体。
+        let p = Path::default();
+        assert!(matches!(p, Path::Root));
     }
 }

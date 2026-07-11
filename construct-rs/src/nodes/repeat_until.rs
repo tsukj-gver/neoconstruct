@@ -213,15 +213,8 @@ impl super::Construct for RepeatUntilNode {
         // （谓词签名 `(obj, list, ctx)` 需要实时 list 参数）。
         let result_list: Py<PyAny> = match &self.predicate {
             RepeatPredicate::Expr(program) => {
-                let elems = parse_expr_path(
-                    py,
-                    stream,
-                    ctx,
-                    path,
-                    &self.inner,
-                    program,
-                    self.discard,
-                )?;
+                let elems =
+                    parse_expr_path(py, stream, ctx, path, &self.inner, program, self.discard)?;
                 PyList::new_bound(py, elems).into_any().unbind()
             }
             RepeatPredicate::PyCallable(predicate) => {
