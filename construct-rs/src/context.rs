@@ -248,6 +248,35 @@ impl<'py> Context<'py> {
         Ok(())
     }
 
+    /// 仅写入 `expr_values_buf`，不修改 PyDict（v5 RepeatUntil Element 字段借用）。
+    ///
+    /// 用于 RepeatUntilNode.parse/build 在迭代时把当前元素借用为 Element 字段
+    /// 槽位，终止表达式中的 `GetInt(element_field_idx)` 会从此槽位取值。
+    /// 与 [`Context::set_field_at`] 不同，此方法**不写 PyDict**——确保
+    /// StructNode.parse 完成后，Element 字段在实例 `__dict__` 中的值仍是
+    /// StructNode 在处理 e 字段时写入的 None（语义正确：Element 字段不持有
+    /// 真实数据）。
+    ///
+    /// 设计依据：`docs/模块设计-Array.md` §4.3.2（v5 Element 字段借用模式）。
+    ///
+    /// # Safety
+    ///
+    /// `value.as_ptr()` 写入 `expr_values_buf[idx]`（borrowed 指针，不 incref）。
+    /// 调用方需保证 value 存活到下次 `set_expr_value_only` / `set_field_at`
+    /// 调用前。RepeatUntilNode 的生产路径中 value 是迭代 elem（owned by Vec），
+    /// 其生命周期覆盖整个终止表达式求值过程，GIL 持有期间无并发释放。
+    ///
+    /// # 性能
+    ///
+    /// ~1-2ns（直接指针写入栈分配内联数组），零 PyDict 开销。
+    #[inline]
+    pub fn set_expr_value_only(&mut self, idx: usize, value: &Bound<'_, PyAny>) {
+        if idx < self.expr_values_len {
+            self.expr_values_buf[idx] = value.as_ptr();
+        }
+        // idx >= expr_values_len：防御性忽略（不 panic）。
+    }
+
     /// 存入字段（parse/build 每个字段完成后调用）。
     ///
     /// 对齐 Python construct `Struct._parse` 中的 `context[sc.name] = subobj`。

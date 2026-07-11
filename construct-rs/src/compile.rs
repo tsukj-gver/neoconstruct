@@ -187,11 +187,19 @@ pub fn compile_schema(
 
     // 4. 逐字段构建节点（FieldName 含 interned PyString）
     let expr_programs_slice: &[Option<Py<PyAny>>] = expr_programs.as_deref().unwrap_or(&[]);
+    let field_names_slice: &[String] = field_names.as_slice();
     let mut fields: Vec<StructField> = Vec::with_capacity(field_names.len());
     for (i, (name, desc)) in field_names.iter().zip(descriptors.iter()).enumerate() {
         let desc_bound = desc.bind(py);
-        let node = build_node_from_descriptor(py, desc_bound, i, expr_programs_slice, bitwise)
-            .map_err(|e| with_field_context(e, name))?;
+        let node = build_node_from_descriptor(
+            py,
+            desc_bound,
+            i,
+            expr_programs_slice,
+            field_names_slice,
+            bitwise,
+        )
+        .map_err(|e| with_field_context(e, name))?;
         // FieldName::new 创建 interned PyString 缓存。
         // mode 从解析后的 modes_resolved 取（Phase 2 扩展）。
         let field = StructField {
@@ -274,6 +282,7 @@ fn build_node_from_descriptor(
     desc: &Bound<'_, PyAny>,
     field_index: usize,
     expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
     bitwise: bool,
 ) -> Result<Node, ConstructError> {
     // 1. FormatFieldDescriptor → Node::FormatField
@@ -428,8 +437,14 @@ fn build_node_from_descriptor(
                         e, field_index
                     ),
                 })?;
-            let inner_node =
-                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, true)?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                true,
+            )?;
             return Ok(Node::Bitwise(BitwiseNode::new(inner_node)));
         }
         // PaddingDescriptor（Phase 3.3）→ 根据 bitwise 上下文选择 BitPaddingNode（bit 域）
@@ -449,8 +464,14 @@ fn build_node_from_descriptor(
                     ),
                 })?;
             // Bytewise 把 bit 流重组为字节流，内部回到 bitwise=false 上下文
-            let inner_node =
-                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
             return Ok(Node::Bytewise(BytewiseNode::new(inner_node)));
         }
         // BitsSwappedDescriptor（Phase 3.3）→ TransformNode(BitSwap)。
@@ -464,8 +485,14 @@ fn build_node_from_descriptor(
                         e, field_index
                     ),
                 })?;
-            let inner_node =
-                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
             return Ok(Node::Transform(TransformNode::new(
                 inner_node,
                 ByteTransform::BitSwap,
@@ -481,8 +508,14 @@ fn build_node_from_descriptor(
                         e, field_index
                     ),
                 })?;
-            let inner_node =
-                build_node_from_descriptor(py, &inner_desc, field_index, expr_programs, false)?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
             return Ok(Node::Transform(TransformNode::new(
                 inner_node,
                 ByteTransform::ByteSwap,
@@ -503,6 +536,7 @@ fn build_node_from_descriptor(
                 desc,
                 field_index,
                 expr_programs,
+                field_names,
             )?));
         }
         // GreedyRangeDescriptor（Phase 4）→ GreedyRangeNode。
@@ -515,6 +549,7 @@ fn build_node_from_descriptor(
                 desc,
                 field_index,
                 expr_programs,
+                field_names,
             )?));
         }
         // PrefixedArrayDescriptor（Phase 4）→ PrefixedArrayNode。
@@ -533,6 +568,7 @@ fn build_node_from_descriptor(
                 desc,
                 field_index,
                 expr_programs,
+                field_names,
             )?));
         }
         // IndexDescriptor（Phase 4）→ IndexNode。
@@ -547,21 +583,18 @@ fn build_node_from_descriptor(
         // 设计依据：`docs/模块设计-Array.md` §4.7。
         // ElementDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
         "ElementDescriptor" => return Ok(Node::Element(ElementNode::new())),
-        // RepeatUntilDescriptor（Phase 4.5）→ RepeatUntilNode。
-        // 对应 Python construct `RepeatUntil(predicate, subcon, discard)`（core.py L2637）。
-        // 谓词分类（设计 §4.3.1）：
-        //   - 简单 lambda（如 `lambda x, _, _: x > 5`）→ RepeatPredicate::Expr
-        //     从 expr_programs[field_index]["predicate"] 取 ExprOp 列表。
-        //     Python 侧 _try_compile_repeat_predicate 用 AST 识别简单模式并预编译。
-        //   - 复杂 lambda → RepeatPredicate::PyCallable（每次迭代跨 FFI）
-        //     descriptor 持有原 callable，Rust 侧从 desc.predicate 读取。
-        // 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3 / §10.1。
+        // RepeatUntilDescriptor（Phase 4.5 v5 重写）→ RepeatUntilNode。
+        // 对应 Python construct `RepeatUntil(terminator, subcon, discard)`（core.py L2637）。
+        // v5：terminator 必须是 Phase 2 表达式（引用 Element 字段），编译为 ExprProgram，
+        // 运行时零 FFI 求值。不接收 Python lambda/callable（用户硬约束 #1）。
+        // 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3.1。
         "RepeatUntilDescriptor" => {
             return Ok(Node::RepeatUntil(build_repeat_until_node(
                 py,
                 desc,
                 field_index,
                 expr_programs,
+                field_names,
             )?));
         }
         // StopIfDescriptor（Phase 4）→ StopIfNode。
@@ -811,6 +844,7 @@ fn build_array_node(
     desc: &Bound<'_, PyAny>,
     field_index: usize,
     expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
 ) -> Result<ArrayNode, ConstructError> {
     // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
     let subcon_desc = desc
@@ -821,8 +855,14 @@ fn build_array_node(
                 e, field_index
             ),
         })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
 
     // 2. 解析 count：常量 or 表达式。
     let count_obj = desc
@@ -914,6 +954,7 @@ fn build_greedy_range_node(
     desc: &Bound<'_, PyAny>,
     field_index: usize,
     expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
 ) -> Result<GreedyRangeNode, ConstructError> {
     // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
     let subcon_desc = desc
@@ -924,8 +965,14 @@ fn build_greedy_range_node(
                 e, field_index
             ),
         })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
 
     // 2. discard 标志（默认 false）。
     let discard: bool = desc
@@ -955,6 +1002,7 @@ fn build_prefixed_array_node(
     desc: &Bound<'_, PyAny>,
     field_index: usize,
     expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
 ) -> Result<PrefixedArrayNode, ConstructError> {
     // 1. 递归编译 countfield（沿用 field_index）。
     let countfield_desc = desc
@@ -965,8 +1013,14 @@ fn build_prefixed_array_node(
                 e, field_index
             ),
         })?;
-    let countfield_node =
-        build_node_from_descriptor(py, &countfield_desc, field_index, expr_programs, false)?;
+    let countfield_node = build_node_from_descriptor(
+        py,
+        &countfield_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
 
     // 2. 递归编译 subcon（沿用 field_index）。
     let subcon_desc = desc
@@ -977,8 +1031,14 @@ fn build_prefixed_array_node(
                 e, field_index
             ),
         })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, expr_programs, false)?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
 
     Ok(PrefixedArrayNode::new(countfield_node, inner_node))
 }
@@ -1074,14 +1134,31 @@ fn build_stop_if_node(
 ///
 /// **阶段 1 临时占位**：v5 重写RepeatUntilNode 数据结构与编译逻辑，
 /// 详见 `docs/模块设计-Array.md` §4.3 / §6.3。完整实现将在阶段 6 引入。
+/// 编译 `RepeatUntilDescriptor` → `RepeatUntilNode`（v5 完全重写）。
+///
+/// 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3.1。
+///
+/// # v5 编译路径
+///
+/// 1. 从 desc 读取 terminator / subcon / discard
+/// 2. 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式）
+/// 3. 从 `expr_programs[field_index]["terminator"]` 取 ExprOp 列表 → ExprProgram
+/// 4. 从 `expr_programs[field_index]["element_field_idx"]` 取 Element 字段索引
+/// 5. 从 `field_names[element_field_idx]` 取 Element 字段名（intern PyString）
+///
+/// # v5 关键变更（vs v4）
+///
+/// - 不再从 `self.predicate` 读取 callable（v4 路径已删）
+/// - 终止表达式编译完全在 Python 侧 `_compile_expr_tree` 完成（与其他表达式字段同模式）
 fn build_repeat_until_node(
-    _py: Python<'_>,
+    py: Python<'_>,
     desc: &Bound<'_, PyAny>,
     field_index: usize,
-    _expr_programs: &[Option<Py<PyAny>>],
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
 ) -> Result<RepeatUntilNode, ConstructError> {
-    // 阶段 1 临时占位：读取 subcon 用于递归编译检查（保持编译管线完整性）。
-    let _subcon_desc = desc
+    // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
         .getattr("subcon")
         .map_err(|e| ConstructError::Compilation {
             message: format!(
@@ -1089,8 +1166,106 @@ fn build_repeat_until_node(
                 e, field_index
             ),
         })?;
-    // 阶段 6 将完成完整编译逻辑（terminator ExprProgram + element_field_idx）。
-    unimplemented!("build_repeat_until_node: v5 阶段 6 完全重写");
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 2. 从 expr_programs[field_index] 取终止表达式 + Element 字段索引。
+    //    Python 侧 _mixin._compile_expressions 通过 RepeatUntilDescriptor
+    //    .set_compiled_expr_params(ops, element_field_idx) 注入。
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil field has no expression program (field index {}); \
+                 terminator expression is required",
+                field_index
+            ),
+        })?;
+    let field_exprs_dict =
+        field_exprs
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "RepeatUntil expression program must be a dict".to_string(),
+            })?;
+
+    // 2a. 取终止表达式 ExprOp 列表（必填）。
+    let ops_obj = field_exprs_dict
+        .get_item("terminator")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get 'terminator' from RepeatUntil expression programs: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil missing 'terminator' in expression programs (field index {})",
+                field_index
+            ),
+        })?;
+    let ops = parse_expr_ops_from_py(&ops_obj)?;
+    let terminator = ExprProgram::new(ops);
+
+    // 2b. 取 Element 字段索引（必填，编译期由 Python 侧从终止表达式引用的
+    // Element 字段推导）。
+    let element_field_idx_obj = field_exprs_dict
+        .get_item("element_field_idx")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get 'element_field_idx' from RepeatUntil expression programs: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "RepeatUntil missing 'element_field_idx' in expression programs (field index {})",
+                field_index
+            ),
+        })?;
+    let element_field_idx: usize =
+        element_field_idx_obj
+            .extract()
+            .map_err(|_| ConstructError::Compilation {
+                message: format!(
+                    "RepeatUntil 'element_field_idx' must be int (field index {})",
+                    field_index
+                ),
+            })?;
+
+    // 3. 取 Element 字段名（intern PyString，set_field_at 的 key 参数）。
+    let element_field_name_str =
+        field_names
+            .get(element_field_idx)
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "RepeatUntil element_field_idx {} out of range (field_names len {})",
+                    element_field_idx,
+                    field_names.len()
+                ),
+            })?;
+    let element_field_name = crate::instance::intern_pystring(py, element_field_name_str);
+
+    // 4. discard 标志（默认 false）。
+    let discard: bool = desc
+        .getattr("discard")
+        .and_then(|d| d.extract())
+        .unwrap_or(false);
+
+    Ok(RepeatUntilNode::new(
+        inner_node,
+        terminator,
+        element_field_idx,
+        element_field_name,
+        discard,
+    ))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。

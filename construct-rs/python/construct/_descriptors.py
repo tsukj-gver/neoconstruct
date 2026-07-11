@@ -29,6 +29,9 @@
    - ``Bit()`` / ``Nibble()`` / ``Octet()`` — ``BitsInteger(1/4/8)`` 语法糖
 """
 
+# RepeatUntilDescriptor.__init__ 需要的 CompilationError（v5 callable 检查）。
+from ._errors import CompilationError
+
 # 从 Rust 扩展导入描述符类与单例。
 # 扩展未构建时静默跳过（允许纯 Python 开发模式）。
 try:
@@ -944,70 +947,128 @@ def StopIf(condfunc):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.5 v5: RepeatUntil 描述符（阶段 2 临时桩）
+# Phase 4 子任务 4.5 v5: RepeatUntil 描述符（v5 完全重写）
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3 / §13（v5）。
+# 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3.1 / §13（v5）。
 #
-# v5 用户硬约束（U-2 + U-4）：
+# v5 用户硬约束：
 # - 删除 AST 识别器（``_AST_OP_TO_EXPROP`` / ``_try_compile_repeat_predicate``）
-# - 不再接收 Python lambda/callable（阶段 6 重命名为 terminator + 类型检查）
-#
-# **阶段 2 临时桩**：仅保留描述符可导入，参数仍叫 ``predicate``，但不再做 AST
-# 识别或 callable 包装。阶段 6 将完全重写（改名 terminator + callable 检查）。
+# - 不再接收 Python lambda/callable（用户硬约束 #1）
+# - 第一参数从 ``predicate`` 改名为 ``terminator``（禁用"谓词"术语，用户硬约束 #3）
+# - terminator 必须是 Phase 2 表达式（``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 组合）
+#   编译为 ExprProgram，运行时零 FFI 求值（用户硬约束 #4）
 # ---------------------------------------------------------------------------
 
 
 class RepeatUntilDescriptor:
-    """``RepeatUntil(predicate, subcon, discard=False)`` 描述符（阶段 2 临时桩）。
+    """``RepeatUntil(terminator, subcon, discard=False)`` 描述符（v5 重写）。
 
-    v5 重写进行中（阶段 6 完成）。当前阶段：
-    - 删除了 AST 识别器（``_try_compile_repeat_predicate``）
-    - 删除了非 callable 包装（V-3 兼容）
-    - 参数仍叫 ``predicate``（阶段 6 改名 ``terminator``）
-    - ``_expr_params`` 暂为空 dict（阶段 6 替换为 ``{"terminator": <expr>, ...}``）
+    终止表达式数组：解析元素到 list 直到终止表达式求值非零（最后元素包含在内），
+    或从 list 构建字节序列直到某元素满足终止表达式。对应 Python construct 的 ``RepeatUntil``。
 
-    完整 v5 设计（阶段 6 实施）见 ``docs/模块设计-Array.md`` §6.3.1。
-
-    :param predicate: 阶段 6 将改名为 ``terminator``，要求 Phase 2 表达式。
-    :param subcon: 元素子构造器。
+    :param terminator: 终止表达式（Phase 2 表达式：``_FieldDescriptor`` / ``_ExprRef`` /
+                       ``int`` 组合）。必须引用同 Struct 中已声明的 Element 字段
+                       （如 ``e > 5``，其中 ``e`` 是 ``rfield(Element())``）。
+                       求值结果非零即终止。不接收 Python lambda / callable。
+    :param subcon: 元素子构造器（描述符）。
     :param discard: 若为 True，parse 返回空 list 但仍消耗流。
+
+    ``_expr_params`` 协议（v5）：
+
+    - 返回 ``{"terminator": <expr>, "element_field_idx": <int>}``（编译期由
+      ``set_compiled_expr_params`` 注入）。
+    - ``terminator`` 是终止表达式（由 ``_compile_expr_tree`` 编译为 ExprOp 列表）。
+    - ``element_field_idx`` 是终止表达式引用的 Element 字段在 Struct 中的索引
+      （由 ``_compile_expr_tree`` 在编译时从表达式中提取的 GetInt 索引推导）。
+
+    与 Python construct 的差异：
+
+    - **不接收 Python lambda / callable**：用户硬约束 #1（避免隐藏决策路径）。
+      Phase 2 表达式 VM 无法描述的终止逻辑（如 list 切片），用户须改用 Adapter
+      （显式慢路径）。详见 §13.9 能力边界。
+    - **discard 语义简化**：v5 中 discard 仅影响 parse 方向 list 收集；
+      build 方向 discard 不影响终止表达式求值（终止表达式不接收 list 参数）。
     """
 
-    __slots__ = ("predicate", "subcon", "discard", "_expr_params")
+    __slots__ = ("terminator", "subcon", "discard", "_expr_params", "_element_field_idx")
 
-    def __init__(self, predicate, subcon, discard=False):
-        """初始化 RepeatUntil 描述符（阶段 2 临时桩）。
+    def __init__(self, terminator, subcon, discard=False):
+        """初始化 RepeatUntil 描述符（v5 重写）。
 
-        :param predicate: 阶段 6 改名为 terminator，要求 Phase 2 表达式。
+        :param terminator: 终止表达式（Phase 2 表达式）。
         :param subcon: 元素子构造器。
         :param discard: 是否丢弃解析结果。
         """
-        self.predicate = predicate
+        # 用户硬约束 #1：terminator 不能是 callable（v5 删除 PyCallable 路径）。
+        # callable 包括 lambda / 函数 / 实现了 __call__ 的类实例。
+        if callable(terminator):
+            raise CompilationError(
+                "RepeatUntil terminator must be a Phase 2 expression "
+                "(_FieldDescriptor / _ExprRef / int), not a Python callable. "
+                "Example: RepeatUntil(e > 5, Int8ub) where 'e' is rfield(Element()). "
+                "For complex termination logic depending on list/context, "
+                "use Adapter (explicit slow path)."
+            )
+        self.terminator = terminator
         self.subcon = subcon
         self.discard = discard
-        # 阶段 2 临时：暂不编译任何表达式。阶段 6 引入 terminator + element_field_idx。
-        self._expr_params = {}
+        # _element_field_idx 由 _compile_expressions 在编译期填充（延迟设置）。
+        self._element_field_idx = None
+        # _expr_params 初始为 {"terminator": <expr>}，set_compiled_expr_params
+        # 会替换为含 element_field_idx 的版本。
+        self._expr_params = {"terminator": terminator}
+
+    def set_compiled_expr_params(self, ops, element_field_idx):
+        """编译期由 _compile_expressions 调用，注入已编译的 ops 和 Element 字段索引。
+
+        :param ops: 编译后的 ExprOp 元组列表（如 ``[("getint", 0), ("const", 5), ("gt",)]``）。
+        :param element_field_idx: Element 字段在 Struct 中的索引。
+        """
+        self._element_field_idx = element_field_idx
+        self._expr_params = {
+            "terminator": ops,
+            "element_field_idx": element_field_idx,
+        }
 
     def __repr__(self):
-        return "RepeatUntil(predicate={!r}, subcon={!r}, discard={!r})".format(
-            self.predicate, self.subcon, self.discard
+        return "RepeatUntil(terminator={!r}, subcon={!r}, discard={!r})".format(
+            self.terminator, self.subcon, self.discard
         )
 
 
-def RepeatUntil(predicate, subcon, discard=False):
-    """创建一个 RepeatUntil 描述符（阶段 2 临时桩）。
+def RepeatUntil(terminator, subcon, discard=False):
+    """创建一个 RepeatUntil 描述符（v5 重写）。
 
     终止表达式数组。对应 Python construct 的 ``RepeatUntil``。
 
-    v5 完整 API（阶段 6 实施）：``RepeatUntil(terminator, subcon, discard=False)``，
-    其中 ``terminator`` 是 Phase 2 表达式（引用 Element 字段）。
+    使用方式（终止表达式 = Phase 2 表达式，引用 Element 字段）::
 
-    :param predicate: 阶段 6 改名为 terminator，要求 Phase 2 表达式。
+        @dataclass
+        class Packet(StructMixin):
+            e: int = rfield(Element())                # 当前元素引用入口
+            payload: list = field(RepeatUntil(e > 5, Int8ub))
+
+        Packet.parse(b"\\x01\\x02\\x06\\xAA")
+        # Packet(e=None, payload=[1, 2, 6])    # 最后元素 6 满足 e > 5
+
+    限制（Phase 4.5 v5）：
+
+    - **不接收 Python lambda / callable**（用户硬约束 #1）。如传入 callable，
+      ``RepeatUntilDescriptor.__init__`` 立即抛 ``CompilationError``。
+    - 终止表达式必须引用 Element 字段（编译期校验，否则 ``terminator must reference
+      an Element field`` 错误）。
+    - sizeof 永远返回 ``SizeofError``
+    - inner subcon 不支持含表达式的子描述符（与 ``Array`` / ``Bitwise`` 同限制）
+
+    Phase 2 表达式 VM 无法描述的终止逻辑（如 list 切片、字符串比较），
+    用户须改用 Adapter（显式慢路径）。详见 §13.9 能力边界。
+
+    :param terminator: 终止表达式（Phase 2 表达式，引用 Element 字段）。
     :param subcon: 元素子构造器。
     :param discard: 若为 True，parse 返回空 list 但仍消耗流。
     :return: ``RepeatUntilDescriptor`` 实例。
     """
-    return RepeatUntilDescriptor(predicate, subcon, discard)
+    return RepeatUntilDescriptor(terminator, subcon, discard)
 
 
 __all__ = [

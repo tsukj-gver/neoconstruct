@@ -627,12 +627,17 @@ def _compile_expressions(descriptors, field_index_map):
     1. 从 subcon 提取表达式参数（``_extract_and_compile_exprs``）
     2. 对每个表达式执行编译期验证（前向引用、WO 引用）
     3. 收集到 ``{field_index: {param_name: [expr_ops]}}`` 结构
+    4. RepeatUntilDescriptor 特殊处理：从 terminator ops 提取 element_field_idx
+       并调 set_compiled_expr_params（v5）
 
     :param descriptors: ``[(name, _FieldDescriptor), ...]`` 有序列表。
     :param field_index_map: ``{id(descriptor): field_index}``。
     :return: ``{field_index: {param_name: [expr_ops]}}`` 嵌套字典，空 dict 表示无表达式。
     :raises CompilationError: 任何表达式编译或验证失败。
     """
+    # v5：延迟导入 RepeatUntilDescriptor（避免循环导入）。
+    from ._descriptors import RepeatUntilDescriptor
+
     expr_programs = {}
     for idx, (name, desc) in enumerate(descriptors):
         subcon = desc.subcon
@@ -643,7 +648,77 @@ def _compile_expressions(descriptors, field_index_map):
                 _check_forward_reference(ops, idx, name)
                 _check_wo_reference(ops, descriptors, name)
             expr_programs[idx] = field_exprs
+
+        # v5 RepeatUntil 特殊处理：terminator 表达式需提取 element_field_idx。
+        if isinstance(subcon, RepeatUntilDescriptor):
+            _finalize_repeat_until(subcon, field_exprs, idx, name, descriptors)
+
     return expr_programs
+
+
+def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descriptors):
+    """v5：完成 RepeatUntilDescriptor 的编译期参数注入。
+
+    从 terminator ops 中提取第一个 getint 索引作为 element_field_idx，
+    调 ``desc.set_compiled_expr_params(ops, element_field_idx)``，
+    并把 element_field_idx 写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
+
+    设计依据：``docs/模块设计-Array.md`` §6.3.1 DEV 实现要点。
+
+    :raises CompilationError: terminator 不引用任何 Element 字段。
+    """
+    ops = field_exprs.get("terminator")
+    if ops is None:
+        raise CompilationError(
+            "RepeatUntil field '{}' (index {}) missing 'terminator' expression. "
+            "terminator must be a Phase 2 expression (e.g. e > 5).".format(
+                field_name, field_index
+            )
+        )
+
+    # 提取第一个 getint 索引作为 element_field_idx。
+    # 终止表达式必须引用 Element 字段（设计 §7.3 RU-13）。
+    element_field_idx = None
+    for op in ops:
+        if op[0] == "getint":
+            element_field_idx = op[1]
+            break
+
+    if element_field_idx is None:
+        raise CompilationError(
+            "RepeatUntil terminator in field '{}' (index {}) does not reference any "
+            "field. terminator must reference an Element field declared before "
+            "RepeatUntil (e.g. e > 5 where e = rfield(Element())).".format(
+                field_name, field_index
+            )
+        )
+
+    # 校验 element_field_idx 引用的字段确实是 Element 字段（设计 §7.3 RU-15）。
+    if element_field_idx >= len(descriptors):
+        raise CompilationError(
+            "RepeatUntil element_field_idx {} out of range (field_count {}) in "
+            "field '{}' (index {}).".format(
+                element_field_idx, len(descriptors), field_name, field_index
+            )
+        )
+    elem_name, elem_desc = descriptors[element_field_idx]
+    elem_subcon = elem_desc.subcon
+    from ._descriptors import ElementDescriptor
+
+    if not isinstance(elem_subcon, ElementDescriptor):
+        raise CompilationError(
+            "RepeatUntil terminator in field '{}' (index {}) references field '{}' "
+            "(index {}) which is not an Element field. Use rfield(Element()) to "
+            "declare an Element field for RepeatUntil terminator.".format(
+                field_name, field_index, elem_name, element_field_idx
+            )
+        )
+
+    # 注入编译产物到描述符（供 Rust 侧 build_repeat_until_node 读取）。
+    desc.set_compiled_expr_params(ops, element_field_idx)
+    # 同步更新 field_exprs：替换 terminator 值为已编译 ops + 新增 element_field_idx。
+    field_exprs["terminator"] = ops
+    field_exprs["element_field_idx"] = element_field_idx
 
 
 def _expr_programs_to_list(expr_programs, field_count):
