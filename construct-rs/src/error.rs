@@ -224,7 +224,7 @@ pub enum ConstructError {
         path: String,
     },
 
-    /// RepeatUntil build 时无元素满足谓词。
+    /// RepeatUntil build 时无元素满足终止表达式。
     ///
     /// 对应 Python construct 的 `RepeatError`（`core.py` L2700）。
     #[error("repeat error: {message} at {path}")]
@@ -514,7 +514,7 @@ struct ExceptionClasses {
     /// Python construct 的 `RangeError`，用于 Array count 无效等。
     range_error: Py<PyType>,
     /// 对应 `ConstructError::Repeat`（Phase 4）。
-    /// Python construct 的 `RepeatError`，用于 RepeatUntil build 无元素满足谓词。
+    /// Python construct 的 `RepeatError`，用于 RepeatUntil build 无元素满足终止表达式。
     repeat_error: Py<PyType>,
     /// 对应 `ConstructError::StopField`（Phase 4）。
     /// Python construct 的 `StopFieldError`，StopIf 早停信号。

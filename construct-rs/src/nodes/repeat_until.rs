@@ -15,8 +15,8 @@
 //! - **终止表达式 = Phase 2 ExprProgram**：编译期从用户面表达式编译，运行时
 //!   Rust 内部栈式 VM 求值（零 FFI）
 //! - **Element 字段借用模式**：用户声明 `e: int = rfield(Element())`，RepeatUntil
-//!   在迭代时 `ctx.set_field_at(element_field_idx, elem, ...)` 借用 Element 字段
-//!   槽位，终止表达式中的 `GetInt(element_field_idx)` 即取到此值
+//!   在迭代时 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, elem)` 借用
+//!   Element 字段槽位，终止表达式中的 `GetInt(element_field_idx)` 即取到此值
 //! - **不引入 ExprOp::GetElem / _current_elem_ptr**（v4 删除，v5 不恢复）
 //!
 //! ## parse 流程（对齐 Python L2670-2682）
@@ -27,7 +27,7 @@
 //!    - 设置 `ctx._index = i`（4.7 lazy path：成功路径不调 path.push_index/pop）
 //!    - inner.parse → elem（失败直接上抛，RU-1，不像 GreedyRange 回退）
 //!    - 若 `!discard`，push elem 到 Vec
-//!    - `ctx.set_field_at(element_field_idx, elem_name, elem, py)` 借用 Element 字段槽位
+//!    - `ctx.set_expr_value_raw(element_field_idx, elem)` 借用 Element 字段槽位
 //!    - 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
 //!    - 非零 → 终止（最后元素已包含在 Vec 中，RU-2）；零 → 继续迭代
 //! 4. 一次性 `PyList::new_bound` + 恢复 `ctx._index`
@@ -37,7 +37,7 @@
 //! 1. 收集 obj（list/tuple/iterable）到 Vec（调 collect_obj_to_vec）
 //! 2. 遍历元素：
 //!    - inner.build(e) 写入 stream
-//!    - `ctx.set_field_at(element_field_idx, elem_name, e, py)` 借用 Element 字段槽位
+//!    - `ctx.set_expr_value_py(element_field_idx, e)` 借用 Element 字段槽位
 //!    - 求值终止表达式：非零 → matched=true，break
 //! 3. 若 !matched → `Repeat` 错误（RU-3）
 //!
@@ -81,7 +81,7 @@ use pyo3::types::PyString;
 ///
 /// 每次迭代：
 /// 1. inner.parse → elem（失败直接上抛，RU-1）
-/// 2. `ctx.set_field_at(element_field_idx, elem_name, elem, py)` 把当前元素借用为
+/// 2. `ctx.set_expr_value_raw(element_field_idx, elem)` 把当前元素借用为
 ///    Element 字段槽位
 /// 3. 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
 /// 4. 表达式非零 → 终止（最后元素包含在内，RU-2）；零 → 继续迭代
@@ -116,10 +116,10 @@ pub struct RepeatUntilNode {
     /// 求值结果非零即终止。
     terminator: ExprProgram,
     /// Element 字段在当前 Struct 的 `expr_values_buf` 中的索引（编译期确定）。
-    /// RepeatUntil 每次迭代调 `ctx.set_field_at(element_field_idx, ...)` 把当前元素
-    /// 写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
+    /// RepeatUntil 每次迭代调 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, ...)`
+    /// 把当前元素写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
     element_field_idx: usize,
-    /// Element 字段名（interned PyString，set_field_at 的 key 参数）。
+    /// Element 字段名（interned PyString，供调试/自省；v5.1 起按 idx 写槽位，不再作 key）。
     element_field_name: Py<PyString>,
     /// Index 字段索引列表（编译期从终止表达式中提取的 Index 字段索引，
     /// 不含 element_field_idx）。RepeatUntil 每次迭代把这些槽位同步为当前
@@ -193,7 +193,7 @@ impl RepeatUntilNode {
     /// has_expressions 判断（设计 §6.1.1）。
     ///
     /// **始终返回 true**（v5）：终止表达式始终引用 Element 字段，需要外层 Struct
-    /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_field_at` 可用。
+    /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_expr_value_*` 可用。
     ///
     /// 此外，inner 子树可能含表达式（虽 Phase 4 暂不支持 inner 表达式，但
     /// 防御性返回 true 避免未来扩展时遗漏 init）。

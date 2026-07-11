@@ -145,12 +145,12 @@ class RangeError(ConstructError):
 
 
 class RepeatError(ConstructError):
-    """重复错误：RepeatUntil build 时无元素满足谓词。
+    """重复错误：RepeatUntil build 时无元素满足终止表达式。
 
     对应 Python construct 的 ``RepeatError`` 和 Rust 的
     ``ConstructError::Repeat``。
 
-    Phase 4 新增：RepeatUntil build 遍历完列表无元素满足谓词时触发
+    Phase 4 新增：RepeatUntil build 遍历完列表无元素满足终止表达式时触发
     （core.py L2700）。
     """
 

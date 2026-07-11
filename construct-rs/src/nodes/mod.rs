@@ -213,9 +213,9 @@ pub enum Node {
     /// 得到 count，再循环 count 次 inner.parse；build 先取 list 长度 build countfield，
     /// 再遍历 list build inner。
     PrefixedArray(PrefixedArrayNode),
-    /// 谓词终止数组节点（对应 Python construct `RepeatUntil(predicate, subcon, discard)`）。
-    /// Phase 4.5 新增。inner 用 `Box<Node>`，谓词可为 ExprProgram（快路径，零 FFI）
-    /// 或 PyCallable（兜底，每次迭代跨 FFI）。parse/build 循环直到谓词为真
+    /// 终止表达式数组节点（对应 Python construct `RepeatUntil(predicate, subcon, discard)`）。
+    /// Phase 4.5 新增。inner 用 `Box<Node>`，终止表达式为 ExprProgram（编译期从
+    /// 用户面表达式编译，运行时零 FFI）。parse/build 循环直到终止表达式求值非零
     /// （最后元素包含在内）；build 无元素满足则 `Repeat` 错误。sizeof 永远 Err。
     RepeatUntil(RepeatUntilNode),
     /// 取当前数组迭代下标的节点（对应 Python construct `Index`）。
@@ -229,7 +229,7 @@ pub enum Node {
     StopIf(StopIfNode),
     /// RepeatUntil 当前元素引用入口节点（v5 新增；Python construct 无对应物）。
     /// Phase 4.5 v5 新增（设计 §4.7）。parse 始终返回 Py_None，值由
-    /// RepeatUntilNode 在迭代时 set_field_at 借用设置；build 是 no-op；
+    /// RepeatUntilNode 在迭代时 set_expr_value_raw/set_expr_value_py 借用设置；build 是 no-op；
     /// sizeof 返回 0；has_expressions 返回 false。
     Element(ElementNode),
 }

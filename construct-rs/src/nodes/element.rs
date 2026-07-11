@@ -11,7 +11,7 @@
 //! `_FieldDescriptor` + GetInt"哲学（设计决策记录 Phase 4 决策 3 + 决策 5）。
 //!
 //! - parse 返回 `Py_None`（Element 字段不持有真实数据——其值由 RepeatUntilNode
-//!   在迭代时通过 `ctx.set_field_at(element_field_idx, elem, ...)` 借用设置）
+//!   在迭代时通过 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, elem)` 借用设置）
 //! - build 是 no-op（sizeof=0，不写字节）
 //! - sizeof 返回 0
 //! - has_expressions 返回 false（ElementNode 自身不引用 Struct 字段，仅作为引用入口）
@@ -30,8 +30,8 @@
 //!
 //! ElementNode 与 IndexNode 同构——唯一的实现差异是值生命周期：
 //! - IndexNode：值由 IndexNode.parse 在 Struct 进入时一次性写入 ctx（单次 parse 周期）
-//! - ElementNode：值由 RepeatUntilNode 在每次迭代时主动 set_field_at 覆盖
-//!   （RepeatUntil 单次迭代周期，借用模式）
+//! - ElementNode：值由 RepeatUntilNode 在每次迭代时主动 set_expr_value_raw/
+//!   set_expr_value_py 覆盖（RepeatUntil 单次迭代周期，借用模式）
 //!
 //! 这是实现细节，不影响用户面一致性。
 
@@ -54,8 +54,8 @@ use pyo3::prelude::*;
 ///
 /// 始终返回 `Py_None`——ElementNode.parse 在用户面不可见。Element 字段的值
 /// 由 [`crate::nodes::repeat_until::RepeatUntilNode`] 在迭代时通过
-/// `ctx.set_field_at(element_field_idx, elem, ...)` 借用设置，终止表达式通过
-/// `GetInt(element_field_idx)` 取值。
+/// `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, elem)` 借用设置，
+/// 终止表达式通过 `GetInt(element_field_idx)` 取值。
 ///
 /// # build 行为
 ///

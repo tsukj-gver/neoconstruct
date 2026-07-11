@@ -933,11 +933,11 @@ def StopIf(condfunc):
 #
 # 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3 / §10.1。
 #
-# ``RepeatUntil(predicate, subcon, discard=False)`` 是谓词终止数组描述符，对应
+# ``RepeatUntil(predicate, subcon, discard=False)`` 是终止表达式数组描述符，对应
 # Python construct 的 ``RepeatUntil``。construct-rs 通过 type name "RepeatUntilDescriptor"
 # 识别，构建 ``Node::RepeatUntil(RepeatUntilNode)``。
 #
-# 两条谓词路径（设计 §4.3.1 / §2.5）：
+# 两条终止表达式路径（设计 §4.3.1 / §2.5）：
 # - **Expr 路径**（性能 ≥8x）：简单 lambda（如 ``lambda x,_,_: x > 5``）编译期
 #   通过 AST 识别并翻译为 ExprProgram ``[GetElem, Const(N), Op]``，运行时零 FFI。
 #   仅支持整数元素 + 6 种比较运算（>, >=, ==, !=, <, <=）。
@@ -954,7 +954,7 @@ def StopIf(condfunc):
 # v5 用户硬约束：
 # - 删除 AST 识别器（``_AST_OP_TO_EXPROP`` / ``_try_compile_repeat_predicate``）
 # - 不再接收 Python lambda/callable（用户硬约束 #1）
-# - 第一参数从 ``predicate`` 改名为 ``terminator``（禁用"谓词"术语，用户硬约束 #3）
+# - 第一参数从 ``predicate`` 改名为 ``terminator``（用户硬约束 #3，统一使用"终止表达式"表述）
 # - terminator 必须是 Phase 2 表达式（``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 组合）
 #   编译为 ExprProgram，运行时零 FFI 求值（用户硬约束 #4）
 # ---------------------------------------------------------------------------
