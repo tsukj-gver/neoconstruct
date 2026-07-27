@@ -2,8 +2,8 @@
   "manifest_version": "1.0",
   "harness_spec_version": "1.0",
   "iteration": 2,
-  "timestamp": "2026-07-27T12:00:00+08:00",
-  "author": "pm (user request)",
+  "timestamp": "2026-07-27T22:10:00+08:00",
+  "author": "pm (verification)",
   "changes": [
     {
       "change_id": "ch_005",
@@ -11,33 +11,70 @@
       "subtype": "update",
       "file_path": "opencode.json",
       "summary": "为 opencode 启用 websearch 与 webfetch 工具的 permission 配置",
-      "failure_evidence": "Harness Audit iteration 1 报告 Tool Descriptions 组件状态为 ❌（完全缺失）。用户指令明确要求启用 websearch 功能以访问 AHE 论文与仓库",
-      "root_cause": "opencode.json 未声明 permission.websearch / permission.webfetch，默认行为不显式。websearch 工具实际可用性还受 OPENCODE_ENABLE_EXA 环境变量控制，未设置",
-      "targeted_fix": "opencode.json 添加 permission: { websearch: 'allow', webfetch: 'allow' }。同时通过 setx OPENCODE_ENABLE_EXA 1 设置用户级持久环境变量（Exa AI 提供搜索后端，免 API key）",
+      "failure_evidence": "Harness Audit iteration 1 报告 Tool Descriptions 组件状态为 ❌。用户指令明确要求启用 websearch",
+      "root_cause": "opencode.json 未声明 permission.websearch；websearch 后端 Exa AI 需要 OPENCODE_ENABLE_EXA=1 环境变量",
+      "targeted_fix": "opencode.json permission + setx OPENCODE_ENABLE_EXA=1",
       "predicted_impact": {
-        "expected_fixes": [
-          "重启 opencode 后，agent 工具列表中出现 websearch 工具",
-          "agent 可主动检索 AHE 论文、仓库、依赖库等在线资源",
-          "ARCH 设计阶段可参考 pydantic-core、mashumaro 等参考项目的最新文档"
-        ],
-        "at_risk_regressions": [
-          "websearch 通过 Exa AI 在线服务，若网络受限或 Exa 服务异常则失败",
-          "Exa AI 免 key 但有未公开的速率限制，密集搜索可能受限"
-        ],
-        "rationale": "opencode 官方文档明确：websearch 工具在 OPENCODE_ENABLE_EXA=1 或使用 OpenCode provider 时启用。Exa AI 后端免 key。本次修改同时覆盖配置（permission）与启用条件（env）"
+        "expected_fixes": ["重启 opencode 后 websearch 工具可用"],
+        "at_risk_regressions": ["环境变量未传播则失败"],
+        "rationale": "opencode 官方文档明确启用方式"
       }
     }
   ],
   "verification": {
-    "status": "pending",
-    "scheduled_at": "2026-07-28T00:00:00+08:00",
-    "verification_method": "用户重启 opencode 后，在新会话中调用 websearch 工具检索 'Agentic Harness Engineering arxiv'，验证返回结果包含 https://arxiv.org/abs/2604.25850"
+    "status": "partial",
+    "scheduled_at": "2026-07-27T22:00:00+08:00",
+    "completed_at": "2026-07-27T22:10:00+08:00",
+    "result": {
+      "expected_fixes_verified": [
+        "opencode.json permission.websearch=allow 配置生效（磁盘已写入）",
+        "User 级环境变量 OPENCODE_ENABLE_EXA=1 已持久（[Environment]::GetEnvironmentVariable 确认）",
+        "AHE 论文 URL https://arxiv.org/abs/2604.25850 通过 webfetch 验证可达",
+        "AHE 仓库 URL https://github.com/china-qijizhifeng/agentic-harness-engineering 通过 webfetch 验证可达"
+      ],
+      "unexpected_fixes": [],
+      "regressions_observed": [],
+      "false_predictions": [
+        "预测：'重启 opencode 后 websearch 工具可用' —— 部分证伪"
+      ],
+      "primary_failure": {
+        "symptom": "重启后 websearch 工具仍未出现在 agent 工具列表中（agent 可见工具：bash/edit/glob/grep/question/read/skill/task/todowrite/webfetch/write，无 websearch）",
+        "diagnostic_data": {
+          "user_scope_env_var": "OPENCODE_ENABLE_EXA = '1' (persistent)",
+          "current_process_env_var": "OPENCODE_ENABLE_EXA = '' (empty)",
+          "opencode_pid": 15372,
+          "opencode_parent": "powershell.exe PID 11320 (interactive shell, no args)",
+          "opencode_grandparent": "PID 10652"
+        },
+        "root_cause": "Windows 环境变量传播规则：setx 写入注册表 HKCU\\Environment，但已运行的进程（含 explorer.exe 和已打开的 PowerShell 窗口）不会自动重新读取。用户重启 opencode 时，是从一个 setx 之前就已打开的 PowerShell 窗口启动的——该窗口及它启动的 opencode 子进程都没有继承新变量。当前 opencode 进程的 OPENCODE_ENABLE_EXA 为空字符串，因此 websearch 工具未启用",
+        "why_user_restart_didnt_help": "用户重启了 opencode，但启动它的父 PowerShell 是旧进程。需要父 shell 也是 setx 之后启动的才能继承"
+      }
+    },
+    "verdict": "partial",
+    "verdict_rationale": "配置层正确（opencode.json + 用户级环境变量均已持久），但运行时未生效（环境变量未传播到当前 opencode 进程）。用户决定：跳过自动修复，按当前状态记录"
   },
-  "note_pre_verification_evidence": {
-    "webfetch_already_verified": [
-      "https://arxiv.org/abs/2604.25850 — 抓取成功，确认论文存在（标题：Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses；作者：Jiahang Lin 等 11 人；2026-04-28 v1 → 2026-05-18 v4）",
-      "https://github.com/china-qijizhifeng/agentic-harness-engineering — 抓取成功，确认仓库存在（775 stars / 86 forks；MIT license；含 evolve.py / agents/ / scripts/ 等代码）"
-    ],
-    "caveat": "webfetch 与 websearch 是不同工具：webfetch 抓取已知 URL 内容（当前会话已可用），websearch 用 Exa AI 搜索未知信息（需重启 opencode 才生效）。两者网络层独立，但都依赖外网可达——webfetch 验证通过说明网络层正常"
+  "recovery_options": [
+    {
+      "option": "A (推荐) 关闭所有 PowerShell 窗口后重新打开新的，再启动 opencode",
+      "rationale": "新启动的 PowerShell 会从注册表读到 OPENCODE_ENABLE_EXA=1，opencode 子进程会继承"
+    },
+    {
+      "option": "B 在启动 opencode 的 PowerShell 窗口里手动注入：$env:OPENCODE_ENABLE_EXA='1'; opencode",
+      "rationale": "进程级环境变量立即生效，子进程继承"
+    },
+    {
+      "option": "C 注销 Windows 当前用户后重新登录",
+      "rationale": "强制 explorer.exe 重启，所有新启动的程序都会读到新变量"
+    },
+    {
+      "option": "D 重启电脑",
+      "rationale": "彻底但代价大，仅在 A/B/C 不便时使用"
+    }
+  ],
+  "skip_decision": {
+    "decision": "skip",
+    "decided_by": "user",
+    "reason": "用户指令'若未成功，则跳过并记录'",
+    "next_action": "本次迭代不强制修复。后续若需要 websearch，按 recovery_options 中任一方式重启 opencode 即可。配置文件已就位，无需再做任何磁盘修改"
   }
 }
