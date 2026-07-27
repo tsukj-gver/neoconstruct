@@ -1,3 +1,13 @@
+---
+id: DESIGN-Context-Vec
+status: active
+phase: "2.5"
+depends_on: [DESIGN-Expr, ADR-007, ADR-008]
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 模块设计：Context Vec 优化（Phase 2.5）
 
 > **目标**：使 E1-E3 全部 parse/build 场景达到 ≥10x 加速比（vs Python construct 2.10.70）。

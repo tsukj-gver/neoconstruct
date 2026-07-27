@@ -1,0 +1,112 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 3,
+  "timestamp": "2026-07-27T23:30:00+08:00",
+  "author": "pm (AHE iteration 3)",
+  "scope_summary": "记录文档与设计文档按 AHE 模式重构（T1 结构正交 + T2 frontmatter + T3 ADR 化）",
+  "changes": [
+    {
+      "change_id": "ch_006",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "MEMORY.md",
+      "summary": "建立 HARNESS.md 标准的顶层 LTM 索引（MEMORY.md），整合 00-项目进度.md 的 PM 入口功能 + 跨阶段知识指针（experiences.md / docs/decisions/ / docs/design/）",
+      "failure_evidence": "Harness Audit 发现：(1) 项目无 MEMORY.md，违反 HARNESS.md §目录结构标准；(2) 00-项目进度.md 既承担 PM 入口仪表盘又承担阶段状态细节，与各 phase 总纲.md 形成状态信息双源真相（P-4）；(3) 新角色启动时缺乏统一的 'harness 入口' 指针",
+      "root_cause": "项目早期按 PM 直觉建立 00-项目进度.md 作为入口，未对照 HARNESS.md 标准。状态信息天然分散在'阶段仪表盘'和'phase 内部清单'两处，缺乏单一事实源约束",
+      "targeted_fix": "新建 MEMORY.md 作为 HARNESS 标准 LTM 顶层：(1) 项目定位一句话；(2) LTM 索引（指向 experiences.md / docs/decisions/ / docs/design/）；(3) 阶段索引（指向各 phase 总纲.md，单行状态 + tag）；(4) harness 组件清单（指向 AGENTS.md / .opencode/ / manifests/）。00-项目进度.md 同步精简为纯历史快照（不再保活跃状态）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "P-4 状态信息双源真相消除——阶段状态以 phaseN/总纲.md 为单一源，MEMORY.md 只索引",
+          "新角色启动时从 MEMORY.md 入口，按 HARNESS 标准流程读取 LTM",
+          "experiences.md / docs/decisions/ 的检索率上升（MEMORY.md 集中指针）"
+        ],
+        "at_risk_regressions": [
+          "PM 习惯性查 00-项目进度.md 看状态，迁移期需要双读——需配合 AGENTS.md §6 入口指引更新"
+        ],
+        "rationale": "MEMORY.md 是 HARNESS.md v1.0 §目录结构标准的硬要求。建立后与项目现有 LTM（experiences.md + 设计决策记录）形成完整的三层 LTM：MEMORY.md（顶层索引）/ experiences.md（模式化失败教训）/ ADR-*（具体决策）"
+      }
+    },
+    {
+      "change_id": "ch_007",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "docs/设计决策记录.md → docs/decisions/ADR-NNN-*.md",
+      "summary": "T3 ADR 化：将单文件表格型决策记录拆为多个独立 ADR（Architecture Decision Record），每条决策含 context / decision / status / consequences / relations",
+      "failure_evidence": "P-2 文档类型混杂：docs/设计决策记录.md 是 57 行的大表格，所有 Phase 的决策混在一张表里。Phase 4 决策 4' / 5 出现 'v5 用户打回作废' / 'v5 新增' / 'v5 实施澄清' 等版本演化标注，表格形式无法清晰表达 supersede 关系。experiences.md L-04 教训指出'模式未沉淀'是反复出现的失败模式——表格决策记录无法表达'某条决策替代了哪条旧决策'",
+      "root_cause": "表格形式适合'决策一览'但不适合'决策演化追溯'。当决策被修订（如 Phase 4 决策 4 被 4' 替代），表格只能用删除线+脚注标记，丧失可追溯性。ADR 格式（每决策一文件 + status: proposed/accepted/deprecated/superseded）是工业界成熟的决策演化管理方案",
+      "targeted_fix": "docs/decisions/ 目录下按主题建 ADR 文件：ADR-001 ~ ADR-006（Phase 2 表达式）/ ADR-007 ~ ADR-008（Phase 2.5 性能）/ ADR-009 ~ ADR-010（Phase 3 BitStream）/ ADR-011 ~ ADR-015（Phase 4 Array，含 4 被 4' supersede）/ ADR-016 ~ ADR-018（跨阶段模式 P0-3 / Vec 中转 / _index save-restore）。原 docs/设计决策记录.md 转为 docs/decisions/README.md 索引（保留表格视图但每条链接到 ADR）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "P-2 减轻：决策记录从 docs/ 根目录下沉到 docs/decisions/，根目录文档类型减少一类",
+          "决策演化可追溯：ADR-014 (决策 4') 显式声明 supersedes: ADR-013 (决策 4)，读者可顺藤摸瓜",
+          "experiences.md L-04 对策'模式沉淀到决策记录'有更清晰的归宿——每个模式一个 ADR"
+        ],
+        "at_risk_regressions": [
+          "文件数量从 1 增加到 ~19，若 docs/decisions/README.md 索引未维护，读者找不到决策",
+          "ADR 模板若过于僵化（强制 context/consequences 都填），可能被角色视为形式主义"
+        ],
+        "rationale": "ADR 是 IEEE/ThoughtWorks 已验证的决策管理实践，与 AHE falsifiable 原则天然契合（每条决策是可证伪假设，superseded 关系记录证伪结果）。当前决策记录已出现版本演化（v4→v5），不 ADR 化将越来越乱"
+      }
+    },
+    {
+      "change_id": "ch_008",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "docs/ + plans/phase{1,2,3}/过程记录.md",
+      "summary": "T1 结构正交 + T2 frontmatter：docs/ 重组为 design/decisions/reviews/analysis/archive/ 子目录；phase1/2/3 巨型过程记录（共 7734 行）按子任务拆分为 per-文件；所有文档加 YAML frontmatter（id/status/phase/depends_on/supersedes/last_updated）",
+      "failure_evidence": "P-1 巨型过程记录：phase4 过程记录 5216 行 / phase1 2737 行 / phase2 2515 行 / phase3 2482 行。单文件无法精细回滚，agent 读特定子任务记录必须读整个文件（上下文消耗极大）。P-2 docs/ 5 类文档平铺根目录（设计 8 / 决策 1 / 修订 2 / 审查 1 / 分析 3），命名前缀不统一（'模块设计-' vs 'FFI' vs 'Mixin'）",
+      "root_cause": "AGENTS.md §5 规定'每个子任务的过程记录段必须包含以下结构'——但未规定'每个子任务一个文件'。docs/ 缺乏子目录分类标准。文档缺乏元数据头，无法机器解析状态/依赖",
+      "targeted_fix": "(1) docs/design/（活跃设计 8 个）/ docs/decisions/（ADR）/ docs/reviews/（架构审查）/ docs/analysis/（已有 + 迁入 phase3/4 分析报告 + 不对称分析）/ docs/archive/phase1/（Phase 1 修订日志归档）。(2) phase1/2/3 过程记录按子任务拆为 过程记录-X.Y.md（per-文件 ~250-300 行）。(3) 每文件 YAML frontmatter 头。(4) phase4 过程记录不拆分（仍在追加），但新追加内容改用新结构",
+      "predicted_impact": {
+        "expected_fixes": [
+          "P-1 解决：单文件最大 ~300 行，agent 读特定子任务只需读对应文件",
+          "P-2 解决：docs/ 根目录清空，所有文档归类子目录",
+          "P-5 解决：archive 机制建立，已完成 phase 的修订日志归档",
+          "frontmatter 让 agent 启动时可机器扫描文档状态（grep 'status: superseded' 找过时决策）"
+        ],
+        "at_risk_regressions": [
+          "文件路径全变，所有交叉引用（AGENTS.md / experiences.md / docs 内部互引 / phaseN/总纲.md）需批量更新，遗漏即 broken reference",
+          "frontmatter 增加角色书写负担，若 agent 不主动填，元数据失效",
+          "phase4 过程记录保持单文件与新规范不一致——需在 phaseN/索引.md 标注 'phase4 例外'"
+        ],
+        "rationale": "组件可观测性是 HARNESS.md 硬要求。frontmatter 是 AHE 三层可观测性中'组件可观测性'的实现手段——让每个工件可被机器解析。结构正交消除检索成本"
+      }
+    },
+    {
+      "change_id": "ch_009",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md",
+      "summary": "同步更新 AGENTS.md：§2 目录结构（新目录树）/ §5 过程记录格式（per-子任务文件 + frontmatter）/ §10 引用路径（docs 子目录化）/ §12 文件权限（docs 子目录归属）",
+      "failure_evidence": "本次 harness 重构后，AGENTS.md §2 现有目录树过时，§5 过程记录格式描述与实际 per-文件结构不符，§10 表格中 '模块设计-表达式系统.md' 等路径失效",
+      "root_cause": "AGENTS.md 是 System Rules 核心文件，任何 harness 结构变更必须同步更新",
+      "targeted_fix": "AGENTS.md 四处对齐：(1) §2 目录树加入 docs/design/decisions/reviews/analysis/archive + plans/phaseN/过程记录-X.Y.md；(2) §5 加入 frontmatter schema 规范 + per-子任务文件说明 + phase4 例外条款；(3) §10 引用路径前缀加 docs/design/；(4) §12 文件权限不变（PM 仍只写 plans/，但允许 PM 在 harness 维护任务中重组 docs/）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "AGENTS.md 与实际结构一致，消除 Rules 漂移",
+          "新 agent 启动时按 §2 目录树能找到所有文档"
+        ],
+        "at_risk_regressions": [
+          "§5 过程记录格式变更可能影响 in-flight 子任务（Phase 4）——需明确'新格式仅适用于新建子任务记录'"
+        ],
+        "rationale": "System Rules 内部一致性是 HARNESS.md 合规检查清单的硬要求"
+      }
+    }
+  ],
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "2026-08-10T00:00:00+08:00",
+    "verification_method": "下次 Harness Audit 时检查：(1) MEMORY.md 是否被 agent 启动时主动引用；(2) ADR 文件是否在 ARCH 设计新模块时被对照（L-04 对策）；(3) frontmatter status 字段是否被 agent 用于过滤过时文档；(4) 过程记录 per-文件是否降低 agent 上下文消耗；(5) docs/ 根目录是否保持清空状态"
+  },
+  "evidence_summary": {
+    "audit_findings_addressed": ["P-1", "P-2", "P-3", "P-4", "P-5"],
+    "existing_lessons_applied": ["L-04 (跨阶段模式未沉淀 → ADR 化)", "L-03 (PM 接受不对等证据 → frontmatter status 让证据类型机器可读)"],
+    "tier_coverage": {
+      "T1_structure_orthogonality": "ch_008 (docs 重组 + 过程记录拆分)",
+      "T2_metadata_frontmatter": "ch_008 (frontmatter schema)",
+      "T3_ADR_decision_records": "ch_007 (ADR 拆分)",
+      "LTM_elevation": "ch_006 (MEMORY.md)"
+    }
+  }
+}

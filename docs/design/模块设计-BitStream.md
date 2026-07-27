@@ -1,3 +1,13 @@
+---
+id: DESIGN-BitStream
+status: active
+phase: "3"
+depends_on: [DESIGN-Architecture, ADR-009, ADR-010]
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 模块设计：BitStream 支持（Phase 3）
 
 > **设计依据**：

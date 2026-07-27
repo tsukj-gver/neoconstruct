@@ -1,3 +1,13 @@
+---
+id: ANALYSIS-Phase3-Asymmetry
+status: archived
+phase: "3"
+depends_on: []
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # Phase 3 parse/build 不对称根因分析
 
 **分析人**：ARCH

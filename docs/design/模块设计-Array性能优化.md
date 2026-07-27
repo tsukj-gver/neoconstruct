@@ -1,3 +1,13 @@
+---
+id: DESIGN-Array-Perf
+status: active
+phase: "4"
+depends_on: [DESIGN-Array, ADR-016, ADR-017, ADR-018]
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 模块设计：Array 系列节点 per-iter 性能优化
 
 ## 模块位置

@@ -1,3 +1,13 @@
+---
+id: DESIGN-Mixin
+status: active
+phase: "0"
+depends_on: []
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # Dataclass Mixin 自动编译设计原则
 
 > 本文档定义 construct-rs 项目中"用户定义 dataclass 子类时自动完成编译，用户无感"这一模式的设计原则。

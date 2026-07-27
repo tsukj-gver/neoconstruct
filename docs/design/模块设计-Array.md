@@ -1,3 +1,13 @@
+---
+id: DESIGN-Array
+status: active
+phase: "4"
+depends_on: [DESIGN-Architecture, DESIGN-Expr, ADR-011, ADR-012, ADR-014, ADR-015]
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 模块设计：Array 支持（Phase 4）
 
 > **设计依据**：

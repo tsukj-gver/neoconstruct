@@ -40,7 +40,7 @@
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
 | 1 | 2026-06-21 | **推倒重来**：1.5-1.8 实现将解析结果先构造为 Rust 中间类型再逐个转换为 Python 对象，并在输入/输出侧引入 trait 抽象层使每个字段都跨越 FFI 边界。性能 0.3-1.8x。 | AGENTS.md §0 历史教训 |
-| 2 | 2026-06-22 | **Phase 1 设计修订 R3**：当前实现（1.5-1.8）的 `_parse_raw` 返回 dict 到 Python，Python 侧 `cls(**dict)`——dict 跨越 FFI 边界返回。ARCH/REV/PM 三方审查均未发现此违反。 | docs/设计修订-parse路径优化.md §0 |
+| 2 | 2026-06-22 | **Phase 1 设计修订 R3**：当前实现（1.5-1.8）的 `_parse_raw` 返回 dict 到 Python，Python 侧 `cls(**dict)`——dict 跨越 FFI 边界返回。ARCH/REV/PM 三方审查均未发现此违反。 | docs/archive/phase1/设计修订-parse路径优化.md §0 |
 | 3 | 2026-06-19 | **Phase 15 验收失败**：PyDictSink 仍 per-field 调 PyDict_SetItem，FFI 调用次数未减少。parse 0.26x / build 0.08x。 | performance-gate/SKILL.md §历史教训 |
 
 **根因**：
@@ -48,7 +48,7 @@
 2. 三方审查（ARCH/REV/PM）在缺乏显式 §0 对照表时，倾向于"功能正确即可"，不主动检查每条 §0 原则。
 
 **对策**（agent 必须执行）：
-- **ARCH**：设计文档中涉及 parse/build 数据流时，必须包含"§0 原则对照表"（见 docs/设计修订-parse路径优化.md §0.4 模板），逐条说明设计如何满足每条 §0 原则。
+- **ARCH**：设计文档中涉及 parse/build 数据流时，必须包含"§0 原则对照表"（见 docs/archive/phase1/设计修订-parse路径优化.md §0.4 模板），逐条说明设计如何满足每条 §0 原则。
 - **REV**：设计检视时，"§0 原则对照"是必查项——若设计文档未提供对照表，直接驳回。
 - **DEV**：实现时若发现需要在 parse 返回 dict / build 接收 dict 跨 FFI，立即标记 `[设计质疑]`，不可自行实现。
 - **PM**：验收 S-PERF 时，若性能 < 0.5x，优先怀疑中间表示层违反，分派 ARCH 做对照表审查。
@@ -69,7 +69,7 @@
 |---|------|------|------|
 | 1 | 2026-06-21 | 推倒重来前的设计声称理论加速，实际 0.3-1.8x。 | AGENTS.md §0 |
 | 2 | 2026-06-19 | Phase 15 设计声称"5000x 加速"（推算），REV 接受。实际 0.26x。 | performance-gate/SKILL.md §历史教训 |
-| 3 | 2026-06-28 | Phase 3 parse/build 不对称：前一轮调查将根因归为 tp_new（理论），被 Phase 2.5 数据推翻。需 7 组隔离实验才定位。 | docs/分析-phase3-parse-build不对称.md §1.2 |
+| 3 | 2026-06-28 | Phase 3 parse/build 不对称：前一轮调查将根因归为 tp_new（理论），被 Phase 2.5 数据推翻。需 7 组隔离实验才定位。 | docs/analysis/phase3-parse-build不对称.md §1.2 |
 
 **根因**：
 1. 理论估算容易给出吸引人的数字（"5000x"），但忽略了实际瓶颈（如 CPython 小整数缓存、pyo3 i128 任意精度路径）。
@@ -96,7 +96,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
 | 1 | 2026-06-19 | Phase 15：S-PERF-2 "Python 路径 ≥1.0x"，DEV 报告"bench 编译通过，无对比基准"，PM 接受并打 tag。实际 parse 0.26x / build 0.08x。 | performance-gate/SKILL.md §历史教训 |
-| 2 | 2026-07-11 | 架构审查发现：P0-3 lazy path 模式在 Phase 1 验证后未沉淀，导致 Phase 4 重新决策、重复实现，直到性能不达标才补救。PM 验收 Phase 1 时未检查"模式是否已沉淀"。 | docs/架构审查-重复代码与抽象质量.md §1.2 |
+| 2 | 2026-07-11 | 架构审查发现：P0-3 lazy path 模式在 Phase 1 验证后未沉淀，导致 Phase 4 重新决策、重复实现，直到性能不达标才补救。PM 验收 Phase 1 时未检查"模式是否已沉淀"。 | docs/reviews/架构审查-重复代码与抽象质量.md §1.2 |
 
 **根因**：
 1. PM 倾向于信任其他角色的结论（"DEV 报告通过"），而非独立验证证据类型。
@@ -111,7 +111,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 ## L-04: 跨阶段模式未沉淀
 
-> **核心约束**：新模式一旦在某个 Phase 验证，必须沉淀到 `docs/设计决策记录.md`
+> **核心约束**：新模式一旦在某个 Phase 验证，必须沉淀到 `docs/decisions/`（ADR-NNN）
 > 或本 experiences.md，避免后续 Phase 重新决策。
 
 **模式描述**：某个 Phase 中验证了优秀的模式（如 lazy path 优化），但未写入决策
@@ -121,16 +121,16 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
-| 1 | 2026-07-11 | **P0-3 lazy path 模式**：Phase 1 中由 StructNode 验证（成功路径不维护 Path 栈，子节点 Err 时重建）。未写入设计决策记录。Phase 4 Array 系列 4 个节点（array/greedy_range/prefixed_array/repeat_until）重新决策不用，重复实现 4 份 `restore_index` + 8 处 lazy path 错误传播。直到 4.7 性能不达标才补救。 | docs/架构审查-重复代码与抽象质量.md §1.2 |
-| 2 | 2026-06-22 | Phase 1 设计修订 R3 的方案 B'（pydantic-core 式实例构造）在 R1/R2 中未被识别——直到 PM 指出 §0 违反才调查 pydantic-core。pydantic-core 的做法本应在 Phase 0 架构设计阶段就沉淀为参考。 | docs/设计修订-parse路径优化.md R3 修订记录 |
+| 1 | 2026-07-11 | **P0-3 lazy path 模式**：Phase 1 中由 StructNode 验证（成功路径不维护 Path 栈，子节点 Err 时重建）。未写入设计决策记录。Phase 4 Array 系列 4 个节点（array/greedy_range/prefixed_array/repeat_until）重新决策不用，重复实现 4 份 `restore_index` + 8 处 lazy path 错误传播。直到 4.7 性能不达标才补救。 | docs/reviews/架构审查-重复代码与抽象质量.md §1.2 |
+| 2 | 2026-06-22 | Phase 1 设计修订 R3 的方案 B'（pydantic-core 式实例构造）在 R1/R2 中未被识别——直到 PM 指出 §0 违反才调查 pydantic-core。pydantic-core 的做法本应在 Phase 0 架构设计阶段就沉淀为参考。 | docs/archive/phase1/设计修订-parse路径优化.md R3 修订记录 |
 
 **根因**：
 1. Phase 验收清单只检查"功能/性能达标"，未检查"可复用模式是否已沉淀"。
-2. 设计决策记录（`docs/设计决策记录.md`）的更新无明确触发时机。
+2. 设计决策记录（`docs/decisions/`（ADR-NNN））的更新无明确触发时机。
 
 **对策**：
-- **PM**：Phase 验收清单新增"模式沉淀检查"——若本 Phase 验证了新的可复用模式（性能优化、错误处理范式、数据结构选择），必须确认已写入 `docs/设计决策记录.md` 或本 experiences.md。
-- **ARCH**：每个 Phase 设计时，先读取 `docs/设计决策记录.md` 和本文件，确认是否已有可复用模式。避免重新决策。
+- **PM**：Phase 验收清单新增"模式沉淀检查"——若本 Phase 验证了新的可复用模式（性能优化、错误处理范式、数据结构选择），必须确认已写入 `docs/decisions/`（ADR-NNN） 或本 experiences.md。
+- **ARCH**：每个 Phase 设计时，先读取 `docs/decisions/`（ADR-NNN） 和本文件，确认是否已有可复用模式。避免重新决策。
 - **AUDITOR**：审计 Phase 验收时，检查"模式沉淀"项是否执行。
 
 ---
@@ -147,7 +147,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
-| 1 | 2026-06-22 | Phase 1 设计修订 R1/R2：优化了表达式求值的 FFI，但未分析 PyDict_SetItem 仍是 per-field FFI。R3 才补全。 | docs/设计修订-parse路径优化.md R3 修订记录 |
+| 1 | 2026-06-22 | Phase 1 设计修订 R1/R2：优化了表达式求值的 FFI，但未分析 PyDict_SetItem 仍是 per-field FFI。R3 才补全。 | docs/archive/phase1/设计修订-parse路径优化.md R3 修订记录 |
 | 2 | 2026-06-19 | Phase 15：设计声称消除表达式 FFI，但 PyDictSink 仍 per-field 调 PyDict_SetItem。FFI 调用次数未减少。 | performance-gate/SKILL.md §历史教训 |
 
 **根因**：
@@ -169,7 +169,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
-| 1 | 2026-06-28 | Phase 3 parse/build 不对称分析：PM 起初认为 Phase 3 多出 ~56ns 不对称是 Phase 3 引入的新问题。ARCH 指出对比存在字段数混淆——Phase 1 B7 是 0 字段、Phase 2.5 E1/E3 是 2-6 字段、Phase 3 是 1-3 字段。字段数不同时"每字段 build 累积开销"会抵消"StructNode 固有不对称"。需 7 组隔离实验才定位。 | docs/分析-phase3-parse-build不对称.md §1.2-§1.3 |
+| 1 | 2026-06-28 | Phase 3 parse/build 不对称分析：PM 起初认为 Phase 3 多出 ~56ns 不对称是 Phase 3 引入的新问题。ARCH 指出对比存在字段数混淆——Phase 1 B7 是 0 字段、Phase 2.5 E1/E3 是 2-6 字段、Phase 3 是 1-3 字段。字段数不同时"每字段 build 累积开销"会抵消"StructNode 固有不对称"。需 7 组隔离实验才定位。 | docs/analysis/phase3-parse-build不对称.md §1.2-§1.3 |
 
 **根因**：
 1. 性能对比未控制变量（字段数、输入大小）。
@@ -186,5 +186,5 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 - **新增教训**：当某次失败符合"模式化"（非偶发）特征，新增条目。每条教训必须有 ≥1 个真实事件证据（时间 + 证据文件路径）。
 - **不删除**：教训一旦写入不删除。若对策失效，标记为"对策失效"并补充新对策。
-- **引用而非复制**：本文件只记录模式 + 证据指针。具体技术细节引用源文件（如 `docs/设计修订-parse路径优化.md §0`）。
+- **引用而非复制**：本文件只记录模式 + 证据指针。具体技术细节引用源文件（如 `docs/archive/phase1/设计修订-parse路径优化.md §0`）。
 - **Agent 自检**：每次决策前，agent 自问"当前情境是否匹配 L-XX？" 若匹配，必须主动应用对策并在过程记录中注明引用的教训 ID。

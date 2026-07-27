@@ -89,7 +89,7 @@ parse/build 对称性：
 ## 工作流程
 
 1. 阅读 PM 分派的任务要求
-2. 阅读设计文档（`docs/模块设计-*.md`）
+2. 阅读设计文档（`docs/design/模块设计-*.md`）与跨阶段决策（`docs/decisions/`）
 3. 阅读参考实现（Python 原版源码）
 4. 编写 Rust 代码
 5. 编写单元测试

@@ -1,3 +1,13 @@
+---
+id: ARCHIVE-P1-ParseOpt-R1R3
+status: archived
+phase: "1"
+depends_on: [ADR-008]
+supersedes: []
+superseded_by: [ARCHIVE-P2.5-ParseOpt-R4]
+last_updated: 2026-07-27
+---
+
 # 设计修订：parse 路径优化（消除中间 dict + kwargs unpacking）
 
 > **触发原因**：Phase 1 子任务 1.8 性能基准测试揭示 B4（100 字段）加速比仅 0.94x，

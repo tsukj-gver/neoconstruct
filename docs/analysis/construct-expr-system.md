@@ -1,3 +1,13 @@
+---
+id: ANALYSIS-Construct-Expr
+status: active
+phase: meta
+depends_on: []
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # Python construct 2.10.70 表达式系统分析
 
 > 本文档是对 Python 库 [construct](https://github.com/construct/construct) 2.10.70 版本表达式系统的独立分析报告。

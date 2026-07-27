@@ -1,3 +1,13 @@
+---
+id: ARCHIVE-P2.5-ParseOpt-R4
+status: archived
+phase: "2.5"
+depends_on: [ARCHIVE-P1-ParseOpt-R1R3, ADR-008]
+supersedes: [ARCHIVE-P1-ParseOpt-R1R3]
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 设计修订：parse 路径优化（借用实例 `__dict__`，消除中间 dict）
 
 > **触发原因**：Phase 2.5 Vec 化后，parse 路径的固定开销仍有可优化空间。

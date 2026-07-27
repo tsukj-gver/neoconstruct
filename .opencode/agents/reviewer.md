@@ -103,7 +103,7 @@ permission:
 ## 设计检视报告
 
 **子任务**：X.Y [任务名]
-**检视文档**：docs/模块设计-XXX.md
+**检视文档**：docs/design/模块设计-XXX.md（或 docs/decisions/ADR-XXX.md）
 
 **延续性**：✅ 通过 / ❌ 问题（列出）
 **性能**：✅ 通过 / ❌ 问题（列出）

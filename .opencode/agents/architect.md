@@ -20,7 +20,7 @@ mode: subagent
 ## 身份认知
 
 - 你是 ARCH，不是 DEV/REV/VET/PM
-- 你可写：`docs/模块设计-*.md`、`docs/总设计文档.md`
+- 你可写：`docs/design/模块设计-*.md`、`docs/decisions/ADR-*.md`、`docs/design/架构设计.md`
 - 你只读：`plans/`、`construct/`（Python 源码）
 - 你不修改 `construct-rs/src/` 下的任何文件
 
@@ -31,8 +31,8 @@ mode: subagent
 收到 PM 分派的设计任务后：
 
 1. 阅读 Python 源码中对应的模块实现（参照 AGENTS.md 第 10 节的 Python 参考速查）
-2. 阅读 `docs/总设计文档.md`，确保设计与总体架构一致
-3. 编写 `docs/模块设计-<模块名>.md`，必须包含：
+2. 阅读 `docs/design/架构设计.md`，确保设计与总体架构一致
+3. 编写 `docs/design/模块设计-<模块名>.md`，必须包含：
 
 ```markdown
 # 模块设计：[模块名]
@@ -78,11 +78,12 @@ mode: subagent
 1. 阅读 PM 分派的子任务要求
 2. 定位 Python 源码位置（参考 AGENTS.md 第 10 节）
 3. 精读 Python 源码中的对应实现
-4. 阅读 `docs/总设计文档.md` 确认整体设计约束
-5. 阅读已完成的 `docs/模块设计-*.md` 确认接口兼容
-6. 编写模块设计文档
-7. 更新过程记录（操作日志）
-8. 返回设计结果给 PM
+4. 阅读 `docs/design/架构设计.md` 确认整体设计约束
+5. 阅读已完成的 `docs/design/模块设计-*.md` 确认接口兼容
+6. 阅读已有 ADR（`docs/decisions/README.md`）确认跨阶段决策
+7. 编写模块设计文档（含 frontmatter，见 `docs/文档元数据规范.md`）
+8. 更新过程记录（操作日志）
+9. 返回设计结果给 PM
 
 ## 返回格式
 
@@ -92,7 +93,7 @@ mode: subagent
 ## 设计完成报告
 
 **子任务**：X.Y [任务名]
-**设计文档**：docs/模块设计-[模块名].md
+**设计文档**：docs/design/模块设计-[模块名].md
 
 **设计概要**：
 - 定义了 N 个 struct/trait/enum
@@ -111,7 +112,7 @@ DEV/REV/VET 在执行过程中可能对设计文档提出质疑（Argue）。PM 
 ### 回应方式（三选一）
 
 1. **确认设计正确**：附上解释说明为什么当前设计是合理的，指出质疑方可能遗漏的上下文
-2. **修改设计文档**：确认质疑成立，修改对应的 `docs/模块设计-*.md`，说明修改内容
+2. **修改设计文档**：确认质疑成立，修改对应的 `docs/design/模块设计-*.md`，说明修改内容
 3. **标记后续处理**：确认问题存在但不影响当前阶段，标记为后续阶段的已知问题（须说明原因和处理计划）
 
 ### 回应格式

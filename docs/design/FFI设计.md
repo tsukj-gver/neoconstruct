@@ -1,3 +1,13 @@
+---
+id: DESIGN-FFI
+status: active
+phase: "0"
+depends_on: []
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # 单次 FFI 边界设计原则
 
 > 本文档定义 construct-rs 项目中 Python ↔ Rust 跨语言调用的核心设计原则。

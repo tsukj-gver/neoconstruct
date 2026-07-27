@@ -1,3 +1,13 @@
+---
+id: ANALYSIS-P0-Perf
+status: archived
+phase: "0"
+depends_on: []
+supersedes: []
+superseded_by: []
+last_updated: 2026-07-27
+---
+
 # P0 性能优化分析：pydantic-core 对照报告
 
 > **⚠️ 临时文档** — P0 优化验证通过后合并到正式设计文档。

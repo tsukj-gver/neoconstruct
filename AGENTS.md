@@ -46,17 +46,37 @@ Rust 代码是**内核实现手段**，不是独立产品。没有任何 Rust �
 
 ```
 construct_rust/
+├── AGENTS.md               ← System Rules（核心规则文件）
+├── MEMORY.md               ← HARNESS 标准 LTM 顶层索引（agent 启动入口）
+├── experiences.md          ← LTM：跨阶段模式化失败教训（L-01 ~ L-06）
+├── manifests/              ← AHE Change Manifest（每次 harness 修改的 falsifiable 记录）
+│
 ├── construct/              ← Python 原版仓库（只读参考，禁止修改）
 ├── refs/                   ← 参考项目（pydantic-core, mashumaro）
 ├── examples/               ← 用户 API 定义（example.py, construct.py）
+│
 ├── plans/                  ← 阶段计划
-│   ├── 00-项目进度.md      ← 总进度仪表盘（PM 恢复工作入口）
-│   ├── phase0-architecture/← Phase 0 架构设计
-│   └── phase1-foundation/  ← Phase 1 垂直切片
-└── docs/                   ← 设计文档
-    ├── 架构设计.md          ← Phase 0 产出的核心设计（待创建）
-    └── analysis/           ← 分析报告（pydantic-core 对比、mashumaro 分析）
+│   ├── 00-项目进度.md      ← 阶段进度快照（历史归档，活跃状态以 phaseN/总纲.md 为单一源）
+│   └── phaseN-<name>/      ← Phase 目录
+│       ├── 总纲.md          ← PM 维护：任务清单 + 状态（单一事实源）
+│       ├── 索引.md          ← 子任务过程记录导航（行号锚点）
+│       ├── 过程记录.md      ← 历史单文件累积（phase0-4，含 frontmatter）
+│       ├── 过程记录-X.Y.md  ← 新建子任务（phase5+）：per-子任务文件，含 frontmatter
+│       └── 分析报告-*.md    ← PM 写的 phase 需求分析
+│
+├── docs/                   ← 设计文档
+│   ├── 文档元数据规范.md    ← frontmatter schema + ADR 模板（CONVENTION-*）
+│   ├── design/             ← 活跃设计文档（DESIGN-*）
+│   ├── decisions/          ← ADR 决策记录（ADR-001 ~ ADR-NNN）+ README.md 索引
+│   ├── reviews/            ← 架构审查报告（REVIEW-*）
+│   ├── analysis/           ← 分析报告（ANALYSIS-*，含 Python 参考分析 + 根因分析）
+│   └── archive/            ← 已完成 phase 的历史工件
+│       └── phaseN/         ← 按 phase 归档（修订日志、旧版设计等）
+│
+└── .opencode/              ← Harness 组件（agents / skills / 等）
 ```
+
+> **目录结构标准**：本结构遵循 HARNESS.md v1.0。详见 `MEMORY.md` 的 Harness 组件清单。
 
 ## 3. 工作流概要
 
@@ -106,27 +126,57 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 
 ## 5. 过程记录格式
 
-每个子任务的过程记录段必须包含以下结构：
+> **AHE iteration 3 更新**（2026-07-27）：过程记录从"单文件累积 + 表格元数据"改为"per-子任务文件 + YAML frontmatter"。详见 `docs/文档元数据规范.md`。
+
+### 5.1 新规范（phase5+ 必须遵守）
+
+每个子任务一个独立文件 `plans/phaseN/过程记录-X.Y.md`，含 YAML frontmatter：
 
 ```markdown
-## 子任务 X.Y: [任务名]
+---
+id: TRACE-<phase>.<task>
+phase: <N>
+task: "<X.Y 子任务标题>"
+status: accepted          # pending / designing / design_reviewed / coding / code_reviewed / accepted / rejected
+owners: []                # 角色缩写列表（ARCH / DEV / REV / VET / PM / AUDITOR）
+started: YYYY-MM-DD
+completed: YYYY-MM-DD     # 留空表示未完成
+manifest_refs: []         # 关联的 AHE Change Manifest ch_XXX
+---
 
-| 项目 | 内容 |
-|------|------|
-| 状态 | 未开始 / 设计中 / 待检视 / 开发中 / 待审查 / 已通过 / 已驳回 |
-| 负责人 | [角色缩写] |
-| 开始时间 | YYYY-MM-DD |
-| 完成时间 | YYYY-MM-DD |
+## 操作日志
+- [YYYY-MM-DD] [角色] 操作描述
 
-### 操作日志
-- [时间] [角色] 操作描述
-
-### [角色专属段落]
+## [角色专属段落]
 （REV：设计检视结果 / VET：代码审查结果 / ARCH：设计说明 / DEV：自检结果 / PM：验收分析记录 / AUDITOR：审计结果）
 
-### 备注
+## 备注
 （补充说明、驳回原因记录等）
 ```
+
+### 5.2 历史规范（phase0-4 已累积文件）
+
+`plans/phase0-4/过程记录.md` 是单文件累积格式（已加 frontmatter 标注为历史遗留）。**不回溯物理拆分**，但：
+
+- 每个 phase 必须有 `索引.md` 列出子任务行号锚点
+- agent 读特定子任务时通过索引跳行号（Read 工具的 `offset` 参数）
+- 新追加内容（如 phase4 重审）继续追加到原文件，不另建新文件
+
+### 5.3 状态语义
+
+| status 值 | 含义 |
+|----------|------|
+| `pending` | 未开始 |
+| `designing` | 设计中 |
+| `design_reviewed` | 设计已检视 |
+| `coding` | 开发中 |
+| `code_reviewed` | 代码已审查 |
+| `accepted` | 已通过（PM 验收） |
+| `rejected` | 已驳回 |
+
+### 5.4 frontmatter 必填字段
+
+详见 `docs/文档元数据规范.md`。核心：`id` / `status` / `phase` / `last_updated` 必填。
 
 ## 6. 常用命令
 
@@ -220,7 +270,7 @@ git tag phase-N-complete            # 阶段验收标签
 
 ## 8.5 跨阶段设计决策
 
-`docs/设计决策记录.md` 记录了全项目跨阶段的设计约束。任何新功能设计不可违反这些决策。所有角色必须阅读。
+`docs/decisions/`（ADR-001 ~ ADR-NNN）记录了全项目跨阶段的设计约束，索引见 `docs/decisions/README.md`。任何新功能设计不可违反这些决策。所有角色必须阅读。
 
 ## 9. 阶段依赖关系
 
