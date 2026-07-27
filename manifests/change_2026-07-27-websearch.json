@@ -74,7 +74,31 @@
   "skip_decision": {
     "decision": "skip",
     "decided_by": "user",
-    "reason": "用户指令'若未成功，则跳过并记录'",
-    "next_action": "本次迭代不强制修复。后续若需要 websearch，按 recovery_options 中任一方式重启 opencode 即可。配置文件已就位，无需再做任何磁盘修改"
+    "reason": "用户指令'若未成功，则跳过并记录'（重启 PowerShell 后仍未生效）",
+    "next_action": "本次迭代不强制修复。配置文件已就位。"
+  },
+  "iteration_2_followup": {
+    "timestamp": "2026-07-27T22:30:00+08:00",
+    "user_action": "用户关闭旧 PowerShell，开新窗口启动 opencode（PID 29532, 启动于 22:06:38）",
+    "verification_result": {
+      "user_scope_env_var": "OPENCODE_ENABLE_EXA = '1' ✅",
+      "opencode_process_env_var": "OPENCODE_ENABLE_EXA = '1' ✅ (环境变量已正确继承)",
+      "agent_tool_list_includes_websearch": "❌ 仍无 websearch（可见工具：bash/edit/glob/grep/question/read/skill/task/todowrite/webfetch/write）"
+    },
+    "binary_inspection": {
+      "opencode_version": "1.18.7",
+      "binary_size": "174 MB",
+      "binary_timestamp": "2026-07-27 21:52:01",
+      "keyword_hits": {
+        "OPENCODE_ENABLE_EXA": 2,
+        "websearch": 75,
+        "Exa": 209,
+        "exa.ai": 3
+      },
+      "key_code_fragment": "enableExa: EI(\"OPENCODE_EXPERIMENTAL\") || EI(\"OPENCODE_ENABLE_EXA\") || EI(\"OPENCODE_EXPERIMENTAL_EXA\"); provider: process.env.OPENCODE_WEBSEARCH_PROVIDER === \"exa\" || process.env.OPENCODE_WEBSEARCH_PROVIDER === \"parallel\" ? process.env.OPENCODE_WEBSEARCH_PROVIDER : void 0",
+      "hypothesis": "websearch 工具完整启用可能同时需要 OPENCODE_WEBSEARCH_PROVIDER=exa。仅 OPENCODE_ENABLE_EXA=1 在 1.18.7 版本下不足以暴露工具",
+      "hypothesis_verification": "未完成（用户选择跳过）"
+    },
+    "final_status": "配置层完整就位，运行时仍未生效。用户决定跳过本项改进。后续如需启用，建议尝试 setx OPENCODE_WEBSEARCH_PROVIDER exa 后重启 PowerShell+opencode"
   }
 }
