@@ -1,0 +1,66 @@
+﻿python.exe : <legacy-repo>\experiments\phase4_47_perf_verify.py:18: SyntaxWarning: "\S
+" is an invalid escape sequence. Such sequences will not work in the future. Did you mean "\\S"? A raw string is also a
+n option.
+所在位置 行:1 字符: 85
++ ... \python.exe"; & $rs experiments\phase4_47_perf_verify.py 2>&1 | Out-F ...
++                   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (C:\Others\Proje...also an option.:String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+  & crs_venv_new\Scripts\python.exe experiments\phase4_47_perf_verify.py
+
+=== i02 Array(100, Index()) parse (number=3000) ===
+  construct-rs: 888.8 ns/call
+  python-construct: 16087.3 ns/call
+  鍔犻€熸瘮: 18.10x OK >=10x
+
+=== i03 Array(1000, Index()) parse (number=500) ===
+  construct-rs: 11454.2 ns/call
+  python-construct: 150174.4 ns/call
+  鍔犻€熸瘮: 13.11x OK >=10x
+
+=== i04 Array(4096, Index()) parse (number=200) ===
+  construct-rs: 49706.5 ns/call
+  python-construct: 611517.0 ns/call
+  鍔犻€熸瘮: 12.30x OK >=10x
+
+=== i01 Array(10, Index()) build (number=5000) ===
+  construct-rs: 212.5 ns/call
+  python-construct: 3279.4 ns/call
+  鍔犻€熸瘮: 15.44x OK >=10x
+
+=== g01 GreedyRange(Int8ub) N=10 parse (number=5000) ===
+  construct-rs: 567.7 ns/call
+  python-construct: 6216.8 ns/call
+  鍔犻€熸瘮: 10.95x OK >=10x
+
+=== i01 Array(10, Index()) parse [structural] (number=5000) ===
+  construct-rs: 334.7 ns/call
+  python-construct: 3606.0 ns/call
+  鍔犻€熸瘮: 10.77x OK >=10x
+
+=== a01 Array(10, Int8ub) parse [structural] (number=5000) ===
+  construct-rs: 361.4 ns/call
+  python-construct: 4544.0 ns/call
+  鍔犻€熸瘮: 12.57x OK >=10x
+
+=== e01 Array(0, Index()) parse [structural] (number=10000) ===
+  construct-rs: 206.7 ns/call
+  python-construct: 1951.8 ns/call
+  鍔犻€熸瘮: 9.44x FAIL <10x
+
+======================================================================
+鎬ц兘楠岃瘉姹囨€伙紙4.7 lazy path 浼樺寲鍚庯級
+======================================================================
+鍦烘櫙                                       Rs(ns)       Py(ns)       鍔犻€熸瘮        >=10x?
+----------------------------------------------------------------------
+i02 Array(100, Index()) parse            888.8        16087.3      18.10      OK
+i03 Array(1000, Index()) parse           11454.2      150174.4     13.11      OK
+i04 Array(4096, Index()) parse           49706.5      611517.0     12.30      OK
+i01 Array(10, Index()) build             212.5        3279.4       15.44      OK
+g01 GreedyRange(Int8ub) N=10 parse       567.7        6216.8       10.95      OK
+i01 Array(10, Index()) parse [structural] 334.7        3606.0       10.77      OK
+a01 Array(10, Int8ub) parse [structural] 361.4        4544.0       12.57      OK
+e01 Array(0, Index()) parse [structural] 206.7        1951.8       9.44       FAIL
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\phase4_47_perf_results.json

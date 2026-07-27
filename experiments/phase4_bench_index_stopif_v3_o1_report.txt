@@ -1,0 +1,181 @@
+﻿==================================================================================================================================
+Phase 4.4 Index+StopIf 鎬ц兘鍩哄噯 v3锛堟柟娉曡瀵圭О淇锛?
+==================================================================================================================================
+REPEAT=5, DEFAULT_NUMBER=5000
+Python (rs): <opencode-temp>\crs_venv_new\Scripts\python.exe
+Python (py): <opencode-temp>\crs_venv_py_new\Scripts\python.exe
+
+
+==================================================================================================================================
+涓昏〃锛坅pples-to-apples锛夛細Rust StructMixin  vs  Python Struct(...)  <- 鍙岀閮藉寘 Struct锛屽彛寰勫绛?
+==================================================================================================================================
+#     鍦烘櫙                                                    N    number     Py+ ns/call      Rs ns/call      鍔犻€熸瘮+      鏂瑰悜
+----------------------------------------------------------------------------------------------------------------------------------
+I01_arArray(10, Index())                                   10      5000         3.73 us        365.1 ns   10.20x   parse
+I01_ar  鈹斺攢 build                                           10      5000         3.55 us        226.9 ns   15.66x   build
+I02_arArray(100, Index())                                 100      5000        17.32 us        938.6 ns   18.46x   parse
+I02_ar  鈹斺攢 build                                          100      5000        15.62 us        707.2 ns   22.09x   build
+I03_arArray(1000, Index())                               1000       500       150.67 us        11.18 us   13.48x   parse
+I03_ar  鈹斺攢 build                                         1000       500       137.01 us         5.87 us   23.33x   build
+I04_arArray(4096, Index())                               4096       200       628.76 us        51.24 us   12.27x   parse
+I04_ar  鈹斺攢 build                                         4096       200       572.54 us        22.14 us   25.87x   build
+I05_arArray(100, Struct{i: Index, v: Byte})               100      5000       189.90 us        12.08 us   15.73x   parse
+I05_ar  鈹斺攢 build                                          100      5000       181.23 us         4.45 us   40.76x   build
+I06_arArray(4096, Struct{i: Index, v: Byte})             4096       200         7.88 ms       518.32 us   15.21x   parse
+I06_ar  鈹斺攢 build                                         4096       200         7.55 ms       172.84 us   43.71x   build
+I07_arArray(100, Struct{i: Index, v: Int16ub})            100      5000       193.25 us        12.45 us   15.52x   parse
+I07_ar  鈹斺攢 build                                          100      5000       184.04 us         4.68 us   39.32x   build
+I08_arArray(256, Struct{i: Index, v: Int32ub})            256      5000       497.09 us        33.15 us   15.00x   parse
+I08_ar  鈹斺攢 build                                          256      5000       472.76 us        12.61 us   37.48x   build
+I09_grGreedyRange(Struct{i: Index, v: Byte})             1024       500         2.01 ms       127.01 us   15.84x   parse
+I09_gr  鈹斺攢 build                                         1024       500         1.85 ms        42.78 us   43.29x   build
+S01_stStopIf(x==0) x=1 涓嶈Е鍙?                                 0      5000         2.87 us        276.1 ns   10.38x   parse
+S01_st  鈹斺攢 build                                            0      5000         2.80 us        253.2 ns   11.06x   build
+S02_stStopIf(x==0) x=0 瑙﹀彂                                   0      5000         3.19 us        270.7 ns   11.78x   parse
+S02_st  鈹斺攢 build                                            0      5000         3.04 us        240.7 ns   12.62x   build
+S03_stStopIf(True) 甯搁噺瑙﹀彂                                     0      5000         2.78 us        258.2 ns   10.76x   parse
+S03_st  鈹斺攢 build                                            0      5000         2.75 us        178.4 ns   15.40x   build
+E01_emArray(0, Index()) 绌烘暟缁?                                0      5000         1.90 us        222.9 ns    8.54x <10x!   parse
+E01_em  鈹斺攢 build                                            0      5000         1.94 us        116.5 ns   16.65x   build
+----------------------------------------------------------------------------------------------------------------------------------
+
+==================================================================================================================================
+闄勬敞锛堣８鍙ｅ緞锛岄潪绛変环瀵规瘮锛夛細Rust StructMixin锛堝繀缁?Struct锛?vs  Python 瑁?Array/GreedyRange锛堝皯鍋?Struct 宸ヤ綔锛?
+  鈫?v2 鐢ㄧ殑灏辨槸杩欎釜鍙ｅ緞锛圛 绯诲垪 + E 绯诲垪锛夛紱S 绯诲垪涓よ竟閮芥槸 Struct锛宐are==wrapped
+==================================================================================================================================
+#     鍦烘櫙                                                    N     Py* ns/call      Rs ns/call      鍔犻€熸瘮*      鍔犻€熸瘮+       螖      鏂瑰悜
+----------------------------------------------------------------------------------------------------------------------------------
+I01_arArray(10, Index())                                   10         2.34 us        365.1 ns    6.40x <10x!   10.20x  +3.80x   parse
+I01_ar  鈹斺攢 build                                           10         2.21 us        226.9 ns    9.74x <10x!   15.66x  +5.93x   build
+I02_arArray(100, Index())                                 100        14.84 us        938.6 ns   15.81x   18.46x  +2.64x   parse
+I02_ar  鈹斺攢 build                                          100        13.70 us        707.2 ns   19.38x   22.09x  +2.71x   build
+I03_arArray(1000, Index())                               1000       151.74 us        11.18 us   13.57x   13.48x  -0.10x   parse
+I03_ar  鈹斺攢 build                                         1000       141.11 us         5.87 us   24.03x   23.33x  -0.70x   build
+I04_arArray(4096, Index())                               4096       627.36 us        51.24 us   12.24x   12.27x  +0.03x   parse
+I04_ar  鈹斺攢 build                                         4096       583.17 us        22.14 us   26.35x   25.87x  -0.48x   build
+I05_arArray(100, Struct{i: Index, v: Byte})               100       194.44 us        12.08 us   16.10x   15.73x  -0.38x   parse
+I05_ar  鈹斺攢 build                                          100       182.96 us         4.45 us   41.14x   40.76x  -0.39x   build
+I06_arArray(4096, Struct{i: Index, v: Byte})             4096         8.01 ms       518.32 us   15.45x   15.21x  -0.24x   parse
+I06_ar  鈹斺攢 build                                         4096         7.52 ms       172.84 us   43.50x   43.71x  +0.21x   build
+I07_arArray(100, Struct{i: Index, v: Int16ub})            100       198.44 us        12.45 us   15.93x   15.52x  -0.42x   parse
+I07_ar  鈹斺攢 build                                          100       185.60 us         4.68 us   39.65x   39.32x  -0.33x   build
+I08_arArray(256, Struct{i: Index, v: Int32ub})            256       512.06 us        33.15 us   15.45x   15.00x  -0.45x   parse
+I08_ar  鈹斺攢 build                                          256       483.40 us        12.61 us   38.32x   37.48x  -0.84x   build
+I09_grGreedyRange(Struct{i: Index, v: Byte})             1024         2.03 ms       127.01 us   15.97x   15.84x  -0.13x   parse
+I09_gr  鈹斺攢 build                                         1024         1.88 ms        42.78 us   44.01x   43.29x  -0.71x   build
+S01_stStopIf(x==0) x=1 涓嶈Е鍙?                                 0         2.92 us        276.1 ns   10.59x   10.38x  -0.21x   parse
+S01_st  鈹斺攢 build                                            0         2.86 us        253.2 ns   11.28x   11.06x  -0.22x   build
+S02_stStopIf(x==0) x=0 瑙﹀彂                                   0         3.16 us        270.7 ns   11.67x   11.78x  +0.11x   parse
+S02_st  鈹斺攢 build                                            0         3.09 us        240.7 ns   12.82x   12.62x  -0.20x   build
+S03_stStopIf(True) 甯搁噺瑙﹀彂                                     0         2.77 us        258.2 ns   10.71x   10.76x  +0.05x   parse
+S03_st  鈹斺攢 build                                            0         2.70 us        178.4 ns   15.14x   15.40x  +0.26x   build
+E01_emArray(0, Index()) 绌烘暟缁?                                0        728.6 ns        222.9 ns    3.27x <10x!    8.54x  +5.27x   parse
+E01_em  鈹斺攢 build                                            0        762.7 ns        116.5 ns    6.55x <10x!   16.65x +10.10x   build
+----------------------------------------------------------------------------------------------------------------------------------
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 1锛歛pples-to-apples 鍔犻€熸瘮鎺掑簭锛堢敱楂樺埌浣庯級 鈹€鈹€鈹€
+  Array(4096, Struct{i: Index, v: Byte}) build               N=4096     43.71x
+  GreedyRange(Struct{i: Index, v: Byte}) build               N=1024     43.29x
+  Array(100, Struct{i: Index, v: Byte}) build                N=100      40.76x
+  Array(100, Struct{i: Index, v: Int16ub}) build             N=100      39.32x
+  Array(256, Struct{i: Index, v: Int32ub}) build             N=256      37.48x
+  Array(4096, Index()) build                                 N=4096     25.87x
+  Array(1000, Index()) build                                 N=1000     23.33x
+  Array(100, Index()) build                                  N=100      22.09x
+  Array(100, Index()) parse                                  N=100      18.46x
+  Array(0, Index()) 绌烘暟缁?build                                N=0        16.65x
+  GreedyRange(Struct{i: Index, v: Byte}) parse               N=1024     15.84x
+  Array(100, Struct{i: Index, v: Byte}) parse                N=100      15.73x
+  Array(10, Index()) build                                   N=10       15.66x
+  Array(100, Struct{i: Index, v: Int16ub}) parse             N=100      15.52x
+  StopIf(True) 甯搁噺瑙﹀彂 build                                    N=0        15.40x
+  Array(4096, Struct{i: Index, v: Byte}) parse               N=4096     15.21x
+  Array(256, Struct{i: Index, v: Int32ub}) parse             N=256      15.00x
+  Array(1000, Index()) parse                                 N=1000     13.48x
+  StopIf(x==0) x=0 瑙﹀彂 build                                  N=0        12.62x
+  Array(4096, Index()) parse                                 N=4096     12.27x
+  StopIf(x==0) x=0 瑙﹀彂 parse                                  N=0        11.78x
+  StopIf(x==0) x=1 涓嶈Е鍙?build                                 N=0        11.06x
+  StopIf(True) 甯搁噺瑙﹀彂 parse                                    N=0        10.76x
+  StopIf(x==0) x=1 涓嶈Е鍙?parse                                 N=0        10.38x
+  Array(10, Index()) parse                                   N=10       10.20x
+  Array(0, Index()) 绌烘暟缁?parse                                N=0         8.54x <10x!
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 2锛歱arse/build 姣旂巼锛坅pples-to-apples锛?鈹€鈹€鈹€
+  鍦烘櫙                                                    N    py p/b    rs p/b        鏂瑰悜涓€鑷?
+  Array(10, Index())                                   10     1.05x     1.61x           Y
+  Array(100, Index())                                 100     1.11x     1.33x           Y
+  Array(1000, Index())                               1000     1.10x     1.90x           Y
+  Array(4096, Index())                               4096     1.10x     2.31x           Y
+  Array(100, Struct{i: Index, v: Byte})               100     1.05x     2.72x           Y
+  Array(4096, Struct{i: Index, v: Byte})             4096     1.04x     3.00x           Y
+  Array(100, Struct{i: Index, v: Int16ub})            100     1.05x     2.66x           Y
+  Array(256, Struct{i: Index, v: Int32ub})            256     1.05x     2.63x           Y
+  GreedyRange(Struct{i: Index, v: Byte})             1024     1.09x     2.97x           Y
+  StopIf(x==0) x=1 涓嶈Е鍙?                                 0     1.02x     1.09x           Y
+  StopIf(x==0) x=0 瑙﹀彂                                   0     1.05x     1.12x           Y
+  StopIf(True) 甯搁噺瑙﹀彂                                     0     1.01x     1.45x           Y
+  Array(0, Index()) 绌烘暟缁?                                0     0.98x     1.91x           N
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 3锛欰rray(N, Index) 瑙勬ā鎵╁睍锛坣s/鍏冪礌锛宎pples-to-apples锛?鈹€鈹€鈹€
+        N    py+ parse ns/e     rs parse ns/e    py+ build ns/e     rs build ns/e
+       10           372.59            36.51           355.32            22.69
+      100           173.22             9.39           156.21             7.07
+     1000           150.67            11.18           137.01             5.87
+     4096           153.51            12.51           139.78             5.40
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 4锛欼ndex+Int 鎵胯浇绫诲瀷瀵规瘮锛坧arse 鍔犻€熸瘮+锛?鈹€鈹€鈹€
+  Array(N, Index) N=10                       parse 鍔犻€熸瘮+:  10.20x
+  Array(N, Index) N=100                      parse 鍔犻€熸瘮+:  18.46x
+  Array(N, Index) N=1000                     parse 鍔犻€熸瘮+:  13.48x
+  Array(N, Index) N=4096                     parse 鍔犻€熸瘮+:  12.27x
+  Struct{i: Index, v: Byte} N=100            parse 鍔犻€熸瘮+:  15.73x
+  Struct{i: Index, v: Int16ub} N=100         parse 鍔犻€熸瘮+:  15.52x
+  Struct{i: Index, v: Int32ub} N=256         parse 鍔犻€熸瘮+:  15.00x
+  GreedyRange(Struct{i,v}) N=1024            parse 鍔犻€熸瘮+:  15.84x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 5锛氬満鏅爣绛?N vs 瀹為檯杩唬娆℃暟 鈹€鈹€鈹€
+  鍦烘櫙                                                    鏍囩 N        瀹為檯杩唬      涓€鑷?
+  Array(10, Index())                                      10          10       Y
+  Array(100, Index())                                    100         100       Y
+  Array(1000, Index())                                  1000        1000       Y
+  Array(4096, Index())                                  4096        4096       Y
+  Array(100, Struct{i: Index, v: Byte})                  100         100       Y
+  Array(4096, Struct{i: Index, v: Byte})                4096        4096       Y
+  Array(100, Struct{i: Index, v: Int16ub})               100         100       Y
+  Array(256, Struct{i: Index, v: Int32ub})               256         256       Y
+  GreedyRange(Struct{i: Index, v: Byte})                1024        1024       Y
+  StopIf(x==0) x=1 涓嶈Е鍙?                                    0           0       Y
+  StopIf(x==0) x=0 瑙﹀彂                                      0           0       Y
+  StopIf(True) 甯搁噺瑙﹀彂                                        0           0       Y
+  Array(0, Index()) 绌烘暟缁?                                   0           0       Y
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 6锛氬唴閮ㄥ叧绯诲悎鐞嗘€э紙Array(N, Index) N=100 鏄熀绾匡級 鈹€鈹€鈹€
+  [鍩虹嚎] Array(100, Index) parse: py+=17.32 us, rs=938.6 ns
+  Array(100, Struct{i,Byte})         parse rs/base=12.86x, py+/base=10.96x
+  Array(100, Struct{i,Int16ub})      parse rs/base=13.27x, py+/base=11.16x
+
+鈹€鈹€鈹€ 娲剧敓鎸囨爣 7锛氭柟娉曡瀵圭О鎬ф牳鏌ヨ〃锛圧ust vs Python 宸ヤ綔閲忓鐓э級 鈹€鈹€鈹€
+  鍦烘櫙                                              Rust 渚?                         Python 渚?(wrapped)                    瀵圭О
+  Array(10, Index())                              Struct{Array(N,Index)}          Struct{Array(N,Index)}                 Y
+  Array(100, Index())                             Struct{Array(N,Index)}          Struct{Array(N,Index)}                 Y
+  Array(1000, Index())                            Struct{Array(N,Index)}          Struct{Array(N,Index)}                 Y
+  Array(4096, Index())                            Struct{Array(N,Index)}          Struct{Array(N,Index)}                 Y
+  Array(100, Struct{i: Index, v: Byte})           Struct{Array(N,Struct{Index,Int})}Struct{Array(N,Struct{Index,Int})}       Y
+  Array(4096, Struct{i: Index, v: Byte})          Struct{Array(N,Struct{Index,Int})}Struct{Array(N,Struct{Index,Int})}       Y
+  Array(100, Struct{i: Index, v: Int16ub})        Struct{Array(N,Struct{Index,Int})}Struct{Array(N,Struct{Index,Int})}       Y
+  Array(256, Struct{i: Index, v: Int32ub})        Struct{Array(N,Struct{Index,Int})}Struct{Array(N,Struct{Index,Int})}       Y
+  GreedyRange(Struct{i: Index, v: Byte})          Struct{GreedyRange(Struct{Index,Int8})}Struct{GreedyRange(Struct{Index,Int8})}       Y
+  StopIf(x==0) x=1 涓嶈Е鍙?                           Struct{Int8,StopIf,Int8}        Struct{Int8,StopIf,Int8}               Y
+  StopIf(x==0) x=0 瑙﹀彂                             Struct{Int8,StopIf,Int8}        Struct{Int8,StopIf,Int8}               Y
+  StopIf(True) 甯搁噺瑙﹀彂                               Struct{Int8,StopIf,Int8}        Struct{Int8,StopIf,Int8}               Y
+  Array(0, Index()) 绌烘暟缁?                          Struct{Array(N,Index)}          Struct{Array(N,Index)}                 Y
+
+鈹€鈹€鈹€ 寮傚父椤规娴嬶紙apples-to-apples锛?鈹€鈹€鈹€
+  [WARN] 浣庝簬 10x 鐨勫満鏅?(1):
+    Array(0, Index()) 绌烘暟缁?parse N=0: 8.54x
+
+鈹€鈹€鈹€ S-PERF 鍑哄彛鏍囧噯 (鈮?0.0x, apples-to-apples) 鈹€鈹€鈹€
+  25/26 鍦烘櫙 >= 10.0x
+    Array(0, Index()) 绌烘暟缁?parse: 8.54x
+==================================================================================================================================
