@@ -1,0 +1,148 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 5,
+  "timestamp": "2026-07-28T01:35:00+08:00",
+  "author": "pm (AHE iteration 5 — 补 Evaluate 步骤 + L-08 沉淀)",
+  "scope_summary": "补 AHE §演化循环缺失的 Evaluate 步骤（项目级 §C 协议）；沉淀 L-08 教训（AHE 规范解读层错误）；MEMORY.md Harness 组件清单加规范来源列；项目级 skill 加 §D AHE 规范解读检查清单。首次执行 Evaluate（dogfood = iter5 自身轨迹）",
+  "evaluate_evidence": {
+    "trace_file": "experiments/eval-2026-07-27-iter5-dogfood.md",
+    "task_category": "执行类",
+    "failures_classified": [
+      "L-08（核心，已沉淀）",
+      "L-09 候选（工具-框架失配，未沉淀，单次事件）",
+      "工具环境问题（PowerShell 中文乱码，非 harness 缺陷）"
+    ],
+    "analyze_summary": "单轨迹不足以跨轨迹模式分析，但 L-08 与 iter4 v1 历史事件（ch_012）构成 2+ 次模式化失败，满足沉淀条件"
+  },
+  "changes": [
+    {
+      "change_id": "ch_014",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "experiences.md",
+      "summary": "新增 L-08 教训：AHE 规范解读层错误（通用 vs 项目自定义混淆）",
+      "failure_evidence": "iter5 准备阶段 PM 误判 AUDITOR 缺位为漏洞（用户驳斥点 1）；iter4 v1 PM 误把 L-07 对策写进通用 AHE skill（ch_012）。详见 experiments/eval-2026-07-27-iter5-dogfood.md failures #3",
+      "root_cause": "(1) MEMORY.md Harness 组件清单未标注规范来源；(2) PM 在 AHE iteration 中默认'项目有的角色/流程都适用于 AHE'；(3) 通用 AHE skill 工作流 3 未约束'谁执行'；(4) PM 跳过 Evaluate 凭直觉判断，范畴错误无法被轨迹证伪",
+      "targeted_fix": "experiences.md 索引表加 L-08 行；末尾追加 §L-08 段（模式描述 + 2 个真实事件 + 根因 + 5 条对策）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "下次 AHE iteration PM 主动执行 §D AHE 规范解读检查清单",
+          "PM 在 manifest 中引用规范条款时显式标注来源前缀",
+          "PM 不再凭直觉判断'X 角色未执行 Y 流程'——会先查 HARNESS.md / AHE skill 确认 Y 是否通用规范"
+        ],
+        "at_risk_regressions": [
+          "若 PM 不读 MEMORY.md 组件清单的'规范来源'列，对策可能失效",
+          "若下次 iteration 涉及多个角色，§D2 角色/流程归属判定耗时增加（可接受成本）"
+        ],
+        "rationale": "L-08 是认知层错误，比 L-07（执行层）更基础。iter5 dogfood 已实证：凭直觉 Improve 会范畴错误"
+      }
+    },
+    {
+      "change_id": "ch_015",
+      "component": "skills",
+      "subtype": "update",
+      "file_path": ".opencode/skills/construct-rs-ahe-practices/SKILL.md",
+      "summary": "项目级 skill 加 §C Evaluate 协议 + §D AHE 规范解读检查清单（通用 AHE skill 未覆盖的项目级补充）",
+      "failure_evidence": "AHE skill PROJECT_README.md §当前能力边界 明确标注 Evaluate / Analyze / 演化闭环'未实现（后续迭代）'。iter1-4 全部跳过 Evaluate。iter5 准备阶段 PM 因跳过 §D（当时还没建立）误判 AUDITOR 缺位为漏洞",
+      "root_cause": "通用 AHE skill 是上游工具，未提供项目级 Evaluate 协议；项目级补充此前只覆盖 §A/§B（Generate Manifest + Verify 补充），未覆盖 Evaluate 和规范解读检查",
+      "targeted_fix": "§C Evaluate 协议：C1 触发时机（每 AHE iteration 开始 / 每 phase 子任务 ACCEPTED / AUDITOR 异常时）/ C2 测试任务集（启动类/检索类/执行类）/ C3 轨迹文件格式（6 字段）/ C4 失败模式分类（强制对齐 L-XX）/ C5 Analyze 步骤。§D AHE 规范解读检查清单：D1 触发条件 / D2 角色/流程归属判定（3 问决策树）/ D3 规范条款来源前缀（6 类）/ D4 'X 未执行 Y' 判断的前置检查。同时更新 B3 加范畴提示，更新差异总结表加 3 行",
+      "predicted_impact": {
+        "expected_fixes": [
+          "下次 AHE iteration 开始时 PM 主动执行 §C1（dogfood 轨迹）",
+          "下次 PM 引用规范条款时按 §D3 标注来源前缀",
+          "下次 PM 发现'X 角色未执行 Y 流程'时按 §D4 前置检查（查 HARNESS.md / AHE skill 确认 Y 是否通用规范）"
+        ],
+        "at_risk_regressions": [
+          "新 skill 章节增加 agent 启动检索成本（§C/§D 共 ~140 行）",
+          "若 PM 仅加载通用 AHE skill 不加载本 skill，§C/§D 仍可能被忽略——MEMORY.md Harness 组件清单已声明本 skill"
+        ],
+        "rationale": "通用 AHE skill 不应被项目特定内容污染（L-08 教训）；项目级补充是 AHE 模式的正确分层"
+      }
+    },
+    {
+      "change_id": "ch_016",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "MEMORY.md",
+      "summary": "Harness 组件清单加'规范来源'列；AHE 演化历史加 iter5 行 + iter4 verdict 改 partial；教训索引加 L-08 行",
+      "failure_evidence": "iter5 dogfood (failure #3) 揭示：MEMORY.md 组件清单未标注规范来源是 PM 误判 AUDITOR 归属的根因之一",
+      "root_cause": "MEMORY.md 作为 L0 索引应提供足够概览让 agent 决定是否下沉，规范来源缺失导致 agent 无法快速判断角色归属",
+      "targeted_fix": "Harness 组件清单每行加'规范来源'列，明确标注 System Rules / Tool Descriptions / Skills / Sub-Agents 等的来源（HARNESS.md / opencode 框架 / 项目自定义 / 混合）；AHE 历史表加 iter5 行，iter4 verdict 改 partial（iter5 dogfood 部分验证）；教训索引加 L-08 行",
+      "predicted_impact": {
+        "expected_fixes": [
+          "agent 读 MEMORY.md 即可知每个组件的规范来源，不再混淆通用与项目自定义"
+        ],
+        "at_risk_regressions": [
+          "表格密度增加——但每行仅加一列，可读性可接受"
+        ],
+        "rationale": "L-08 对策 (1) 的直接实现"
+      }
+    },
+    {
+      "change_id": "ch_017",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "experiments/eval-2026-07-27-iter5-dogfood.md",
+      "summary": "首份 Evaluate dogfood 轨迹文件（按 §C3 格式）",
+      "failure_evidence": "iter5 自身执行过程中 PM 误判 AUDITOR 缺位（failure #3）—— 这是首份可结构化记录的 Evaluate 证据",
+      "root_cause": "iter1-4 全部跳过 Evaluate，导致 L-08（认知层错误）直到 iter5 才被发现。证明 §C 协议的必要性",
+      "targeted_fix": "创建 experiments/eval-2026-07-27-iter5-dogfood.md，含 task_id / task_category / tool_calls（含重复检测）/ decision_points（含规范来源标注）/ failures（L-08 + 候选 L-09 + 工具环境）/ outcome / Analyze 摘要",
+      "predicted_impact": {
+        "expected_fixes": [
+          "未来 AHE iteration 可参考本轨迹格式",
+          "L-08 教训有具体证据指针（不再只是描述）"
+        ],
+        "at_risk_regressions": [],
+        "rationale": "Evaluate 协议的首次 dogfood——证明协议可执行"
+      }
+    },
+    {
+      "change_id": "ch_018",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "manifests/change_2026-07-27-skill-iteration-lessons.json",
+      "summary": "iter4 manifest verification 关闭（pending → partial），记录 iter5 dogfood 部分验证结果",
+      "failure_evidence": "iter4 manifest status=pending 长达 1 个 iteration，未关闭",
+      "root_cause": "iter4 的 4 个子预测中 3 个需要特定场景（文件重组 / 上游 skill 同步）才触发，本次 iter5 未触发这些场景",
+      "targeted_fix": "verification.status: pending → partial；新增 completed_at / verified_by / result / verdict / followup 字段。1 个预测已验证（construct-rs-ahe-practices skill 被主动加载），3 个 predictions_not_yet_triggered 如实记录",
+      "predicted_impact": {
+        "expected_fixes": [
+          "iter4 状态闭环，不再挂在 pending",
+          "iter5 主动加载 construct-rs-ahe-practices skill 的事实被记录为 expected_fixes_verified"
+        ],
+        "at_risk_regressions": [
+          "iter4 的 3 个未触发预测若永远不触发（项目不再做文件重组），可能永远 partial——这是真实状态，不应掩盖"
+        ],
+        "rationale": "iter5 dogfood 是 iter4 预测 (2) 的验证场景；其他 3 个预测的触发场景不确定，partial 是诚实记录"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "本 iteration 涉及 5 个文件改动（3 个 edit / 1 个 create / 1 个 manifest edit）。按 §A1 检查：(1) experiences.md / MEMORY.md / SKILL.md / iter4 manifest 都是 edit 现有文件，路径不变；(2) 新建 experiments/eval-2026-07-27-iter5-dogfood.md 已被 SKILL.md 关联文档段 + 本 manifest 引用；(3) 新建 manifest 路径符合 manifests/change_*.json 约定。无 git mv / 无目录重组",
+    "frontmatter_applicability": "新建 experiments/eval-*.md 已加 frontmatter（id/status/phase/task_id/task_category/last_updated）；iter5 manifest 是 JSON 无 frontmatter 要求；edit 的现有文件 frontmatter 不变",
+    "at_risk_regressions_categories": {
+      "path_regression": [
+        "experiments/eval-2026-07-27-iter5-dogfood.md 被 SKILL.md §关联文档 引用——若移动需同步"
+      ],
+      "metadata_regression": [
+        "experiments/eval-*.md 是新文件类型（之前 experiments/ 无 frontmatter 规范），本轮首次加 frontmatter——未来 experiments/ 文件是否都需 frontmatter 待定（§B1 仅扫 docs/ / plans/ 规定目录）"
+      ],
+      "functional_regression": [
+        "若 PM 不读 MEMORY.md 组件清单的'规范来源'列，L-08 对策 (1) 失效"
+      ]
+    }
+  },
+  "process_lesson": {
+    "title": "Evaluate 协议的首次自举",
+    "description": "本 iteration 是首次执行 Evaluate 的 AHE iteration。Evaluate 的对象是 iter5 自身执行过程——这是一种自举（bootstrap）：协议在被定义的同时被应用。优点：定义即验证；缺点：协议本身的盲点无法被本次 dogfood 发现（需要下次 iteration 验证）",
+    "lesson_home": "本 manifest（过程可观测性）+ experiments/eval-2026-07-27-iter5-dogfood.md",
+    "preventive_check": "未来 AHE iteration 应保留 dogfood 轨迹作为常规实践。当 §C 协议本身的盲点暴露时，按 L-04（跨阶段模式未沉淀）流程升级协议"
+  },
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "下次 AHE iteration 时验证：(1) §C Evaluate 协议是否被 PM 主动执行（dogfood 轨迹是否产出）；(2) §D AHE 规范解读检查清单是否被 PM 在 iteration 开始前主动执行；(3) MEMORY.md 组件清单'规范来源'列是否被 PM 启动时读；(4) L-08 对策是否实际生效（PM 不再凭直觉判断'X 角色未执行 Y 流程'）",
+    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) frontmatter 完整性已扫（experiments/eval-*.md 含完整 frontmatter）；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md / experiences.md / construct-rs-ahe-practices SKILL.md 修改符合各自规范"
+  }
+}

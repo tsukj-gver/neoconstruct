@@ -55,15 +55,18 @@ last_updated: 2026-07-27
 
 ## Harness 组件清单
 
-| HARNESS 组件 | 文件位置 |
-|-------------|---------|
-| System Rules | `AGENTS.md` / `SOUL.md`（待建） |
-| Tool Descriptions | opencode.json（声明 permission） |
-| Tool Implementations | opencode 内置（bash/edit/glob/grep/read/write 等） |
-| Middleware | （未启用） |
-| Skills | `.opencode/skills/{agentic-harness-engineering, construct-rs-ahe-practices, performance-gate, pm-performance-validation}/SKILL.md` |
-| Sub-Agents | `.opencode/agents/{pm,architect,developer,reviewer,vetter,auditor}.md` |
-| Long-Term Memory | `MEMORY.md`（本文件）+ `experiences.md` + `docs/decisions/` |
+> **规范来源**列说明（L-08 对策）：标注每个组件的来源是 AHE 通用规范还是项目自定义。
+> 通用规范组件不可被项目特定内容污染；项目自定义组件不适用于 AHE iteration 自身的 verify。
+
+| HARNESS 组件 | 文件位置 | 规范来源 |
+|-------------|---------|---------|
+| System Rules | `AGENTS.md` / `SOUL.md`（待建） | 项目自定义（AGENTS.md），但映射 HARNESS.md §7 组件 |
+| Tool Descriptions | opencode.json（声明 permission） | 项目自定义（opencode 框架约定） |
+| Tool Implementations | opencode 内置（bash/edit/glob/grep/read/write 等） | 项目自定义（opencode 框架约定） |
+| Middleware | （未启用） | HARNESS.md §7 定义，项目未启用 |
+| Skills | `.opencode/skills/{agentic-harness-engineering, construct-rs-ahe-practices, performance-gate, pm-performance-validation}/SKILL.md` | `agentic-harness-engineering` = HARNESS.md 通用；`construct-rs-ahe-practices` = 项目级补充；`performance-gate` / `pm-performance-validation` = 项目自定义 |
+| Sub-Agents | `.opencode/agents/{pm,architect,developer,reviewer,vetter,auditor}.md` | **全部项目自定义**（HARNESS.md / 通用 AHE skill 未定义具体角色；AUDITOR 是项目业务流程审计员，不审计 AHE iteration） |
+| Long-Term Memory | `MEMORY.md`（本文件）+ `experiences.md` + `docs/decisions/` | HARNESS.md §7 定义结构，内容由项目填充 |
 
 ---
 
@@ -74,7 +77,8 @@ last_updated: 2026-07-27
 | 1 | 2026-07-27 | `manifests/change_2026-07-27.json` | 建立 LTM（experiences.md）/ 规范 skill 目录 / AUDITOR 注册对齐 / 建立 manifests 基础设施 | **verified**（iteration 3 收尾时补做） |
 | 2 | 2026-07-27 | `manifests/change_2026-07-27-websearch.json` | 启用 websearch | partial（配置层就位，运行时未生效，用户主动 skip） |
 | 3 | 2026-07-27 | `manifests/change_2026-07-27-docs-restructure.json` | 记录/设计文档 AHE 化（T1 结构正交 + T2 frontmatter + T3 ADR） | partial（predicted_impact 漏报 42 broken refs + 9 frontmatter 缺失，已当场修复） |
-| 4 | 2026-07-27 | `manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `construct-rs-ahe-practices`（不动通用 AHE skill） | pending |
+| 4 | 2026-07-27 | `manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `construct-rs-ahe-practices`（不动通用 AHE skill） | **partial**（iter5 dogfood 验证：construct-rs-ahe-practices skill 被 PM 主动加载 ✓；但"文件重组时主动执行 §A1 cross-ref check" + "通用 skill 同步不冲突" 两个预测未触发——等待下次文件重组 iteration） |
+| 5 | 2026-07-27 | `manifests/change_2026-07-27-iter5-evaluate-step.json` | 补 AHE §演化循环缺失的 Evaluate 步骤（项目级 §C 协议）；沉淀 L-08（AHE 规范解读层错误）；MEMORY.md Harness 组件清单加规范来源列；项目级 skill 加 §D AHE 规范解读检查清单 | pending（本轮 dogfood = iter5 自身轨迹，已记入 `experiments/eval-2026-07-27-iter5-dogfood.md`） |
 
 ## 教训索引
 
@@ -89,6 +93,7 @@ last_updated: 2026-07-27
 | L-05 | 优化 A 路径忽略 B 路径 | 性能设计 |
 | L-06 | 字段数混淆对照 | 性能数据对比 |
 | L-07 | predicted_impact 重结构轻交叉引用 | AHE harness 重组 |
+| L-08 | AHE 规范解读层错误（通用 vs 项目自定义混淆） | AHE iteration 中引用角色/流程时 |
 
 ---
 

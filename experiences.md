@@ -24,6 +24,7 @@
 | L-05 | 优化 A 路径忽略 B 路径 | 2+ | 设计修订 R1/R2 漏洞 | §L-05 |
 | L-06 | 字段数混淆对照 | 1 | Phase 3 不对称误判 | §L-06 |
 | L-07 | AHE predicted_impact 重结构轻交叉引用 | 1+ | iteration 3 漏报 42 broken refs | §L-07 |
+| L-08 | AHE 规范解读层错误（通用 vs 项目自定义混淆） | 2+ | iter5 误判 AUDITOR 缺位 / iter4 v1 误改通用 skill | §L-08 |
 
 ---
 
@@ -212,6 +213,41 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 - **PM**：涉及文件移动/重命名/重组时，在 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §A1（Cross-Reference Migration Check）中**强制**用 grep 列出所有引用，作为 `at_risk_regressions` 的具体条目
 - **AUDITOR（审计 AHE iteration 时）**：检查 manifest 的 `predicted_impact.at_risk_regressions` 是否覆盖了"路径 broken"类别。若修改涉及文件重组但 at_risk_regressions 为空或仅含功能项 → 驳回（§B3）
 - **任何角色**：发现 manifest predicted_impact 漏报回归时，必须在 verification 的 `false_predictions` 字段如实记录（§B2），**不可静默修复**
+
+---
+
+## L-08: AHE 规范解读层错误（通用 vs 项目自定义混淆）
+
+> **核心约束**（HARNESS.md §演化循环 + AGENTS.md §12）：AHE 规范（HARNESS.md / 通用 AHE skill）
+> 定义跨 Agent 的通用要求；项目 AGENTS.md / 项目级 skill / `.opencode/agents/*.md` 定义项目特定角色与流程。
+> 两者不可混淆——通用工具不可被项目特定内容污染，项目角色不可被当作通用规范要求。
+
+**模式描述**：PM 在执行 AHE iteration 时，混淆"通用 AHE 规范要求"与"项目自定义角色/流程"，
+产生两类相反方向的错误：
+- **错误 A（项目→通用误读）**：把项目自定义角色当作 AHE 规范要求。如：要求项目 AUDITOR 审计 AHE iteration（AHE §演化循环根本无 AUDITOR 角色）
+- **错误 B（通用←项目污染）**：把项目特定内容写入通用工具。如：把 L-07 对策写进通用 AHE skill 的工作流
+
+**反复出现事件**：
+
+| # | 时间 | 事件 | 证据 |
+|---|------|------|------|
+| 1 | 2026-07-27 | **iter5 准备阶段（错误 A）**：PM 把"4 次 iteration 无 AUDITOR 审计"当作结构性漏洞，提议用项目 auditor agent 审计 manifest。用户驳斥："AUDITOR 是否 AHE 规定的 auditor，还是只是项目优化前的 auditor，这两者不一定等价"。查 HARNESS.md §演化循环 + 通用 AHE skill 工作流 3 确认：AHE Verify 是"执行者自我验证 + 下一轮 Evaluate 时间独立"，根本无 AUDITOR 角色。项目 AUDITOR 是业务流程审计员（`auditor.md` "审 PM 的管理"），与 AHE iteration verify 流程不等价。 | 本 iteration manifest `ch_014` / 用户对话 |
+| 2 | 2026-07-27 | **iter4 v1（错误 B）**：PM 把 L-07 对策直接写进通用 AHE skill 的工作流 2/3。用户驳斥："改 AHE 的 SKILL.md，这符合 AHE 的做法吗？" → revert。当时归因为"通用工具 vs 项目实践边界"，实际是 L-08 同一根因（AHE 规范解读层错误）。 | `manifests/change_2026-07-27-skill-iteration-lessons.json` ch_012 |
+
+**根因**：
+
+1. **MEMORY.md Harness 组件清单未标注"规范来源"**：agent 看到清单时无法分辨哪些来自 HARNESS.md 硬要求、哪些是项目自定义
+2. **通用 AHE skill 与项目角色之间无显式映射文档**：PM 在 AHE iteration 中默认"项目有的角色/流程都适用于 AHE"
+3. **通用 AHE skill 工作流 3（Verify）描述了"步骤"但未约束"谁执行"**：agent 倾向于套用项目角色，而非按 AHE 规范的"执行者自我验证"
+4. **PM 跳过 Evaluate 步骤**：iter1-4 全是凭直觉/审计发现改进，未跑真实任务收集轨迹。Evidence-Driven 原则缺失导致"凭感觉"判断，范畴错误无法被轨迹证伪
+
+**对策**（agent 必须执行）：
+
+- **PM（AHE iteration 执行者）**：每次 AHE iteration 开始前，执行 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §D "AHE 规范解读检查清单"，明确"本 iteration 涉及的角色/流程，哪些是 AHE 规范要求、哪些是项目自定义"
+- **PM**：任何"X 角色未执行 Y 流程"的判断，必须先查 HARNESS.md / 通用 AHE skill 确认 Y 是否 AHE 规范要求；若仅在项目 AGENTS.md / `auditor.md` 等中出现 → 是项目自定义，不适用于 AHE iteration
+- **PM**：MEMORY.md Harness 组件清单已新增"规范来源"列，启动时必读
+- **PM**：AHE iteration 引用规范条款时，必须显式标注来源（`HARNESS.md §X` / `AHE skill 工作流 Y` / `AGENTS.md §Z` / `construct-rs-ahe-practices §W` / `auditor.md` 等）
+- **PM**：每次 AHE iteration 必须先做 Evaluate（即使是最小 dogfood —— iteration 自身执行轨迹），不允许跳过。详见 `construct-rs-ahe-practices §D`
 
 ---
 
