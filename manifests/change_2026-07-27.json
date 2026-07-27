@@ -1,0 +1,97 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 1,
+  "timestamp": "2026-07-27T00:00:00+08:00",
+  "author": "pm (via AHE skill)",
+  "changes": [
+    {
+      "change_id": "ch_001",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "experiences.md",
+      "summary": "建立 Long-Term Memory 组件，集中沉淀 6 条跨阶段模式化失败教训（L-01 至 L-06）",
+      "failure_evidence": "项目历史中至少 5 次模式化失败未沉淀：(1) 2026-06-21 推倒重来（AGENTS.md §0）；(2) 2026-06-19 Phase 15 验收失败（performance-gate/SKILL.md §历史教训）；(3) 2026-06-22 Phase 1 设计修订 R3 揭示 R1/R2 漏洞（docs/设计修订-parse路径优化.md R3 修订记录）；(4) 2026-06-28 Phase 3 不对称误判（docs/分析-phase3-parse-build不对称.md §1.2）；(5) 2026-07-11 P0-3 lazy path 模式 Phase 1 验证后未沉淀，Phase 4 重复实现（docs/架构审查-重复代码与抽象质量.md §1.2）",
+      "root_cause": "项目缺少 HARNESS.md 组件 7（Long-Term Memory）。跨阶段经验散落在 AGENTS.md §0、performance-gate/SKILL.md §历史教训、各 docs/分析-*.md 文件中，每次 agent 启动都要重新发现，且新 Phase 设计时不会主动检索过往教训",
+      "targeted_fix": "创建 experiences.md，按优先级沉淀 6 条教训（L-01 中间表示层违反 / L-02 理论估算替代实证数据 / L-03 PM 接受不对等证据 / L-04 跨阶段模式未沉淀 / L-05 优化 A 路径忽略 B 路径 / L-06 字段数混淆对照）。每条教训包含：模式描述、反复出现事件表（带证据指针）、根因、按角色分派的对策。Agent 使用方式说明在文件顶部",
+      "predicted_impact": {
+        "expected_fixes": [
+          "后续 Phase 的设计文档应主动包含 §0 原则对照表（L-01 对策）",
+          "REV 检视应主动检查'所有 FFI/拷贝/转换来源'是否都在预测中（L-05 对策）",
+          "PM 验收含性能标准时应主动输出分析记录（L-03 对策）",
+          "Phase 验收应主动检查'模式沉淀'项（L-04 对策）"
+        ],
+        "at_risk_regressions": [
+          "agent 启动时多读一个文件（experiences.md ~190 行），上下文消耗略增",
+          "若 agent 不主动检索 experiences.md，教训仍可能被忽略——需配合 AGENTS.md 引用强化"
+        ],
+        "rationale": "教训本身已存在于项目文档中，但散落导致检索成本高。集中后检索成本降低，agent 决策时可主动对照。AHE 论文核心发现之一：Long-Term Memory 是降低同类失败复现率的最有效组件"
+      }
+    },
+    {
+      "change_id": "ch_002",
+      "component": "skills",
+      "subtype": "update",
+      "file_path": ".opencode/skills/performance-gate.md → .opencode/skills/performance-gate/SKILL.md",
+      "summary": "将 performance-gate skill 从裸文件结构转为规范的目录结构（SKILL.md）",
+      "failure_evidence": "Harness Audit 发现 .opencode/skills/ 下三种结构并存：performance-gate.md（裸文件，违规）、pm-performance-validation/（目录，规范）、agentic-harness-engineering/（目录，规范）。HARNESS.md §目录结构标准规定 skill 应放在 skills/<name>/SKILL.md",
+      "root_cause": "缺乏结构标准约束。performance-gate.md 是早期创建的 skill，未遵循后续确立的目录规范。pm.md Line 158 和 experiences.md 中所有引用都使用旧路径 .opencode/skills/performance-gate.md",
+      "targeted_fix": "git mv .opencode/skills/performance-gate.md → .opencode/skills/performance-gate/SKILL.md。同步更新 AGENTS.md §6 Line 158 的引用路径。experiences.md 中所有引用已直接使用新路径 performance-gate/SKILL.md",
+      "predicted_impact": {
+        "expected_fixes": [
+          "skill 加载行为统一——三个 skill 都通过 SKILL.md 入口加载"
+        ],
+        "at_risk_regressions": [
+          "若有外部脚本或文档硬编码旧路径 .opencode/skills/performance-gate.md，将失效"
+        ],
+        "rationale": "结构一致性能消除 skill 加载时的歧义。这是低风险高一致性的改进"
+      }
+    },
+    {
+      "change_id": "ch_003",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md",
+      "summary": "AUDITOR 角色注册对齐——AGENTS.md §3/§4/§5/§12 补齐 AUDITOR 信息",
+      "failure_evidence": "Harness Audit 发现：(1) .opencode/agents/auditor.md 已存在；(2) pm.md Line 61 工作流图含 AUDITED 状态；(3) plans/phase4-array/过程记录.md Line 1613+ 显示 AUDITOR 已实际执行审计任务（4.1 验收审计 + 补审）；但 (4) AGENTS.md §3 工作流图（原 Line 66）只到 ACCEPTED 状态；(5) AGENTS.md §4 文件读写规则表无 AUDITOR 行；(6) AGENTS.md §12 agent 列表（原 Line 277-283）无 auditor.md；(7) AGENTS.md §12 Task 工具参数（原 Line 293）无 'auditor' 选项",
+      "root_cause": "Rules 与实际 agent 文件漂移。auditor.md 在某次新增时未同步更新 AGENTS.md 的所有引用位置。AGENTS.md 是 System Rules 核心文件，agent 注册信息分散在 §3/§4/§5/§12 四个章节，任一章节漏改都会导致不一致",
+      "targeted_fix": "AGENTS.md 四处对齐：(1) §3 工作流图加入 AUDITED 状态 + AUDITOR 角色，驳回规则加入 'AUDITOR 可驳回至 PM'；(2) §4 文件读写规则表加入 AUDITOR 行（可写 plans/phaseN/过程记录.md + experiments/）；(3) §5 过程记录格式的角色专属段落说明加入 'AUDITOR：审计结果'；(4) §12 agent 文件列表加入 auditor.md，Task 工具 subagent_type 加入 'auditor'，文件权限表加入 auditor 行",
+      "predicted_impact": {
+        "expected_fixes": [
+          "AGENTS.md 与 .opencode/agents/*.md 完全一致，消除 Rules 内部矛盾",
+          "PM 在分派 AUDITOR 任务时不会因为 AGENTS.md 未列出而犹豫",
+          "新 agent 加入项目时有完整的注册位置参照（§12 四个表格/列表）"
+        ],
+        "at_risk_regressions": [
+          "无显著风险——本次修改只是补齐实际已存在但未记录的状态"
+        ],
+        "rationale": "System Rules 内部一致性是 HARNESS.md 合规检查清单的硬要求。本次修改消除了 Rules 漂移，让任何角色读 AGENTS.md 都能看到完整的角色体系"
+      }
+    },
+    {
+      "change_id": "ch_004",
+      "component": "system_rules",
+      "subtype": "create",
+      "file_path": "manifests/",
+      "summary": "建立 Change Manifest 基础设施（manifests/ 目录 + 本 manifest 文件）",
+      "failure_evidence": "Harness Audit 发现：docs/ 下有 5 个修订/分析文件（设计修订-parse路径优化.md / 设计修订-parse路径优化-借用实例dict.md / 分析-phase3-parse-build不对称.md / 架构审查-重复代码与抽象质量.md / analysis/perf-p0-analysis.md），每次修订都缺乏标准化的'失败证据/根因/修复/预测/验证'记录。HARNESS.md §Change Manifest 标准格式要求每次 harness 修改都附带 manifest",
+      "root_cause": "项目无 manifests/ 目录，无 Change Manifest 规范。决策可观测性机制（AHE 三层可观测性的第三层）缺失",
+      "targeted_fix": "创建 manifests/ 目录。生成本 Change Manifest 文件（change_2026-07-27.json）记录本次 4 个改进的可证伪预测",
+      "predicted_impact": {
+        "expected_fixes": [
+          "后续每次 harness/rules 修改都生成 manifest，决策可追溯",
+          "下次 Harness Audit 可基于 manifest 验证预测准确性（keep/revert/partial）"
+        ],
+        "at_risk_regressions": [
+          "若 agent 不主动生成 manifest，机制仍会失效——需配合 AGENTS.md 工作流强化"
+        ],
+        "rationale": "Change Manifest 是 AHE 论文的核心机制——让每次修改成为可证伪假设。本次是基础设施建立，本身不直接改进 agent 行为，但为后续 evidence-driven 演化奠定基础"
+      }
+    }
+  ],
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "2026-08-10T00:00:00+08:00",
+    "verification_method": "下次 Harness Audit 时检查：(1) experiences.md 是否被 agent 决策时主动引用；(2) performance-gate/SKILL.md 是否仍可正常加载；(3) AGENTS.md 修改后是否消除 AUDITOR 注册漂移；(4) 后续 harness 修改是否生成新 manifest"
+  }
+}

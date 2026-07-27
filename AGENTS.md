@@ -63,8 +63,8 @@ construct_rust/
 每个子任务严格按以下管道流转，不可跳步：
 
 ```
-PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
- (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)
+PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED → AUDITED
+ (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)     (AUDITOR)
 ```
 
 - **PENDING**：PM 从总纲选取任务
@@ -72,9 +72,10 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 - **DESIGN_REVIEW**：REV 检视设计的延续性、性能、整体性、可行性、完备性
 - **CODING**：DEV 编码 + 单元测试 + 自检
 - **CODE_REVIEW**：VET 审查代码逻辑、行为一致性、错误处理、安全、边界条件
-- **ACCEPTED**：PM 确认完成
+- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）
+- **AUDITED**：AUDITOR 审计 PM 的验收管理是否到位（流程、口径、标准、遗留追踪、规划合规）
 
-**驳回规则**：REV 可驳回至 DESIGNING；VET 可驳回至 CODING。驳回必须附具体原因。
+**驳回规则**：REV 可驳回至 DESIGNING；VET 可驳回至 CODING；AUDITOR 可驳回至 PM（PM 须补充缺失的管理工作）。驳回必须附具体原因。
 
 **角色隔离**：同一子任务中，DEV 不得兼任 REV 或 VET。REV（设计检视）和 VET（代码审查）必须是不同 agent，避免确认偏误。
 
@@ -93,6 +94,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 | DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志）、`experiments/`（实验） | `docs/`、`plans/phaseN/总纲.md` |
 | REV | `plans/phaseN/过程记录.md`（设计检视结果）、`experiments/`（实验） | 全部 |
 | VET | `plans/phaseN/过程记录.md`（代码审查结果）、`experiments/`（实验） | 全部 |
+| AUDITOR | `plans/phaseN/过程记录.md`（审计结果）、`experiments/`（实验） | 全部 |
 
 `experiments/` 是试验场，任何角色都可以在此写代码做实验（测元操作耗时、验证行为、诊断问题），不受编码规范约束，不影响交付物。
 
@@ -120,7 +122,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED
 - [时间] [角色] 操作描述
 
 ### [角色专属段落]
-（REV：设计检视结果 / VET：代码审查结果 / ARCH：设计说明 / DEV：自检结果）
+（REV：设计检视结果 / VET：代码审查结果 / ARCH：设计说明 / DEV：自检结果 / PM：验收分析记录 / AUDITOR：审计结果）
 
 ### 备注
 （补充说明、驳回原因记录等）
@@ -155,7 +157,7 @@ cargo bench
 
 ### ⚠️ 性能门禁（涉及性能的阶段必须遵守）
 
-详见 `.opencode/skills/performance-gate.md`。三条硬规则：
+详见 `.opencode/skills/performance-gate/SKILL.md`。三条硬规则：
 
 1. **设计阶段**：ARCH 必须在设计中写入"性能假设"（瓶颈识别 + 可证伪预测 + 验证方法）。REV 必须检查预测覆盖了**所有**瓶颈来源。
 2. **首个实现后**：PM 必须执行性能烟雾测试（vs 绝对基线，非旧路径）。< 0.5x → 暂停后续阶段。
@@ -280,6 +282,7 @@ Phase 2+ ←── 由用户在 Phase 1 验收通过后指定
 ├── developer.md   ← DEV（子 agent，mode: subagent）
 ├── reviewer.md    ← REV（子 agent，mode: subagent）— 设计检视
 ├── vetter.md      ← VET（子 agent，mode: subagent）— 代码审查
+├── auditor.md     ← AUDITOR（子 agent，mode: subagent）— PM 验收管理审计
 ```
 
 > **已移除** `validator.md`（REF 角色已并入 VET）。
@@ -290,7 +293,7 @@ PM 通过 opencode 的 Task 工具分派任务给子 agent：
 
 ```
 Task 工具参数：
-  subagent_type: "architect" | "developer" | "reviewer" | "vetter"
+  subagent_type: "architect" | "developer" | "reviewer" | "vetter" | "auditor"
   description: "3-5词任务描述"
   prompt: "包含子任务信息、必读文件、输出要求的完整指令"
 ```
@@ -304,6 +307,7 @@ Task 工具参数：
 | developer | `construct-rs/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
 | reviewer | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
 | vetter | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
+| auditor | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
 
 ### 切换 agent
 
