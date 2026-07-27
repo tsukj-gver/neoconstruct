@@ -1,0 +1,43 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 2,
+  "timestamp": "2026-07-27T12:00:00+08:00",
+  "author": "pm (user request)",
+  "changes": [
+    {
+      "change_id": "ch_005",
+      "component": "tool_descriptions",
+      "subtype": "update",
+      "file_path": "opencode.json",
+      "summary": "为 opencode 启用 websearch 与 webfetch 工具的 permission 配置",
+      "failure_evidence": "Harness Audit iteration 1 报告 Tool Descriptions 组件状态为 ❌（完全缺失）。用户指令明确要求启用 websearch 功能以访问 AHE 论文与仓库",
+      "root_cause": "opencode.json 未声明 permission.websearch / permission.webfetch，默认行为不显式。websearch 工具实际可用性还受 OPENCODE_ENABLE_EXA 环境变量控制，未设置",
+      "targeted_fix": "opencode.json 添加 permission: { websearch: 'allow', webfetch: 'allow' }。同时通过 setx OPENCODE_ENABLE_EXA 1 设置用户级持久环境变量（Exa AI 提供搜索后端，免 API key）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "重启 opencode 后，agent 工具列表中出现 websearch 工具",
+          "agent 可主动检索 AHE 论文、仓库、依赖库等在线资源",
+          "ARCH 设计阶段可参考 pydantic-core、mashumaro 等参考项目的最新文档"
+        ],
+        "at_risk_regressions": [
+          "websearch 通过 Exa AI 在线服务，若网络受限或 Exa 服务异常则失败",
+          "Exa AI 免 key 但有未公开的速率限制，密集搜索可能受限"
+        ],
+        "rationale": "opencode 官方文档明确：websearch 工具在 OPENCODE_ENABLE_EXA=1 或使用 OpenCode provider 时启用。Exa AI 后端免 key。本次修改同时覆盖配置（permission）与启用条件（env）"
+      }
+    }
+  ],
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "2026-07-28T00:00:00+08:00",
+    "verification_method": "用户重启 opencode 后，在新会话中调用 websearch 工具检索 'Agentic Harness Engineering arxiv'，验证返回结果包含 https://arxiv.org/abs/2604.25850"
+  },
+  "note_pre_verification_evidence": {
+    "webfetch_already_verified": [
+      "https://arxiv.org/abs/2604.25850 — 抓取成功，确认论文存在（标题：Agentic Harness Engineering: Observability-Driven Automatic Evolution of Coding-Agent Harnesses；作者：Jiahang Lin 等 11 人；2026-04-28 v1 → 2026-05-18 v4）",
+      "https://github.com/china-qijizhifeng/agentic-harness-engineering — 抓取成功，确认仓库存在（775 stars / 86 forks；MIT license；含 evolve.py / agents/ / scripts/ 等代码）"
+    ],
+    "caveat": "webfetch 与 websearch 是不同工具：webfetch 抓取已知 URL 内容（当前会话已可用），websearch 用 Exa AI 搜索未知信息（需重启 opencode 才生效）。两者网络层独立，但都依赖外网可达——webfetch 验证通过说明网络层正常"
+  }
+}
