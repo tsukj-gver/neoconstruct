@@ -30,7 +30,7 @@ mode: subagent
 
 收到 PM 分派的设计任务后：
 
-1. 阅读 Python 源码中对应的模块实现（参照 AGENTS.md 第 10 节的 Python 参考速查）
+1. 阅读 Python 源码中对应的模块实现（参照本文 §Python 参考速查）
 2. 阅读 `docs/design/架构设计.md`，确保设计与总体架构一致
 3. 编写 `docs/design/模块设计-<模块名>.md`，必须包含：
 
@@ -76,7 +76,7 @@ mode: subagent
 ## 工作流程
 
 1. 阅读 PM 分派的子任务要求
-2. 定位 Python 源码位置（参考 AGENTS.md 第 10 节）
+2. 定位 Python 源码位置（参考本文 §Python 参考速查）
 3. 精读 Python 源码中的对应实现
 4. 阅读 `docs/design/架构设计.md` 确认整体设计约束
 5. 阅读已完成的 `docs/design/模块设计-*.md` 确认接口兼容
@@ -134,6 +134,28 @@ DEV/REV/VET 在执行过程中可能对设计文档提出质疑（Argue）。PM 
 - 必须基于 Python 源码事实回应，不能凭理论推断
 - 如果质疑暴露了总设计文档的问题，须一并提出修改建议
 - 回应须及时，避免阻塞 DEV 的开发进度
+
+## Python 参考速查
+
+开发任何模块时，首先定位 Python 源码中的对应实现（其他角色可参考本表）：
+
+| Rust 模块 | Python 源码位置 |
+|-----------|---------------|
+| Construct trait | `construct/construct/core.py` → `Construct` 类 (line ~321) |
+| 动态类型 | 对应 Python 的动态类型 + `Container` / `ListContainer`（直接以 PyObject 表达，无 Rust 中间枚举） |
+| Context | `construct/construct/core.py` → parse/build 中的 `context` 参数 |
+| Stream | `construct/construct/core.py` → `stream_read` 等辅助函数 |
+| 错误 | `construct/construct/core.py` → 文件末尾 ~40 个 Exception 子类 |
+| 原子构造器 | `construct/construct/core.py` → `Bytes`, `FormatField`, `VarInt` 等 |
+| 复合构造器 | `construct/construct/core.py` → `Struct`, `Sequence`, `Array` 等 |
+| 适配器 | `construct/construct/core.py` → `Adapter`, `Enum`, `Validator` 等 |
+| 表达式 | `construct/construct/expr.py` → `Path`, `BinExpr` 等 |
+| 流操作 | `construct/construct/core.py` → `Bitwise`, `Pointer`, `Prefixed` 等 |
+| 惰性解析 | `construct/construct/core.py` → `Lazy`, `LazyStruct` 等 |
+| 容器类型 | `construct/construct/lib/containers.py` |
+| 二进制工具 | `construct/construct/lib/binary.py` |
+| 流包装器 | `construct/construct/lib/bitstream.py` |
+| 格式示例 | `construct/gallery/` 和 `construct/deprecated_gallery/` |
 
 ## 注意事项
 

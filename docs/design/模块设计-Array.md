@@ -259,7 +259,7 @@ pub struct ArrayNode {
 }
 ```
 
-**为什么不用 `Box<dyn Construct>`**：违反 AGENTS.md §7（禁止动态分派）。
+**为什么不用 `Box<dyn Construct>`**：违反 AGENTS.md §0（禁止动态分派）。
 enum_dispatch 静态分派是项目硬约束。
 
 ### 2.2 决策 A2：count 来源编译期分类（静态 / 表达式）
@@ -340,7 +340,7 @@ IndexNode.parse 直接读 `ctx.index()`，None 时返回 Py_None（对齐 Python
 ### 2.4 决策 A4：`StopFieldError` 用 Result 哨兵变体（不引入 panic / 异常）
 
 Python 用异常做控制流（`StopIf` 抛 `StopFieldError`，`Struct`/`Sequence`/
-`GreedyRange` 捕获视为正常终止）。Rust 不能用 panic（AGENTS.md §8 红线 2），
+`GreedyRange` 捕获视为正常终止）。Rust 不能用 panic（developer.md §Rust 编码红线 红线 2），
 也不能引入新返回类型（破坏 Construct trait 签名）。
 
 **决策**：在 `ConstructError` 增加 `StopField` 哨兵变体：
@@ -3280,7 +3280,7 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 ...
 ```
 
-**测量口径**（AGENTS.md §6 S-PERF）：
+**测量口径**（performance-gate/SKILL.md S-PERF）：
 - construct-rs 侧：`maturin develop --release` 安装后，Python 调用用户面 API
 - Python 侧：直接 `import construct`，调等效 API
 - 子进程隔离（两边包同名，不可同进程导入）
@@ -4129,7 +4129,7 @@ Element 是引用入口，不独立 benchmark，但需通过 RepeatUntil 场景�
 - **低于 10x 的场景单独标注**（用户硬约束 #5：所有场景必须达标）
 - 与参考实现 parse/build 方向相反的场景单独标注
 
-### 14.4 测量口径（AGENTS.md §6 S-PERF）
+### 14.4 测量口径（performance-gate/SKILL.md S-PERF）
 
 - construct-rs 侧：`maturin develop --release` 安装后，Python timeit 调用 `Packet.parse(data)`
 - Python construct 侧：Python timeit 调用 `pkt.parse(data)`（同包名，子进程隔离）

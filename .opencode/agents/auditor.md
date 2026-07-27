@@ -80,11 +80,11 @@ PM 是否在正确的时机做了子任务分解：
   [ ] 子任务粒度是否合理（非一次性全做）
 ```
 
-### 6. Evaluate 触发合规（规范来源：`AGENTS.md §3.1` + `HARNESS.md §演化循环`）
+### 6. Evaluate 触发合规（规范来源：`AGENTS.md §1 工作流管道` + `HARNESS.md §演化循环`）
 
 PM 是否按 AHE §演化循环要求触发了 Evaluate 步骤：
 ```
-  [ ] 每个子任务 ACCEPTED 时是否产出了 Evaluate 摘录（按 AGENTS.md §3.1 模板）
+  [ ] 每个子任务 ACCEPTED 时是否产出了 Evaluate 摘录（按 `AGENTS.md §1` + `pm.md §指标验收` 模板）
   [ ] 每个 phase 验收（打 tag）时是否产出了完整 Evaluate 轨迹（experiments/eval-*-{phase}.md）
   [ ] Evaluate 摘录中的 failures 是否对齐了 experiences.md L-XX（无未对齐的"候选 L-XX"积压）
   [ ] 跳过 Evaluate 直接 ACCEPTED 的子任务是否有 PM 显式标注的理由

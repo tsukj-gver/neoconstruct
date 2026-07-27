@@ -1,7 +1,6 @@
 """pytest 全局配置：确保 construct-rs 包优先于 site-packages 中的同名 Python 包。
 
-背景：基准测试需要安装 Python 原版 ``construct==2.10.70`` 作为绝对基线（AGENTS.md
-性能门禁 §2）。该包与 construct-rs 同名，安装在 site-packages 下。pytest 默认
+背景：基准测试需要安装 Python 原版 ``construct==2.10.70`` 作为绝对基线（`.opencode/skills/performance-gate/SKILL.md` Checkpoint 2）。该包与 construct-rs 同名，安装在 site-packages 下。pytest 默认
 将 site-packages 置于 sys.path 前部，会导致 ``import construct`` 误命中 Python
 原版（无 Rust 扩展）。
 

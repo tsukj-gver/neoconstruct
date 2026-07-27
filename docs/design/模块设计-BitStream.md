@@ -262,7 +262,7 @@ impl BuildStream {
   顶层 Bitwise 保证 bit_pos==0），release 模式不为此增加运行时分支。
 
 **理由**：debug_assert 在开发/测试环境（CI 跑 debug build）捕获调用方 bug；release
-模式遵循 Rust "无额外运行时检查"惯例，与 AGENTS.md §8 红线 #2（禁止 panic）一致——
+模式遵循 Rust "无额外运行时检查"惯例，与 developer.md §Rust 编码红线 红线 #2（禁止 panic）一致——
 **所有 panic 路径均限定在 `debug_assert!`（仅 debug build 触发），release 永不 panic**。
 read 的 release 路径有 Err 返回值（可恢复），write/into_bytes 的 release 路径为
 "调用方契约违反，行为未定义但不 panic"（与 std `Vec`/`slice` 的 unsafe-adjacent API 一致）。
@@ -1411,7 +1411,7 @@ FlagsEnum 语法糖，与 bit 流无关），全部覆盖。
 - Padding 需同步实现 → BitPaddingNode + PaddingNode（§4.2/§4.6）
 - 不自动 padding，剩余 bit 报错 → BitwiseNode 对齐校验（§4.3 BW-1）
 
-### 14.3 编码红线遵守（AGENTS.md §8）
+### 14.3 编码红线遵守（developer.md §Rust 编码红线）
 
 | 红线 | 遵守情况 |
 |------|---------|

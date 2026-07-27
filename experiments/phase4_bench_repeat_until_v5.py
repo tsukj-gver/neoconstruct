@@ -1,6 +1,6 @@
 """Phase 4 子任务 4.5 v5 性能基准：RepeatUntil parse/build（v5 终止表达式路径）。
 
-按 AGENTS.md §6 S-PERF 测量口径：
+按 performance-gate/SKILL.md S-PERF 测量口径：
 - construct-rs 侧：通过 maturin develop 安装后，Python 调用用户面 API
 - Python construct 侧：直接 import construct，调等效 API（**包 Struct，apples-to-apples**）
 - 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）

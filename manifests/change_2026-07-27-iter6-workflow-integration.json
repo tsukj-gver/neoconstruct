@@ -126,8 +126,28 @@
     "preventive_check": "未来 AHE iteration 涉及 System Rules（AGENTS.md）或 agent 角色定义（.opencode/agents/*.md）修改时，先判断：(1) 修改是否影响业务子任务工作流？(2) 是否需要 ARCH/REV lightweight review（不走完整 §3 管道但有独立检查）？(3) 若同样场景出现 2+ 次（候选 L-09）→ 沉淀为新教训"
   },
   "verification": {
-    "status": "pending",
-    "scheduled_at": "下次 phase 子任务 ACCEPTED 时验证：(1) PM 是否按 AGENTS.md §3.1 主动产出 Evaluate 摘录；(2) AUDITOR 是否按第 6 类审计项检查 Evaluate 触发；(3) pm.md §指标验收 的'无 Evaluate 摘录的 ACCEPTED 状态无效'条款是否实际执行；(4) auditor.md §范畴边界 是否实际阻止 AUDITOR 越界审计 AHE iteration manifest",
-    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) AGENTS.md §3.1 ↔ auditor.md 第 6 类 ↔ pm.md §指标验收 三向引用一致；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md AHE 历史加 iter6 行"
+    "status": "partial",
+    "scheduled_at": "下次 phase 子任务 ACCEPTED 时验证：(1) PM 是否按 AGENTS.md §1 主动产出 Evaluate 摘录；(2) AUDITOR 是否按第 6 类审计项检查 Evaluate 触发；(3) pm.md §指标验收 的'无 Evaluate 摘录的 ACCEPTED 状态无效'条款是否实际执行；(4) auditor.md §范畴边界 是否实际阻止 AUDITOR 越界审计 AHE iteration manifest",
+    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) AGENTS.md §1（原 §3.1）↔ auditor.md 第 6 类 ↔ pm.md §指标验收 三向引用一致；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md AHE 历史加 iter6 行",
+    "completed_at": "2026-07-28T03:35:00+08:00",
+    "verified_by": "iter7 dogfood（详见 experiments/eval-2026-07-27-iter7-dogfood.md）",
+    "result": {
+      "expected_fixes_verified": [
+        "预测 (1) 验证 ✓：iter7 PM 主动产出 dogfood 轨迹（experiments/eval-2026-07-27-iter7-dogfood.md），按 AGENTS.md §1（原 §3.1，iter7 重写后章节号变更）+ pm.md §指标验收 模板"
+      ],
+      "unexpected_fixes": [],
+      "regressions_observed": [
+        "iter7 把 AGENTS.md §3.1 重写为 §1 工作流管道（融入 AHE Evaluate 触发）。原 §3.1 引用在 iter7 中全部更新为 §1。这是结构性变更，非回归"
+      ],
+      "false_predictions": [],
+      "predictions_not_yet_triggered": [
+        "预测 (2) 未触发：iter7 不涉及 phase 子任务 ACCEPTED，AUDITOR 第 6 类审计项未被调用",
+        "预测 (3) 未触发：iter7 不涉及 PM 验收子任务，'无 Evaluate 摘录的 ACCEPTED 状态无效'条款未执行",
+        "预测 (4) 未触发：iter7 不涉及 AUDITOR 审计 AHE iteration，§范畴边界 未实际阻止越界"
+      ]
+    },
+    "verdict": "partial",
+    "verdict_rationale": "4 个子预测中 1 个已验证（dogfood 轨迹产出），3 个需要 phase 子任务场景触发（iter7 是 AHE meta iteration，不涉及 phase 子任务）。无回归、无虚假预测。iter7 AGENTS.md 重写把 §3.1 → §1，结构变更已记录",
+    "followup": "下次 phase 子任务（如 Phase 5+ 启动）ACCEPTED 时验证预测 (2)(3)(4)"
   }
 }

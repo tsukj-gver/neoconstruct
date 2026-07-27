@@ -14,7 +14,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 # pyo3 是核心依赖（非 optional feature），Rust 内部直接操作 Python 对象。
-# 见 AGENTS.md §7 核心技术决策与 docs/架构设计.md §D.1。
+# 见 AGENTS.md §0 核心原则与 docs/架构设计.md §D.1。
 #
 # extension-module 不放在默认依赖中：
 # - cargo test 时需要嵌入 Python 解释器（链接 libpython），extension-module 会让符号未定义。

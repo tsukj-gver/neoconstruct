@@ -6,7 +6,7 @@
     v3 修复：Python 也包一层 `pc.Struct("items" / pc.Array(N, pc.Index))`。
     （S 系列 StopIf 两边本来就都是 Struct，已天然对称，仅做统一报告。）
 
-测量口径（AGENTS.md §6 S-PERF）：
+测量口径（performance-gate/SKILL.md S-PERF）：
 - construct-rs 侧：maturin develop 安装后，Python 调用户面 API（必经 Struct）
 - Python construct 侧：import construct，调等效 API
 - 子进程隔离（包同名，不可在同一进程导入）

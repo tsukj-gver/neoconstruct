@@ -67,8 +67,8 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 - **DESIGN_REVIEW**：REV 检视设计（延续性、性能、可行性、完备性）
 - **CODING**：DEV 编码 + 单元测试 + 自检
 - **CODE_REVIEW**：VET 审查代码（逻辑、行为一致性、错误处理、边界条件）
-- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）+ **产出 Evaluate 摘录**（按 AGENTS.md §3.1）
-- **AUDITED**：AUDITOR 审计 PM 的验收是否到位 + **检查 Evaluate 摘录产出**
+- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）+ **产出 Evaluate 摘录**（按 AGENTS.md §1 + 本文件 §指标验收）
+- **AUDITED**：AUDITOR 审计 PM 的验收是否到位 + **检查 Evaluate 摘录产出**（按 `AGENTS.md §1`）
 
 **驳回**：REV 驳回至 DESIGNING；VET 驳回至 CODING；AUDITOR 驳回至 PM（PM 补充缺失的管理工作）。必须附具体原因。
 
@@ -101,9 +101,9 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 
 PM 必须在过程记录中写入性能数据分析记录。分析的具体维度和派生指标要求在项目配置（AGENTS.md 等）中定义。**无分析记录的 ACCEPTED 状态无效。** 发现异常时必须先分派调查，不可直接验收。
 
-**每个子任务 ACCEPTED 时必须产出 Evaluate 摘录**（规范来源：`AGENTS.md §3.1` + `HARNESS.md §演化循环`）：
+**每个子任务 ACCEPTED 时必须产出 Evaluate 摘录**（规范来源：`AGENTS.md §1 工作流管道` + `HARNESS.md §演化循环`）：
 
-PM 在过程记录中 append 一段 Evaluate 摘录（按 `AGENTS.md §3.1` 模板）。**无 Evaluate 摘录的 ACCEPTED 状态无效。** 这是 AHE Evidence-Driven 原则的实现——产出可被下一轮 Evaluate / AUDITOR 审计证伪的证据。
+PM 在过程记录中 append 一段 Evaluate 摘录（按 `AGENTS.md §1` + 本段模板）。**无 Evaluate 摘录的 ACCEPTED 状态无效。** 这是 AHE Evidence-Driven 原则的实现——产出可被下一轮 Evaluate / AUDITOR 审计证伪的证据。
 
 | 标准类型 | 要求的证据 | 不可接受 |
 |---------|-----------|---------|
@@ -135,10 +135,60 @@ PM 全程只需知道质疑的标题/一句摘要。
 
 ## 提交规范
 
-- 子任务 ACCEPTED 后 PM 提交
-- 阶段验收通过后 PM 打 tag
-- 其他角色可查看（git status / diff）但不可提交
-- commit message 和 tag 格式在项目配置中定义
+PM 是 git 主操作者（DEV 可做 checkpoint 提交，REV/VET/AUDITOR 禁止任何 git 写操作）。
+
+**分支策略**：直接在 `main` 分支开发，不使用特性分支。
+
+**提交时机**：
+```
+子任务 ACCEPTED → PM 执行 git add + git commit
+    ↓
+... 所有子任务完成 ...
+    ↓
+阶段验收通过 → PM 执行 git tag phase-N-complete
+```
+
+DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint，防止工作丢失。
+
+**commit message 格式**：
+```
+feat(phaseN): X.Y 子任务描述
+```
+示例：`feat(phase1): 1.1 项目初始化` / `feat(phase2): 2.3 FormatField 实现` / `docs(phase1): 更新总设计文档`
+
+**tag 格式**：`phase-N-complete`（如 `phase-1-complete`）
+
+**禁止事项**（全员）：
+- 所有角色禁止 `git push`（本地仓库）
+- REV / VET / AUDITOR 禁止 `git add` / `git commit` / `git tag` / `git checkout` / `git revert` 等任何写操作
+- 禁止提交 `construct/` 目录下的任何变更（Python 原版仓库有独立 git）
+
+## opencode 角色分派机制
+
+PM 通过 opencode 的 Task 工具分派任务给子 agent：
+
+```
+.opencode/agents/
+├── pm.md          ← PM（主 agent，mode: primary）
+├── architect.md   ← ARCH（子 agent，mode: subagent）
+├── developer.md   ← DEV（子 agent，mode: subagent）
+├── reviewer.md    ← REV（子 agent，mode: subagent）— 设计检视
+├── vetter.md      ← VET（子 agent，mode: subagent）— 代码审查
+└── auditor.md     ← AUDITOR（子 agent，mode: subagent）— PM 验收管理审计
+```
+
+**Task 工具调用**：
+```
+subagent_type: "architect" | "developer" | "reviewer" | "vetter" | "auditor"
+description: "3-5词任务描述"
+prompt: "包含子任务信息、必读文件、输出要求的完整指令"
+```
+
+**分派规范**：分派时提供任务标识、状态转换、任务要求、必读文件、输出要求、操作权限。驳回后重新分派必须附完整驳回原因。
+
+**切换 agent**：PM 是默认主 agent，用户直接与 PM 对话；如需直接使用其他角色，可在 opencode 中切换 agent。所有角色 agent 的完整指令见 `.opencode/agents/*.md`。
+
+**Agent 文件写入规范**（PM 分派时强制要求）：子 agent 写入大文件必须分批（每次 ≤300 行），禁止一次性 Write/Edit 超长内容，禁止在单个 Task prompt 中要求一次性超大输出。
 
 ## PM 不做的事
 

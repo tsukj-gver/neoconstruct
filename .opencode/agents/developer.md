@@ -140,5 +140,5 @@ parse/build 对称性：
 ## 注意事项
 
 - 所有 cargo 命令必须使用 bash 工具的 `workdir="construct-rs"` 参数
-- 优先阅读 Python 原版实现来理解行为，但编码风格必须是惯用 Rust
+- 优先阅读 Python 原版实现来理解行为，但编码风格必须是惯用 Rust（Python 源码位置速查见 `architect.md §Python 参考速查`）
 - 不要过度设计，只实现当前子任务要求的功能

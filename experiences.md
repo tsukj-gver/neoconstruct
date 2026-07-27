@@ -87,7 +87,7 @@
 
 ## L-03: PM 接受不对等证据
 
-> **核心约束**（performance-gate/SKILL.md Checkpoint 3 + AGENTS.md §6 性能门禁）：
+> **核心约束**（performance-gate/SKILL.md Checkpoint 3）：性能假设必须有量化数据支撑
 > S-PERF "≥Xx" 标准要求"对比数据表（多场景 × vs 绝对基线）"作为证据。
 
 **模式描述**：PM 在验收时接受了类型不匹配的证据——如标准是"≥4x 性能"，
@@ -105,7 +105,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 2. 验收清单中"证据类型匹配"未硬编码为强制检查项。
 
 **对策**：
-- **PM**：验收时严格执行证据类型对照表（AGENTS.md §6 + pm.md §指标验收）。证据类型不匹配 → 驳回，不可降低标准。
+- **PM**：验收时严格执行证据类型对照表（`performance-gate/SKILL.md` + `pm.md §指标验收`）。证据类型不匹配 → 驳回，不可降低标准。
 - **AUDITOR**：审计 PM 验收时，"证据类型匹配"是必查项——若 PM 接受了类型不匹配的证据，AUDITOR 必须驳回。
 - **PM**：含性能标准的子任务验收，必须在过程记录中写入性能数据分析记录。**无分析记录的 ACCEPTED 状态无效。**
 
@@ -218,7 +218,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 ## L-08: AHE 规范解读层错误（通用 vs 项目自定义混淆）
 
-> **核心约束**（HARNESS.md §演化循环 + AGENTS.md §12）：AHE 规范（HARNESS.md / 通用 AHE skill）
+> **核心约束**（HARNESS.md §演化循环 + AGENTS.md §1 工作流管道）：AHE 规范（HARNESS.md / 通用 AHE skill）
 > 定义跨 Agent 的通用要求；项目 AGENTS.md / 项目级 skill / `.opencode/agents/*.md` 定义项目特定角色与流程。
 > 两者不可混淆——通用工具不可被项目特定内容污染，项目角色不可被当作通用规范要求。
 

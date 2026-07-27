@@ -618,7 +618,7 @@ build 方向不需要构建 PyList（从已有 Python list 读取），无需优
 
 ### 7.1 分类依据
 
-AGENTS.md §3 简化规则：trivial 性质的子任务可跳过 DESIGNING 和 DESIGN_REVIEW，仅走 CODING → CODE_REVIEW。
+AGENTS.md §1 简化规则：trivial 性质的子任务可跳过 DESIGNING 和 DESIGN_REVIEW，仅走 CODING → CODE_REVIEW。
 
 **本文档即为设计阶段产出**（已由 ARCH 完成）。在 REV 批准本设计后，所有 Item 的设计阶段即告完成，后续仅需 CODING → CODE_REVIEW。
 

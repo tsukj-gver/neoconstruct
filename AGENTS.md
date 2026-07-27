@@ -1,457 +1,92 @@
 # AGENTS.md
 
-> 本文档包含 construct-rs 项目中所有角色在任何任务、任何状态下都必须知晓的信息。
-> 无论你被分配为何种角色（PM / ARCH / DEV / REV / VET），开始工作前必须阅读并遵守本文档。
+> 项目级 System Rules（最高优先级）。所有角色（PM / ARCH / DEV / REV / VET / AUDITOR）启动时必读。
+> 遵循 HARNESS.md v1.0 + AHE §演化循环（Evaluate → Analyze → Improve → Verify）。
+> 详细角色职责见 `.opencode/agents/<role>.md`；详细规范入口见 `MEMORY.md`。
 
----
+## 0. 项目定位（违反即推倒重来）
 
-## 0. 项目定位（最高优先级，所有决策的前提）
+**Python 项目**——交付 Python 包，用户是 Python 开发者。Rust 是内核实现手段，**无独立 Rust 用户**。
+性能目标：**≥4x vs Python construct 2.10.70**（10x 为理想）。
 
-**这是一个 Python 项目。**
+**§0 核心原则（不可违反）**：
+1. **一次 FFI**：编译 / parse / build 各只有一次 Python↔Rust 边界穿越，Rust 内部通过 CPython C API 直接操作 Python 对象
+2. **无中间表示层**：parse 直接从 bytes 构造 PyObject；build 直接从 PyObject 读属性写字节，不在 Rust 侧引入独立的中间数据类型再转换（参考 pydantic-core）
+3. **输出/输入侧无抽象 trait**：不在输入/输出侧引入 trait 抽象层（会使每字段跨越 FFI 边界）
+4. **pyo3 是核心依赖**：单 crate，不存在独立的 Python 绑定层
+5. **mashumaro 式 API**：`@dataclass class X(StructMixin)`，编译在 `__init_subclass__`
+6. **构造器分派**：`enum_dispatch` 静态分派（参考 pydantic-core CombinedValidator）
+7. **错误处理**：`Result<T, ConstructError>` + `thiserror`，错误携带 `path` 字段
+8. **Stream 抽象**：纯 Rust 内部抽象，不跨 FFI
 
-交付物是 Python 包。用户是 Python 开发者。性能目标：**≥4x vs Python construct 2.10.70**（10x 为理想目标）。
+> **历史教训**：违反上述原则的实现，性能仅为原版 0.3-1.8x。本项目于 2026-06-21 推倒重来。详见 `experiences.md §L-01`。
 
-Rust 代码是**内核实现手段**，不是独立产品。没有任何 Rust 用户。不存在"纯 Rust 使用场景"。
-
-### 核心原则（所有架构决策必须遵守）
-
-1. **一次 FFI**：编译、parse、build 各只有一次 Python↔Rust 边界穿越。Rust 内部通过 CPython C API 直接操作 Python 对象。
-
-2. **无中间表示层**：parse 直接从 bytes 构造 PyObject，build 直接从 PyObject 读属性写字节，不在 Rust 侧引入独立的中间数据类型再转换。参考 pydantic-core。
-
-3. **pyo3 是核心依赖**：单 crate，不存在独立的 Python 绑定层。
-
-4. **mashumaro 式 API**：`@dataclass class X(StructMixin)`，不照搬 pydantic BaseModel。编译在 `__init_subclass__` 中完成，用户无感。
-
-> **历史教训**：此前的实现将解析结果先构造为 Rust 中间类型再逐个转换为 Python 对象，
-> 并在输入/输出侧引入 trait 抽象层使每个字段都跨越 FFI 边界，
-> 这些间接层的累积开销使 Python 端性能仅为原版的 0.3-1.8x。
-> 本项目于 2026-06-21 推倒重来，坚持一次 FFI、直接操作 Python 对象的设计。
-
----
-
-## 1. 项目简介
-
-将 Python 库 [construct](https://github.com/construct/construct) (v2.10.70) 的核心内核用 Rust 重写，**使其更快**。Construct 是一个声明式、对称的二进制数据解析与构建库——同一套定义既能解析（parse）二进制数据，也能构建（build）二进制数据。
-
-**Python 原版源码位置**：`construct/construct/`（在本项目目录下）
-- `core.py`（6447行）：所有构造器实现，是核心中的核心
-- `expr.py`：表达式系统（this/obj_ 引用）
-- `lib/containers.py`：Container / ListContainer 数据结构
-- `lib/binary.py`：整数/位/字节转换
-- `lib/bitstream.py`：流包装器
-- `gallery/`：格式解析器示例（ELF, PE/COFF 等）
-
-## 2. 目录结构
-
-```
-construct_rust/
-├── AGENTS.md               ← System Rules（核心规则文件）
-├── MEMORY.md               ← HARNESS 标准 LTM 顶层索引（agent 启动入口）
-├── experiences.md          ← LTM：跨阶段模式化失败教训（L-01 ~ L-06）
-├── manifests/              ← AHE Change Manifest（每次 harness 修改的 falsifiable 记录）
-│
-├── construct/              ← Python 原版仓库（只读参考，禁止修改）
-├── refs/                   ← 参考项目（pydantic-core, mashumaro）
-├── examples/               ← 用户 API 定义（example.py, construct.py）
-│
-├── plans/                  ← 阶段计划
-│   ├── 00-项目进度.md      ← 阶段进度快照（历史归档，活跃状态以 phaseN/总纲.md 为单一源）
-│   └── phaseN-<name>/      ← Phase 目录
-│       ├── 总纲.md          ← PM 维护：任务清单 + 状态（单一事实源）
-│       ├── 索引.md          ← 子任务过程记录导航（行号锚点）
-│       ├── 过程记录.md      ← 历史单文件累积（phase0-4，含 frontmatter）
-│       ├── 过程记录-X.Y.md  ← 新建子任务（phase5+）：per-子任务文件，含 frontmatter
-│       └── 分析报告-*.md    ← PM 写的 phase 需求分析
-│
-├── docs/                   ← 设计文档
-│   ├── 文档元数据规范.md    ← frontmatter schema + ADR 模板（CONVENTION-*）
-│   ├── design/             ← 活跃设计文档（DESIGN-*）
-│   ├── decisions/          ← ADR 决策记录（ADR-001 ~ ADR-NNN）+ README.md 索引
-│   ├── reviews/            ← 架构审查报告（REVIEW-*）
-│   ├── analysis/           ← 分析报告（ANALYSIS-*，含 Python 参考分析 + 根因分析）
-│   └── archive/            ← 已完成 phase 的历史工件
-│       └── phaseN/         ← 按 phase 归档（修订日志、旧版设计等）
-│
-└── .opencode/              ← Harness 组件（agents / skills / 等）
-```
-
-> **目录结构标准**：本结构遵循 HARNESS.md v1.0。详见 `MEMORY.md` 的 Harness 组件清单。
-
-## 3. 工作流概要
-
-每个子任务严格按以下管道流转，不可跳步：
+## 1. 工作流管道
 
 ```
 PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED → AUDITED
  (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)     (AUDITOR)
 ```
 
-- **PENDING**：PM 从总纲选取任务
-- **DESIGNING**：ARCH 编写/确认模块设计文档
-- **DESIGN_REVIEW**：REV 检视设计的延续性、性能、整体性、可行性、完备性
-- **CODING**：DEV 编码 + 单元测试 + 自检
-- **CODE_REVIEW**：VET 审查代码逻辑、行为一致性、错误处理、安全、边界条件
-- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）+ **产出 Evaluate 摘录**（按 §3.1 AHE 融入）
-- **AUDITED**：AUDITOR 审计 PM 的验收管理是否到位（流程、口径、标准、遗留追踪、规划合规）+ **检查 Evaluate 摘录是否产出**
+- **状态流转**：每个子任务严格按管道推进，不可跳步。`trivial` 子任务 PM 标注后可跳 DESIGNING + DESIGN_REVIEW；关联紧密的子任务 PM 可合并为一次 ARCH 分派
+- **ACCEPTED 时 PM 必须产出 Evaluate 摘录**（AHE §演化循环）；**AUDITED 时 AUDITOR 检查摘录产出**
+- **驳回规则**：REV→DESIGNING / VET→CODING / AUDITOR→PM（PM 补充缺失的管理工作），必须附具体原因
+- **角色隔离**：DEV 不兼任 REV/VET（避免确认偏误）
+- **设计质疑**：任何角色可标记 `[设计质疑]`，PM 转发 ARCH 必须回应
+- 详见 `pm.md §工作流管道`（状态细节）+ `construct-rs-ahe-practices §C`（Evaluate 协议）
 
-**驳回规则**：REV 可驳回至 DESIGNING；VET 可驳回至 CODING；AUDITOR 可驳回至 PM（PM 须补充缺失的管理工作）。驳回必须附具体原因。
+## 2. 文件读写权限
 
-**角色隔离**：同一子任务中，DEV 不得兼任 REV 或 VET。REV（设计检视）和 VET（代码审查）必须是不同 agent，避免确认偏误。
-
-**简化流程**：对于 `trivial` 性质的子任务（如项目初始化、纯文档更新），PM 可标注为 trivial，跳过 DESIGNING 和 DESIGN_REVIEW 阶段，仅走 CODING → CODE_REVIEW。
-
-**合并设计**：关联紧密的多个子任务，PM 可合并为一次 ARCH 分派，产出一份合并的模块设计文档。
-
-**设计质疑（Argue 机制）**：任何角色在执行任务过程中发现设计文档存在不合理、冲突或遗漏时，可向 PM 提出质疑。PM 将质疑转发给 ARCH，ARCH 必须回应。详见本文件 §11 问题处理优先级。
-
-### 3.1 AHE §演化循环融入（规范来源：`HARNESS.md §演化循环`）
-
-> 本节是把通用 AHE 规范的 Evaluate 步骤融入项目工作流。详见 `.opencode/skills/construct-rs-ahe-practices/SKILL.md §C`。
-
-**硬要求**：项目工作流不能仅跑业务管道（§3 主流程），必须同时驱动 AHE 演化循环（`HARNESS.md §演化循环`：Evaluate → Analyze → Improve → Verify）。否则 harness 改进只能凭直觉（违反 Evidence-Driven，`experiences.md §L-08` 根因之一）。
-
-**Evaluate 触发点**（与 §3 主流程同步）：
-
-| 触发时机 | 产出 | 责任角色 | 规范来源 |
-|---------|------|---------|---------|
-| 每个子任务 ACCEPTED 时 | Evaluate 摘录（append 到 `plans/phaseN/过程记录-X.Y.md`） | PM | `construct-rs-ahe-practices §C1` |
-| 每个 phase 验收（打 tag）时 | 完整 Evaluate 轨迹（`experiments/eval-{date}-{phase}.md`） | PM | `construct-rs-ahe-practices §C1` |
-| AHE iteration 进行时 | dogfood 轨迹（`experiments/eval-{date}-iterN-dogfood.md`） | PM | `construct-rs-ahe-practices §C1` |
-| AUDITOR 审计 phase 验收发现异常时 | 临时 Evaluate | AUDITOR 触发，PM 执行 | `construct-rs-ahe-practices §C1` |
-
-**Evaluate 摘录格式**（轻量级，append 到子任务过程记录）：
-
-```
-## Evaluate 摘录（AHE §演化循环）
-- task_id: X.Y
-- tool_calls 关键点: [简述]
-- failures 对齐 L-XX: [L-XX 或 "候选 L-XX" 或 "无"]
-- outcome: [完成/部分/失败]
-```
-
-**AUDITOR 检查**（`auditor.md` 第 6 类审计项）：AUDITOR 在 phase 验收审计时，检查每个子任务的 Evaluate 摘录是否产出。**注意**：AUDITOR 不审计 AHE iteration 自身的 manifest 预测验证（那是 PM 自我验证，`construct-rs-ahe-practices §B3`）——只审计 phase 子任务中 PM 是否走了 Evaluate 流程。
-
-**禁止**：跳过 Evaluate 直接 Improve。iter1-4 的"凭直觉 Improve"导致 L-08（AHE 规范解读层错误）直到 iter5 才被发现（`experiments/eval-2026-07-27-iter5-dogfood.md failures #3`）。
-
-## 4. 文件读写规则
-
-| 角色 | 可写 | 只读 |
-|------|------|------|
+| 角色 | 可写 | 只读/禁止 |
+|------|------|----------|
 | PM | 除业务代码外的全部（`plans/`、`docs/`、`.opencode/`、`experiments/`） | `construct-rs/src/`、`construct/` |
-| ARCH | `docs/`（设计文档）、`experiments/`（实验） | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`（开发日志）、`experiments/`（实验） | `docs/`、`plans/phaseN/总纲.md` |
-| REV | `plans/phaseN/过程记录.md`（设计检视结果）、`experiments/`（实验） | 全部 |
-| VET | `plans/phaseN/过程记录.md`（代码审查结果）、`experiments/`（实验） | 全部 |
-| AUDITOR | `plans/phaseN/过程记录.md`（审计结果）、`experiments/`（实验） | 全部 |
+| ARCH | `docs/`（设计文档）、`experiments/` | `plans/`、`construct/` |
+| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`、`experiments/` | `docs/`、`plans/phaseN/总纲.md` |
+| REV / VET / AUDITOR | `plans/phaseN/过程记录.md`、`experiments/` | 全部 |
 
-`experiments/` 是试验场，任何角色都可以在此写代码做实验（测元操作耗时、验证行为、诊断问题），不受编码规范约束，不影响交付物。
+**禁止**（全员）：`construct/`（Python 原版只读参考）/ `construct-rs/src/` 业务代码（仅 DEV）/ 已验收阶段总纲（除非 PM 授权）
 
-**禁止修改**：
-- `construct-rs/src/` 下的业务代码（仅 DEV 可写）
-- `construct/` 目录下的任何文件（Python 原版，只读参考）
-- 已验收阶段的总纲文件（除非 PM 授权）
-- 非自己角色负责的文件段落
+## 3. 全员红线
 
-## 5. 过程记录格式
+- **§0 不可违反**：parse 返回 dict 跨 FFI / build 接收 dict 跨 FFI / 引入输入输出 trait 抽象层 → 立即驳回（详见 `experiences.md §L-01`）
+- **质量门禁**（每次出口必须通过）：`cargo build` + `cargo clippy`（零 warning）+ `cargo fmt --check` + `cargo test`（全 PASS）。详见 `developer.md §自检清单`
+- **Rust 编码红线**：禁止 `unwrap()`/`expect()`/panic 在非测试代码 / 禁止 `TODO`/`FIXME` / 禁止硬编码魔法数字 / 所有 `pub` 项必须有 `///` 文档注释 / parse/build 对称。详见 `developer.md §Rust 编码红线`
+- **跨阶段决策**：所有新功能设计不可违反 `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）
+- **阶段依赖**：依赖阶段未完成验收时禁止开始后续阶段子任务
+- **Git 禁止**：所有角色禁止 `git push`；REV/VET/AUDITOR 禁止任何 git 写操作（详见 `pm.md §提交规范`）
+- **问题处理优先级**：设计缺陷 > 实现遗漏 > 测试遗漏 > 接口不一致 > 逻辑错误 > 代码质量
+- **Agent 文件写入**：禁止一次性 Write/Edit 超过 ~300 行，必须分批
 
-> **AHE iteration 3 更新**（2026-07-27）：过程记录从"单文件累积 + 表格元数据"改为"per-子任务文件 + YAML frontmatter"。详见 `docs/文档元数据规范.md`。
+## 4. 启动入口
 
-### 5.1 新规范（phase5+ 必须遵守）
+任何角色启动时按序读取：
 
-每个子任务一个独立文件 `plans/phaseN/过程记录-X.Y.md`，含 YAML frontmatter：
+1. 本文件（System Rules 核心）
+2. `MEMORY.md`（L0 索引：项目定位 / 阶段索引 / Harness 组件 / 教训索引 / 性能快照）
+3. `experiences.md`（L1 教训：L-01~L-08 模式化失败，全员决策前对照）
+4. `.opencode/agents/<role>.md`（自身角色定义 + 操作清单）
+5. `plans/phaseN/总纲.md`（当前 phase 单一事实源）
+6. 涉及 AHE iteration 时：`.opencode/skills/construct-rs-ahe-practices/SKILL.md`
+7. 涉及性能子任务时：`.opencode/skills/performance-gate/SKILL.md`
+8. 涉及过程记录填写时：`docs/文档元数据规范.md`
 
-```markdown
+## 5. 内容准入标准（防止 AGENTS.md 膨胀）
+
+加入 AGENTS.md 的内容必须**同时满足**：
+
+1. **全员必读**：所有 6 角色都需要的约束（不是某角色专属）
+2. **稳定性高**：不频繁变更的核心约束（详细操作流程放 agent 文件）
+3. **不可下沉**：无法通过引用其他文件替代
+
+**不满足的内容应放在**：
+- 角色专属操作流程 → `.opencode/agents/<role>.md`
+- 详细规范模板（如 frontmatter / 过程记录格式）→ `docs/`
+- 跨阶段教训 → `experiences.md` / `docs/decisions/ADR-*.md`
+- AHE 工作流补充 → `.opencode/skills/construct-rs-ahe-practices/SKILL.md`
+- 性能门禁 → `.opencode/skills/performance-gate/SKILL.md`
+
+每次向 AGENTS.md 加内容前，PM 必须对照本节检查。违反准入标准的内容应被驳回。
+
 ---
-id: TRACE-<phase>.<task>
-phase: <N>
-task: "<X.Y 子任务标题>"
-status: accepted          # pending / designing / design_reviewed / coding / code_reviewed / accepted / rejected
-owners: []                # 角色缩写列表（ARCH / DEV / REV / VET / PM / AUDITOR）
-started: YYYY-MM-DD
-completed: YYYY-MM-DD     # 留空表示未完成
-manifest_refs: []         # 关联的 AHE Change Manifest ch_XXX
----
 
-## 操作日志
-- [YYYY-MM-DD] [角色] 操作描述
-
-## [角色专属段落]
-（REV：设计检视结果 / VET：代码审查结果 / ARCH：设计说明 / DEV：自检结果 / PM：验收分析记录 / AUDITOR：审计结果）
-
-## 备注
-（补充说明、驳回原因记录等）
-```
-
-### 5.2 历史规范（phase0-4 已累积文件）
-
-`plans/phase0-4/过程记录.md` 是单文件累积格式（已加 frontmatter 标注为历史遗留）。**不回溯物理拆分**，但：
-
-- 每个 phase 必须有 `索引.md` 列出子任务行号锚点
-- agent 读特定子任务时通过索引跳行号（Read 工具的 `offset` 参数）
-- 新追加内容（如 phase4 重审）继续追加到原文件，不另建新文件
-
-### 5.3 状态语义
-
-| status 值 | 含义 |
-|----------|------|
-| `pending` | 未开始 |
-| `designing` | 设计中 |
-| `design_reviewed` | 设计已检视 |
-| `coding` | 开发中 |
-| `code_reviewed` | 代码已审查 |
-| `accepted` | 已通过（PM 验收） |
-| `rejected` | 已驳回 |
-
-### 5.4 frontmatter 必填字段
-
-详见 `docs/文档元数据规范.md`。核心：`id` / `status` / `phase` / `last_updated` 必填。
-
-## 6. 常用命令
-
-> **注意**：所有 cargo 命令必须在 `construct-rs/` 目录下执行（使用 bash 工具的 `workdir="construct-rs"` 参数）。
-
-```bash
-# 编译检查
-cargo build
-cargo clippy                        # 零 warning 要求
-
-# 测试
-cargo test                          # 全部 PASS 要求
-cargo test --features compression   # 含可选依赖测试
-cargo test -- --nocapture           # 显示 println! 输出
-
-# 代码格式
-cargo fmt --check                   # 格式检查
-cargo fmt                           # 自动格式化
-
-# 文档
-cargo doc --no-deps --open          # 生成并查看文档
-
-# 基准测试（Phase 9+）
-cargo bench
-```
-
-**所有阶段出口必须通过**：`cargo build` + `cargo clippy` + `cargo fmt --check` + `cargo test`
-
-### ⚠️ 性能门禁（涉及性能的阶段必须遵守）
-
-详见 `.opencode/skills/performance-gate/SKILL.md`。三条硬规则：
-
-1. **设计阶段**：ARCH 必须在设计中写入"性能假设"（瓶颈识别 + 可证伪预测 + 验证方法）。REV 必须检查预测覆盖了**所有**瓶颈来源。
-2. **首个实现后**：PM 必须执行性能烟雾测试（vs 绝对基线，非旧路径）。< 0.5x → 暂停后续阶段。
-3. **验收阶段**：PM 必须检查证据类型匹配。"≥1.0x"要求对比数据表，不接受"编译通过"。
-
-**S-PERF 基线必须用绝对基线**（Python 原版 construct），不可用相对基线（旧路径）。
-
-**S-PERF 测量口径**：性能对比必须从用户面 API 测量，确保两边走相同的调用路径：
-- construct-rs 侧：通过 `maturin develop --release` 安装后，在 Python 中用 timeit 调用用户面 API（如 `Packet.parse(data)`）
-- Python construct 侧：用 timeit 调用等效的 Python API（如 `pkt.parse(data)`）
-- **禁止**用独立 Rust 二进制直接调 Rust 库函数来产生 S-PERF 数据——这跳过了 Python 分发和 FFI 开销，口径不一致
-- 两边使用相同的 timeit 参数（NUMBER/REPEAT），取相同的统计量
-- 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）
-
-**S-PERF benchmark 输出要求**：benchmark 脚本除了原始数据（ns/call），还必须自动输出派生指标供 PM 审查：
-- parse/build 比率（每个场景的 Rust 比率和参考实现的比率，对照方向是否一致）
-- 加速比按场景复杂度排列（验证趋势是否符合预期）
-- 低于 4x 的场景单独标注
-- 任何 parse/build 方向与参考实现相反的场景单独标注
-
-### Git 命令
-
-```bash
-# PM 专用（所有角色可查看）
-git status                          # 查看工作区状态
-git diff                            # 查看未暂存的变更
-git log --oneline -10               # 查看最近提交
-
-# PM 专用（仅 PM 可执行）
-git add <files>                     # 暂存文件
-git commit -m "feat(phaseN): X.Y 描述"  # 子任务提交
-git tag phase-N-complete            # 阶段验收标签
-```
-
-## 7. 核心技术决策（全员须知）
-
-> ⚠️ 以下决策由 Phase 0 架构设计最终确定。当前为暂定方向，ARCH 在设计过程中可细化。
-
-| 决策 | 内容 | 理由 |
-|------|------|------|
-| **pyo3 定位** | pyo3 是核心依赖，非 optional feature。parse 直接产 `Py<PyAny>`，build 直接接收 `&Bound<PyAny>` | 消除中间表示层。详见 §0 |
-| **直接操作 Python 对象** | parse 从 bytes 直接构造 PyObject；build 从 PyObject 直接读属性写字节，Rust 侧不引入独立的中间数据类型 | 中间类型转换层是不可接受的开销（见 §0 历史教训） |
-| **输出/输入侧无抽象 trait** | 参考pydantic-core：不在输入/输出侧引入 trait 抽象层，直接操作 CPython C API | trait 抽象层会使每字段都跨越 FFI 边界，是不可接受的开销（见 §0 历史教训） |
-| **单 crate** | 不存在独立的 Python 绑定层，pyo3 在主 crate 中 | 消除 crate 间的边界开销 |
-| **mashumaro 式 API** | `@dataclass class X(StructMixin)`，编译在 `__init_subclass__` 中 | 用户无感，不照搬 pydantic BaseModel |
-| **一次 FFI** | 编译、parse、build 各只有一次 Python↔Rust 边界穿越 | 每字段跨越 FFI 是不可接受的开销（见 §0 历史教训） |
-| **构造器分派** | `enum_dispatch` 静态分派（参考 pydantic-core CombinedValidator） | 避免 `Box<dyn>` 动态分派开销 |
-| **错误处理** | `Result<T, ConstructError>` + `thiserror` | 统一错误体系，`?` 传播 |
-| **Stream 抽象** | 纯 Rust 内部抽象，不跨 FFI | parse/build 边界内完整处理 |
-
-## 8. Rust 编码红线（全员必须遵守）
-
-1. **禁止 `unwrap()` / `expect()` 在非测试代码中出现** — 所有可能失败的操作必须返回 `Result`
-2. **禁止 panic** — 非法输入必须返回 `Err` 而非 panic
-3. **禁止 `TODO` / `FIXME`** — 当轮任务当轮解决，或明确创建新子任务
-4. **禁止硬编码魔法数字** — 使用常量或枚举
-5. **所有 `pub` 项必须有 `///` 文档注释**
-6. **错误必须携带 `path` 字段** — 用于追踪出错位置
-7. **parse/build 对称性** — 所有构造器必须同时支持 parse 和 build
-
-## 8.5 跨阶段设计决策
-
-`docs/decisions/`（ADR-001 ~ ADR-NNN）记录了全项目跨阶段的设计约束，索引见 `docs/decisions/README.md`。任何新功能设计不可违反这些决策。所有角色必须阅读。
-
-## 9. 阶段依赖关系
-
-```
-Phase 0 (架构设计)
-  ↓
-Phase 1 (垂直切片) ←── 验证架构可行性 + 性能 >4x
-  ↓
-Phase 2+ ←── 由用户在 Phase 1 验收通过后指定
-```
-
-> 阶段规划在 Phase 0 架构设计完成后由 PM 根据设计文档制定。
-
-**禁止**：在依赖阶段未完成验收时开始后续阶段的子任务。
-
-## 10. Python 参考速查
-
-开发任何模块时，首先定位 Python 源码中的对应实现：
-
-| Rust 模块 | Python 源码位置 |
-|-----------|---------------|
-| Construct trait | `construct/construct/core.py` → `Construct` 类 (line ~321) |
-| 动态类型 | 对应 Python 的动态类型 + `Container` / `ListContainer`（直接以 PyObject 表达，无 Rust 中间枚举） |
-| Context | `construct/construct/core.py` → parse/build 中的 `context` 参数 |
-| Stream | `construct/construct/core.py` → `stream_read` 等辅助函数 |
-| 错误 | `construct/construct/core.py` → 文件末尾 ~40 个 Exception 子类 |
-| 原子构造器 | `construct/construct/core.py` → `Bytes`, `FormatField`, `VarInt` 等 |
-| 复合构造器 | `construct/construct/core.py` → `Struct`, `Sequence`, `Array` 等 |
-| 适配器 | `construct/construct/core.py` → `Adapter`, `Enum`, `Validator` 等 |
-| 表达式 | `construct/construct/expr.py` → `Path`, `BinExpr` 等 |
-| 流操作 | `construct/construct/core.py` → `Bitwise`, `Pointer`, `Prefixed` 等 |
-| 惰性解析 | `construct/construct/core.py` → `Lazy`, `LazyStruct` 等 |
-| 容器类型 | `construct/construct/lib/containers.py` |
-| 二进制工具 | `construct/construct/lib/binary.py` |
-| 流包装器 | `construct/construct/lib/bitstream.py` |
-| 格式示例 | `construct/gallery/` 和 `construct/deprecated_gallery/` |
-
-## 11. 问题处理优先级
-
-当发现问题时，按以下优先级处理：
-
-1. **设计缺陷** → 驳回至 DESIGNING，ARCH 修正设计文档
-2. **实现遗漏** → 驳回至 CODING，DEV 补充实现
-3. **测试遗漏** → 驳回至 CODING，DEV 补充测试
-4. **接口不一致** → 驳回至 CODING，DEV 修正；涉及设计变更则先回退至 DESIGNING
-5. **逻辑错误** → 驳回至 CODING，DEV 修正
-6. **代码质量** → 驳回至 CODING，DEV 修正
-
-所有驳回都必须在过程记录中记录原因，修复后需重新走完整的验证+审查流程。
-
-## 12. opencode 角色分派机制
-
-本项目通过 opencode 的 agent 系统实现角色分派。每个角色对应一个 agent 文件：
-
-```
-.opencode/agents/
-├── pm.md          ← PM（主 agent，mode: primary）
-├── architect.md   ← ARCH（子 agent，mode: subagent）
-├── developer.md   ← DEV（子 agent，mode: subagent）
-├── reviewer.md    ← REV（子 agent，mode: subagent）— 设计检视
-├── vetter.md      ← VET（子 agent，mode: subagent）— 代码审查
-├── auditor.md     ← AUDITOR（子 agent，mode: subagent）— PM 验收管理审计
-```
-
-> **已移除** `validator.md`（REF 角色已并入 VET）。
-
-### PM 分派方式
-
-PM 通过 opencode 的 Task 工具分派任务给子 agent：
-
-```
-Task 工具参数：
-  subagent_type: "architect" | "developer" | "reviewer" | "vetter" | "auditor"
-  description: "3-5词任务描述"
-  prompt: "包含子任务信息、必读文件、输出要求的完整指令"
-```
-
-### 各角色 agent 的文件权限
-
-| 角色 agent | 可写范围 | 禁止写入 |
-|-----------|---------|---------|
-| pm | `plans/`（含 `00-项目进度.md`） | `construct-rs/`, `docs/`, `construct/` |
-| architect | `docs/` | `construct-rs/`, `plans/`, `construct/` |
-| developer | `construct-rs/`, `plans/*/过程记录.md` | `docs/`, `construct/` |
-| reviewer | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
-| vetter | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
-| auditor | `plans/*/过程记录.md` | `construct-rs/`, `docs/`, `construct/` |
-
-### 切换 agent
-
-- PM 是默认主 agent，用户直接与 PM 对话
-- 如需直接使用其他角色，可在 opencode 中切换 agent
-- 所有角色 agent 的完整指令见 `.opencode/agents/*.md`
-
-### Agent 文件写入规范（全员必须遵守）
-
-子 agent 在写入大文件时**必须分批操作**，严禁一次性写入超长内容：
-
-1. **禁止一次性创建/覆盖超过 ~300 行的文件**。对于大型设计文档或源文件，必须：
-   - 先用 `Write` 工具创建文件并写入第一部分（文档头部 + 前几节）
-   - 再用 `Edit` 工具追加后续章节，每次追加不超过 ~300 行
-   - 每次写入后确认成功再继续下一批
-
-2. **禁止在单个 Task prompt 中要求 agent 一次性产出超大输出**。PM 分派任务时应：
-   - 明确告知 agent 分批写入策略
-   - 对于大型文档，可在 prompt 中指定分批计划（如"先写第 1-4 节，再追加第 5-8 节"）
-
-3. **原因**：单次写入超长内容会导致 agent 响应超时或被截断，浪费大量时间。
-
-## 13. Git 工作流
-
-### 分支策略
-
-直接在 `main` 分支上开发，不使用特性分支。
-
-### 提交规范
-
-| 操作 | 执行者 | 规则 |
-|------|--------|------|
-| `git commit` | PM + DEV | PM：每个子任务 ACCEPTED 后正式提交；DEV：开发过程中可做 checkpoint 提交防止丢失 |
-| `git tag` | 仅 PM | 阶段验收通过后打 tag |
-| `git status` / `git diff` | 所有角色 | 只读，用于查看变更 |
-
-**commit message 格式**：
-```
-feat(phaseN): X.Y 子任务描述
-```
-示例：
-- `feat(phase1): 1.1 项目初始化`
-- `feat(phase2): 2.3 FormatField 实现`
-- `docs(phase1): 更新总设计文档`
-
-**tag 格式**：
-```
-phase-N-complete
-```
-示例：`phase-1-complete`、`phase-2-complete`
-
-### 提交时机
-
-```
-子任务 ACCEPTED → PM 执行 git add + git commit
-    ↓
-... 所有子任务完成 ...
-    ↓
-阶段验收通过 → PM 执行 git tag phase-N-complete
-```
-
-DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint，防止工作丢失。
-
-### 禁止事项
-
-- REV / VET **禁止**执行 `git add`、`git commit`、`git tag`、`git push`
-- 所有角色**禁止**执行 `git push`（本地仓库，无需远程推送）
-- **禁止**提交 `construct/` 目录下的任何变更（Python 原版仓库有独立 git）
+> 本文件保持精简。详细操作见各入口文件。

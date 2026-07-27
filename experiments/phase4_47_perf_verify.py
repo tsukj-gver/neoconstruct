@@ -7,7 +7,7 @@
   4. Array(10, Index()) build     — i01 build
   5. GreedyRange(Int8ub) N=10 parse — g01
 
-测量口径（AGENTS.md §6 S-PERF）：
+测量口径（performance-gate/SKILL.md S-PERF）：
   - construct-rs 侧：maturin develop --release 安装后，Python 调用户面 API
   - Python construct 侧：import construct，调等效 API
   - 子进程隔离（包同名，不可在同一进程导入）

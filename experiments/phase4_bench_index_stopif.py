@@ -1,6 +1,6 @@
 """Phase 4 子任务 4.4 性能基准：Index + StopIf。
 
-测量口径（AGENTS.md §6 S-PERF）：
+测量口径（performance-gate/SKILL.md S-PERF）：
 - construct-rs 侧：maturin develop --release 安装后，Python 调用用户面 API。
 - Python 侧：直接 import construct，调等效 API。
 - 子进程隔离（两边包同名，不可同进程导入）。

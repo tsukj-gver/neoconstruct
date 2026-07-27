@@ -16,7 +16,7 @@ v4 修复（双端对称）：
         Python：`pc.Array(...).parse(data)`（直接裸调）
         明确标注"裸口径，非等价对比"。
 
-按 AGENTS.md §6 S-PERF 测量口径：
+按 performance-gate/SKILL.md S-PERF 测量口径：
 - construct-rs 侧：maturin develop 安装后，Python 调用户面 API
 - Python construct 侧：直接 import construct，调等效 API
 - 子进程隔离（包同名，不可在同一进程导入）

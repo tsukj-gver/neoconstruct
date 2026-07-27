@@ -1,12 +1,12 @@
 """construct-rs vs Python construct 2.10.70 BitStream 场景性能基准测试。
 
-设计依据：AGENTS.md §6（性能门禁）、§7（核心技术决策）、Phase 2.5 ``benchmark_expr.py``
+设计依据：performance-gate/SKILL.md（性能门禁）、§7（核心技术决策）、Phase 2.5 ``benchmark_expr.py``
 的子进程隔离方法。
 
 覆盖范围：Phase 3 全部子任务（3.1 BitsInteger / 3.2 Bitwise+BitStruct / 3.3
 Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build} 两个方向。
 
-口径（AGENTS.md §6）：
+口径（performance-gate/SKILL.md）：
     本脚本严格遵循"用户面 API"测量口径：
     - **construct-rs**：通过 ``maturin develop`` 安装到 venv，子进程中 Python ``timeit``
       调用真实用户面 API（``Packet.parse(data)`` / ``packet.build()``）。包含完整的
@@ -268,7 +268,7 @@ _MEASURE_SCRIPT = textwrap.dedent(
         raise ValueError('unknown case: ' + case)
 
     def _make_case_py(case):
-        # 公平口径（AGENTS.md §6）：
+        # 公平口径（performance-gate/SKILL.md）：
         # 每个 case 的 Python 用例必须与 Rust 用例产生**对等**的容器/实例开销。
         # - Rust B1-B4 / BS1-BS2 / BW1 使用 BitStructMixin → 实例创建 + 单字段填充
         # - Rust BW2-BW4 使用 StructMixin → 实例创建 + 单字段填充
@@ -526,7 +526,7 @@ def compute_geomean_speedups(results: dict, cases: list[str]) -> dict:
 
 
 def compute_derived_metrics(results: dict, cases: list[str]) -> dict:
-    """计算 AGENTS.md §6 要求的派生指标。
+    """计算 performance-gate/SKILL.md 要求的派生指标。
 
     :return: dict 含：
         - per_case: list of {case, rs_parse, rs_build, py_parse, py_build,
@@ -597,10 +597,10 @@ def compute_derived_metrics(results: dict, cases: list[str]) -> dict:
 
 
 def format_derived_metrics(metrics: dict) -> str:
-    """格式化派生指标为可读字符串（AGENTS.md §6 要求）。"""
+    """格式化派生指标为可读字符串（performance-gate/SKILL.md 要求）。"""
     lines = []
     lines.append("=" * 78)
-    lines.append("派生指标（AGENTS.md §6 S-PERF 输出要求）")
+    lines.append("派生指标（performance-gate/SKILL.md S-PERF 输出要求）")
     lines.append("=" * 78)
 
     # 1. parse/build 比率 + 方向一致性
@@ -731,7 +731,7 @@ def write_results_file(
     lines.append(f"  repeat (中位数) : {REPEAT}")
     lines.append(f"  测量时间        : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
-    lines.append("测量口径（AGENTS.md §6）：")
+    lines.append("测量口径（performance-gate/SKILL.md）：")
     lines.append("  - construct-rs：maturin develop 安装到 venv，Python timeit 调用")
     lines.append("    用户面 API（Packet.parse / packet.build）。一次 FFI 穿越。")
     lines.append("  - Python construct 2.10.70：pip install 安装到 venv，Python timeit")

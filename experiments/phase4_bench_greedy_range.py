@@ -1,6 +1,6 @@
 """Phase 4 子任务 4.2 性能基准：GreedyRange parse/build。
 
-按 AGENTS.md §6 S-PERF 测量口径：
+按 performance-gate/SKILL.md S-PERF 测量口径：
 - construct-rs 侧：通过 maturin develop 安装后，Python 调用用户面 API
 - Python construct 侧：直接 import construct，调等效 API
 - 子进程隔离（Rust 和 Python 包同名，不可在同一进程导入）

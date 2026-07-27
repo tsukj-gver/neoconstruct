@@ -79,7 +79,8 @@ last_updated: 2026-07-27
 | 3 | 2026-07-27 | `manifests/change_2026-07-27-docs-restructure.json` | 记录/设计文档 AHE 化（T1 结构正交 + T2 frontmatter + T3 ADR） | partial（predicted_impact 漏报 42 broken refs + 9 frontmatter 缺失，已当场修复） |
 | 4 | 2026-07-27 | `manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `construct-rs-ahe-practices`（不动通用 AHE skill） | **partial**（iter5 dogfood 验证：construct-rs-ahe-practices skill 被 PM 主动加载 ✓；但"文件重组时主动执行 §A1 cross-ref check" + "通用 skill 同步不冲突" 两个预测未触发——等待下次文件重组 iteration） |
 | 5 | 2026-07-27 | `manifests/change_2026-07-27-iter5-evaluate-step.json` | 补 AHE §演化循环缺失的 Evaluate 步骤（项目级 §C 协议）；沉淀 L-08（AHE 规范解读层错误）；MEMORY.md Harness 组件清单加规范来源列；项目级 skill 加 §D AHE 规范解读检查清单 | **verified_with_followups**（iter6 dogfood 4/4 预测全部触发验证场景且通过；followup: §D 长期生效需 iter7+ 持续观察） |
-| 6 | 2026-07-27 | `manifests/change_2026-07-27-iter6-workflow-integration.json` | AHE §演化循环融入项目工作流（AGENTS.md §3 + §3.1）；pm.md / auditor.md 同步更新；AUDITOR 加第 6 类审计项 + L-08 范畴提示 | pending（本轮 dogfood = iter6 自身轨迹） |
+| 6 | 2026-07-27 | `manifests/change_2026-07-27-iter6-workflow-integration.json` | AHE §演化循环融入项目工作流（AGENTS.md §1 + pm.md / auditor.md 同步）；AUDITOR 加第 6 类审计项 + L-08 范畴提示 | **partial**（iter7 dogfood 1/4 预测触发验证；3 个预测需 phase 子任务场景——等待 Phase 5+ 启动） |
+| 7 | 2026-07-27 | `manifests/change_2026-07-27-iter7-agents-slim.json` | AGENTS.md 瘦身重构（457→66 行，缩减 85.6%）；内容按四维度分类迁移到 agent 文件；§5 内容准入标准建立；38 个活跃文件 cross-reference 修复 | pending（本轮 dogfood = iter7 自身轨迹；首次'减法 iteration'） |
 
 ## 教训索引
 

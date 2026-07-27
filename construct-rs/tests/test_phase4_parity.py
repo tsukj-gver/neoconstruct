@@ -1,7 +1,7 @@
 """Phase 4 Array 系列构造器 Python 行为一致性测试。
 
 设计依据：
-- AGENTS.md §6（性能门禁子进程隔离方法可复用为正确性对比）
+- performance-gate/SKILL.md（性能门禁子进程隔离方法可复用为正确性对比）
 - plans/phase4-array/总纲.md S-FUNC：Phase 4 全部构造器行为与 Python
   construct 2.10.70 一致
 - docs/模块设计-Array.md §7 边界条件 / §9.5 已知行为差异

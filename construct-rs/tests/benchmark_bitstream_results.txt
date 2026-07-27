@@ -12,7 +12,7 @@ construct-rs vs Python construct 2.10.70 BitStream 性能测试结果
   repeat (中位数) : 5
   测量时间        : 2026-06-29 13:31:48
 
-测量口径（AGENTS.md §6）：
+测量口径（performance-gate/SKILL.md）：
   - construct-rs：maturin develop 安装到 venv，Python timeit 调用
     用户面 API（Packet.parse / packet.build）。一次 FFI 穿越。
   - Python construct 2.10.70：pip install 安装到 venv，Python timeit
@@ -56,7 +56,7 @@ BW4    build  244.2        3222.3         13.19     x [PASS]
   全部       : 14.41x
 
 ==============================================================================
-派生指标（AGENTS.md §6 S-PERF 输出要求）
+派生指标（performance-gate/SKILL.md S-PERF 输出要求）
 ==============================================================================
 
 1) parse/build 比率（build_ns / parse_ns，>1 = build 较慢）：

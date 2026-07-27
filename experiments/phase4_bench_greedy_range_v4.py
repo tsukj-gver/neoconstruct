@@ -5,7 +5,7 @@
             Python 侧 `pc.GreedyRange(...)` 直接调用（不包 Struct）。
     v4 修复：Python 也包一层 `pc.Struct("items" / pc.GreedyRange(...))`。
 
-测量口径（AGENTS.md §6 S-PERF）：
+测量口径（performance-gate/SKILL.md S-PERF）：
 - construct-rs 侧：maturin develop 安装后，Python 调用户面 API（必经 Struct）
 - Python construct 侧：import construct，调等效 API
 - 子进程隔离（包同名，不可在同一进程导入）
