@@ -1,0 +1,133 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 6,
+  "timestamp": "2026-07-28T02:35:00+08:00",
+  "author": "pm (AHE iteration 6 — AHE §演化循环融入项目工作流)",
+  "scope_summary": "关闭 AHE 工作流与项目工作流的系统性偏离：AGENTS.md §3 + §3.1 加 Evaluate 触发点；pm.md 验收清单加 Evaluate 摘录产出要求；auditor.md 加第 6 类审计项 + L-08 范畴提示。基于评估 1（AHE 工作流未融入项目工作流）+ 评估 2（角色设计 gap）",
+  "evaluate_evidence": {
+    "trace_file": "experiments/eval-2026-07-27-iter6-dogfood.md",
+    "task_category": "执行类",
+    "task_description": "评估 AHE 工作流融合度 + 角色设定是否符合 AHE 思想，启动 iter6",
+    "failures_classified": [
+      "无核心 failure——本次 dogfood 验证 iter5 §C/§D 协议被 PM 主动执行（关闭 iter5 4/4 预测）",
+      "候选 L-09（AHE iteration 修改 System Rules 审查机制缺失）——iter6 决策 4 识别，单次事件未沉淀"
+    ],
+    "analyze_summary": "iter6 是首次完整执行 §D 检查清单的 iteration（iter5 dogfood 是首次执行 §C Evaluate）。证明 §C/§D 协议在 PM 决策中实际生效。角色评估整体优秀（正交/Falsifiable 闭环/组件外推），仅 2 处 gap 暂缓（PM 验收 falsifiable 扩展 / ARCH 设计强制引用 Python 源码）"
+  },
+  "changes": [
+    {
+      "change_id": "ch_019",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md",
+      "summary": "AGENTS.md §3 工作流管道：ACCEPTED/AUDITED 状态加 Evaluate 摘录产出/检查前置条件",
+      "failure_evidence": "评估 1 evidence：iter1-4 全部跳过 Evaluate（experiments/eval-2026-07-27-iter5-dogfood.md failures #3）；AGENTS.md §3 工作流原 ACCEPTED 状态仅要求'检查数据、口径、标准'，无 AHE §演化循环的 Evaluate 触发点",
+      "root_cause": "项目 AGENTS.md §3 工作流（项目自定义）未集成 AHE §演化循环（HARNESS.md 通用规范）的 Evaluate 步骤——两者属于不同层级但应同步",
+      "targeted_fix": "ACCEPTED 行加'+ 产出 Evaluate 摘录（按 §3.1 AHE 融入）'；AUDITED 行加'+ 检查 Evaluate 摘录是否产出'",
+      "predicted_impact": {
+        "expected_fixes": [
+          "未来 phase 子任务 ACCEPTED 时 PM 主动产出 Evaluate 摘录",
+          "AUDITOR 审计时可检查 Evaluate 摘录是否产出（ch_022 配合）"
+        ],
+        "at_risk_regressions": [
+          "若 PM 视为形式主义（只填模板不思考），Evaluate 摘录可能沦为模板填空——需配合 ch_021 pm.md 强制要求",
+          "增加 PM 验收工作量（每个子任务多一个产出）——但这是 AHE Evidence-Driven 原则的必要成本"
+        ],
+        "rationale": "规范来源 HARNESS.md §演化循环硬要求。System Rules 是行为约束的最强层（agent 启动必读 AGENTS.md）"
+      }
+    },
+    {
+      "change_id": "ch_020",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md",
+      "summary": "AGENTS.md §3 末尾新增 §3.1 AHE §演化循环融入小节（规范来源标注 + 触发点表 + 摘录格式 + 禁止条款）",
+      "failure_evidence": "同 ch_019——§3.1 是 ch_019 的展开（详细触发时机 / 产出格式 / 责任角色）",
+      "root_cause": "§3 工作流管道图是状态机视角，需要补充说明每个状态的 AHE 责任。原 §3 仅有'设计质疑'子段，无 AHE 融入子段",
+      "targeted_fix": "新增 §3.1 小节，含：(1) 规范来源声明（HARNESS.md §演化循环 + construct-rs-ahe-practices §C1）；(2) 硬要求说明（项目工作流必须同时驱动 AHE 演化循环）；(3) Evaluate 触发点表（4 个时机）；(4) Evaluate 摘录格式模板（4 字段）；(5) AUDITOR 检查范畴（含 L-08 边界）；(6) 禁止条款（跳过 Evaluate 直接 Improve）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "agent 读 AGENTS.md §3.1 即知 AHE 融入要求，不需要单独读 construct-rs-ahe-practices",
+          "iter1-4 凭直觉 Improve 的反模式有 System Rules 层禁止条款"
+        ],
+        "at_risk_regressions": [
+          "§3.1 增加约 30 行，AGENTS.md 总长度增加——但仍是必要密度",
+          "Evaluate 摘录格式可能与 phase 子任务过程记录格式（AGENTS.md §5）冲突——需确认两者兼容（§5 frontmatter 规范 vs §3.1 Evaluate 摘录段落，互不冲突）"
+        ],
+        "rationale": "System Rules 内部一致性是 HARNESS.md 合规检查硬要求"
+      }
+    },
+    {
+      "change_id": "ch_021",
+      "component": "sub_agents",
+      "subtype": "update",
+      "file_path": ".opencode/agents/pm.md",
+      "summary": "pm.md 工作流管道 ACCEPTED/AUDITED 同步加 Evaluate 摘录产出/检查；指标验收段加'每个子任务 ACCEPTED 时必须产出 Evaluate 摘录'强要求",
+      "failure_evidence": "pm.md §工作流管道 ACCEPTED 行原仅'PM 确认完成（检查数据、口径、标准）'，与 AGENTS.md §3 改后版本不一致；§指标验收 仅强制'性能类输出分析记录'（L-03 对策），未覆盖 Evaluate 摘录",
+      "root_cause": "AGENTS.md 与 agent 角色定义同步性要求——任一变更必须双侧更新（L-07 cross-reference 教训的延伸：cross-file 一致性）",
+      "targeted_fix": "工作流管道 ACCEPTED/AUDITED 两行同步加 Evaluate 摘录要求（引用 AGENTS.md §3.1）；§指标验收 加'每个子任务 ACCEPTED 时必须产出 Evaluate 摘录'段，明示'无 Evaluate 摘录的 ACCEPTED 状态无效'",
+      "predicted_impact": {
+        "expected_fixes": [
+          "PM agent 启动时读 pm.md 即知 Evaluate 摘录产出要求（不需要读 AGENTS.md §3.1）",
+          "AGENTS.md §3 与 pm.md 工作流管道保持一致，消除 Rules 漂移"
+        ],
+        "at_risk_regressions": [
+          "pm.md 略微膨胀（+~10 行）——可接受"
+        ],
+        "rationale": "agent 角色定义是 agent 启动时的入口，必须包含行为约束"
+      }
+    },
+    {
+      "change_id": "ch_022",
+      "component": "sub_agents",
+      "subtype": "update",
+      "file_path": ".opencode/agents/auditor.md",
+      "summary": "auditor.md 加第 6 类审计项'Evaluate 触发合规'（4 检查项）；报告模板加 Evaluate 触发合规行；§注意事项 加 L-08 范畴边界段",
+      "failure_evidence": "评估 2 evidence：auditor.md 5 类清单不含 Evaluate 触发检查；缺 L-08 范畴提示（与 construct-rs-ahe-practices §B3 不对称）",
+      "root_cause": "AUDITOR 是项目业务流程审计员（项目自定义），其清单随项目工作流演进而扩展。AHE 融入后（ch_019/020），AUDITOR 审计范围自然扩展到 Evaluate 触发检查。同时 L-08 教训要求范畴边界显式声明（避免 AUDITOR 越界审计 AHE iteration manifest）",
+      "targeted_fix": "新增 §审计清单 第 6 类'Evaluate 触发合规'（4 检查项：摘录产出 / 完整轨迹 / failures 对齐 L-XX / 跳过理由）；报告模板加'Evaluate 触发合规'行；§注意事项 末尾新增 §范畴边界 段（明示 AUDITOR 不审计 AHE iteration manifest 预测，那是 PM 自我验证）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "AUDITOR 审计 phase 子任务时可检查 PM 是否触发 Evaluate",
+          "L-08 范畴边界显式声明，避免 AUDITOR 越界审计 AHE iteration manifest",
+          "与 construct-rs-ahe-practices §B3 形成对称（双侧都明示范畴）"
+        ],
+        "at_risk_regressions": [
+          "AUDITOR 审计清单从 5 类增到 6 类，工作量增加——可接受",
+          "若 PM 跳过 Evaluate，AUDITOR 必须驳回——可能导致 phase 验收延迟（但这是设计意图）"
+        ],
+        "rationale": "AUDITOR 是 falsifiable 链条的末端防线。Evaluate 触发合规是 AHE Evidence-Driven 的执行保证"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "本 iteration 涉及 4 个文件 edit（AGENTS.md / pm.md / auditor.md / MEMORY.md）+ 1 个 manifest edit（iter5 manifest verification）+ 1 个新建（iter6 manifest）+ 1 个新建（iter6 dogfood 轨迹）。按 §A1 检查：(1) 所有 edit 文件路径不变；(2) 新建 experiments/eval-2026-07-27-iter6-dogfood.md 已被本 manifest + MEMORY.md 引用；(3) AGENTS.md §3.1 引用的 auditor.md 第 6 类已同步实施（ch_022）。无 git mv / 无目录重组",
+    "frontmatter_applicability": "AGENTS.md / pm.md / auditor.md / MEMORY.md 是已有文件，frontmatter 状态不变（AGENTS.md 无 frontmatter 规范要求；pm.md/auditor.md 是 opencode agent 文件有 description 字段；MEMORY.md 有 frontmatter）；新建 experiments/eval-*.md 加完整 frontmatter；iter5/iter6 manifest 是 JSON 无 frontmatter 要求",
+    "at_risk_regressions_categories": {
+      "path_regression": [
+        "experiments/eval-2026-07-27-iter6-dogfood.md 被 MEMORY.md AHE 历史行 + 本 manifest 引用——若移动需同步"
+      ],
+      "metadata_regression": [
+        "AGENTS.md §3.1 引用 auditor.md 第 6 类——必须确保 ch_022 同步实施（已完成）",
+        "pm.md §指标验收 引用 AGENTS.md §3.1——双向链接，任一变更需同步（已完成）"
+      ],
+      "functional_regression": [
+        "若 PM 视 Evaluate 摘录为形式主义，可能模板填空——AGENTS.md §3.1 禁止条款 + auditor.md 第 6 类检查是双重防线",
+        "若 AUDITOR 越界审计 AHE iteration manifest，违反 L-08——auditor.md §范畴边界 已显式禁止"
+      ]
+    }
+  },
+  "process_lesson": {
+    "title": "AHE iteration 修改 System Rules 的合规性边界",
+    "description": "本 iteration 修改了 AGENTS.md §3（System Rules 核心）。按 AGENTS.md §3 工作流，System Rules 变更应走完整 DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW。但 AHE iteration 是 meta 层（harness 自演化），不走 §3 子任务管道（与 iter1-5 一致）。这个矛盾在本次 iteration 显式识别但未解决——记录此处作为候选 L-09 的 evidence",
+    "lesson_home": "本 manifest（过程可观测性）+ experiments/eval-2026-07-27-iter6-dogfood.md 决策 4",
+    "preventive_check": "未来 AHE iteration 涉及 System Rules（AGENTS.md）或 agent 角色定义（.opencode/agents/*.md）修改时，先判断：(1) 修改是否影响业务子任务工作流？(2) 是否需要 ARCH/REV lightweight review（不走完整 §3 管道但有独立检查）？(3) 若同样场景出现 2+ 次（候选 L-09）→ 沉淀为新教训"
+  },
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "下次 phase 子任务 ACCEPTED 时验证：(1) PM 是否按 AGENTS.md §3.1 主动产出 Evaluate 摘录；(2) AUDITOR 是否按第 6 类审计项检查 Evaluate 触发；(3) pm.md §指标验收 的'无 Evaluate 摘录的 ACCEPTED 状态无效'条款是否实际执行；(4) auditor.md §范畴边界 是否实际阻止 AUDITOR 越界审计 AHE iteration manifest",
+    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) AGENTS.md §3.1 ↔ auditor.md 第 6 类 ↔ pm.md §指标验收 三向引用一致；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md AHE 历史加 iter6 行"
+  }
+}

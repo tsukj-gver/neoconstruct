@@ -67,8 +67,8 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 - **DESIGN_REVIEW**：REV 检视设计（延续性、性能、可行性、完备性）
 - **CODING**：DEV 编码 + 单元测试 + 自检
 - **CODE_REVIEW**：VET 审查代码（逻辑、行为一致性、错误处理、边界条件）
-- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）
-- **AUDITED**：AUDITOR 审计 PM 的验收是否到位
+- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）+ **产出 Evaluate 摘录**（按 AGENTS.md §3.1）
+- **AUDITED**：AUDITOR 审计 PM 的验收是否到位 + **检查 Evaluate 摘录产出**
 
 **驳回**：REV 驳回至 DESIGNING；VET 驳回至 CODING；AUDITOR 驳回至 PM（PM 补充缺失的管理工作）。必须附具体原因。
 
@@ -100,6 +100,10 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 **含性能标准的子任务验收必须输出分析记录**：
 
 PM 必须在过程记录中写入性能数据分析记录。分析的具体维度和派生指标要求在项目配置（AGENTS.md 等）中定义。**无分析记录的 ACCEPTED 状态无效。** 发现异常时必须先分派调查，不可直接验收。
+
+**每个子任务 ACCEPTED 时必须产出 Evaluate 摘录**（规范来源：`AGENTS.md §3.1` + `HARNESS.md §演化循环`）：
+
+PM 在过程记录中 append 一段 Evaluate 摘录（按 `AGENTS.md §3.1` 模板）。**无 Evaluate 摘录的 ACCEPTED 状态无效。** 这是 AHE Evidence-Driven 原则的实现——产出可被下一轮 Evaluate / AUDITOR 审计证伪的证据。
 
 | 标准类型 | 要求的证据 | 不可接受 |
 |---------|-----------|---------|

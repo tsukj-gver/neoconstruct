@@ -92,8 +92,8 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 - **DESIGN_REVIEW**：REV 检视设计的延续性、性能、整体性、可行性、完备性
 - **CODING**：DEV 编码 + 单元测试 + 自检
 - **CODE_REVIEW**：VET 审查代码逻辑、行为一致性、错误处理、安全、边界条件
-- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）
-- **AUDITED**：AUDITOR 审计 PM 的验收管理是否到位（流程、口径、标准、遗留追踪、规划合规）
+- **ACCEPTED**：PM 确认完成（检查数据、口径、标准）+ **产出 Evaluate 摘录**（按 §3.1 AHE 融入）
+- **AUDITED**：AUDITOR 审计 PM 的验收管理是否到位（流程、口径、标准、遗留追踪、规划合规）+ **检查 Evaluate 摘录是否产出**
 
 **驳回规则**：REV 可驳回至 DESIGNING；VET 可驳回至 CODING；AUDITOR 可驳回至 PM（PM 须补充缺失的管理工作）。驳回必须附具体原因。
 
@@ -104,6 +104,35 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 **合并设计**：关联紧密的多个子任务，PM 可合并为一次 ARCH 分派，产出一份合并的模块设计文档。
 
 **设计质疑（Argue 机制）**：任何角色在执行任务过程中发现设计文档存在不合理、冲突或遗漏时，可向 PM 提出质疑。PM 将质疑转发给 ARCH，ARCH 必须回应。详见本文件 §11 问题处理优先级。
+
+### 3.1 AHE §演化循环融入（规范来源：`HARNESS.md §演化循环`）
+
+> 本节是把通用 AHE 规范的 Evaluate 步骤融入项目工作流。详见 `.opencode/skills/construct-rs-ahe-practices/SKILL.md §C`。
+
+**硬要求**：项目工作流不能仅跑业务管道（§3 主流程），必须同时驱动 AHE 演化循环（`HARNESS.md §演化循环`：Evaluate → Analyze → Improve → Verify）。否则 harness 改进只能凭直觉（违反 Evidence-Driven，`experiences.md §L-08` 根因之一）。
+
+**Evaluate 触发点**（与 §3 主流程同步）：
+
+| 触发时机 | 产出 | 责任角色 | 规范来源 |
+|---------|------|---------|---------|
+| 每个子任务 ACCEPTED 时 | Evaluate 摘录（append 到 `plans/phaseN/过程记录-X.Y.md`） | PM | `construct-rs-ahe-practices §C1` |
+| 每个 phase 验收（打 tag）时 | 完整 Evaluate 轨迹（`experiments/eval-{date}-{phase}.md`） | PM | `construct-rs-ahe-practices §C1` |
+| AHE iteration 进行时 | dogfood 轨迹（`experiments/eval-{date}-iterN-dogfood.md`） | PM | `construct-rs-ahe-practices §C1` |
+| AUDITOR 审计 phase 验收发现异常时 | 临时 Evaluate | AUDITOR 触发，PM 执行 | `construct-rs-ahe-practices §C1` |
+
+**Evaluate 摘录格式**（轻量级，append 到子任务过程记录）：
+
+```
+## Evaluate 摘录（AHE §演化循环）
+- task_id: X.Y
+- tool_calls 关键点: [简述]
+- failures 对齐 L-XX: [L-XX 或 "候选 L-XX" 或 "无"]
+- outcome: [完成/部分/失败]
+```
+
+**AUDITOR 检查**（`auditor.md` 第 6 类审计项）：AUDITOR 在 phase 验收审计时，检查每个子任务的 Evaluate 摘录是否产出。**注意**：AUDITOR 不审计 AHE iteration 自身的 manifest 预测验证（那是 PM 自我验证，`construct-rs-ahe-practices §B3`）——只审计 phase 子任务中 PM 是否走了 Evaluate 流程。
+
+**禁止**：跳过 Evaluate 直接 Improve。iter1-4 的"凭直觉 Improve"导致 L-08（AHE 规范解读层错误）直到 iter5 才被发现（`experiments/eval-2026-07-27-iter5-dogfood.md failures #3`）。
 
 ## 4. 文件读写规则
 

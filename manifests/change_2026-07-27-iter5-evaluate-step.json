@@ -141,8 +141,24 @@
     "preventive_check": "未来 AHE iteration 应保留 dogfood 轨迹作为常规实践。当 §C 协议本身的盲点暴露时，按 L-04（跨阶段模式未沉淀）流程升级协议"
   },
   "verification": {
-    "status": "pending",
+    "status": "verified_with_followups",
     "scheduled_at": "下次 AHE iteration 时验证：(1) §C Evaluate 协议是否被 PM 主动执行（dogfood 轨迹是否产出）；(2) §D AHE 规范解读检查清单是否被 PM 在 iteration 开始前主动执行；(3) MEMORY.md 组件清单'规范来源'列是否被 PM 启动时读；(4) L-08 对策是否实际生效（PM 不再凭直觉判断'X 角色未执行 Y 流程'）",
-    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) frontmatter 完整性已扫（experiments/eval-*.md 含完整 frontmatter）；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md / experiences.md / construct-rs-ahe-practices SKILL.md 修改符合各自规范"
+    "verification_method_pre_commit": "已自验证（§B1）：(a) cross_reference_check 已执行（本 manifest cross_reference_check 段）；(b) frontmatter 完整性已扫（experiments/eval-*.md 含完整 frontmatter）；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) MEMORY.md / experiences.md / construct-rs-ahe-practices SKILL.md 修改符合各自规范",
+    "completed_at": "2026-07-28T02:30:00+08:00",
+    "verified_by": "iter6 dogfood（详见 experiments/eval-2026-07-27-iter6-dogfood.md）",
+    "result": {
+      "expected_fixes_verified": [
+        "预测 (1) 验证 ✓：iter6 PM 主动产出 dogfood 轨迹（experiments/eval-2026-07-27-iter6-dogfood.md）",
+        "预测 (2) 验证 ✓：iter6 PM 在评估角色设定时主动执行 §D2 规范归属判定（iter6 dogfood 决策 1）——避开'用户问题本身含 L-08 范畴错误'的陷阱",
+        "预测 (3) 验证 ✓：iter6 PM 在角色评估时引用了 MEMORY.md 组件清单'规范来源'列（评估 2 的规范归属判定）",
+        "预测 (4) 验证 ✓：iter6 PM 在决策 1 主动识别'用户问角色是否符合 AHE 标准'可能含范畴错误，重新表述为'项目角色是否阻碍 AHE 思想实现'——L-08 对策 (D4) 实际生效"
+      ],
+      "unexpected_fixes": [],
+      "regressions_observed": [],
+      "false_predictions": []
+    },
+    "verdict": "verified_with_followups",
+    "verdict_rationale": "4 个子预测全部在 iter6 触发验证场景且通过。L-08 对策被 iter6 PM 主动应用（避开范畴错误），证明 §D 协议有效。followup：'长期生效'需要后续 iteration 持续观察，单次 iter6 不算充分证明",
+    "followup": "iter7+ 持续观察 §D 是否被 PM 在每个 AHE iteration 开始前主动执行"
   }
 }
