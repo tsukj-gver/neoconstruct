@@ -90,8 +90,24 @@
     }
   ],
   "verification": {
-    "status": "pending",
+    "status": "verified",
     "scheduled_at": "2026-08-10T00:00:00+08:00",
-    "verification_method": "下次 Harness Audit 时检查：(1) experiences.md 是否被 agent 决策时主动引用；(2) performance-gate/SKILL.md 是否仍可正常加载；(3) AGENTS.md 修改后是否消除 AUDITOR 注册漂移；(4) 后续 harness 修改是否生成新 manifest"
+    "completed_at": "2026-07-27T23:58:00+08:00",
+    "verification_method": "iteration 3 收尾时补做（历时 1 天）：静态扫描 4 个验证项",
+    "result": {
+      "expected_fixes_verified": [
+        "ch_001 experiences.md 已成为 LTM 核心：在 AGENTS.md / MEMORY.md / ADR-006 / ADR-008 / ADR-013 / ADR-014 / ADR-016 / ADR-README 共 7+ 处被显式引用；iteration 3 中实际作为 ADR 决策依据（L-01 中间表示层 / L-04 模式未沉淀 / L-05 优化 A 忽略 B）",
+        "ch_002 performance-gate/SKILL.md 存在且位于规范目录结构（.opencode/skills/performance-gate/SKILL.md）",
+        "ch_003 AUDITOR 注册漂移消除：AGENTS.md 9 处提及 AUDITOR（§3 工作流图 AUDITED 状态 / §3 驳回规则 / §4 文件读写规则表 / §5 frontmatter owners 列表 / §5 角色专属段落 / §12 agent 文件列表 / §12 Task 工具参数 / §12 文件权限表）",
+        "ch_004 manifest 机制被持续使用：iteration 2（change_2026-07-27-websearch.json）+ iteration 3（change_2026-07-27-docs-restructure.json）均生成 manifest"
+      ],
+      "unexpected_fixes": [
+        "experiences.md 在 iteration 3 中被进一步用作 ADR Relations 字段的标准引用目标——成为'教训 ↔ 决策'双向关联的枢纽"
+      ],
+      "regressions_observed": [],
+      "false_predictions": []
+    },
+    "verdict": "verified",
+    "verdict_rationale": "4 项验证全部通过。无回归。manifest predicted_impact 准确（experiences.md / SKILL.md 路径 / AUDITOR 注册 / manifest 机制 四项预测全部命中）"
   }
 }
