@@ -1,0 +1,123 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 8,
+  "timestamp": "2026-07-28T04:30:00+08:00",
+  "author": "pm (AHE iteration 8 — base/extension 分层架构)",
+  "scope_summary": "实现 subagent 跨工程化 + 渐进式披露。阶段 1：6 个 base agent 重写为跨工程通用（去除项目特定）；6 个 extension 新建于 docs/agents/（项目特定）；§5 准入标准下沉到 pm-extension（关闭自反讽）。阶段 2：用户评估后全面调正粒度（base 详细化通用清单，extension 仅保留项目特定），清理 base 中 4 处项目特定泄漏。基于 opencode 框架能力调研（不支持继承，但支持 agent 主动 read）",
+  "evaluate_evidence": {
+    "trace_file": "experiments/eval-2026-07-27-iter8-dogfood.md",
+    "task_category": "执行类",
+    "task_description": "AGENTS.md §5 自反省下沉 + base/extension 分层 + 全面粒度调正",
+    "failures_classified": [
+      "Failure #1: PM base 残留 extension 内容（用户二次纠偏，4 处泄漏）→ 候选 L-11（单次未沉淀）",
+      "Failure #2: 阶段 1 base/extension 粒度错位（通用详细放 extension）→ 候选 L-12（单次未沉淀）"
+    ],
+    "analyze_summary": "经历两轮迭代（初版 + 用户评估后调正）。每个角色启动加载量从 iter7 前 557-657 行降到 ~282 行（减半目标达成）。L-09 候选达沉淀阈值（iter6+iter7+iter8 三次 AHE iteration 修改 System Rules）"
+  },
+  "changes": [
+    {
+      "change_id": "ch_027",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md",
+      "summary": "AGENTS.md §5 准入标准简化为 1 句索引（指向 pm-extension）；§4 启动入口加 base + extension 双层加载说明",
+      "failure_evidence": "用户评估 1：§5 自检违反自身准则（仅 PM 维护时需要，非全员必读）",
+      "root_cause": "iter7 加 §5 时未做自检——§5 准入标准应自我应用",
+      "targeted_fix": "§5 简化为'PM 修改本文件前对照 pm-extension §AGENTS.md 维护标准'；§4 启动入口明确'.opencode/agents/<role>.md（通用 base）+ docs/agents/<role>-extension.md（项目特定 extension，由 base 强制约定加载）'",
+      "predicted_impact": {
+        "expected_fixes": ["AGENTS.md 从 92 行降到 80 行", "§5 自反讽关闭"],
+        "at_risk_regressions": ["若 PM 不读 pm-extension §AGENTS.md 维护标准，膨胀可能重演——AUDITOR 审计 AGENTS.md 行数趋势是防线"],
+        "rationale": "规范来源 §5 自身准则（自我应用）"
+      }
+    },
+    {
+      "change_id": "ch_028",
+      "component": "sub_agents",
+      "subtype": "update",
+      "file_path": ".opencode/agents/*.md（6 个 base 重写）",
+      "summary": "6 个 base agent 重写为跨工程通用：去除项目特定内容（construct-rs / Rust / Python / S-PERF 等名词）；末尾加 ## 启动加载（强制）段约定 read extension。行数：661（vs iter7 前 934）",
+      "failure_evidence": "用户评估 2.1：subagent 提示词中直接出现项目特定内容，无法跨工程复用",
+      "root_cause": "iter7 内容迁移把项目特定内容堆到 agent 文件，未做通用/项目特定分类",
+      "targeted_fix": "每个 base 末尾加固定约定：'启动时必须 read docs/agents/<role>-extension.md'。base 仅保留身份认知/通用职责框架/返回格式模板/驳回模式/通用职业操守",
+      "predicted_impact": {
+        "expected_fixes": ["base 跨工程复用（新项目直接复制 6 个 base）", "每个角色启动加载量减半（~280 行 vs ~557-657 行）"],
+        "at_risk_regressions": ["若 agent 不主动 read extension，会缺失项目特定上下文——base 末尾'强制'约定是防线", "base 改动影响所有项目（跨工程）——但本项目是首次实施，无其他项目受影响"],
+        "rationale": "规范来源 opencode 框架能力调研（agent 主动 read 支持）+ 用户明确指令"
+      }
+    },
+    {
+      "change_id": "ch_029",
+      "component": "sub_agents",
+      "subtype": "create",
+      "file_path": "docs/agents/*.md（6 个 extension 新建）",
+      "summary": "6 个 extension 文件新建于 docs/agents/：每个含项目特定工作流状态名 / 子任务标识格式 / 详细检查清单 / 项目特定文件路径 / 项目特定注意事项。行数合计 531",
+      "failure_evidence": "base 去除项目特定后，需要专门文件承载项目特定内容",
+      "root_cause": "base/extension 分层的必然结果",
+      "targeted_fix": "固定路径约定 docs/agents/<role>-extension.md；每个含 frontmatter（id: EXT-<role> / project / phase / last_updated）；按 base 通用框架的维度补充项目特定细节",
+      "predicted_impact": {
+        "expected_fixes": ["项目特定内容集中管理（修改不影响其他项目）", "extension 按需加载（agent 启动时主动 read）"],
+        "at_risk_regressions": ["增加 6 个新文件——但每个独立维护，可读性好", "路径约定 docs/agents/ 是项目自定义（其他项目可能用不同路径）——base 中固定此路径，跨工程时需同步"],
+        "rationale": "规范来源 用户明确指令 + opencode 框架能力"
+      }
+    },
+    {
+      "change_id": "ch_030",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "experiments/eval-2026-07-27-iter8-dogfood.md",
+      "summary": "iter8 dogfood 轨迹（第 4 份 Evaluate 证据）",
+      "failure_evidence": "iter6 §C1 协议要求每 AHE iteration 产出 dogfood",
+      "root_cause": "常规 Evaluate 实践",
+      "targeted_fix": "含 task_id / tool_calls / 4 个 decision_points（含规范来源标注）/ failures（无核心 failure）/ outcome / Analyze（L-09 候选达沉淀阈值判断）",
+      "predicted_impact": {
+        "expected_fixes": ["§C 协议第 4 次验证", "L-09 候选达沉淀阈值识别"],
+        "at_risk_regressions": [],
+        "rationale": "Evaluate 常规 dogfood"
+      }
+    },
+    {
+      "change_id": "ch_031",
+      "component": "sub_agents",
+      "subtype": "update",
+      "file_path": ".opencode/agents/*.md + docs/agents/*.md（阶段 2 全面粒度调正）",
+      "summary": "阶段 2 粒度调正：F 工作流状态名集中（AGENTS.md §1 加子任务标识统一约定，6 extension 删重复）/ G PM 通用内容上移（pm base 加证据表/分析记录/AGENTS.md 维护三准则/PM 不做的事；pm-ext 瘦身 136→105）/ H reviewer/vetter base 详细化（5/6 维度详细清单上移；extension 仅保留项目特定补充）/ I base 4 处项目特定泄漏清理（developer parse/build 对称 + architect parse/build/sizeof 方法名 + vetter unsafe/clone + pm AGENTS.md §1 引用/基线/skill 名/plans 目录 + reviewer/vetter 返回格式引用）/ J pm.md L27-29 与 L31-35 去重",
+      "failure_evidence": "用户评估：阶段 1 base/extension 粒度错位（base 太抽象，extension 重复展开同维度）+ base 含项目特定泄漏（4 处）+ 用户二次指出 PM base 仍残留 extension 内容",
+      "root_cause": "(1) 阶段 1 把'详细'等同于'项目特定'，未充分区分通用详细与项目特定；(2) 清理时只关注明显项目名词（construct-rs/Python），忽略 AGENTS.md §1 这类结构性引用",
+      "targeted_fix": "5 类动作（F/G/H/I/J）。base 通用详细化（reviewer 5 维度 + vetter 6 维度完整清单）；extension 仅项目特定补充；扫描验证 base 0 项目特定泄漏（仅余 permission frontmatter 框架约束）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "base 真正跨工程通用（其他项目复制 base 仅需改 permission 路径）",
+          "消除 base 概述 + extension 重复展开的同维度两遍问题",
+          "启动加载量平均 282 行（减半目标达成）"
+        ],
+        "at_risk_regressions": [
+          "base 改动影响跨工程复用——但本项目是首次实施，无其他项目受影响",
+          "若未来 extension 加通用内容（而非项目特定），粒度错位可能重演——§AGENTS.md 维护标准的延伸检查是防线"
+        ],
+        "rationale": "规范来源 HARNESS.md §7 反模式'多个组件做同一件事'（base+extension 重复展开）。用户明确要求全面调正"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "本 iteration 创建 6 个新文件（docs/agents/*.md）+ 重写 6 个 base agent + 改 AGENTS.md。无 git mv / 无目录重组（docs/agents/ 是新建子目录）。检查：(1) base 末尾'启动加载'段全部约定 read docs/agents/<role>-extension.md；(2) AGENTS.md §4 启动入口列出 base + extension；(3) extension frontmatter 含 project: construct-rs 标识",
+    "frontmatter_applicability": "新建 docs/agents/*.md 全部含 frontmatter（id: EXT-<role> / project: construct-rs / phase: meta / last_updated）；AGENTS.md 无 frontmatter 要求；base agent 文件 frontmatter 保持 opencode agent 规范（description / mode / permission）",
+    "at_risk_regressions_categories": {
+      "path_regression": ["docs/agents/<role>-extension.md 被 6 个 base 文件引用——若移动需同步"],
+      "metadata_regression": ["extension frontmatter 是新规范（id 前缀 EXT-），与 docs/文档元数据规范.md §3 文档类型前缀中的 EXT-* 一致"],
+      "functional_regression": ["若 agent 不主动 read extension，base 自身无法独立工作——'强制'约定 + AGENTS.md §4 入口指引双防线"]
+    }
+  },
+  "process_lesson": {
+    "title": "L-09 候选达沉淀阈值 + base/extension 分层需多轮迭代",
+    "description": "iter6/7/8 三次 AHE iteration 都修改了 System Rules（AGENTS.md / agent 文件），都涉及'meta 层不走 §3 管道'的矛盾——L-09 候选达沉淀阈值（≥3 次），建议 iter9 沉淀。iter8 同时揭示：base/extension 分层单次拆分难以避免泄漏，需要 dogfood 验证 + 用户审查 + 二次纠偏（候选 L-11/L-12）",
+    "lesson_home": "本 manifest + experiments/eval-2026-07-27-iter8-dogfood.md",
+    "preventive_check": "iter9 应：(1) 沉淀 L-09（AHE iteration 修改 System Rules 审查机制）；(2) 在 construct-rs-ahe-practices §D 加 D5'AHE iteration 修改 System Rules 前的检查'；(3) 跨工程复用时复制 base + 替换 permission 路径 + 重写 extension"
+  },
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "下次 phase 子任务启动 / 跨工程新项目时验证：(1) 各角色 agent 是否按 base 约定主动 read docs/agents/<role>-extension.md；(2) base 跨工程复用是否成立（新项目复制 base 后只需改 permission + extension）；(3) §5 准入标准是否实际阻止 AGENTS.md 膨胀；(4) L-09 候选是否在 iter9 沉淀；(5) base 是否持续保持跨工程纯净（无新泄漏）",
+    "verification_method_pre_commit": "已自验证（§B1）：(a) AGENTS.md 81 行；(b) 6 base 合计 742 行，6 extension 合计 463 行；(c) base 跨工程扫描通过（0 项目特定泄漏，仅余 permission frontmatter 框架约束）；(d) 各 extension 引用 AGENTS.md §1 子任务标识统一约定（不在 extension 重复）；(e) iter7 manifest verification 关闭"
+  }
+}

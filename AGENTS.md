@@ -29,6 +29,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 ```
 
 - **状态流转**：每个子任务严格按管道推进，不可跳步。`trivial` 子任务 PM 标注后可跳 DESIGNING + DESIGN_REVIEW；关联紧密的子任务 PM 可合并为一次 ARCH 分派
+- **子任务标识格式**：`<phase>.<子任务编号> [任务名]`（如 `4.7 [GreedyRange 实现]`）—— 全角色统一
 - **ACCEPTED 时 PM 必须产出 Evaluate 摘录**（AHE §演化循环）；**AUDITED 时 AUDITOR 检查摘录产出**
 - **驳回规则**：REV→DESIGNING / VET→CODING / AUDITOR→PM（PM 补充缺失的管理工作），必须附具体原因
 - **角色隔离**：DEV 不兼任 REV/VET（避免确认偏误）
@@ -64,28 +65,16 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 1. 本文件（System Rules 核心）
 2. `MEMORY.md`（L0 索引：项目定位 / 阶段索引 / Harness 组件 / 教训索引 / 性能快照）
 3. `experiences.md`（L1 教训：L-01~L-08 模式化失败，全员决策前对照）
-4. `.opencode/agents/<role>.md`（自身角色定义 + 操作清单）
-5. `plans/phaseN/总纲.md`（当前 phase 单一事实源）
-6. 涉及 AHE iteration 时：`.opencode/skills/construct-rs-ahe-practices/SKILL.md`
-7. 涉及性能子任务时：`.opencode/skills/performance-gate/SKILL.md`
-8. 涉及过程记录填写时：`docs/文档元数据规范.md`
+4. `.opencode/agents/<role>.md`（**通用 base**：跨工程身份/职责/返回格式框架）
+5. `docs/agents/<role>-extension.md`（**项目特定 extension**：工作流状态/检查清单/文件路径，由 base 强制约定加载）
+6. `plans/phaseN/总纲.md`（当前 phase 单一事实源）
+7. 涉及 AHE iteration 时：`.opencode/skills/construct-rs-ahe-practices/SKILL.md`
+8. 涉及性能子任务时：`.opencode/skills/performance-gate/SKILL.md`
+9. 涉及过程记录填写时：`docs/文档元数据规范.md`
 
-## 5. 内容准入标准（防止 AGENTS.md 膨胀）
+## 5. 内容准入标准
 
-加入 AGENTS.md 的内容必须**同时满足**：
-
-1. **全员必读**：所有 6 角色都需要的约束（不是某角色专属）
-2. **稳定性高**：不频繁变更的核心约束（详细操作流程放 agent 文件）
-3. **不可下沉**：无法通过引用其他文件替代
-
-**不满足的内容应放在**：
-- 角色专属操作流程 → `.opencode/agents/<role>.md`
-- 详细规范模板（如 frontmatter / 过程记录格式）→ `docs/`
-- 跨阶段教训 → `experiences.md` / `docs/decisions/ADR-*.md`
-- AHE 工作流补充 → `.opencode/skills/construct-rs-ahe-practices/SKILL.md`
-- 性能门禁 → `.opencode/skills/performance-gate/SKILL.md`
-
-每次向 AGENTS.md 加内容前，PM 必须对照本节检查。违反准入标准的内容应被驳回。
+PM 是 AGENTS.md 的唯一维护者。修改本文件前必须对照 **`pm.md §AGENTS.md 维护标准`** 的三准则（全员必读 / 稳定性高 / 不可下沉）。违反准则的内容应驳回。
 
 ---
 

@@ -125,8 +125,29 @@
     "preventive_check": "未来 iteration：(1) 涉及 System Rules 大改时，提醒候选 L-09；(2) 大段 edit 时使用更小 oldString（单 §边界）避免 L-10；(3) 减法 iteration 应成为常规实践（每 N 个加法 iteration 后做 1 次减法）"
   },
   "verification": {
-    "status": "pending",
+    "status": "partial",
     "scheduled_at": "下次 phase 子任务启动时验证：(1) 各角色 agent 启动时是否仅需读 AGENTS.md（66 行）+ 自身 .md 文件，不再需要 docs/skill 等额外文件；(2) §5 内容准入标准是否实际阻止 AGENTS.md 膨胀；(3) 历史 plans/phase0-4/过程记录.md 中的旧 §号引用是否导致 reader 困惑（dogfood 收集）；(4) 候选 L-09/L-10 是否再次出现（达到沉淀阈值）",
-    "verification_method_pre_commit": "已自验证（§B1）：(a) AGENTS.md 66 行（< 100 目标 ✓）；(b) cross-reference 最终扫描：活跃文件 0 broken refs ✓；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) iter6 manifest verification 关闭（pending → partial，1/4 预测触发）；(e) MEMORY.md iter6 行更新 + 待加 iter7 行"
+    "verification_method_pre_commit": "已自验证（§B1）：(a) AGENTS.md 66 行（< 100 目标 ✓）；(b) cross-reference 最终扫描：活跃文件 0 broken refs ✓；(c) 通用 AHE skill 未修改（git diff 应为空）；(d) iter6 manifest verification 关闭（pending → partial，1/4 预测触发）；(e) MEMORY.md iter6 行更新 + 待加 iter7 行",
+    "completed_at": "2026-07-28T04:35:00+08:00",
+    "verified_by": "iter8 dogfood（详见 experiments/eval-2026-07-27-iter8-dogfood.md）",
+    "result": {
+      "expected_fixes_verified": [
+        "预测 (2) 验证 ✓：iter8 §5 自检下沉到 pm-extension（§5 自反省发现违反自身准则，是准入标准的首次自我应用）"
+      ],
+      "unexpected_fixes": [
+        "iter8 进一步把 AGENTS.md §5 也下沉，AGENTS.md 从 92 行降到 81 行（iter7 是 66 行，iter8 §4 加 base+extension 入口略增）"
+      ],
+      "regressions_observed": [
+        "iter8 把 AGENTS.md 启动入口从'agent 文件'改为'base + extension'双层——结构变更，预测 (1) 的描述（仅读 AGENTS + agent .md）已过时"
+      ],
+      "false_predictions": [],
+      "predictions_not_yet_triggered": [
+        "预测 (3) 未触发：iter8 不涉及读历史 plans 过程记录",
+        "预测 (4) 部分触发：候选 L-09 在 iter8 第 3 次出现（达沉淀阈值），L-10 未触发"
+      ]
+    },
+    "verdict": "partial",
+    "verdict_rationale": "4 个子预测中 1 个验证（§5 准入标准自我应用 ✓），1 个结构变更（启动入口重定义为 base+extension），2 个未触发。iter8 在 iter7 基础上继续推进，把 AGENTS.md 瘦身成果进一步深化",
+    "followup": "iter9 沉淀 L-09（已达 3 次阈值）；下次 phase 子任务验证预测 (3)"
   }
 }
