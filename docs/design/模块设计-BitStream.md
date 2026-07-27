@@ -1310,7 +1310,7 @@ def Bitwise(subcon): return BitwiseDescriptor(subcon)
 
 ### 12.3 与架构设计文档的兼容性
 
-本设计**不修改** `docs/架构设计.md` 的核心约定：
+本设计**不修改** `docs/design/架构设计.md` 的核心约定：
 - §C.1 Construct trait 签名不变（parse/build/sizeof 三方法）
 - §C.4 Stream 抽象"纯 Rust 内部，不跨 FFI"——bit 游标仍在此约束内
 - §B.2 compile_schema 一次 FFI——新增 bitwise 参数不破坏

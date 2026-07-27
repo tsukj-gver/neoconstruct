@@ -13,7 +13,7 @@ last_updated: 2026-07-27
 > **设计依据**：
 > - `AGENTS.md` §0（核心原则：一次 FFI、无中间表示层、直接操作 Python 对象）、
 >   §7（技术决策）、§8（编码红线）、§10（Python 参考速查）
-> - `docs/设计决策记录.md`（跨阶段约束，含 Phase 4 决策 3 "Index 仅作为构造器字段"）
+> - `docs/decisions/README.md`（跨阶段约束，含 Phase 4 决策 3 "Index 仅作为构造器字段"）
 > - `plans/phase4-array/分析报告-Array功能集.md`（功能集分析）
 > - `plans/phase4-array/总纲.md`（用户面设计四原则 + S-PERF ≥10x 硬门禁 + 场景矩阵）
 > - `construct-rs/src/nodes/mod.rs`（现有 Node enum + Construct trait）
@@ -65,7 +65,7 @@ v2 逐项修正：
 
 ### 0.2 v3 修正（V1/V2/V3/V4 —— 决策记录对照驳回）
 
-REV 在 v2 复审通过后，对照 `docs/设计决策记录.md` 全部 12 条决策逐条审查，
+REV 在 v2 复审通过后，对照 `docs/decisions/README.md` 全部 12 条决策逐条审查，
 发现违反 Phase 2 决策 1（废弃 `this`），驳回 2 个设计问题（V1/V2）+ 2 个文档表述
 问题（V3/V4）。v3 逐项修正：
 
@@ -77,7 +77,7 @@ REV 在 v2 复审通过后，对照 `docs/设计决策记录.md` 全部 12 条�
 | V4 | §4.5.1 StopIfCondition::Expr 注释使用 `this.x == 0` | §4.5.1 | 改为 construct-rs 实际语法：`x == 0`（x 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`） |
 
 附加修正（连带）：
-- 新增 `docs/设计决策记录.md` Phase 4 决策 3（Index 仅作为构造器字段）
+- 新增 `docs/decisions/README.md` Phase 4 决策 3（Index 仅作为构造器字段）
 - §0.2 新增 v3 修正摘要
 - §11 自检章节同步更新
 
@@ -102,7 +102,7 @@ v4 逐项修正（V-2~V-5 留待 DEV 在 V-1 修复批次中附带处理，本�
 - §4.3.4 build PyCallable 路径同步更新
 - §7.3 新增 RU-9 边界（谓词 context 访问）
 - §8.1/§8.2/§8.3 更新 PyCallable 路径性能预期（≥3x → ≥1.5x）
-- 新增 `docs/设计决策记录.md` Phase 4 决策 4（PyCallable proxy 用 Container 包装）
+- 新增 `docs/decisions/README.md` Phase 4 决策 4（PyCallable proxy 用 Container 包装）
 - §9.5 不新增已知差异条目（方案 A 行为对齐 Python，无差异）
 
 > **V-2/V-3/V-4/V-5 不在本次设计修正范围**：
@@ -152,7 +152,7 @@ v5 逐项修正（**全文性变更**，涉及多处重写）：
 - §9.5 已知行为差异表删除 RU-build-2、RU-3b、RU-9（均 PyCallable 相关）
 - §10.1 删除"RepeatUntil 的 Expr 谓词路径"（Expr 就是唯一路径，无后续优化方向）
 - §13 新增附录：完整用户面使用样例集（用户验收门禁）
-- 新增 `docs/设计决策记录.md` Phase 4 决策 4 作废 + 决策 4'（RepeatUntil 终止表达式 = Phase 2 表达式）+ 决策 5（Element 仅作为构造器字段）
+- 新增 `docs/decisions/README.md` Phase 4 决策 4 作废 + 决策 4'（RepeatUntil 终止表达式 = Phase 2 表达式）+ 决策 5（Element 仅作为构造器字段）
 
 > **v5 不可逆约束**（用户硬约束，违反即打回）：
 > 1. 禁止保留任何形式的 PyCallable 路径
@@ -4144,10 +4144,10 @@ Element 是引用入口，不独立 benchmark，但需通过 RepeatUntil 场景�
 - `AGENTS.md` §0、§7、§8、§10
 - `plans/phase4-array/分析报告-Array功能集.md`
 - `plans/phase4-array/总纲.md`（v5：用户面设计四原则 + S-PERF ≥10x + 场景矩阵硬要求）
-- `docs/架构设计.md` §C.1-C.6
-- `docs/模块设计-BitStream.md`（Box<Node> 递归模式参考）
-- `docs/模块设计-表达式系统.md`（ExprProgram / ExprOp 参考）
-- `docs/模块设计-Context-Vec优化.md`（Context 栈分配模式参考）
+- `docs/design/架构设计.md` §C.1-C.6
+- `docs/design/模块设计-BitStream.md`（Box<Node> 递归模式参考）
+- `docs/design/模块设计-表达式系统.md`（ExprProgram / ExprOp 参考）
+- `docs/design/模块设计-Context-Vec优化.md`（Context 栈分配模式参考）
 - `construct/construct/core.py` L2493-2704、L2934-2972、L4079-4131、L4934-4983
 - `construct/construct/lib/containers.py`（ListContainer；v5 后 construct-rs 不再依赖 Container）
 

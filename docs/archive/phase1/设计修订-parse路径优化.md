@@ -556,7 +556,7 @@ pydantic-core 的 serialize 路径同样是：遍历字段的 serializer，每�
 > **实测确认（2026-06-22）**：以下 R3 预测已被 P0 优化后的实测数据大幅超越。
 > 实测加速比 8-12x（vs R3 预测 5-9x），完整实测数据见 `docs/analysis/perf-p0-analysis.md`
 > §8，实测确认表见本文档 §4.7。偏差根因是 R3 模型低估了 pyo3 抽象层隐性开销
-> （详见 `docs/架构设计.md` §G.6 性能模型修正）。
+> （详见 `docs/design/架构设计.md` §G.6 性能模型修正）。
 
 ### 4.1 每字段成本模型
 
@@ -649,7 +649,7 @@ Full parse（方案 B' 优化后）≈ Rust 内部总耗时（不再有 Python �
 > ~140ns/field），P0-1 启用 fat LTO 后此开销被内联消除。
 >
 > **完整实测数据见 `docs/analysis/perf-p0-analysis.md` §8.2**；完整偏差分析见同文档
-> §8-§9；修正后的性能模型见 `docs/架构设计.md` §G.6。
+> §8-§9；修正后的性能模型见 `docs/design/架构设计.md` §G.6。
 
 ---
 
@@ -958,7 +958,7 @@ slots 类上会**运行期失败**（slots 类无 `__dict__`，`GenericSetAttr` 
 
 ---
 
-*本设计修订（**R3，2026-06-22**）经 PM 确认后，由 ARCH 更新 `docs/架构设计.md`
+*本设计修订（**R3，2026-06-22**）经 PM 确认后，由 ARCH 更新 `docs/design/架构设计.md`
 相关章节，再由 DEV 实施。R3 将实例构造策略从方案 B 升级为方案 B'（与 pydantic-core
 对齐），移除 `object_new` 缓存（改用 `create_class` 辅助函数），新增 §0 原则对照表
 和 build 路径评估。R3 保留 R2 的全部修正（P2 `__slots__` 编译期报错、N1-N5）。

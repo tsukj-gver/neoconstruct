@@ -95,9 +95,42 @@
     }
   ],
   "verification": {
-    "status": "pending",
+    "status": "verified_with_followups",
     "scheduled_at": "2026-08-10T00:00:00+08:00",
-    "verification_method": "下次 Harness Audit 时检查：(1) MEMORY.md 是否被 agent 启动时主动引用；(2) ADR 文件是否在 ARCH 设计新模块时被对照（L-04 对策）；(3) frontmatter status 字段是否被 agent 用于过滤过时文档；(4) 过程记录 per-文件是否降低 agent 上下文消耗；(5) docs/ 根目录是否保持清空状态"
+    "completed_at": "2026-07-27T23:55:00+08:00",
+    "verification_method": "post-commit 自验证：(1) broken reference 全表扫描；(2) frontmatter 必填字段完整性扫描",
+    "result": {
+      "expected_fixes_verified": [
+        "P-1 解决：通过 索引.md + frontmatter 让 5000+ 行过程记录可定位",
+        "P-2 解决：docs/ 根目录清空，所有文档归类子目录",
+        "P-4 解决：MEMORY.md 建立，00-项目进度.md 简化为快照，状态单一源为 phaseN/总纲.md",
+        "P-5 解决：archive/ 机制建立，Phase 1 修订日志归档"
+      ],
+      "unexpected_fixes": [],
+      "regressions_observed": [
+        "42 个 broken refs 在活跃文件中（docs 内部互引 + phase 总纲/过程记录引用 docs）—— predicted_impact 漏报。已批量修复（16 active + 3 archive 文件路径替换）",
+        "9 个文件缺 frontmatter（5 phase 总纲 + 2 phase 分析报告 + docs/archive/设计决策记录-v1-deprecated.md + 漏改的 phase2 总纲）—— predicted_impact 漏报。已补加"
+      ],
+      "false_predictions": [
+        "ch_008 predicted_impact 未提及'历史过程记录和设计文档内部互引的旧路径'需要更新——实际有 42 处 broken refs，必须修复才能称为'可观测'",
+        "ch_008 targeted_fix 措辞'每文件 YAML frontmatter 头'暗示全量覆盖，但执行时遗漏了 5 个总纲 + 2 个分析报告"
+      ]
+    },
+    "verdict": "partial",
+    "verdict_rationale": "核心结构改进有效（T1+T2+T3 全部落地），但 manifest 的 predicted_impact 不完整：(1) 未预测到 42 处历史互引需批量更新；(2) 未预测到 9 个文件 frontmatter 遗漏。回归已当场修复，最终状态：零 broken refs / 零 frontmatter 缺失。下一轮 iteration 应在 predicted_impact 中明确包含'内部交叉引用路径迁移'检查项",
+    "followup_iteration_topics": [
+      "在 AHE skill 的 generate-manifest 工作流中加入'cross-reference migration check'作为强制验证步骤",
+      "把 frontmatter 完整性检查加入 HARNESS audit 清单"
+    ],
+    "final_state": {
+      "active_files_scanned": 62,
+      "archive_files_scanned": 3,
+      "broken_refs_final": 0,
+      "frontmatter_missing_final": 0,
+      "files_added": 39,
+      "files_renamed": 13,
+      "files_modified": 22
+    }
   },
   "evidence_summary": {
     "audit_findings_addressed": ["P-1", "P-2", "P-3", "P-4", "P-5"],

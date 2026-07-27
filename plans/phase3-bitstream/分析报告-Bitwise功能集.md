@@ -1,3 +1,11 @@
+---
+id: REQUIREMENT-Bitwise
+status: accepted
+phase: "3"
+task: "Phase 3 Bitwise 功能集需求分析"
+last_updated: 2026-07-27
+---
+
 # Bitwise 功能集分析报告（Python construct 2.10.70）
 
 > 调查时间：2026-06-27

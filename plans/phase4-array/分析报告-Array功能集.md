@@ -1,3 +1,11 @@
+---
+id: REQUIREMENT-Array
+status: accepted
+phase: "4"
+task: "Phase 4 Array 功能集需求分析"
+last_updated: 2026-07-27
+---
+
 # Array 功能集分析报告（Python construct 2.10.70）
 
 > 调查时间：2026-06-29

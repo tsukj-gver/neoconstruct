@@ -17,15 +17,15 @@ last_updated: 2026-07-27
 > **提出者**：PM
 > **处理者**：ARCH
 > **日期**：2026-06-24
-> **前置文档**：`docs/设计修订-parse路径优化.md`（R3，方案 B'）、
->   `docs/模块设计-Context-Vec优化.md`（Phase 2.5 Vec 化）
+> **前置文档**：`docs/archive/phase1/设计修订-parse路径优化.md`（R3，方案 B'）、
+>   `docs/design/模块设计-Context-Vec优化.md`（Phase 2.5 Vec 化）
 > **状态**：初版，待 REV 检视
 
 ---
 
 ## 0. 与既有设计的关系
 
-本修订是 `docs/设计修订-parse路径优化.md`（R3 方案 B'）的**增量优化**。
+本修订是 `docs/archive/phase1/设计修订-parse路径优化.md`（R3 方案 B'）的**增量优化**。
 R3 方案 B' 的核心是"独立 dict 构造 + `tp_new` + `force_setattr` 整体替换"。
 本修订不改变方案 B' 的语义（parse 返回用户类实例、兼容 frozen dataclass、
 绕过自定义 `__setattr__`），仅改变**实例 dict 的来源**：
