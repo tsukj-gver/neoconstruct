@@ -61,7 +61,7 @@ last_updated: 2026-07-27
 | Tool Descriptions | opencode.json（声明 permission） |
 | Tool Implementations | opencode 内置（bash/edit/glob/grep/read/write 等） |
 | Middleware | （未启用） |
-| Skills | `.opencode/skills/{agentic-harness-engineering, performance-gate, pm-performance-validation}/SKILL.md` |
+| Skills | `.opencode/skills/{agentic-harness-engineering, construct-rs-ahe-practices, performance-gate, pm-performance-validation}/SKILL.md` |
 | Sub-Agents | `.opencode/agents/{pm,architect,developer,reviewer,vetter,auditor}.md` |
 | Long-Term Memory | `MEMORY.md`（本文件）+ `experiences.md` + `docs/decisions/` |
 
@@ -69,11 +69,26 @@ last_updated: 2026-07-27
 
 ## AHE 演化历史
 
-| 迭代 | 时间 | Manifest | 主要变更 |
-|------|------|----------|---------|
-| 1 | 2026-07-27 | `manifests/change_2026-07-27.json` | 建立 LTM（experiences.md）/ 规范 skill 目录 / AUDITOR 注册对齐 / 建立 manifests 基础设施 |
-| 2 | 2026-07-27 | `manifests/change_2026-07-27-websearch.json` | 启用 websearch（partial） |
-| 3 | 2026-07-27 | `manifests/change_2026-07-27-docs-restructure.json` | 记录/设计文档 AHE 化（T1 结构正交 + T2 frontmatter + T3 ADR） |
+| 迭代 | 时间 | Manifest | 主要变更 | Verdict |
+|------|------|----------|---------|---------|
+| 1 | 2026-07-27 | `manifests/change_2026-07-27.json` | 建立 LTM（experiences.md）/ 规范 skill 目录 / AUDITOR 注册对齐 / 建立 manifests 基础设施 | **verified**（iteration 3 收尾时补做） |
+| 2 | 2026-07-27 | `manifests/change_2026-07-27-websearch.json` | 启用 websearch | partial（配置层就位，运行时未生效，用户主动 skip） |
+| 3 | 2026-07-27 | `manifests/change_2026-07-27-docs-restructure.json` | 记录/设计文档 AHE 化（T1 结构正交 + T2 frontmatter + T3 ADR） | partial（predicted_impact 漏报 42 broken refs + 9 frontmatter 缺失，已当场修复） |
+| 4 | 2026-07-27 | `manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `construct-rs-ahe-practices`（不动通用 AHE skill） | pending |
+
+## 教训索引
+
+详见 `experiences.md`，按优先级排序：
+
+| ID | 模式 | 触发场景 |
+|----|------|---------|
+| L-01 | 中间表示层违反 | parse/build 数据流设计 |
+| L-02 | 理论估算替代实证数据 | 性能预测 |
+| L-03 | PM 接受不对等证据 | 性能验收 |
+| L-04 | 跨阶段模式未沉淀 | Phase 验收 |
+| L-05 | 优化 A 路径忽略 B 路径 | 性能设计 |
+| L-06 | 字段数混淆对照 | 性能数据对比 |
+| L-07 | predicted_impact 重结构轻交叉引用 | AHE harness 重组 |
 
 ---
 

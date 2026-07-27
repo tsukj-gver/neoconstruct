@@ -1,0 +1,105 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 4,
+  "timestamp": "2026-07-28T00:30:00+08:00",
+  "author": "pm (AHE iteration 4 — 沉淀 iteration 3 教训)",
+  "scope_summary": "把 iteration 3 verify 发现的 predicted_impact 盲区沉淀为 L-07 教训 + 新建项目级 AHE 补充 skill（不动通用 AHE skill）",
+  "changes": [
+    {
+      "change_id": "ch_010",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "experiences.md",
+      "summary": "新增 L-07 教训：AHE predicted_impact 重结构轻交叉引用盲区",
+      "failure_evidence": "iteration 3 manifest verification.regressions_observed 记录：42 处 broken refs + 9 frontmatter 缺失均未在 predicted_impact 中预测。iteration 1 manifest verification 长期 pending（'verify 流程被跳过'同根模式）",
+      "root_cause": "通用 AHE skill 工作流 2 步骤 5（预测影响）是抽象描述，对'文件重组'场景缺乏强制检查项；工作流 3 触发条件（'到了 scheduled_at 时间'）过严，commit 前自验证不在流程中。manifest schema 中 at_risk_regressions 是开放列表，agent 凭直觉填——直觉通常聚焦'功能回归'，遗漏'路径回归'",
+      "targeted_fix": "experiences.md 新增 §L-07 段：模式描述 + 2 个真实事件 + 根因分析 + 4 类角色对策；索引表加入 L-07 行",
+      "predicted_impact": {
+        "expected_fixes": [
+          "后续 AHE iteration 涉及文件重组时，PM 主动执行 cross-reference migration check",
+          "AUDITOR 审计 manifest 时检查 at_risk_regressions 是否覆盖路径回归",
+          "agent 启动读 experiences.md 时知道这条盲区"
+        ],
+        "at_risk_regressions": [
+          "若仅靠 LTM 教训，agent 仍可能在执行 AHE 时不主动检索——需配合项目级 skill（ch_011）强化"
+        ],
+        "rationale": "experiences.md 是全员启动必读 LTM，教训沉淀后会被任何 AHE iteration 主动检索"
+      }
+    },
+    {
+      "change_id": "ch_011",
+      "component": "skills",
+      "subtype": "create",
+      "file_path": ".opencode/skills/construct-rs-ahe-practices/SKILL.md",
+      "summary": "新建项目级 AHE 补充 skill，把 L-07 对策落实为可执行检查清单",
+      "failure_evidence": "同 ch_010——教训只放 LTM 不够，需要在 agent 调用 AHE skill 时强制看到",
+      "root_cause": "通用 AHE skill (.opencode/skills/agentic-harness-engineering/SKILL.md) 是上游工具副本，不应被项目特定经验污染。项目实践补充必须独立成 skill",
+      "targeted_fix": "新建 .opencode/skills/construct-rs-ahe-practices/SKILL.md：明确与通用 AHE skill 的关系（补充而非替代）；§A1 Cross-Reference Migration Check；§A2 Frontmatter 新增清单；§A3 at_risk_regressions 必含路径/元数据回归；§B1 commit 前自验证；§B2 漏报必填 false_predictions；§B3 AUDITOR 检查覆盖度",
+      "predicted_impact": {
+        "expected_fixes": [
+          "下次 AHE iteration commit 前，PM 主动执行 §B1 自动扫描（broken refs / frontmatter）",
+          "下次涉及文件重组时，PM 在 §A1 中 grep 列出所有交叉引用作为 at_risk_regressions",
+          "通用 AHE skill 升级（上游同步）时本 skill 不受影响"
+        ],
+        "at_risk_regressions": [
+          "新 skill 增加 agent 启动检索成本——但这是必要的项目特定补充",
+          "若 agent 不主动加载本 skill（仅加载通用 AHE skill），对策仍可能被忽略——MEMORY.md Harness 组件清单已声明本 skill，agent 启动时会看到"
+        ],
+        "rationale": "skill 是 agent 实际执行 AHE 时的入口。在通用 skill 之上加项目补充，是 AHE 模式的正确分层（通用工具不动，项目实践独立沉淀）"
+      }
+    },
+    {
+      "change_id": "ch_012",
+      "component": "skills",
+      "subtype": "update",
+      "file_path": ".opencode/skills/agentic-harness-engineering/SKILL.md",
+      "summary": "REVERTED：曾误改通用 AHE skill（ch_011 v1），改为新建项目 skill 后已 git checkout 恢复",
+      "failure_evidence": "iteration 4 v1 误把 L-07 对策直接写进通用 AHE skill 的工作流 2/3。用户质询：'改 AHE 的 SKILL.md，这符合 AHE 的做法吗？'——答案是不符合",
+      "root_cause": "PM 混淆了'通用工具'与'项目实践'的边界。通用 AHE skill 是上游 reference 副本，未来从 AHE 项目同步时本地修改会冲突；其他项目用同一 skill 会看到本项目特定内容",
+      "targeted_fix": "git checkout .opencode/skills/agentic-harness-engineering/SKILL.md（已执行）。项目特定内容改放到 ch_011 新建的项目级 skill",
+      "predicted_impact": {
+        "expected_fixes": [
+          "通用 AHE skill 保持上游一致性",
+          "项目特定经验归项目 skill 管（ch_011）"
+        ],
+        "at_risk_regressions": [],
+        "rationale": "AHE 自身哲学：组件正交。通用工具与项目实践是两个组件，不应混淆"
+      },
+      "verdict_note": "本 change 是本 iteration 的一次失败尝试，记录此处作为过程可观测性。verdict=verified（revert 成功执行）"
+    },
+    {
+      "change_id": "ch_013",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "MEMORY.md",
+      "summary": "同步 AHE 演化历史（加入 iteration 4 + verdict 列）+ 新增教训索引段 + Harness 组件清单加入 construct-rs-ahe-practices",
+      "failure_evidence": "MEMORY.md 原 AHE 演化历史表只有 iteration 1-3，无 verdict 列；无教训索引；Harness 组件清单的 Skills 行未含新 skill",
+      "root_cause": "MEMORY.md 作为 L0 索引应提供足够概览让 agent 决定是否下沉",
+      "targeted_fix": "AHE 演化历史表加 verdict 列 + iteration 4 行；新增'教训索引'段（7 条教训概览）；Skills 组件清单加入 construct-rs-ahe-practices",
+      "predicted_impact": {
+        "expected_fixes": [
+          "agent 读 MEMORY.md 即可知每轮 iteration 状态 + 有哪些教训 + 有哪些 skill"
+        ],
+        "at_risk_regressions": [],
+        "rationale": "L0 索引密度提升"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "本 iteration 涉及 1 个文件新建（.opencode/skills/construct-rs-ahe-practices/SKILL.md）。检查：是否被其他文件引用？答：MEMORY.md Harness 组件清单已更新引用；experiences.md §L-07 对策段引用本 skill。无 broken refs 风险。",
+    "frontmatter_applicability": "新建 SKILL.md 有 YAML frontmatter（description 字段，符合 opencode skill 规范）。experiences.md / MEMORY.md 是 LTM 文件，本身无 frontmatter 规范要求"
+  },
+  "process_lesson": {
+    "title": "通用工具 vs 项目实践的边界",
+    "description": "本 iteration 经历了一次失败尝试：误改通用 AHE skill。用户质询后 revert，改为新建项目 skill。这个判断失败本身值得记录——它揭示了 PM 在执行 AHE 改进时容易混淆工具组件边界",
+    "lesson_home": "本 manifest（过程可观测性）",
+    "preventive_check": "未来 AHE iteration 涉及 .opencode/skills/<name>/ 修改时，先判断：(1) 该 skill 是否是上游副本？(2) 修改内容是否项目特定？(3) 若两者都是 → 新建项目 skill 而非改上游副本"
+  },
+  "verification": {
+    "status": "pending",
+    "scheduled_at": "下次 AHE iteration 时验证：(1) L-07 是否被 PM 在下次文件重组时主动引用；(2) construct-rs-ahe-practices skill 是否被 PM 在生成 manifest 时主动加载；(3) 下次 manifest 的 predicted_impact.at_risk_regressions 是否覆盖路径回归；(4) 通用 AHE skill 是否在下次同步时不出现冲突",
+    "verification_method_pre_commit": "已自验证：(a) 通用 AHE skill 已恢复（git status 显示无 modified）；(b) 新建项目 skill 路径有效；(c) experiences.md §L-07 对策段已更新引用；(d) MEMORY.md 索引已更新"
+  }
+}

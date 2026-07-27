@@ -23,6 +23,7 @@
 | L-04 | 跨阶段模式未沉淀 | 2+ | Phase 4 重新决策 + 返工 | §L-04 |
 | L-05 | 优化 A 路径忽略 B 路径 | 2+ | 设计修订 R1/R2 漏洞 | §L-05 |
 | L-06 | 字段数混淆对照 | 1 | Phase 3 不对称误判 | §L-06 |
+| L-07 | AHE predicted_impact 重结构轻交叉引用 | 1+ | iteration 3 漏报 42 broken refs | §L-07 |
 
 ---
 
@@ -179,6 +180,38 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 - **PM**：呈现性能数据时，必须标注每个场景的关键变量（字段数、输入大小、复杂度）。比较"差距"时先确认变量一致。
 - **ARCH**：分析性能差距时，先做"变量隔离假设"——若数据可由已知变量差异解释，无需引入新假设。
 - **PM**：触发 pm-performance-validation skill 时，检查"内部数据关系"维度——同字段数的场景成本应一致。
+
+---
+
+## L-07: AHE predicted_impact 重结构轻交叉引用
+
+> **核心约束**（`.opencode/skills/construct-rs-ahe-practices/SKILL.md` §A1）：涉及文件移动/重命名/重组的 harness 修改，
+> 必须在 `predicted_impact` 中列出所有可能 broken 的交叉引用。
+
+**模式描述**：AHE Change Manifest 的 `predicted_impact` 字段在结构改造类修改中，
+倾向于只预测"组件可观测性提升 / 检索成本下降"等结构性收益，遗漏"历史文件内部互相引用的旧路径会 broken"。
+
+**反复出现事件**：
+
+| # | 时间 | 事件 | 证据 |
+|---|------|------|------|
+| 1 | 2026-07-27 | **iteration 3 broken refs 风暴**：T1+T2+T3 文档 AHE 化重组后 commit，verify 时发现 42 处 broken refs 在活跃文件中（phase 总纲/过程记录/docs 内部互引），9 处 frontmatter 缺失。predicted_impact 完全未预测。已批量修复（16 active + 3 archive 文件路径替换 + 9 frontmatter 补加）。 | `manifests/change_2026-07-27-docs-restructure.json` verification.regressions_observed |
+| 2 | 2026-07-27 | **iteration 1 manifest pending 遗留**：iteration 1（experiences.md / AUDITOR 注册 / skill 规范化）的 verification 字段一直为 `pending`，从未做过验证。直到 iteration 3 收尾时按用户质询才补做。这是"verify 流程被跳过"的同根模式——predicted_impact 没要求"commit 前自验证"。 | `manifests/change_2026-07-27.json` verification.status（此次补做后改为 verified） |
+
+**根因**：
+
+1. **通用 AHE skill 流程抽象**：`.opencode/skills/agentic-harness-engineering/SKILL.md` 工作流 2 的"步骤 5 预测影响"是抽象描述（"哪些任务应该修复，哪些可能回归"），没有针对"文件重组"这类高频修改场景给出**强制检查项**。manifest schema 中 `at_risk_regressions` 是开放列表，agent 凭直觉填——直觉通常聚焦"功能回归"，遗漏"路径回归"。通用 skill 不应被项目污染，需要项目级补充。
+2. **Verify 工作流触发条件过严**：通用 skill 工作流 3 原要求"到了 scheduled_at 时间"才验证，但 scheduled_at 通常设为几周后。commit 前的自验证不在流程中，导致问题积压到下次审计才发现。
+3. **agent 单次操作聚焦"做修改"，不主动扫描"修改后果"**：grep 全工作区的 broken refs 不在标准工具链中。
+
+**对策**（agent 必须执行）：
+
+- **PM（AHE iteration 执行者）**：每次 commit 前必须执行 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §B1 自动扫描：
+  - Broken refs 扫描：`grep -r "\.md" --include="*.md" . | 验证目标存在`
+  - Frontmatter 完整性扫描：所有规范要求 frontmatter 的文件必须有 `id` / `status` / `phase` / `last_updated`
+- **PM**：涉及文件移动/重命名/重组时，在 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §A1（Cross-Reference Migration Check）中**强制**用 grep 列出所有引用，作为 `at_risk_regressions` 的具体条目
+- **AUDITOR（审计 AHE iteration 时）**：检查 manifest 的 `predicted_impact.at_risk_regressions` 是否覆盖了"路径 broken"类别。若修改涉及文件重组但 at_risk_regressions 为空或仅含功能项 → 驳回（§B3）
+- **任何角色**：发现 manifest predicted_impact 漏报回归时，必须在 verification 的 `false_predictions` 字段如实记录（§B2），**不可静默修复**
 
 ---
 
