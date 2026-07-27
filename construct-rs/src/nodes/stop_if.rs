@@ -117,17 +117,26 @@ impl StopIfNode {
         self.cond.is_expr()
     }
 
-    /// 求值条件（设计 §4.5.2）。
+    /// 求值条件（设计 §4.5.2 + §16.1.3-O1 fast-path）。
     ///
     /// - `Always` → `true`
     /// - `Never` → `false`
-    /// - `Expr(prog)` → `eval_expr_int(prog, ctx, py) != 0`（整数非零为真）
+    /// - `Expr(prog)` → 整数非零为真。先尝试 [`ExprProgram::try_eval_simple_cmp`]
+    ///   fast-path（命中 3-op 单/双字段比较模式时内联求值，省 ~10ns/调用），
+    ///   未命中走通用 [`eval_expr_int`]（5-op `(e&0xFF)==0` / 复合表达式等）。
+    ///   fast-path 范式与 [`crate::nodes::repeat_until::RepeatUntilNode::eval_terminator`]
+    ///   一致（4.5 v5.1 已验证）。
     fn eval_cond(&self, ctx: &Context<'_>, py: Python<'_>) -> Result<bool, ConstructError> {
         match &self.cond {
             StopIfCondition::Always => Ok(true),
             StopIfCondition::Never => Ok(false),
             StopIfCondition::Expr(prog) => {
-                let v = eval_expr_int(prog, ctx, py)?;
+                // O1 fast-path（设计 §16.1.3-O1）：命中常见 3-op 比较模式时内联求值。
+                let v = if let Some(fast) = prog.try_eval_simple_cmp(ctx, py) {
+                    fast?
+                } else {
+                    eval_expr_int(prog, ctx, py)?
+                };
                 Ok(v != 0)
             }
         }
