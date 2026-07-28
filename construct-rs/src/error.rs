@@ -23,9 +23,12 @@
 //! 携带 `full_message()` 输出——保证错误信息不丢失，仅类型降级。
 
 use pyo3::exceptions::PyValueError;
+use pyo3::ffi;
+// SAFETY 用途：c_str! 宏将 &str 字面量编译期转为 &CStr（CPython C API 需要 *const c_char）。
+use pyo3::ffi::c_str;
 use pyo3::prelude::*;
 use pyo3::sync::GILOnceCell;
-use pyo3::types::PyType;
+use pyo3::types::{PyAny, PyString, PyTuple, PyType};
 
 /// construct-rs 内部统一错误类型，携带结构化信息。
 ///
@@ -532,6 +535,50 @@ struct ExceptionClasses {
 /// - 一旦写入，永不变更（异常类是模块级单例）
 static EXCEPTIONS: GILOnceCell<ExceptionClasses> = GILOnceCell::new();
 
+impl ExceptionClasses {
+    /// 检查 `cls_ptr` 是否确切等于缓存中某个内置异常类（指针相等比较）。
+    ///
+    /// 用于 O3 fast-path 前置条件检查（设计 §1.3.1 U1 第 ③ 条）：仅当 `cls` 是
+    /// 确切内置异常类时，才能安全跳过 Python `__init__` 字节码；用户子类化必须
+    /// 走 `call1` 慢路径，否则会绕过用户的 `__init__` 重写（破坏 BC3 兼容性）。
+    ///
+    /// # 子类化检测方法（按 4.x-REV OBS-2 修订）
+    ///
+    /// 用裸指针相等比较，**而非** `PyType_IsSubtype`：后者检查"A 是否 B 的子类"，
+    /// 对任何子类返回 true，不适用于"是否确切等于内置类"判定。指针比较直接判定
+    /// 对象身份，仅确切类型（无子类）才返回 true。
+    ///
+    /// # 参数
+    ///
+    /// - `cls_ptr`：待判定的 Python 类型对象指针（来自 `Bound<PyType>::as_ptr()`
+    ///   或 `Py<PyType>::as_ptr()`，两者均返回 `*mut PyObject`）。
+    ///
+    /// # 返回
+    ///
+    /// `true` 表示 `cls_ptr` 等于 13 个内置异常类之一，可进入 fast-path；
+    /// `false` 表示用户子类化或未知类，走慢路径。
+    fn is_builtin_class(&self, cls_ptr: *mut ffi::PyObject) -> bool {
+        // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
+        // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
+        let builtin_ptrs: [*mut ffi::PyObject; 13] = [
+            self.stream_error.as_ptr(),
+            self.format_field_error.as_ptr(),
+            self.field_length_error.as_ptr(),
+            self.compilation_error.as_ptr(),
+            self.unresolved_reference_error.as_ptr(),
+            self.generic_construct_error.as_ptr(),
+            self.construct_error_base.as_ptr(),
+            self.integer_error.as_ptr(),
+            self.padding_error.as_ptr(),
+            self.range_error.as_ptr(),
+            self.repeat_error.as_ptr(),
+            self.stop_field_error.as_ptr(),
+            self.index_field_error.as_ptr(),
+        ];
+        builtin_ptrs.contains(&cls_ptr)
+    }
+}
+
 /// 在模块初始化时调用，从 `construct._errors` 缓存 Python 异常类引用。
 ///
 /// 必须在 [`crate::_construct_rust`] 模块初始化函数中调用一次。多次调用幂等
@@ -582,11 +629,18 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
 ///
 /// 不存在对应类时（如未来新增变体），返回 `None`，调用方应回退到
 /// [`PyValueError`] 或 [`construct_error`](ExceptionClasses::construct_error) 基类。
+///
+/// # O2 优化（4.x 错误路径 D 类）
+///
+/// 返回 `&Bound<'py, PyType>` 借用引用，**不**调用 `clone()`（避免 `Py_INCREF`/
+/// `Py_DECREF` 各一次的 ~20ns incref 开销）。借用周期由 `classes` 参数的生命周期
+/// `'py` 保证——`classes` 来自全局 [`EXCEPTIONS`] 的 `GILOnceCell::get`，一旦模块
+/// 初始化完成永不变更。
 fn select_exception_class<'py>(
     err: &ConstructError,
     classes: &'py ExceptionClasses,
     py: Python<'py>,
-) -> Bound<'py, PyType> {
+) -> &'py Bound<'py, PyType> {
     let cls: &Py<PyType> = match err {
         ConstructError::Stream { .. } => &classes.stream_error,
         ConstructError::FormatField { .. } => &classes.format_field_error,
@@ -615,7 +669,9 @@ fn select_exception_class<'py>(
         ConstructError::StopField { .. } => &classes.stop_field_error,
         ConstructError::IndexField { .. } => &classes.index_field_error,
     };
-    cls.bind(py).clone()
+    // cls.bind(py) 返回 &Bound<'py, PyType>，借用 cls（借自 classes）。
+    // 不调 clone()，避免 incref/decref 各一次。
+    cls.bind(py)
 }
 
 /// 构造一个携带 `message` 与可选 `path` 的 Python 异常实例。
@@ -637,6 +693,137 @@ fn build_exception_instance<'py>(
     }
 }
 
+/// O3 fast-path：绕过 Python `__init__` 直接构造异常实例（4.x 错误路径 D 类优化）。
+///
+/// 仅对 [`ExceptionClasses`] 缓存的 13 个内置异常类启用（指针相等比较判定，见
+/// [`ExceptionClasses::is_builtin_class`]）。用户子类化的异常返回 `None`，由调用方
+/// 走 [`build_exception_instance`] 慢路径以保证用户的 `__init__` 被调用。
+///
+/// # fast-path 流程（对应设计 §1.3.1 U1-U4）
+///
+/// 1. `PyType_GenericAlloc(cls, 0)` 分配实例（CPython 固有 ~200ns，不可压缩）。
+/// 2. `PyObject_SetAttrString(instance, "message", msg)` 写入 `message` 属性。
+/// 3. `PyObject_SetAttrString(instance, "path", path_or_none)` 写入 `path` 属性。
+/// 4. `PyObject_SetAttrString(instance, "args", (message,))` 写入 `args` 字段
+///    （`BaseException_setattro` 在 CPython 中对 `"args"` 特殊处理，绕过 READONLY
+///    member 限制——见 `Objects/exceptions.c` 中 `BaseException_setattro`）。
+/// 5. 包装为 `PyErr`（O4：直接构造，避免中间层 incref）。
+///
+/// 与慢路径 [`build_exception_instance`] 的行为差异：
+/// - 慢路径：`args = (full,)`，其中 `full = "Error in path X\nY"` 或 `Y`。
+/// - fast-path：`args = (message,)`（不含 path 前缀）。
+/// - `str(e)` 行为一致：Python 侧 `__str__` 已重写为基于 `self.path` + `self.message`
+///   格式化，不依赖 `args`。
+/// - `repr(e)` / `pickle` 行为差异由设计 §3.1.3 ADR-019 决策 4 显式批准。
+///
+/// # 失败模式（BC6 回退）
+///
+/// 任何步骤返回 -1 或 NULL 时：
+/// 1. 调用 `ffi::PyErr_Clear()` 清除挂起的 Python 异常（避免污染后续调用）。
+/// 2. 释放已分配的部分实例（`ffi::Py_DecRef`），避免内存泄漏。
+/// 3. 返回 `None`，调用方走 [`build_exception_instance`] 慢路径。
+///
+/// # 引用计数
+///
+/// `PyType_GenericAlloc` 返回 refcount=1 的新实例。在 4 个 SetAttr 调用中：
+/// - `message` / `args` 共享同一 `PyString`（refcount=2 from instance attrs）。
+/// - `path` 为 PyString（refcount=1 from instance attr）或借用 PyNone（SetAttr
+///   内部 incref，无需调用方管理）。
+///
+/// 最后 `Bound::from_owned_ptr_or_opt` 消费 instance 指针（不 incref），所有权
+/// 转移给 `Bound<PyAny>`，再转移给 `PyErr`。
+///
+/// # 安全性（按设计 §1.3.1 unsafe CPython C API 安全前置条件列表）
+///
+/// 内部 4 个 `unsafe` 块各对应 U1-U4 之一，每个块的内联 `SAFETY` 注释列出前置条件
+/// + 失败模式 + BC6 回退路径。函数本身是 safe（所有 unsafe 操作均被前置条件检查包裹）。
+fn try_fast_path_alloc<'py>(
+    py: Python<'py>,
+    cls: &Bound<'py, PyType>,
+    classes: &ExceptionClasses,
+    message: &str,
+    path: Option<&str>,
+) -> Option<PyErr> {
+    // U1 前置条件 ③：确切类型为内置类（指针相等比较，非 PyType_IsSubtype）。
+    // 用户子类化（cls != 任何内置类）→ 返回 None，走慢路径。
+    if !classes.is_builtin_class(cls.as_ptr()) {
+        return None;
+    }
+
+    // SAFETY: 以下 unsafe 块逐项满足 U1-U4 前置条件。
+    // - GIL 持有：py: Python<'py> token 在作用域内（FFI 入口已持 GIL）。
+    // - cls 有效：来自 Bound<PyType>（pyo3 类型保证）。
+    // - cls 确切为内置类：上面 is_builtin_class 指针比较已验证。
+    unsafe {
+        // U1: 分配实例。
+        // 前置条件：GIL 持有；cls 是有效 PyTypeObject；cls 是确切内置类。
+        // 失败模式：返回 NULL + PyErr_MemoryError（仅 OOM），下面 is_null() 分支处理。
+        let instance: *mut ffi::PyObject = ffi::PyType_GenericAlloc(cls.as_type_ptr(), 0);
+        if instance.is_null() {
+            // BC6: 清除挂起的异常，回退到慢路径。
+            ffi::PyErr_Clear();
+            return None;
+        }
+
+        // 构造 message PyString（new_bound 返回 owned Bound，refcount=1）。
+        let msg_bound: Bound<'py, PyString> = PyString::new_bound(py, message);
+
+        // U2: 设置 message 属性。
+        // 前置条件：instance 是 U1 返回的非空对象；msg_bound.as_ptr() 是有效 PyString。
+        // 失败模式：返回 -1（极端，如内置类被 monkey patch __setattr__），下面分支处理。
+        if ffi::PyObject_SetAttrString(instance, c_str!("message").as_ptr(), msg_bound.as_ptr()) < 0
+        {
+            // BC6: 清除异常 + 释放已分配实例，回退慢路径。
+            ffi::PyErr_Clear();
+            ffi::Py_DecRef(instance);
+            return None;
+        }
+        // 引用计数：msg_bound 的 PyString 现 refcount=2（msg_bound + instance.message）。
+
+        // 构造 path 值。Some(p) → PyString；None → 借用 Py_None（不 incref，SetAttr 内部 incref）。
+        let path_owned: Option<Bound<'py, PyString>> = path.map(|p| PyString::new_bound(py, p));
+        let path_ptr: *mut ffi::PyObject = match path_owned.as_ref() {
+            Some(b) => b.as_ptr(),
+            // SAFETY: 持有 GIL，Py_None() 返回有效 *mut PyObject（CPython 单例）。
+            None => ffi::Py_None(),
+        };
+
+        // U3: 设置 path 属性。
+        // 前置条件：instance 是 U1 返回的非空对象；path_ptr 是有效 PyString 或 Py_None。
+        // 失败模式：同 U2。
+        if ffi::PyObject_SetAttrString(instance, c_str!("path").as_ptr(), path_ptr) < 0 {
+            ffi::PyErr_Clear();
+            ffi::Py_DecRef(instance);
+            return None;
+        }
+        // 引用计数：path_owned 的 PyString 现 refcount=2（path_owned + instance.path）；
+        // 若为 Py_None，Py_None 全局 refcount +1（由 instance 持有）。
+
+        // U4: 设置 args = (message,)。
+        // BaseException_setattro 在 CPython 中对 "args" 特殊处理（虽 member 标记 READONLY）：
+        //   - 检查 name == &_Py_ID(args)，调 Py_XSETREF(self->args, value)。
+        //   - 调用方无需操作 C struct 字段。
+        // PyTuple::new_bound(py, iter) 创建新元组，increfs 每个 element（msg refcount 现 =3）。
+        let args_tuple: Bound<'py, PyTuple> = PyTuple::new_bound(py, [msg_bound.clone()]);
+        // msg_bound.clone() 返回 Py<PyString>（refcount +1 =3: msg_bound + instance.message + 临时）。
+        // PyTuple::new_bound 消费 iter，构造元组时 incref（+1 =4）。临时 Py<PyString> drop → -1 =3。
+        // 最终：instance.message (1) + tuple element (1) + msg_bound (1) = 3。
+
+        if ffi::PyObject_SetAttrString(instance, c_str!("args").as_ptr(), args_tuple.as_ptr()) < 0 {
+            ffi::PyErr_Clear();
+            ffi::Py_DecRef(instance);
+            return None;
+        }
+        // 引用计数：args_tuple 现 refcount=2（args_tuple + instance.args）。
+
+        // O4: 直接构造 PyErr。Bound::from_owned_ptr_or_opt 消费 instance 指针
+        // （不 incref），所有权转移给 Bound<PyAny>。再 PyErr::from_value_bound
+        // 包装（不 incref，转移所有权）。
+        let bound_any: Bound<'py, PyAny> = Bound::from_owned_ptr_or_opt(py, instance)?.into_any();
+        Some(PyErr::from_value_bound(bound_any))
+    }
+}
+
 /// 将 `ConstructError` 转换为 pyo3 的 `PyErr`。
 ///
 /// ## 映射规则
@@ -648,28 +835,58 @@ fn build_exception_instance<'py>(
 /// 无论映射到哪个 Python 异常类，错误消息的格式都与 `construct._errors.ConstructError`
 /// 一致：path 非 None 时为 `"Error in path {path}\n{message}"`，否则为 `{message}`。
 ///
+/// ## 4.x 错误路径 D 类优化（O1-O4）
+///
+/// 优化路径（设计 §1.3）：
+///
+/// | 优化项 | 目标 FFI 来源 | 实现 |
+/// |--------|--------------|------|
+/// | O1 lazy 字符串 | F1 | 借用 `&err` 进入 with_gil 闭包，避免 `to_string()` 预格式化 |
+/// | O2 避免 incref | F5 | `select_exception_class` 返回 `&Bound<'py, PyType>`，不 `clone()` |
+/// | O3 绕过 __init__ | F6+F7 | `try_fast_path_alloc` 用 raw CPython C API 直接构造 |
+/// | O4 PyErr 直接构造 | F8 | `PyErr::from_value_bound` 一步构造，无中间层 |
+///
+/// 慢路径（[`build_exception_instance`]）保留作为：
+/// - 用户子类化异常的兼容路径（BC3）
+/// - fast-path 失败的回退路径（BC6）
+///
 /// ## GIL 获取
 ///
 /// `From` trait 不持有 GIL，因此内部通过 [`Python::with_gil`] 获取。仅在错误路径
 /// 触发（成功路径零成本），开销可接受（~微秒级）。
 impl From<ConstructError> for PyErr {
     fn from(err: ConstructError) -> Self {
-        // 预先提取 message/path（避免在 with_gil 闭包中持有 err 的引用）。
-        let path_owned: Option<String> = err.path().map(|s| s.to_string());
-        // message() 返回 Option：None 表示结构化变体（ExprType / ExprFieldMissing /
-        // ExprStackUnderflow），此时使用 Display（to_string）作为完整消息（已包含 path），
-        // 且不再单独传递 path（避免重复）。
-        let (message, effective_path): (String, Option<&str>) = match err.message() {
-            Some(msg) => (msg.to_string(), path_owned.as_deref()),
-            None => (err.to_string(), None),
-        };
-
+        // O1: 借用 err，避免在 with_gil 闭包外预格式化 message/path。
+        // 闭包捕获 &err，借用其 message()/path() 返回的 &str（零拷贝）。
         Python::with_gil(|py| match EXCEPTIONS.get(py) {
             Some(classes) => {
-                let cls = select_exception_class(&err, classes, py);
-                match build_exception_instance(py, &cls, &message, effective_path) {
+                // O1: 直接借用 err.message() / err.path()，不调 to_string()。
+                // 对于无单一 message 字段的结构化变体（ExprType/ExprFieldMissing/
+                // ExprStackUnderflow/StopField），使用 Display（to_string）作为
+                // 完整消息，path=None（避免重复，path 已嵌入 Display 输出）。
+                // 此分支罕见（仅在表达式错误时），分配 String 可接受。
+                let formatted_str: String;
+                let (message, path): (&str, Option<&str>) = match err.message() {
+                    Some(m) => (m, err.path()),
+                    None => {
+                        formatted_str = err.to_string();
+                        (formatted_str.as_str(), None)
+                    }
+                };
+
+                // O2: 借用类引用，无 incref。
+                let cls: &Bound<'_, PyType> = select_exception_class(&err, classes, py);
+
+                // O3 + O4: 尝试 fast-path。仅内置类生效；用户子类化 / fast-path 失败
+                // 时返回 None，落到下面的慢路径。
+                if let Some(pyerr) = try_fast_path_alloc(py, cls, classes, message, path) {
+                    return pyerr;
+                }
+
+                // 慢路径（BC3 用户子类化 / BC6 fast-path 失败）：原有 call1 实现。
+                match build_exception_instance(py, cls, message, path) {
                     Ok(instance) => PyErr::from_value_bound(instance),
-                    // fallback：异常实例构造失败，回退到 PyValueError + full_message。
+                    // BC1 fallback：异常实例构造失败，回退到 PyValueError + full_message。
                     Err(_) => PyValueError::new_err(err.full_message()),
                 }
             }
@@ -1045,7 +1262,7 @@ mod tests {
             };
             let cls = select_exception_class(&err, &classes, py);
             let instance =
-                build_exception_instance(py, &cls, "boom", Some("root.x")).expect("build");
+                build_exception_instance(py, cls, "boom", Some("root.x")).expect("build");
             let pyerr = PyErr::from_value_bound(instance);
 
             assert!(
@@ -1320,6 +1537,366 @@ mod tests {
             assert_eq!(err.path(), Some(""));
             err.push_path_segment("myfield");
             assert_eq!(err.path(), Some("root.myfield"));
+        });
+    }
+
+    // ======================================================================
+    // 4.x 错误路径 D 类优化（O1-O4）测试
+    // ======================================================================
+
+    /// 辅助：在 Python 中定义对齐生产 `_errors.py` 行为的异常层次。
+    ///
+    /// 与现有 [`build_test_classes`] 不同，本辅助在 ConstructError 上同时实现
+    /// `__init__` 与 `__str__`（与 `construct-rs/python/construct/_errors.py:46-58` 一致），
+    /// 用于验证 O3 fast-path 绕过 `__init__` 后 `__str__` 行为正确（依赖
+    /// `self.path` + `self.message` 而非 `args`）。
+    fn build_test_classes_aligned(py: Python<'_>) -> ExceptionClasses {
+        let code = concat!(
+            "class ConstructError(Exception):\n",
+            "    def __init__(self, message='', path=None):\n",
+            "        self.message = message\n",
+            "        self.path = path\n",
+            "        if path is not None:\n",
+            "            full = \"Error in path {}\\n{}\".format(path, message)\n",
+            "        else:\n",
+            "            full = message\n",
+            "        super().__init__(full)\n",
+            "    def __str__(self):\n",
+            "        if self.path is not None:\n",
+            "            return \"Error in path {}\\n{}\".format(self.path, self.message)\n",
+            "        return self.message\n",
+            "class StreamError(ConstructError): pass\n",
+            "class FormatFieldError(ConstructError): pass\n",
+            "class FieldLengthError(ConstructError): pass\n",
+            "class CompilationError(ConstructError): pass\n",
+            "class UnresolvedReferenceError(ConstructError): pass\n",
+            "class GenericConstructError(ConstructError): pass\n",
+            "class IntegerError(ConstructError): pass\n",
+            "class PaddingError(ConstructError): pass\n",
+            "class RangeError(ConstructError): pass\n",
+            "class RepeatError(ConstructError): pass\n",
+            "class StopFieldError(ConstructError): pass\n",
+            "class IndexFieldError(ConstructError): pass\n",
+        );
+        py.run_bound(code, None, None)
+            .expect("run aligned test classes definition");
+
+        let get = |name: &str| -> Py<PyType> {
+            py.eval_bound(name, None, None)
+                .unwrap_or_else(|e| panic!("get {}: {}", name, e))
+                .extract::<Py<PyType>>()
+                .expect("extract PyType")
+        };
+
+        ExceptionClasses {
+            stream_error: get("StreamError"),
+            format_field_error: get("FormatFieldError"),
+            field_length_error: get("FieldLengthError"),
+            compilation_error: get("CompilationError"),
+            unresolved_reference_error: get("UnresolvedReferenceError"),
+            generic_construct_error: get("GenericConstructError"),
+            construct_error_base: get("ConstructError"),
+            integer_error: get("IntegerError"),
+            padding_error: get("PaddingError"),
+            range_error: get("RangeError"),
+            repeat_error: get("RepeatError"),
+            stop_field_error: get("StopFieldError"),
+            index_field_error: get("IndexFieldError"),
+        }
+    }
+
+    /// O3（设计 §1.3.1 U1 前置条件 ③）：`is_builtin_class` 指针比较仅匹配确切内置类。
+    #[test]
+    fn is_builtin_class_matches_cached_ptrs_only() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes(py);
+
+            // 内置类的指针应被识别（13 个全部）。
+            assert!(
+                classes.is_builtin_class(classes.stream_error.as_ptr()),
+                "StreamError 应被识别为内置类"
+            );
+            assert!(
+                classes.is_builtin_class(classes.stop_field_error.as_ptr()),
+                "StopFieldError 应被识别为内置类"
+            );
+
+            // 用户子类（在 Python 中实时定义）应被识别为非内置类。
+            let user_cls: Py<PyType> = py
+                .eval_bound("type('MyError', (StreamError,), {})", None, None)
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert!(
+                !classes.is_builtin_class(user_cls.as_ptr()),
+                "用户子类 MyError 不应被识别为内置类"
+            );
+        });
+    }
+
+    /// O3 fast-path：内置 StreamError + path → 返回 Some(PyErr)，
+    /// 实例的 message/path/args 属性正确设置（按设计 §1.3 步骤 1-5）。
+    #[test]
+    fn try_fast_path_alloc_builtin_stream_with_path() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+            let cls = classes.stream_error.bind(py);
+
+            let pyerr = try_fast_path_alloc(py, cls, &classes, "boom", Some("root.x"));
+            let pyerr = pyerr.expect("fast-path 应返回 Some(PyErr) for 内置类");
+
+            // 验证 PyErr 实例的 message / path / args 属性。
+            let value = pyerr.value_bound(py);
+            let message: String = value
+                .getattr("message")
+                .expect("get message")
+                .extract()
+                .expect("extract message");
+            assert_eq!(message, "boom");
+
+            let path: String = value
+                .getattr("path")
+                .expect("get path")
+                .extract()
+                .expect("extract path");
+            assert_eq!(path, "root.x");
+
+            // args = (message,) 而非 (full,)（设计 §3.1.3 ADR-019 决策 4）。
+            let args_repr: String = value
+                .getattr("args")
+                .expect("get args")
+                .repr()
+                .expect("repr args")
+                .to_string();
+            assert_eq!(args_repr, "('boom',)");
+
+            // 验证类型名（fast-path 不应改变类型）。
+            let type_name: String = value.get_type().name().expect("type name").to_string();
+            assert_eq!(type_name, "StreamError");
+        });
+    }
+
+    /// O3 fast-path：内置 CompilationError + path=None → 实例 path 属性为 None。
+    #[test]
+    fn try_fast_path_alloc_builtin_compilation_with_none_path() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+            let cls = classes.compilation_error.bind(py);
+
+            let pyerr = try_fast_path_alloc(py, cls, &classes, "bad schema", None);
+            let pyerr = pyerr.expect("fast-path 应返回 Some(PyErr) for 内置 CompilationError");
+
+            let value = pyerr.value_bound(py);
+
+            // path 属性应为 None（path=None → SetAttr Py_None）。
+            let path_obj = value.getattr("path").expect("get path");
+            assert!(path_obj.is_none(), "path 应为 None");
+
+            // args = (message,)。
+            let args_repr: String = value
+                .getattr("args")
+                .expect("get args")
+                .repr()
+                .expect("repr args")
+                .to_string();
+            assert_eq!(args_repr, "('bad schema',)");
+        });
+    }
+
+    /// O3 fast-path：所有 13 个内置异常类都被识别（覆盖测试，避免遗漏某个类）。
+    #[test]
+    fn try_fast_path_alloc_all_builtin_classes_recognized() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+
+            let all_classes: [(&Bound<'_, PyType>, &str); 13] = [
+                (classes.stream_error.bind(py), "stream"),
+                (classes.format_field_error.bind(py), "format_field"),
+                (classes.field_length_error.bind(py), "field_length"),
+                (classes.compilation_error.bind(py), "compilation"),
+                (classes.unresolved_reference_error.bind(py), "unresolved"),
+                (classes.generic_construct_error.bind(py), "generic"),
+                (classes.construct_error_base.bind(py), "base"),
+                (classes.integer_error.bind(py), "integer"),
+                (classes.padding_error.bind(py), "padding"),
+                (classes.range_error.bind(py), "range"),
+                (classes.repeat_error.bind(py), "repeat"),
+                (classes.stop_field_error.bind(py), "stop_field"),
+                (classes.index_field_error.bind(py), "index_field"),
+            ];
+
+            for (cls, name) in all_classes.iter() {
+                let pyerr = try_fast_path_alloc(py, cls, &classes, "msg", Some("p"));
+                assert!(
+                    pyerr.is_some(),
+                    "fast-path 应识别内置类 {} (ptr={:p})",
+                    name,
+                    cls.as_ptr()
+                );
+            }
+        });
+    }
+
+    /// O3 + T6（设计 §1.4.4 R2 + 4.x-REV OBS-3）：用户子类化的异常返回 None，
+    /// 信号调用方走慢路径（call1）以调用用户的 __init__。
+    #[test]
+    fn try_fast_path_alloc_user_subclass_returns_none() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+
+            // 在 Python 中定义 StreamError 的子类（含自定义 __init__）。
+            let code = concat!(
+                "class MyStreamError(StreamError):\n",
+                "    def __init__(self, message='', path=None):\n",
+                "        super().__init__(message, path)\n",
+                "        self.extra = 'custom_marker'\n",
+            );
+            py.run_bound(code, None, None)
+                .expect("define MyStreamError");
+
+            let user_cls: Bound<'_, PyType> = py
+                .eval_bound("MyStreamError", None, None)
+                .unwrap()
+                .extract::<Bound<'_, PyType>>()
+                .unwrap();
+
+            // fast-path 应返回 None（信号慢路径）—— 否则会绕过 MyStreamError.__init__，
+            // 丢失 self.extra 标记（破坏用户代码）。
+            let result = try_fast_path_alloc(py, &user_cls, &classes, "msg", Some("p"));
+            assert!(
+                result.is_none(),
+                "fast-path 必须对用户子类返回 None，否则 __init__ 不被调用（BC3 违反）"
+            );
+        });
+    }
+
+    /// T6（设计 §5.1 + 4.x-REV OBS-3）：用户子类化时，慢路径 [`build_exception_instance`]
+    /// 调用用户的 __init__（self.extra 被正确设置）。
+    ///
+    /// 这是 BC3 兼容性验证：子类化异常的用户自定义行为不被破坏。
+    #[test]
+    fn slow_path_invokes_user_subclass_init() {
+        ensure_python();
+        Python::with_gil(|py| {
+            // build_test_classes_aligned 用于在 Python 解释器中定义 StreamError 等基类，
+            // 返回的 ExceptionClasses 本身不直接使用（MyStreamError 通过继承 StreamError
+            // 间接受益）。
+            let _classes = build_test_classes_aligned(py);
+
+            let code = concat!(
+                "class MyStreamError(StreamError):\n",
+                "    def __init__(self, message='', path=None):\n",
+                "        super().__init__(message, path)\n",
+                "        self.extra = 'custom_marker'\n",
+            );
+            py.run_bound(code, None, None)
+                .expect("define MyStreamError");
+
+            let user_cls: Bound<'_, PyType> = py
+                .eval_bound("MyStreamError", None, None)
+                .unwrap()
+                .extract::<Bound<'_, PyType>>()
+                .unwrap();
+
+            // 慢路径 call1：应调用 MyStreamError.__init__。
+            let instance =
+                build_exception_instance(py, &user_cls, "boom", Some("root.x")).expect("slow path");
+
+            // extra 属性应被设置（__init__ 被调用的直接证据）。
+            let extra: String = instance
+                .getattr("extra")
+                .expect("get extra")
+                .extract()
+                .expect("extract extra");
+            assert_eq!(extra, "custom_marker", "用户子类 __init__ 必须被调用");
+
+            // message/path 也应正确设置（通过 super().__init__ 链）。
+            let message: String = instance.getattr("message").unwrap().extract().unwrap();
+            let path: String = instance.getattr("path").unwrap().extract().unwrap();
+            assert_eq!(message, "boom");
+            assert_eq!(path, "root.x");
+        });
+    }
+
+    /// O3 行为对齐：fast-path 实例的 `str(e)` 与慢路径一致（依赖 __str__ 重写，
+    /// 不依赖 args）。
+    #[test]
+    fn fast_path_str_matches_slow_path_when_path_set() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+            let cls = classes.stream_error.bind(py);
+
+            // fast-path 实例
+            let fast_pyerr =
+                try_fast_path_alloc(py, cls, &classes, "boom", Some("root.x")).expect("fast-path");
+            let fast_str: String = fast_pyerr.value_bound(py).str().expect("str").to_string();
+
+            // 慢路径实例
+            let slow_instance =
+                build_exception_instance(py, cls, "boom", Some("root.x")).expect("slow");
+            let slow_str: String = slow_instance.str().expect("str").to_string();
+
+            // 两者 str(e) 一致（__str__ 基于 self.path + self.message，与 args 无关）。
+            assert_eq!(
+                fast_str, slow_str,
+                "fast-path str(e) 应与慢路径一致（生产 __str__ 重写）"
+            );
+            assert!(
+                fast_str.contains("Error in path root.x"),
+                "str(e) 应包含 path：{}",
+                fast_str
+            );
+            assert!(
+                fast_str.contains("boom"),
+                "str(e) 应包含 message：{}",
+                fast_str
+            );
+        });
+    }
+
+    /// O3 行为差异（设计 §3.1.3 决策 4 + Consequences）：fast-path 的 args=(message,)
+    /// 而慢路径的 args=(full,)。repr 因此不同，但设计显式批准此差异。
+    #[test]
+    fn fast_path_args_differs_from_slow_path_by_design() {
+        ensure_python();
+        Python::with_gil(|py| {
+            let classes = build_test_classes_aligned(py);
+            let cls = classes.stream_error.bind(py);
+
+            // fast-path: args = (message,) = ('boom',)
+            let fast_pyerr =
+                try_fast_path_alloc(py, cls, &classes, "boom", Some("root.x")).expect("fast-path");
+            let fast_args: String = fast_pyerr
+                .value_bound(py)
+                .getattr("args")
+                .unwrap()
+                .repr()
+                .unwrap()
+                .to_string();
+
+            // 慢路径: args = (full,) = ('Error in path root.x\nboom',)
+            let slow_instance =
+                build_exception_instance(py, cls, "boom", Some("root.x")).expect("slow");
+            let slow_args: String = slow_instance
+                .getattr("args")
+                .unwrap()
+                .repr()
+                .unwrap()
+                .to_string();
+
+            // 两者应不同（args 内容不同）。
+            assert_ne!(
+                fast_args, slow_args,
+                "fast-path args 应与慢路径不同（设计显式批准）"
+            );
+            assert_eq!(fast_args, "('boom',)");
+            assert!(slow_args.contains("Error in path root.x"));
         });
     }
 }

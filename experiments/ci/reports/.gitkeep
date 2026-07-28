@@ -1,0 +1,4 @@
+# Reports directory placeholder.
+#
+# CI smoke gate JSON reports are written here (timestamped).
+# Reports are local-only artifacts (typically .gitignored in future META-CI-1d).

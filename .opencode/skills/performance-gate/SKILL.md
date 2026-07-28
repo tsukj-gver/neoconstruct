@@ -167,3 +167,95 @@ Phase 15 验收失败案例（2026-06-19）：
   2. REV 接受了理论推算（"5000x 加速"）而非要求实证数据
   3. 首个实现后无烟雾测试检查点
   4. PM 接受了"没测对比"作为"对比达标"
+
+Phase 4 E01 O1 回归根因调查案例（2026-07-28，对应 `experiences.md §L-09`）：
+
+- **质疑**：用户提出 E01 从 4.7 PM 验收 10.56x 变为 4.6 VET 复测 9.51x（-1.05x），可能是 O1 引入
+- **VET 之前 H1 排查**："O1 只改 stop_if.rs，E01 不调用 StopIf，cargo 未重编译"——论断事实错误（实测 cargo 重编译产生不同 DLL）
+- **ARCH Controlled A/B Test**：6 次交替测量证实 E01 O1 off vs on Δ=+0.023x（远 <0.3x 波动阈值）；阴性对照 i01 同会话出现 0.29x 摆动证明环境漂移足以解释观察差距
+- **根因**：17 天跨度（07-11→07-28）测量环境漂移；E01 真实稳态 9.4-9.7x
+- **教训**：跨时段性能对比的"消除法归因"在边界场景（Rust 侧 <300ns）失效，必须用 Controlled A/B Test
+
+## Checkpoint 4: Cross-Time Performance Comparison (跨时段性能对比 / 回归判定)
+
+**Who**: 任何怀疑性能回归的角色（VET / PM / 用户）触发，ARCH 或 VET 执行 Controlled A/B Test。
+
+**规范来源**：`experiences.md §L-09`（跨时段性能对比消除法归因失效）
+
+### 触发场景
+
+- 跨时段性能数据对比（如本 phase VET 复测 vs 上 phase PM 验收基线）
+- 边界场景（Rust 侧 <300ns / 加速比 9-11x 边缘）
+- 任何"X 改动 vs Y 基线"的回归判定
+
+### 测量规范（必须遵守）
+
+1. **跨时段对比必须标注测量环境**：
+   - Python 版本 / venv 重建状态 / 测量时段 / CPU 型号 / OS 版本 / 环境变量
+   - 跨时段数据必须在报告里附"测量环境差异"段落
+
+2. **边界场景多次采样**：
+   - Rust 侧 <300ns 的场景必须 ≥5 次采样
+   - 报告统计区间（min/max/mean/stddev），不可仅用单点值
+
+3. **消除法归因的"未改"假设必须实测验证**：
+   - "X 没改 → X 不是原因"的论证需要实测验证（DLL hash / 汇编对比 / git stash 验证）
+   - 不可凭直觉判定"crate 整体未受影响"——crate inlining / codegen units / LTO 决策可能传播影响
+
+### Controlled A/B Test（怀疑回归时必做）
+
+当出现跨时段性能差距 ≥0.5x 时，**必须**做 Controlled A/B Test，不可依赖消除法归因或跨时段单次测量对比：
+
+```bash
+# 在当前 HEAD 上做对照实验
+# A. O1 off（或质疑改动的 off 状态）
+git stash push -- <质疑改动文件>
+cargo build --release && maturin develop --release
+# 跑 benchmark 5 次（min(repeat=5) × number），记录每次结果
+
+# B. O1 on（或质疑改动的 on 状态）
+git stash pop
+cargo build --release && maturin develop --release
+# 跑 benchmark 5 次
+
+# C. 交替测量消除时间漂移
+# 重复 A→B→A→B→A→B 至少 3 轮（共 6 次测量，每种条件 3 次）
+```
+
+### 对照组要求（必做）
+
+- **阳性对照**：与质疑改动相关、预期应有效应的场景（验证 toggle 真实性）
+- **阴性对照**：与质疑改动完全无关的场景（验证环境漂移幅度）
+
+> 没有对照组的 A/B Test 不构成因果证据。
+
+### 结论判据
+
+| 差异 | 判定 | 处理 |
+|------|------|------|
+| >0.5x | O1 引入回归 | 进 Step 2 排查 crate inlining 机制 + 设计修复 |
+| <0.3x | 测量波动 | 不需修复；记录统计学证据 |
+| 0.3-0.5x | 中间情况 | 加测 5 轮，看趋势 |
+
+### REV / VET 检查项（硬性，不通过则驳回）
+
+```
+[ ] 跨时段性能对比报告含"测量环境差异"段落
+[ ] 边界场景（Rust 侧 <300ns）有 ≥5 次采样 + 统计区间
+[ ] 怀疑回归时执行了 Controlled A/B Test（含交替测量 + 阳性对照 + 阴性对照）
+[ ] 消除法归因的"未改"假设有实测验证（不可仅凭直觉）
+```
+
+### pm-performance-validation skill 整合
+
+PM 在 `pm-performance-validation` skill 中触发本 Checkpoint 4 的"内部数据关系"维度时，必须检查：
+- 跨时段数据是否标注环境差异
+- 边界场景是否有统计区间
+- 若仅有跨时段单次对比 → 触发本 Checkpoint 4，要求重做 Controlled A/B Test
+
+### 工具支持（参考 `experiments/E01_O1_ab_*`）
+
+Phase 4 E01 调查产物可作为 Controlled A/B Test 的参考实现：
+- `experiments/E01_O1_ab_bench.py`：测量脚本
+- `experiments/E01_O1_ab_harness.ps1`：交替测量 harness
+- `experiments/E01_O1_ab_stats.py`：统计分析（含 welch_t 检验）

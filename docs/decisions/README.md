@@ -2,7 +2,7 @@
 id: ADR-INDEX
 status: active
 phase: meta
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 ---
 
 # ADR Index — 设计决策索引
@@ -55,6 +55,7 @@ last_updated: 2026-07-27
 | [ADR-016](ADR-016-P0-3-lazy-path错误传播.md) | accepted | P0-3 lazy path 错误传播模式 | Phase 1 验证，Phase 4.7 推广 |
 | [ADR-017](ADR-017-Vec中转PyList构建.md) | accepted | Vec 中转 PyList 构建模式 | Phase 4.7 验证 |
 | [ADR-018](ADR-018-index-save-restore配对.md) | accepted | `_index` save/restore 配对模式 | Phase 4 验证，4.5 v5 整合为 Context::restore_index |
+| [ADR-019](ADR-019-错误抛出fast-path.md) | accepted | 错误抛出 fast-path（绕过 Python `__init__` 直接构造异常实例） | Phase 4.x 验证（a_err_eof 11.34x，首次 unsafe raw FFI） |
 
 ## 状态图例
 
@@ -65,7 +66,7 @@ last_updated: 2026-07-27
 
 ## 维护规则
 
-- 新增 ADR：编号自增（下一号 19）
+- 新增 ADR：编号自增（下一号 20）
 - 修订决策：**不修改原 ADR**，新建 ADR 并在原 ADR 加 `superseded_by`，新 ADR 加 `supersedes`
 - 模式采用：新设计文档必须在 frontmatter `depends_on` 列出相关 ADR
 - 教训关联：若决策源于失败教训，在 ADR 的 Relations 段引用 `experiences.md#L-XX`
