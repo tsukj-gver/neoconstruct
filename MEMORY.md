@@ -7,6 +7,11 @@ last_updated: 2026-07-28
 
 # MEMORY.md — Project Long-Term Memory Index
 
+> **Phase 4 完全关闭（2026-07-28）**：Phase 4 Array + 4.x 错误路径优化 + META-CI 冒烟门禁系统全部 ACCEPTED。
+> Phase 5 待用户指定方向。当前所有手头工作完成，等用户告知下一步。
+
+# MEMORY.md — Project Long-Term Memory Index
+
 > **HARNESS.md v1.0 §目录结构标准：Long-Term Memory 顶层文件。**
 >
 > 本文件是任何角色（PM/ARCH/DEV/REV/VET/AUDITOR）启动时的**第一入口**。
@@ -85,6 +90,15 @@ last_updated: 2026-07-28
 | 7 | 2026-07-27 | `manifests/change_2026-07-27-iter7-agents-slim.json` | AGENTS.md 瘦身重构（457→66 行，缩减 85.6%）；内容按四维度分类迁移到 agent 文件；§5 内容准入标准建立；38 个活跃文件 cross-reference 修复 | **partial**（iter8 dogfood 1/4 预测触发——§5 自我应用；1 个结构变更——启动入口重定义为 base+extension；2 个未触发） |
 | 8 | 2026-07-27 | `manifests/change_2026-07-27-iter8-base-extension-split.json` | base/extension 分层架构（跨工程化 + 渐进式披露）；§5 下沉到 pm-extension；6 base + 6 extension 拆分；阶段 2 全面粒度调正（base 详细化通用清单，extension 仅项目特定）；启动加载量平均 282 行（减半目标达成） | pending（两轮迭代：初版 + 用户评估后粒度调正） |
 
+## 项目级里程碑（非 AHE iteration）
+
+| 里程碑 | 时间 | 内容 | 状态 |
+|--------|------|------|------|
+| Phase 4 Array | 2026-07-28 | 6 构造器（Array/GreedyRange/PrefixedArray/RepeatUntil/Index/StopIf）+ 重审 + 4.6 O1 优化 + 4.x 错误路径优化 | ✅ 完成（tag `phase-4-complete` @ f157bbe） |
+| 构造器清单单一事实源 | 2026-07-28 | 双 CSV（inventory 134 构造器 + perf-scenarios 154 测量点）+ 维护规则（PM 主维护 + ARCH 骨架 + AUDITOR 第 7 类审计） | ✅ 完成 |
+| META-CI 冒烟门禁系统 | 2026-07-28 | 4 层门禁（L1 质量 / L2 功能 / L3 性能 / L4 一致性）+ Controlled A/B Test 通用化（L-09 工程化）+ known_exemptions 21 条目 | ✅ 完成（ADR-020 沉淀） |
+| L-09 教训沉淀 | 2026-07-28 | 跨时段性能对比消除法归因失效（边界场景）+ Controlled A/B Test 对策 | ✅ 完成（experiences.md + performance-gate SKILL Checkpoint 4） |
+
 ## 教训索引
 
 详见 `experiences.md`，按优先级排序：
@@ -113,6 +127,8 @@ last_updated: 2026-07-28
 | 4 | Array/GreedyRange/PrefixedArray/RepeatUntil/Index | ≥10x 全场景达标（O1 后） | `docs/perf-scenarios.csv` |
 | 4 | StopIf | 10.72-15.69x（O1 后 VET 复测） | `docs/perf-scenarios.csv` |
 | 4 | E01 Array(0 Index) parse | 9.51x（B1 类边界场景，待 Phase 5 复审） | `docs/perf-scenarios.csv` |
+| 4.x | a_err_eof（错误路径） | 11.34x（O1-O4 后 VET Controlled A/B Test，首次 unsafe raw FFI） | `docs/perf-scenarios.csv` |
+| 4.x | p_err_overflow（错误路径） | 2.72x（Python baseline 5.6µs 结构性边界，用户决策方案 A 接受） | `docs/perf-scenarios.csv` |
 
 > 详细数据见各 phase 总纲 / 过程记录。性能门禁规则见 `.opencode/skills/performance-gate/SKILL.md`。
 
@@ -124,7 +140,9 @@ last_updated: 2026-07-28
 
 > 历史质疑见各过程记录。
 >
-> **已解决（2026-07-28）**：硬约束 #5 "禁止局部门禁" 追溯适用范围——用户决策仅 Phase 4 起适用；Phase 1/2/2.5 共 18 个 <10x 测量点不追溯复审，记入 Phase 5 待办（Struct + FFI 入口优化）。详见 `plans/phase4-array/总纲.md §用户决策`。
+> **已解决（2026-07-28）**：
+> - 硬约束 #5 "禁止局部门禁" 追溯适用范围——用户决策仅 Phase 4 起适用；Phase 1/2/2.5 共 18 个 <10x 测量点不追溯复审，记入 Phase 5 待办（Struct + FFI 入口优化）。详见 `plans/phase4-array/总纲.md §用户决策`
+> - p_err_overflow 错误路径 D 类——用户决策方案 A（接受单点 <10x 作为 Python baseline 短导致的固有边界，与 StopIf B1 同档处理）。详见 `plans/phase4-array/总纲.md §用户决策（2026-07-28 补充）`
 
 ---
 

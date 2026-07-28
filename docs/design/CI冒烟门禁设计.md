@@ -83,10 +83,11 @@ last_updated: 2026-07-28
 |------|-----------|---------|
 | `phase4_smoke_greedy_range.py` | GreedyRange | ★★★ 直接复用 |
 | `phase4_smoke_prefixed_array.py` | PrefixedArray | ★★★ 直接复用 |
-| `phase4_smoke_repeat_until.py` | RepeatUntil | ★★★ 直接复用 |
+| `phase4_smoke_repeat_until.py` | RepeatUntil | ⚠️ **deprecated in v5（F.2 修订）**：v5 ADR-014 删除 PyCallable 路径后此脚本必然失败（CompilationError），保留作历史证据；L2 用 `phase4_repeat_until_examples.py`（v5 重写版）替代 |
 | `phase4_repeat_until_examples.py`（**按 META-CI-1-REV OBS-1 补入**） | RepeatUntil v5 用户面 21 样例 | ★★★ 直接复用（4.5 v5 VET 审查报告 D2 节"用户面 20/20 PASS"的关键脚本，L2 必须调度） |
-| `v4_smoke_test.py` | RepeatUntil V-1~V-5 修正验证 | ★★★ 直接复用 |
-| `vet_phase3_binary.py` / `vet_phase3_bits_integer.py` / `vet_phase32_bitstruct.py` / `vet_phase32_deep.py` | Bitwise / BitsInteger / BitStruct | ★★★ 直接复用 |
+| `v4_smoke_test.py` | RepeatUntil V-1~V-5 修正验证 | ⚠️ **deprecated in v5（F.2 修订）**：v5 ADR-011 删除 Container lib 路径后此脚本必然失败（ModuleNotFoundError），保留作历史证据；L2 不调度 |
+| `vet_phase3_binary.py` / `vet_phase32_bitstruct.py` / `vet_phase32_deep.py` | Bitwise / BitStruct | ★★★ 直接复用 |
+| `vet_phase3_bits_integer.py` | BitsInteger | ⚠️ **known_broken（F.3 修订）**：`Bitwise(Bit).parse(b"\x80")` 在 Python 3.14 + construct 2.10.70 触发 RestreamedBytesIO 上游兼容性 bug，与 construct-rs 无关；L2 不调度（README §7.3） |
 | `test_phase33.py`（**按 META-CI-1-REV OBS-1 补入**） | Phase 3.3 BitStruct 集成测试（test_bitstruct_with_padding 等） | ★★★ 直接复用（与 vet_phase32_bitstruct.py 同档，L2 必须调度） |
 | `vet_4_5_ctx_proxy_test.py` | RepeatUntil Container proxy | ★★ 专题验证 |
 | `vet_e01_repro.py` | E01 边界场景复现 | ★★ 回归专用 |
@@ -174,7 +175,7 @@ experiments/ci/
 ├── run_smoke.ps1              # 主入口（PowerShell，调度 L1-L4）
 ├── lib_smoke.ps1              # 共享函数（venv 解析 / 日志 / 环境采集）
 ├── run_l1_quality.ps1         # L1 质量门禁（cargo build/clippy/fmt/test + maturin develop）
-├── run_l2_functional.py       # L2 功能门禁（Python，调 smoke 脚本矩阵）
+├── run_l2_functional.ps1      # L2 功能门禁（PowerShell 编排，调 Python smoke 脚本矩阵）
 ├── run_l3_perf.py             # L3 性能回归（Python，跑 bench + baseline diff + 报告）
 ├── run_l4_consistency.py      # L4 一致性核查（Python，CSV + 指针 + 源码比对）
 ├── ab_test/                   # Controlled A/B Test 升级路径（复用 E01_O1_ab_*）
@@ -193,8 +194,8 @@ experiments/ci/
 
 1. **零新依赖**：PowerShell 5.1 是 Windows 内置；Python 已是项目核心运行时；不引入 just/cargo-task
 2. **兼容现有资产**：`E01_O1_ab_harness.ps1` 的 `Set-State` / `Build-Install` / `Run-Bench` / `Write-Log` 模式直接被 `run_smoke.ps1` 继承
-3. **可被 git hook 调用**：`pre-commit` / `pre-push` hook 是 shell 脚本，可一行调用 `powershell -File experiments/ci/run_smoke.ps1 -Mode quick`
-4. **分层执行可控**：PowerShell 参数化 `-Mode quick|func|perf|full`，不同触发时机跑不同层次
+3. **可被 git hook 调用**：`pre-commit` / `pre-push` hook 是 shell 脚本，可一行调用 `powershell -File experiments/ci/run_smoke.ps1 -Level "L1,L4"`（D.2 修订命名）
+4. **分层执行可控**：PowerShell 参数化 `-Level L1/L2/L3/L4/All`（D.2 修订命名），不同触发时机跑不同层次
 5. **报告可观测**：所有层次输出统一到 `experiments/ci/reports/` 下，JSON（机器可读）+ Markdown（人工审查）
 
 ---
@@ -252,9 +253,13 @@ experiments/ci/
 
 **执行脚本**：`experiments/ci/run_l1_quality.ps1`
 
+> **全局环境前置（D.1 修订，META-CI-1a DEV [设计质疑]）**：以下命令序列全部步骤（1-5）必须在设置 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` 后执行。Python 3.14 + pyo3 0.22.6 下，step 1 的 `cargo build --release` 就会触发 abi3 forward compat 检查，若仅在 step 5 设置，step 1-4 全部 FAIL。1a VET §4 D.1 评估已实测确认。
+
 **命令序列**（顺序执行，任一失败则 L1 FAIL）：
 
 ```powershell
+# 全局前置：PYO3 abi3 forward compat（影响 step 1-5 全部，D.1 修订）
+$env:PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"
 # 1. cargo build --release（验证编译）
 cargo build --release
 # 2. cargo clippy --all-targets（零 warning，-D warnings 升级为 error）
@@ -264,7 +269,6 @@ cargo fmt --check
 # 4. cargo test --lib（单元测试）
 cargo test --lib
 # 5. maturin develop --release（安装到 crs_venv_new，供 L2/L3 使用）
-$env:PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"
 maturin develop --release
 ```
 
@@ -284,13 +288,17 @@ maturin develop --release
 
 **耗时**：~30s-2min（取决于改动是否触发重编译；fat LTO + codegen-units=1 使 release build 较慢）
 
+> **实现注记（OBS-3a 修订，META-CI-1a VET OBS-3 + 1b VET OBS-VET-4）**：`run_l1_quality.ps1` L87 存在一处裸 `Write-Host $tailPreview`（输出尾部 5 行 stderr 预览），未封装在 `Write-CiLog` 内。这是**合理例外**——`Write-CiLog` 设计为单行日志，无法承载多行 stderr 预览。`run_l2_functional.ps1` L224 同模式（1b VET OBS-VET-4 合并处理）。设计允许此类"多行预览"场景使用裸 `Write-Host`，其他场景必须封装在 `Write-CiLog`。
+
 ### 4.2 L2 功能验证
 
 **覆盖范围**：`docs/constructors-inventory.csv` 中所有 `status=implemented` 的构造器（当前 ~40 个）
 
 > **partial 构造器处理（按 META-CI-1-REV OBS-2 修订）**：`status=partial` 的构造器（Container / ListContainer）**不在 L2 单独 smoke 范围**——这些是内部使用的辅助类型（按 ADR-011 ListContainer 返回原生 `list`，无独立 parse/build 路径），其行为覆盖在 RepeatUntil / Struct 等组合构造器的 smoke 测试中。本规则与 §4.4 L4 的 partial 豁免规则对齐。
 
-**执行脚本**：`experiments/ci/run_l2_functional.py`（Python，调度 smoke 矩阵）
+**执行脚本**：`experiments/ci/run_l2_functional.ps1`（PowerShell 编排，调 Python smoke 矩阵）
+
+> **runner 语言修订（F.1，META-CI-1b DEV [设计偏离]）**：设计 §2.3 原分层"Python 负责 L2/L3/L4 数据"。实施时 L2 runner 改为 PowerShell（`run_l2_functional.ps1`，与 L1 `run_l1_quality.ps1` 风格一致），内部仍 `subprocess` 调用 Python smoke 脚本矩阵。PM 在 1b 任务分派时确定此偏离，§2.3 分层精神（PowerShell 编排 + Python 数据）仍遵守，仅 L2 runner 顶层语言从 Python 改为 PowerShell。
 
 **数据源分层**：
 
@@ -298,8 +306,10 @@ maturin develop --release
 |----|--------|-----------|------|
 | Phase 1 | FormatField / Bytes / GreedyBytes / Struct / StructRef | `cargo test --lib`（L1 已含）+ **新建 `phase1_smoke.py`**（用户面 ModbusRTU 样例） | 当前缺独立 smoke，靠单元测试 + 新建用户面样例补齐 |
 | Phase 2/2.5 | Tell / Computed | **新建 `phase2_smoke.py`**（表达式 + Computed round-trip） | 同上 |
-| Phase 3 | Bitwise / BitStruct / BitsInteger / Bit/Nibble/Octet / Padding / BitsSwapped / ByteSwapped / Bytewise | `vet_phase3_binary.py` + `vet_phase3_bits_integer.py` + `vet_phase32_bitstruct.py` + `vet_phase32_deep.py` + `test_phase33.py`（**按 OBS-1 补入**） | ★ 直接复用 |
-| Phase 4 | Array / GreedyRange / PrefixedArray / RepeatUntil / Index / StopIf / Element | `phase4_smoke_greedy_range.py` + `phase4_smoke_prefixed_array.py` + `phase4_smoke_repeat_until.py` + `phase4_repeat_until_examples.py`（**按 OBS-1 补入**）+ `v4_smoke_test.py` | ★ 直接复用 |
+| Phase 3 | Bitwise / BitStruct / Bit/Nibble/Octet / Padding / BitsSwapped / ByteSwapped / Bytewise | `vet_phase3_binary.py` + `vet_phase32_bitstruct.py` + `vet_phase32_deep.py` + `test_phase33.py`（**按 OBS-1 补入**） | ★ 直接复用 |
+| Phase 3 (known_broken) | BitsInteger | ~~`vet_phase3_bits_integer.py`~~（**F.3 修订**：上游兼容性 bug，L2 不调度） | ⚠️ 见 §1.1 B 类 F.3 标注 |
+| Phase 4 | GreedyRange / PrefixedArray / RepeatUntil | `phase4_smoke_greedy_range.py` + `phase4_smoke_prefixed_array.py` + `phase4_repeat_until_examples.py`（**按 OBS-1 补入**） | ★ 直接复用 |
+| Phase 4 (间接覆盖) | Array / Index / StopIf / Element | `cargo test --lib`（L1 已含）单元测试间接覆盖 | **F.4 修订**：StopIf/Array/Index/Element 无独立 smoke 脚本，由 L1 `cargo test --lib` 单元测试覆盖（struct_node.rs 6 个 + greedy_range.rs 5 个 = 11 个）；F.2 deprecated 的 `phase4_smoke_repeat_until.py` / `v4_smoke_test.py` 已移除 |
 | ~~partial~~ | ~~Container / ListContainer~~ | ~~无独立 smoke~~ | 不在 L2 范围（行为覆盖在 RepeatUntil / Struct smoke 中） |
 
 **通过判据**：
@@ -344,6 +354,8 @@ maturin develop --release
 | C4 | CSV 换行 LF | 读文件检查 `\r\n` | 无 `\r\n` |
 | C5 | inventory.csv `perf_data_source` 指针可达 | 解析 `文件:行号` / `文件:行号-行号`，读源文件确认行存在 + 内容非空 | 所有指针可达 |
 | C6 | perf-scenarios.csv `data_source` 指针可达 | 同上 | 同上 |
+
+> **OBS-2a 修订（META-CI-1a VET OBS-2）**：C5/C6 当前**仅检查指针行号存在**，未检查"内容非空"（即未校验指针指向的行是否有有效数据）。**PM 决策保持现状**（CSV 由 PM 维护，影响极小），不强制扩展检查。1a VET 实测确认此限制对 L4 阻断能力无实质影响（PM 维护的 CSV 不会有空行指针）。
 | C7 | perf-scenarios.csv `meets_10x` 与 `speedup_x` 自洽 | `speedup_x ≥ 10.0 ↔ meets_10x=true` | 不自洽的行号列表为空 |
 | C8 | inventory.csv `status=implemented` 构造器 ↔ `nodes/mod.rs` 注册 | 解析 `nodes/mod.rs` 的 `pub mod` / `pub use` 列出已注册节点模块；比对 `impl_module` 字段 | 所有 implemented 构造器的 impl_module 指向的 .rs 文件存在 |
 | C9 | inventory.csv `status=implemented` 构造器 ↔ `_descriptors.py` 导出 | 解析 `construct-rs/python/construct/_descriptors.py` 的导出符号；比对构造器名 | 所有 implemented 构造器在 _descriptors.py 有对应导出 |
@@ -608,10 +620,10 @@ META-CI-1 工作量较大（涉及 PowerShell + Python + bench 矩阵整合 + A/
 
 | 子任务标识 | 范围 | 依赖 | 预估 DEV 工时 | 优先级 |
 |-----------|------|------|--------------|--------|
-| `META-CI-1a [L1+L4 门禁实现]` | `run_l1_quality.ps1` + `run_l4_consistency.py` + `lib_smoke.ps1` 共享函数 + `run_smoke.ps1` 骨架（仅 -Mode quick） | 无 | 0.5-1 天 | P0（最小可用门禁） |
-| `META-CI-1b [L2 功能门禁实现]` | `run_l2_functional.py`（调度现有 smoke 矩阵）+ **新建 `phase1_smoke.py` + `phase2_smoke.py`** 补齐早期构造器 | META-CI-1a | 1-1.5 天 | P1 |
+| `META-CI-1a [L1+L4 门禁实现]` | `run_l1_quality.ps1` + `run_l4_consistency.py` + `lib_smoke.ps1` 共享函数 + `run_smoke.ps1` 骨架（仅 -Level "L1,L4"） | 无 | 0.5-1 天 | P0（最小可用门禁） |
+| `META-CI-1b [L2 功能门禁实现]` | `run_l2_functional.ps1`（PowerShell 编排，调现有 smoke 矩阵）+ **新建 `phase1_smoke.py` + `phase2_smoke.py`** 补齐早期构造器 | META-CI-1a | 1-1.5 天 | P1 |
 | `META-CI-1c [L3 性能回归检测框架]` | `run_l3_perf.py`（baseline diff + 报告 + 环境标注）+ `ab_test/` 通用化（参数化 `E01_O1_ab_*`） | META-CI-1a | **3-5 天**（按 META-CI-1-REV OBS-TIME-1 修订：原 2-3 天估计偏低，因 L3 涉及 baseline diff 逻辑 + 环境采集 + 适配 5+ 个 bench 脚本的不同接口 + JSON/MD 报告 + A/B Test 通用化 + known_exemptions.json 维护，复杂度显著高于其他子任务） | P1（核心，复杂度最高） |
-| `META-CI-1d [触发时机 + hook 安装 + 文档]` | `install_hook.ps1`（pre-commit 可选安装）+ 使用文档（README）+ `-Mode func/perf/full` 完善 | META-CI-1a/1b/1c | 0.5 天 | P2 |
+| `META-CI-1d [触发时机 + hook 安装 + 文档]` | `install_hook.ps1`（pre-commit 可选安装）+ 使用文档（README）+ `-Level L2/L3/All` 完善（D.2 命名） | META-CI-1a/1b/1c | 0.5 天 | P2 |
 
 ### 6.2 子任务 1a 详细范围（P0，最小可用门禁）
 
@@ -619,18 +631,18 @@ META-CI-1 工作量较大（涉及 PowerShell + Python + bench 矩阵整合 + A/
 - `experiments/ci/lib_smoke.ps1`：共享函数（`Resolve-Venv` / `Write-CiLog` / `Invoke-Cargo` / `Collect-Environment`）
 - `experiments/ci/run_l1_quality.ps1`：§4.1 命令序列
 - `experiments/ci/run_l4_consistency.py`：§4.4 C1-C10 检查项
-- `experiments/ci/run_smoke.ps1`：主入口，支持 `-Mode quick`（L1+L4）
+- `experiments/ci/run_smoke.ps1`：主入口，支持 `-Level "L1,L4"`（L1+L4，D.2 命名）
 - `experiments/ci/reports/.gitkeep`
 
 **验收标准**：
 - S-QUAL：clippy 零 warning + fmt 通过（PowerShell 脚本不强制 fmt，但 Python 部分需通过）
-- S-FUNC：`run_smoke.ps1 -Mode quick` 在干净仓库上全 PASS
+- S-FUNC：`run_smoke.ps1 -Level "L1,L4"` 在干净仓库上全 PASS（D.2 命名）
 - S-ARCH：L4 的 C1-C10 全部实现
 
 ### 6.3 子任务 1b 详细范围
 
 **交付物**：
-- `experiments/ci/run_l2_functional.py`：调度 Phase 1-4 的 smoke 脚本矩阵
+- `experiments/ci/run_l2_functional.ps1`（**F.1 修订**：runner 语言从 .py 改为 .ps1，与 L1 风格一致；内部仍 subprocess 调 Python smoke 脚本矩阵）：调度 Phase 1-4 的 smoke 脚本矩阵
 - `experiments/phase1_smoke.py`（**新建**）：FormatField / Bytes / Struct 用户面 smoke（ModbusRTU 样例 round-trip）
 - `experiments/phase2_smoke.py`（**新建**）：Tell / Computed / 表达式 smoke
 
@@ -642,7 +654,7 @@ META-CI-1 工作量较大（涉及 PowerShell + Python + bench 矩阵整合 + A/
 
 **交付物**：
 - `experiments/ci/run_l3_perf.py`：§5.1 框架（baseline 读取 + 环境采集 + 场景调度 + diff + 报告 + A/B Test 升级触发）
-- `experiments/ci/run_smoke.ps1` 扩展 `-Mode perf`
+- `experiments/ci/run_smoke.ps1` 扩展 `-Level "L1,L3,L4"`（perf 模式，D.2 命名）
 - `experiments/ci/ab_test/ab_harness.ps1`：通用化 `E01_O1_ab_harness.ps1`
 - `experiments/ci/ab_test/ab_bench_template.py`：通用化 `E01_O1_ab_bench.py`
 - `experiments/ci/ab_test/ab_stats.py`：复用 `E01_O1_ab_stats.py`
@@ -730,6 +742,8 @@ META-CI-1 工作量较大（涉及 PowerShell + Python + bench 矩阵整合 + A/
 
 #### ADR-020: CI 冒烟门禁方法学（按 PM 编号分配修订）
 
+> **已正式沉淀（2026-07-28）**：本节候选预览已由 `docs/decisions/ADR-020-CI冒烟门禁方法学.md` 正式固化（META-CI 整体 ACCEPTED 触发）。以下候选描述保留作设计历史，正式决策以 ADR-020 为准（含 D.2 命名修订：`-Mode quick/func/perf/full` 已改为 `-Level L1/L2/L3/L4`）。
+
 **decides**：construct-rs 采用"本地 PowerShell + Python 混合 runner + 四层门禁（L1 质量 / L2 功能 / L3 性能 / L4 一致性）+ perf-scenarios.csv 为性能 baseline"的冒烟门禁架构，不依赖远程 CI。
 
 **需固化的决策点**：
@@ -789,18 +803,22 @@ META-CI-1 工作量较大（涉及 PowerShell + Python + bench 矩阵整合 + A/
 
 ### A.1 `experiments/ci/run_smoke.ps1`
 
+> **D.2 修订（META-CI-1a DEV [设计质疑]）**：参数命名从 `-Mode quick/func/perf/full` 改为 `-Level L1/L2/L3/L4`（更直观，与门禁层次命名直接对应）。实施时用 `[string]$Level`（非 `ValidateSet`），内部 `Resolve-Levels` 函数解析 `All` / 单层 / 逗号分隔组合。
+
 ```powershell
 param(
-    [ValidateSet("quick","func","perf","full")]
-    [string]$Mode = "quick",
+    # D.2 修订：-Mode 改 -Level，支持 L1/L2/L3/L4/All 或逗号分隔组合
+    [string]$Level = 'All',
 
     [switch]$AllowRegression,   # 跳过 L3 FAIL 阻断（仅警告）
     [switch]$NoAbTest,          # L3 FAIL 时不触发 Controlled A/B Test
     [switch]$UpdateBaseline,    # 禁止：baseline 更新走人工，此参数仅作错误提示
     [string]$ReportDir = (Join-Path $PSScriptRoot "reports")
 )
-# 行为：按 $Mode 调度 L1-L4，汇总报告，返回 exit code（0/1/2）
+# 行为：按 $Level 调度 L1-L4（Resolve-Levels 解析），汇总报告，返回 exit code（0/1/2）
 ```
+
+> **OBS-1a 修订（META-CI-1a VET OBS-1）**：多 level 组合（如 L1+L4）**必须加引号** `-Level "L1,L4"`。PS 5.1 native comma 是数组操作符，未加引号的 `-Level L1,L4` 会被解析为数组→空格连接字符串→`Resolve-Levels` 报错。单层（`-Level L1`）和 `-Level All` 不受影响。pre-commit.template 已用 `-Level "L1,L4"`（双引号）规避此陷阱。
 
 ### A.2 `experiments/ci/run_l3_perf.py`
 

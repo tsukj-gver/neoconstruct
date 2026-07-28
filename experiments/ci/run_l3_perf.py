@@ -654,6 +654,8 @@ def build_report_markdown(report: Dict[str, Any]) -> str:
     lines.append(f"- crs_venv: {env['crs_venv_python']}")
     lines.append(f"- pc_venv: {env['pc_venv_python']}")
     lines.append(f"- commit: {env['construct_rs_commit']}")
+    # TD-META-CI-5 修复（OBS-1d-VET-2）：Markdown 报告补 construct_py_version，与 JSON schema 对齐
+    lines.append(f"- construct_py_version: {env['construct_py_version']}")
     lines.append(f"- os: {env['os']}")
     lines.append(f"- cpu: {env['cpu']}")
     lines.append(f"- power_plan: {env['power_plan']}")
