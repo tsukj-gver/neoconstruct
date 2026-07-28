@@ -47,7 +47,7 @@ last_updated: 2026-07-28
 | 2 表达式系统 | ✅ | `phase-2-complete` | `plans/phase2-expression/总纲.md` |
 | 2.5 性能优化 | ✅ | `phase-2.5-complete` | `plans/phase2.5-context-vec/总纲.md` |
 | 3 BitStream | ✅ | `phase-3-complete` | `plans/phase3-bitstream/总纲.md` |
-| 4 Array | 🟢 阶段验收中 | —（旧 `phase-4-complete` tag 是重审前打的，作废） | `plans/phase4-array/总纲.md` |
+| 4 Array | ✅ 完成（2026-07-28，重审后重打 tag） | `phase-4-complete`（重打） | `plans/phase4-array/总纲.md` |
 | 5 Struct + FFI 入口优化 | ⚪ 已立项（待 Phase 4 收尾后启动） | — | 待 ARCH 设计；目标：Phase 1 B1 / Phase 4 StopIf B1 等小字段 Struct 场景达 ≥10x |
 | 6+ | ⚪ | — | 待用户指定 |
 
