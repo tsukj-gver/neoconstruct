@@ -30,7 +30,7 @@ PM 是否按 AHE §演化循环要求触发了 Evaluate 步骤：
 
 ## 审计结果报告（项目特定扩展）
 
-在 base 报告模板基础上，加入第 6 类：
+在 base 报告模板基础上，加入第 6 类与第 7 类：
 
 ```
 **分派合规**：✅ / ❌
@@ -39,7 +39,29 @@ PM 是否按 AHE §演化循环要求触发了 Evaluate 步骤：
 **遗留追踪**：✅ / ❌
 **规划合规**：✅ / ❌
 **Evaluate 触发合规**：✅ / ❌（列出缺失项）
+**构造器清单一致性**：✅ / ❌（列出不一致项）
 ```
+
+## 第 7 类审计项：构造器清单一致性（项目特定）
+
+**规范来源**：`pm-extension.md §构造器清单维护`（PM 主维护责任）
+
+**单一事实源**：`docs/constructors-inventory.csv`（主清单）+ `docs/perf-scenarios.csv`（性能场景）
+
+**审计时机**：每个 Phase 阶段验收（打 tag 前）。AUDITOR 必查以下各项：
+
+```
+  [ ] inventory.csv 中所有 status=implemented 的构造器，impl_module 指向的源文件确实存在
+  [ ] inventory.csv 中所有 perf_data_source 指针（文件:行号）能定位到真实数据（不存在 broken ref）
+  [ ] perf-scenarios.csv 中所有 data_source 指针能定位到真实数据
+  [ ] 已实现构造器无遗漏（与 construct-rs/src/nodes/ + construct-rs/python/_descriptors.py 比对）
+  [ ] perf-scenarios.csv 中 meets_10x 字段与 speedup_x 数值自洽（speedup_x ≥ 10 ↔ meets_10x=true）
+  [ ] CSV 格式合规（每行 13 列 inventory / 17 列 perf-scenarios；UTF-8 without BOM；LF 换行）
+  [ ] PM 在本 phase ACCEPTED 的子任务对应构造器，其状态字段已同步（无"代码已实现但 status 仍为 not_implemented"）
+```
+
+**重要发现必须上报 PM**（L-04 对策的延展）：
+- 若发现项目级内部一致性问题（如多个 phase 共有的 < 10x 场景暴露硬约束追溯适用范围模糊），AUDITOR 必须在审计报告中独立列出，由 PM 转呈用户决策。**AUDITOR 不擅自修订硬约束追溯范围**。
 
 ## 范畴边界（L-08 对策，规范来源：`construct-rs-ahe-practices §B3 + §D`）
 

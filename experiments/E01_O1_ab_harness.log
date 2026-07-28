@@ -1,0 +1,189 @@
+﻿[01:24:11] ==== E01 O1 Controlled A/B Test start ====
+[01:24:11] O1 commit parent = c77c0ea~1 (O1 off) ; B = HEAD (O1 on)
+[01:24:11] Sequence: A1 B1 A2 B2 A3 B3
+[01:24:11] Initial stop_if.rs git status: '' (empty = clean)
+[01:24:11] Verify O1_PARENT (c77c0ea~1) resolves to: bdcbc91
+[01:24:11] 
+[01:24:11] ----- Round 1 / Condition A (A1_O1off) -----
+[01:24:11]   Set-State A ...
+[01:24:11]   Build + maturin develop ...
+[01:24:19]   Bench ...
+[01:24:20]   BENCH A1_O1off : [SUMMARY] label=A1_O1off | E01=9.56x(rs=205ns,pc=1963ns) | S01=11.73x(rs=256ns,pc=3000ns) | i01=10.73x(rs=332ns,pc=3564ns)
+
+======================================================================
+A/B bench run | label=A1_O1off | timestamp=2026-07-28 01:24:19
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 205.5 ns/call
+  python-construct: 1963.3 ns/call
+  speedup: 9.56x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 255.7 ns/call
+  python-construct: 3000.4 ns/call
+  speedup: 11.73x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 332.3 ns/call
+  python-construct: 3564.2 ns/call
+  speedup: 10.73x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_A1_O1off.json
+
+[SUMMARY] label=A1_O1off | E01=9.56x(rs=205ns,pc=1963ns) | S01=11.73x(rs=256ns,pc=3000ns) | i01=10.73x(rs=332ns,pc=3564ns)
+[01:24:20]   Sleep 30s ...
+[01:24:50] 
+[01:24:50] ----- Round 1 / Condition B (B1_O1on) -----
+[01:24:50]   Set-State B ...
+[01:24:50]   Build + maturin develop ...
+[01:24:59]   Bench ...
+[01:25:00]   BENCH B1_O1on : [SUMMARY] label=B1_O1on | E01=9.36x(rs=207ns,pc=1934ns) | S01=11.28x(rs=257ns,pc=2902ns) | i01=10.70x(rs=339ns,pc=3629ns)
+
+======================================================================
+A/B bench run | label=B1_O1on | timestamp=2026-07-28 01:24:59
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 206.7 ns/call
+  python-construct: 1933.6 ns/call
+  speedup: 9.36x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 257.3 ns/call
+  python-construct: 2901.8 ns/call
+  speedup: 11.28x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 339.0 ns/call
+  python-construct: 3628.6 ns/call
+  speedup: 10.70x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_B1_O1on.json
+
+[SUMMARY] label=B1_O1on | E01=9.36x(rs=207ns,pc=1934ns) | S01=11.28x(rs=257ns,pc=2902ns) | i01=10.70x(rs=339ns,pc=3629ns)
+[01:25:00]   Sleep 30s ...
+[01:25:30] 
+[01:25:30] ----- Round 2 / Condition A (A2_O1off) -----
+[01:25:30]   Set-State A ...
+[01:25:30]   Build + maturin develop ...
+[01:25:39]   Bench ...
+[01:25:40]   BENCH A2_O1off : [SUMMARY] label=A2_O1off | E01=9.71x(rs=205ns,pc=1990ns) | S01=11.66x(rs=256ns,pc=2985ns) | i01=10.64x(rs=335ns,pc=3561ns)
+
+======================================================================
+A/B bench run | label=A2_O1off | timestamp=2026-07-28 01:25:39
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 204.9 ns/call
+  python-construct: 1989.6 ns/call
+  speedup: 9.71x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 255.9 ns/call
+  python-construct: 2985.1 ns/call
+  speedup: 11.66x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 334.6 ns/call
+  python-construct: 3561.1 ns/call
+  speedup: 10.64x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_A2_O1off.json
+
+[SUMMARY] label=A2_O1off | E01=9.71x(rs=205ns,pc=1990ns) | S01=11.66x(rs=256ns,pc=2985ns) | i01=10.64x(rs=335ns,pc=3561ns)
+[01:25:40]   Sleep 30s ...
+[01:26:10] 
+[01:26:10] ----- Round 2 / Condition B (B2_O1on) -----
+[01:26:10]   Set-State B ...
+[01:26:10]   Build + maturin develop ...
+[01:26:18]   Bench ...
+[01:26:19]   BENCH B2_O1on : [SUMMARY] label=B2_O1on | E01=9.67x(rs=204ns,pc=1969ns) | S01=11.55x(rs=255ns,pc=2943ns) | i01=10.99x(rs=329ns,pc=3618ns)
+
+======================================================================
+A/B bench run | label=B2_O1on | timestamp=2026-07-28 01:26:18
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 203.6 ns/call
+  python-construct: 1969.4 ns/call
+  speedup: 9.67x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 254.8 ns/call
+  python-construct: 2942.8 ns/call
+  speedup: 11.55x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 329.2 ns/call
+  python-construct: 3617.9 ns/call
+  speedup: 10.99x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_B2_O1on.json
+
+[SUMMARY] label=B2_O1on | E01=9.67x(rs=204ns,pc=1969ns) | S01=11.55x(rs=255ns,pc=2943ns) | i01=10.99x(rs=329ns,pc=3618ns)
+[01:26:19]   Sleep 30s ...
+[01:26:49] 
+[01:26:49] ----- Round 3 / Condition A (A3_O1off) -----
+[01:26:49]   Set-State A ...
+[01:26:49]   Build + maturin develop ...
+[01:26:58]   Bench ...
+[01:26:59]   BENCH A3_O1off : [SUMMARY] label=A3_O1off | E01=9.55x(rs=203ns,pc=1937ns) | S01=11.12x(rs=258ns,pc=2873ns) | i01=10.49x(rs=333ns,pc=3492ns)
+
+======================================================================
+A/B bench run | label=A3_O1off | timestamp=2026-07-28 01:26:58
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 203.0 ns/call
+  python-construct: 1937.4 ns/call
+  speedup: 9.55x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 258.3 ns/call
+  python-construct: 2873.2 ns/call
+  speedup: 11.12x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 333.0 ns/call
+  python-construct: 3492.1 ns/call
+  speedup: 10.49x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_A3_O1off.json
+
+[SUMMARY] label=A3_O1off | E01=9.55x(rs=203ns,pc=1937ns) | S01=11.12x(rs=258ns,pc=2873ns) | i01=10.49x(rs=333ns,pc=3492ns)
+[01:26:59]   Sleep 30s ...
+[01:27:29] 
+[01:27:29] ----- Round 3 / Condition B (B3_O1on) -----
+[01:27:29]   Set-State B ...
+[01:27:29]   Build + maturin develop ...
+[01:27:37]   Bench ...
+[01:27:38]   BENCH B3_O1on : [SUMMARY] label=B3_O1on | E01=9.71x(rs=204ns,pc=1979ns) | S01=11.54x(rs=255ns,pc=2940ns) | i01=11.04x(rs=331ns,pc=3649ns)
+
+======================================================================
+A/B bench run | label=B3_O1on | timestamp=2026-07-28 01:27:37
+======================================================================
+
+--- E01 Array(0, Index()) parse (number=10000) ---
+  construct-rs: 203.7 ns/call
+  python-construct: 1978.6 ns/call
+  speedup: 9.71x  [<10x]
+
+--- S01 StopIf(x==0) x=1 parse [positive control] (number=5000) ---
+  construct-rs: 254.8 ns/call
+  python-construct: 2940.0 ns/call
+  speedup: 11.54x  [OK>=10x]
+
+--- i01 Array(10, Index()) parse [negative control] (number=5000) ---
+  construct-rs: 330.6 ns/call
+  python-construct: 3649.3 ns/call
+  speedup: 11.04x  [OK>=10x]
+
+缁撴灉宸蹭繚瀛樺埌 <legacy-repo>\experiments\E01_O1_ab_bench_B3_O1on.json
+
+[SUMMARY] label=B3_O1on | E01=9.71x(rs=204ns,pc=1979ns) | S01=11.54x(rs=255ns,pc=2940ns) | i01=11.04x(rs=331ns,pc=3649ns)
+[01:27:38]   Sleep 30s ...
+[01:28:08] 
+[01:28:08] ----- Restore HEAD stop_if.rs -----
+[01:28:08] ==== A/B Test end ====
+[01:28:08] Log: <legacy-repo>\experiments\E01_O1_ab_harness.log

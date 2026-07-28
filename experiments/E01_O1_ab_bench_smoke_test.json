@@ -1,0 +1,31 @@
+{
+  "label": "smoke_test",
+  "timestamp": "2026-07-28 01:22:28",
+  "repeat": 5,
+  "results": [
+    {
+      "key": "E01",
+      "name": "E01 Array(0, Index()) parse",
+      "number": 10000,
+      "crs_ns": 206.17999834939837,
+      "pc_ns": 1968.2700047269464,
+      "speedup": 9.546367351266834
+    },
+    {
+      "key": "S01",
+      "name": "S01 StopIf(x==0) x=1 parse [positive control]",
+      "number": 5000,
+      "crs_ns": 255.28001133352518,
+      "pc_ns": 2930.8199882507324,
+      "speedup": 11.48080483442785
+    },
+    {
+      "key": "i01",
+      "name": "i01 Array(10, Index()) parse [negative control]",
+      "number": 5000,
+      "crs_ns": 339.9000037461519,
+      "pc_ns": 3564.9199970066547,
+      "speedup": 10.488143447238823
+    }
+  ]
+}

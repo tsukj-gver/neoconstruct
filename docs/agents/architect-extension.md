@@ -117,4 +117,26 @@ last_updated: YYYY-MM-DD
 ## 可写文件
 
 - `docs/design/模块设计-*.md`、`docs/decisions/ADR-*.md`、`docs/design/架构设计.md`
+- `docs/constructors-inventory.csv`（仅追加骨架行，详见下方）
 - `experiments/**`
+
+## 新构造器设计同步清单（ARCH 辅助责任）
+
+**单一事实源**：`docs/constructors-inventory.csv`（PM 主维护，详见 `pm-extension.md §构造器清单维护`）
+
+**ARCH 触发时机**：模块设计文档（`docs/design/模块设计-*.md`）首次落地时（DESIGNING 阶段），凡涉及新构造器（之前 inventory.csv 未列），ARCH 必须在 inventory.csv 追加**骨架行**。
+
+**ARCH 只填以下列**（其余列由 PM 在 ACCEPTED 时填）：
+- `category`：Primitives/Strings/Mappings/ByteBit/Struct/Array/Conditional/Adapter/Streams/Control/Other
+- `name`：构造器公开名
+- `python_class`：Python 原版类名
+- `status`：固定为 `not_implemented`（设计阶段尚未实现）
+- `notes`：≤80 字符，标注设计文档指针（如"设计见 docs/design/模块设计-X.md §Y"）
+- 其他列：留空（不要填 "-"，PM 在 ACCEPTED 时统一处理）
+
+**禁止**：
+- 不要修改已存在行的任何字段（即使你认为分类错误——通过 [设计质疑] 通道反馈给 PM）
+- 不要填性能数据列（L-02 对策：性能数据必须 PM 独立复测后填）
+- 不要删除历史行
+
+**CSV 编辑规范**：参见 `pm-extension.md §构造器清单维护 §维护红线`（编码 / 列数 / 转义）。

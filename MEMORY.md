@@ -2,7 +2,7 @@
 id: MEMORY-root
 status: active
 phase: meta
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 ---
 
 # MEMORY.md — Project Long-Term Memory Index
@@ -29,6 +29,7 @@ last_updated: 2026-07-27
 | **L1 教训** | `experiences.md` | 跨阶段模式化失败教训 L-01 ~ L-06 | 全员可新增（PM 维护） |
 | **L2 决策** | `docs/decisions/ADR-*.md` | 单条决策的 context/decision/consequences | ARCH |
 | **L3 工件** | `docs/design/` / `docs/reviews/` / `docs/analysis/` / `plans/` | 设计文档 / 审查 / 分析 / 过程记录 | 各角色 |
+| **L3 单一事实源清单** | `docs/constructors-inventory.csv` + `docs/perf-scenarios.csv` | 构造器全集 + 性能场景测量点 | PM 主维护（详见 `pm-extension.md §构造器清单维护`） |
 
 **agent 使用规则**：
 - 启动时：先读本文件 → 再按角色读 `experiences.md` + 当前 phase 总纲
@@ -46,8 +47,9 @@ last_updated: 2026-07-27
 | 2 表达式系统 | ✅ | `phase-2-complete` | `plans/phase2-expression/总纲.md` |
 | 2.5 性能优化 | ✅ | `phase-2.5-complete` | `plans/phase2.5-context-vec/总纲.md` |
 | 3 BitStream | ✅ | `phase-3-complete` | `plans/phase3-bitstream/总纲.md` |
-| 4 Array | 🔴 重审 | — | `plans/phase4-array/总纲.md` |
-| 5+ | ⚪ | — | 待用户指定 |
+| 4 Array | 🟢 阶段验收中 | —（旧 `phase-4-complete` tag 是重审前打的，作废） | `plans/phase4-array/总纲.md` |
+| 5 Struct + FFI 入口优化 | ⚪ 已立项（待 Phase 4 收尾后启动） | — | 待 ARCH 设计；目标：Phase 1 B1 / Phase 4 StopIf B1 等小字段 Struct 场景达 ≥10x |
+| 6+ | ⚪ | — | 待用户指定 |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
 
@@ -97,6 +99,7 @@ last_updated: 2026-07-27
 | L-06 | 字段数混淆对照 | 性能数据对比 |
 | L-07 | predicted_impact 重结构轻交叉引用 | AHE harness 重组 |
 | L-08 | AHE 规范解读层错误（通用 vs 项目自定义混淆） | AHE iteration 中引用角色/流程时 |
+| L-09 | 跨时段性能对比消除法归因失效（边界场景） | 性能回归判定 / 跨时段性能对比 |
 
 ---
 
@@ -107,7 +110,9 @@ last_updated: 2026-07-27
 | 1 | B1-B4（3-100 字段） | 7.6-13.7x / 11.7-17.4x | `plans/00-项目进度.md` |
 | 2.5 | E1-E3（Bytes/Tell） | ~10-12x | `plans/00-项目进度.md` |
 | 3 | BitStruct | 12x / 17x | `plans/00-项目进度.md` |
-| 4 | Array 系列 | 重审中（用户打回） | `plans/phase4-array/总纲.md` |
+| 4 | Array/GreedyRange/PrefixedArray/RepeatUntil/Index | ≥10x 全场景达标（O1 后） | `docs/perf-scenarios.csv` |
+| 4 | StopIf | 10.72-15.69x（O1 后 VET 复测） | `docs/perf-scenarios.csv` |
+| 4 | E01 Array(0 Index) parse | 9.51x（B1 类边界场景，待 Phase 5 复审） | `docs/perf-scenarios.csv` |
 
 > 详细数据见各 phase 总纲 / 过程记录。性能门禁规则见 `.opencode/skills/performance-gate/SKILL.md`。
 
@@ -118,6 +123,8 @@ last_updated: 2026-07-27
 （无）
 
 > 历史质疑见各过程记录。
+>
+> **已解决（2026-07-28）**：硬约束 #5 "禁止局部门禁" 追溯适用范围——用户决策仅 Phase 4 起适用；Phase 1/2/2.5 共 18 个 <10x 测量点不追溯复审，记入 Phase 5 待办（Struct + FFI 入口优化）。详见 `plans/phase4-array/总纲.md §用户决策`。
 
 ---
 

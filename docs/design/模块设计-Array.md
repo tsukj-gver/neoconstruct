@@ -5,7 +5,7 @@ phase: "4"
 depends_on: [DESIGN-Architecture, DESIGN-Expr, ADR-011, ADR-012, ADR-014, ADR-015]
 supersedes: []
 superseded_by: []
-last_updated: 2026-07-27
+last_updated: 2026-07-28
 ---
 
 # 模块设计：Array 支持（Phase 4）
@@ -4154,4 +4154,312 @@ Element 是引用入口，不独立 benchmark，但需通过 RepeatUntil 场景�
 ---
 
 **v5 设计完成。等待 PM 与 REV 审查。**
+
+---
+
+## 16. Phase 4 收尾性能补强（v6 新增；2026-07-28）
+
+> **章节定位与编号说明**（L-07 对策）：本节由子任务 4.6-FINISH-DESIGN（ARCH 收尾设计）新增。
+> PM 任务书原建议为"§14"，但本文档 §14 已被"场景测试覆盖矩阵"占用、§15 为"参考文献"，
+> 故采用 §16 编号以避免大规模重编号引入交叉引用断链（L-07）。
+> PM 后续若决定全局重编号，需同步处理 `docs/design/` 与 `plans/` 内的全部内部引用。
+
+### 16.0 子任务背景
+
+Phase 4 重审收尾阶段，94/102 场景 ≥10x，剩余 8 个未达标场景分两类：
+
+| 类别 | 场景数 | 当前加速比范围 | 根因（INVEST 报告 §3） |
+|------|--------|---------------|----------------------|
+| StopIf B1 类 | 2（仅 parse 方向） | 9.63x / 9.93x | 3 字段 Struct + FFI 稀释，与 Phase 1 B1（7.35x）同档 |
+| 错误路径 D 类 | 2 | 1.97x / 6.45x | `error.rs:655-679` ConstructError→PyErr 转换固定 ~1200-1500ns |
+
+本节给出两类问题的设计输入，供 PM 决策与转呈用户。
+
+### 16.1 StopIf B1 类优化方案
+
+#### 16.1.1 现状数据（量化，来源标注）
+
+数据源：`experiments/phase4_bench_index_stopif_v3_report.txt`（4.7 优化后 apples-to-apples 重测，min(repeat=5)）。
+
+| 场景 | 方向 | Py ns/call | Rs ns/call | 加速比 | 达标？ |
+|------|------|-----------:|-----------:|-------:|:------:|
+| S01 StopIf(x==0) x=1 不触发 | parse | 2,950 | 306.1 | **9.63x** | ❌（差 0.37x） |
+| S01 StopIf(x==0) x=1 不触发 | build | 2,920 | 281.6 | 10.36x | ✅ |
+| S02 StopIf(x==0) x=0 触发 | parse | 3,100 | 296.1 | 10.48x | ✅ |
+| S02 StopIf(x==0) x=0 触发 | build | 3,040 | 266.7 | 11.40x | ✅ |
+| S03 StopIf(True) 常量触发 | parse | 2,820 | 284.3 | **9.93x** | ❌（差 0.07x） |
+| S03 StopIf(True) 常量触发 | build | 2,760 | 200.9 | 13.75x | ✅ |
+
+观察：
+1. 仅 parse 方向不达标（build 已 ≥10x）；
+2. S01（Expr 路径）比 S03（Always 路径）慢 ~22ns（306.1 vs 284.3），差额等于 `eval_expr_int` 一次调用成本；
+3. S03 距 10x 阈值仅差 0.07x，已在测量噪声边缘。
+
+#### 16.1.2 开销拆解（标注每个 FFI/拷贝/转换来源，L-05 对策）
+
+场景结构（S01/S03 同构，以 S01 为例）：
+`@dataclass class _C(StructMixin): x: int = field(Int8ub); y: int = field(Int8ub); stop: Any = rfield(StopIf(x == 0))`
+
+S01 parse 路径 Rs 306.1ns 分解（来源：`experiments/phase4_perf_investigation_report.md` §2.3 + 4.7 实测验证）：
+
+| # | 开销来源 | 估算 ns | 类别 | 是否可优化 |
+|---|---------|--------:|------|-----------|
+| 1 | FFI 入口（pyo3 parse_bytes 调度） | 50-100 | FFI | 否（CPython 固有） |
+| 2 | StructNode 入口（Path::new 零分配 + Context::new_root） | 60-90 | Rust 内部 | 部分（PyDict 占位） |
+| 3 | create_class 实例化（tp_new + __init__） | 60-80 | FFI（CPython） | 否（CPython 固有） |
+| 4 | field x: Int8ub parse（read 1B + PyLong + set_field_at） | 50-70 | Rust + FFI | 否（必要工作） |
+| 5 | field y: Int8ub parse | 50-70 | Rust + FFI | 否（必要工作） |
+| 6 | field stop: StopIf Expr 路径（eval_expr_int + 构造 Py_None） | 25-40 | Rust 内部 | **可（~10ns，§16.1.3-O1）** |
+| 7 | StructNode 收尾（PyDict 与 instance __dict__ 同步 + return） | 20-40 | FFI | 部分（受 §0 原则 2 约束） |
+|   | **合计** | **~315-460** | | |
+
+实测 306.1ns 落在估算下界附近，说明 4.7 的 Path::new 零分配 + Vec 中转 PyList + lazy path 优化已充分发挥。
+
+S03 parse 路径（StopIf Always 路径）Rs 284.3ns：与 S01 几乎相同，StopIf 节点本身仅 ~5-10ns（`Ok(true)` + 构造 `Err(StopField { path: "root" })`），无 Expr 求值开销。
+
+**关键观察**：S01 与 S03 仅相差 ~22ns（StopIf Expr vs Always 的差），但两者均不达标。**StopIf 节点本身的开销已经很小，瓶颈是 Struct + FFI 入口固定开销（来源 1/2/3/7 合计 ~190-330ns）**。
+
+#### 16.1.3 已识别可优化项（按节省 ns 排序）
+
+| # | 优化项 | 适用场景 | 节省 ns | 风险 / 影响面 |
+|---|-------|---------|--------:|--------------|
+| O1 | StopIf Expr 路径采用 `try_eval_simple_cmp` 快速路径（4.5 v5.1 已为 RepeatUntil 实现，见 `expr.rs:183` `ExprProgram::try_eval_simple_cmp`） | S01 | ~10 | 低（已有先例，无非测试 unsafe，仅 stop_if.rs 局部修改） |
+| O2 | StopField 错误体的 path 字段改用 `Cow<'static, str>` 或 `&'static str`（Root 变体时零分配） | S03 | ~5-8 | 中（修改 ConstructError 枚举，影响全部错误变体，跨阶段回归风险） |
+| O3 | StructNode 入口为"仅 StopIf 单字段"场景跳过 Context::new_root 的 PyDict 占位 | S01/S03 | ~20-30 | 高（需识别"无字段引用场景"，与现有 expr 系统冲突，StopIf Expr 必须引用字段） |
+
+**Phase 4 收尾范围内可实施**：仅 O1。O2 / O3 不在 Phase 4 收尾范围（影响面超出了 StopIf）。
+
+#### 16.1.4 可证伪预测（覆盖所有 FFI/拷贝/转换来源，L-05 对策）
+
+应用 O1 后的预测（基于 §16.1.2 拆解 + O1 节省 ~10ns）：
+
+| 场景 | 当前 Rs ns | O1 后 Rs ns（预测） | Py ns | 预测加速比 | 余量 vs 10x |
+|------|-----------:|-------------------:|------:|----------:|-----------:|
+| S01 parse | 306.1 | **~296** | 2,950 | **~9.97x** | -0.03x（仍不达标，处于噪声） |
+| S03 parse | 284.3 | 284.3（无 O1 适用，Always 路径） | 2,820 | **9.93x** | -0.07x（不变） |
+
+**预测结论**：
+- **O1 单独不能让 S01/S03 达到 ≥10x**；
+- S01 距 10x 仅差 ~0.03x（~9ns），处于测量噪声范围（多次测量可能在 9.7-10.1x 间波动）；
+- S03 完全无 StopIf 侧可优化空间（Always 路径不调 eval_expr_int）。
+
+**FFI/拷贝/转换来源对照表**（每个来源都在预测中有对应声明）：
+
+| 来源（§16.1.2 编号） | 预测中声明 | 是否被优化 |
+|--------------------|----------|-----------|
+| 1 FFI 入口（pyo3） | 不优化（CPython 固有） | 否 |
+| 2 Path::new 分配 | 已零分配（4.7 完成） | 已完成 |
+| 2 Context PyDict 占位 | 不优化（O3 排除） | 否 |
+| 3 create_class（tp_new） | 不优化（CPython 固有） | 否 |
+| 4/5 set_field_at（PyDict + buf 双写） | 不优化（用户字段必须入 PyDict） | 否 |
+| 6 StopIf eval_expr_int | **O1 优化为 try_eval_simple_cmp** | **本次** |
+| 7 StructNode 收尾 setattr | 不优化 | 否 |
+| 6 StopField path.to_string | 不优化（O2 排除） | 否 |
+
+#### 16.1.5 §0 原则对照表（L-01 对策）
+
+| §0 原则 | O1 是否符合 | 理由 |
+|--------|-----------|------|
+| 1. 一次 FFI | ✅ | O1 仅修改 Rust 内部表达式求值路径，不增加 FFI 边界穿越 |
+| 2. 无中间表示层 | ✅ | `try_eval_simple_cmp` 是 ExprProgram 的方法（4.5 v5.1 已验证），不引入中间数据类型 |
+| 3. 输入/输出侧无抽象 trait | ✅ | 无新增 trait |
+| 4. pyo3 是核心依赖 | ✅ | 无 pyo3 使用变更 |
+| 5. mashumaro 式 API | ✅ | 用户面 API 不变 |
+| 6. 构造器分派（enum_dispatch） | ✅ | 不改分派机制 |
+| 7. 错误处理（Result + thiserror） | ✅ | Result<T, ConstructError> + thiserror 不变 |
+| 8. Stream 抽象 | ✅ | 无 Stream 变更 |
+
+#### 16.1.6 反例声明（performance-gate SKILL.md Checkpoint 1）
+
+- **若 O1 实施后 S01 仍 < 9.97x**：说明 `try_eval_simple_cmp` 在 StopIf 上下文未命中（可能因 ExprProgram 编译期模式不匹配 3-op `[GetInt, Const, cmp]`），需排查 ExprOp 序列。
+- **若 O1 实施后 S01 ≥ 10x 但 S03 仍 < 10x**：确认 S03 的限制是结构性的（Struct + FFI 固定开销），与 Phase 1 B1 同根因——必须走 §16.3 路径（PM 转呈用户决策）。
+- **若 S01/S03 在多次测量中已在 10x 上下波动**：说明场景处于测量噪声主导区间，加速比的"达标"判据本身需要 PM 用统计方法（如 5 次 repeat 取 min + 容忍区间）重新定义——本节不主张放宽硬门禁，仅指出测量稳定性问题。
+
+### 16.2 错误路径 D 类范围论证
+
+#### 16.2.1 现状数据（量化，来源标注）
+
+数据源：`experiments/phase4_perf_investigation_report.md` §3.3（D 类根因分析）+ §2.3（Rs 开销分解）。
+
+| 场景 | 方向 | Py ns/call | Rs ns/call | 加速比 | Rs 错误转换占比 |
+|------|------|-----------:|-----------:|-------:|---------------:|
+| p_err_overflow（PrefixedArray cf=300 溢出） | build | 4,864 | 2,471 | **1.97x** | ~61%（~1500ns / 2471ns） |
+| a_err_eof（Array(100, Int8ub) + 50B stream EOF） | parse | 15,114 | 2,342 | **6.45x** | ~53%（~1250ns / 2342ns） |
+
+根因（代码位置 `construct-rs/src/error.rs:655-679` `impl From<ConstructError> for PyErr`）：
+- `Python::with_gil` O(1)（已持 GIL）；
+- `EXCEPTIONS.get(py)` OnceCell 查表（首次同步开销）；
+- `select_exception_class` match err 变体 + `cls.bind(py).clone()`；
+- `build_exception_instance` 调 Python 类构造器（`cls.call1((message, path))`）；
+- `PyErr::from_value_bound`。
+
+固定成本 ~1200-1500ns，独立于错误类型，每次错误抛出都会发生。
+
+#### 16.2.2 错误路径是否属于硬门禁"全场景"——文本与工程惯例分析
+
+**项目内文本分析**：
+
+`plans/phase4-array/总纲.md` §"S-PERF 标准"原文：
+> 全部 6 个构造器（Array / GreedyRange / PrefixedArray / RepeatUntil / Index / StopIf）× parse/build 双向 × 全场景，加速比 ≥10x
+
+`plans/phase4-array/总纲.md` §"场景矩阵硬要求"维度表明确包含：
+> 错误路径 | inner parse 错误、countfield 错误、流不完整 至少 2 种
+
+**结论（项目内文本）**：错误路径属于"全场景"，不可豁免（用户硬约束 #5 禁止局部门禁）。
+
+**工程惯例对照**（避免 L-02 理论估算，列具体来源）：
+
+| 库 | 是否对错误路径有性能 SLA | 来源 |
+|----|----------------------|------|
+| Python construct 2.10.70 | 否（无文档承诺） | `construct/README` + `core.py` 错误抛出无性能注释 |
+| cbor2（Python CBOR 库） | 否 | cbor2 benchmark 不含错误路径 |
+| msgpack-python | 否 | msgpack benchmark 仅正常路径 |
+| pydantic-core | 否（pydantic 关注 validation 正常路径速度） | pydantic-core benchmarks 仅覆盖 validation 成功路径 |
+| Rust serde | 否（错误路径用 `std::error::Error`，无性能 SLA） | serde 文档无错误路径性能承诺 |
+
+**结论（工程惯例）**：错误路径性能承诺在 binary parsing 库中**非普遍实践**。但项目硬约束明确将其纳入"全场景"，**项目硬约束优先于一般惯例**——PM/ARCH 不能以"惯例"为由单方面豁免。
+
+#### 16.2.3 三种处理方案对比
+
+##### 方案 1：计入硬门禁，给出优化设计
+
+**优化设计**（INVEST §5.3 已提出）：
+1. **缓存异常类 PyObject 引用**：编译期（`CompiledSchema::new`）预 select 每个 Node 的"主要错误类型"，运行时直接查 ptr（省 OnceCell 同步 + select match）；
+2. **fast-path PyErr**：对高频错误（StreamError EOF / FormatField overflow）用 `PyErr::new_err`（interned string）替代 `from_value_bound`；
+3. **lazy 字符串格式化**：message + path 拼接延迟到 Python 端 `__str__` 调用时。
+
+**可证伪预测**（基于 §16.2.1 拆解 + 每项节省估算；三项合计预估节省 ~1000-1240ns）：
+
+| 场景 | 当前 Rs ns | 优化后 Rs ns（预测） | Py ns | 预测加速比 | 达标？ |
+|------|-----------:|-------------------:|------:|----------:|:------:|
+| p_err_overflow build | 2,471 | ~1,500（节省 ~970） | 4,864 | **~3.24x** | ❌（差 6.76x） |
+| a_err_eof parse | 2,342 | ~1,100（节省 ~1,240） | 15,114 | **~13.7x** | ✅ |
+
+**关键发现**：**p_err_overflow 即便用尽上述优化仍 ~3.24x，远低于 10x**。
+
+p_err_overflow 难以达标的结构性原因（非"物理上限"豁免，而是数据本身的比例）：
+- Python baseline 仅 4,864ns（Python construct 的 PrefixedArray build 用 FocusedSeq+Rebuild 偷懒，count 直接来自 len()，正常路径就很短）；
+- Rs 正常路径已 ~200ns，错误转换剩余成本 ~1,500ns 即便减半也 ~750ns；
+- 750 + 200 = 950ns vs Py 4,864ns = 5.12x（最乐观估计，仍未达 10x）；
+- 这是数据特性而非"物理上限"——若 Python baseline 也提高到 ~10000ns（如更复杂的 PrefixedArray 配置），10x 可达；但当前 benchmark 用的就是简单配置。
+
+##### 方案 2：剥离 Phase 4 立项为 4.x 单独子任务，不阻塞 Phase 4 收尾
+
+**描述**：将错误路径 D 类优化剥离为独立的子任务 4.x（`plans/phase4-array/总纲.md` §"子任务"表已预留此项），Phase 4 收尾不阻塞。
+
+**4.x 子任务范围**：
+- a_err_eof：方案 1 优化（缓存 + fast-path + lazy），目标 ≥10x（预测 ~13.7x，技术可行）；
+- p_err_overflow：方案 1 优化 + **结构性限制声明**——预测上限 ~3-5x（最乐观），无法达 10x；
+- p_err_overflow 的最终处置：PM 转呈用户决策（接受 < 10x 或追加更深层重构）。
+
+**Phase 4 收尾出口**：6 构造器 × parse/build × 正常路径全场景 ≥10x（94/102 已达标）+ 错误路径 8 个场景中 6 个达标（剩余 2 个为 D 类，剥离至 4.x）。
+
+##### 方案 3：永久豁免（错误路径不计入门禁）
+
+**描述**：修订 S-PERF 出口标准，明确"错误路径不计入 ≥10x 硬门禁"，理由是工程惯例（§16.2.2）。
+
+**问题**：直接违反用户硬约束 #5（禁止局部门禁）+ 违反场景矩阵硬要求（明确含错误路径维度）。PM/ARCH 无权单方面修订硬约束。
+
+#### 16.2.4 推荐方案 + 理由
+
+**推荐：方案 2（剥离为 4.x，不阻塞 Phase 4 收尾）**。
+
+**理由**（基于工程证据，非"用户已说优先级低"——避免 L-03 不对等证据）：
+
+1. **方案 1 在 p_err_overflow 上不可行**：§16.2.3 已用数据证明，即便用尽缓存 + fast-path + lazy 三项优化，p_err_overflow 上限 ~3-5x。继续将其作为 Phase 4 收尾的阻塞项会让 Phase 4 永远无法收尾。
+
+2. **方案 3 违反硬约束**：用户硬约束 #5 + 场景矩阵硬要求明确将错误路径纳入"全场景"，PM 无权单方面豁免。
+
+3. **方案 2 不违反硬约束**：
+   - 不豁免（4.x 子任务仍承诺优化，且明确 ≥10x 为目标）；
+   - 不设局部门禁（4.x 仍以 ≥10x 为目标，只是承认 p_err_overflow 可能需要追加更深层重构）；
+   - 不阻塞 Phase 4 收尾（用户已在 `总纲.md` §"待决策事项"标注此项）。
+
+4. **方案 2 的诚实承诺**：
+   - a_err_eof：承诺 ≥10x（预测 ~13.7x，技术可行）；
+   - p_err_overflow：承诺"尽最大努力优化 + 标注结构性限制 + 转呈用户决策"。
+
+**PM 行动**：
+- Phase 4 收尾判据：6 构造器 × parse/build × 正常路径全场景 ≥10x + D 类错误路径剥离至 4.x；
+- 4.x 子任务 ARCH 设计阶段：分别设计 a_err_eof 优化（≥10x 可达）与 p_err_overflow 路径（结构性论证 + 用户决策点）；
+- 用户决策点（PM 转呈）：p_err_overflow 是否接受"最优 ~3-5x + 结构性声明"作为 4.x 完成判据。
+
+#### 16.2.5 §0 原则对照表（方案 2）
+
+| §0 原则 | 方案 2 是否符合 | 理由 |
+|--------|---------------|------|
+| 1. 一次 FFI | ✅ | 4.x 优化不增加 FFI 边界穿越（缓存类引用 + Rust 内部 match） |
+| 2. 无中间表示层 | ✅ | 不引入中间数据类型（缓存的 PyObject 是 Python 对象本身） |
+| 3. 输入/输出侧无抽象 trait | ✅ | 无新增 trait |
+| 4. pyo3 是核心依赖 | ✅ | 缓存 PyObject 引用属 pyo3 标准用法 |
+| 5. mashumaro 式 API | ✅ | 用户面 API 不变 |
+| 6. 构造器分派 | ✅ | 不改 enum_dispatch |
+| 7. 错误处理 | ✅ | Result<T, ConstructError> + thiserror 不变（仅优化 PyErr 转换路径） |
+| 8. Stream 抽象 | ✅ | 无 Stream 变更 |
+
+### 16.3 与 Phase 1 B1 同档问题的处理建议
+
+#### 16.3.1 Phase 1 B1 与 StopIf 场景的同构性论证
+
+数据对照（来源：MEMORY.md 关键性能快照 + §16.1.1）：
+
+| 场景 | 字段数 | Py ns | Rs ns | 加速比 | 数据源 |
+|------|-------:|------:|------:|-------:|--------|
+| Phase 1 B1（3 字段 flat Struct） | 3 | ~2,400 | ~320 | **7.6x** | `plans/00-项目进度.md` |
+| Phase 4 S01 StopIf（x,y,stop 3 字段） | 3 | 2,950 | 306.1 | **9.63x** | §16.1.1 |
+| Phase 4 S03 StopIf（x,y,stop 3 字段） | 3 | 2,820 | 284.3 | **9.93x** | §16.1.1 |
+
+**同构性论证**：
+1. 字段数相同（3 字段）；
+2. 工作量结构相同（小字节字段 + Struct 入口开销主导）；
+3. 加速比同档（7.6x / 9.63x / 9.93x 都在 7-10x 区间）；
+4. StopIf 场景甚至比 Phase 1 B1 略快（StopIf 字段比普通字段工作更少）。
+
+**结论**：StopIf B1 类与 Phase 1 B1 是**同一类问题**——"3 字段 Struct + FFI 入口固定开销稀释"。INVEST 报告 §3.2（line 222-228）已明确此分类。
+
+#### 16.3.2 处理建议
+
+**ARCH 建议**（PM 转呈用户决策）：
+
+Phase 1 已打 tag `phase-1-complete`，B1（7.35-7.6x）已 ACCEPTED。若 StopIf S03（9.93x）必须优化到 ≥10x，则 Phase 1 B1（7.35x）按同一硬约束（#5 禁止局部门禁）也应复审——不能对 Phase 1 B1 接受 7.35x 却对 Phase 4 S03 拒绝 9.93x，那是事实上的局部门禁。
+
+**两种统一处置路径**（PM 转呈用户选择）：
+
+##### 路径 A：接受"小字段 Struct 加速比下界"作为通用特性
+
+- 修订 S-PERF 出口标准：明确"3 字段以下 Struct 场景的加速比下界为 Xx"（X 待用户决策，建议 7x 或不设下界，仅保留"≥4x 总目标"）；
+- 同时适用 Phase 1 B1 与 Phase 4 StopIf 场景；
+- **不违反硬约束 #5**：因为这是"通用规则"而非"局部豁免"；
+- 风险：与"≥10x 全场景"硬约束字面冲突，需用户明确修订硬约束的文字表述。
+
+##### 路径 B：投资 Struct + FFI 入口固定开销优化
+
+- 目标：让 3 字段 Struct 也达到 ≥10x（需将 Rs 入口开销从 ~150ns 降至 ~50ns，即压缩 ~100ns）；
+- 可能方向：
+  - PyDict 占位生成延迟到首个 set_field_at 时（lazy Context）；
+  - create_class 改用更轻量的实例化路径（如直接 dict 而非 tp_new）；
+  - FFI 入口 pyo3 调度优化（受 pyo3 框架限制，可能不可行）；
+- 影响范围：Phase 1-4 全部 parse 路径（StructNode 是核心节点）；
+- 风险：架构层改动，需新开 Phase（如 Phase 5 Struct 入口优化）；
+- 同时收益：Phase 1 B1（7.6x → ~12x）、Phase 4 StopIf（9.63x → ~15x）、所有小字段场景。
+
+**ARCH 推荐**：**路径 B**（投资入口优化）。理由：
+1. 不需修订硬约束（保持 ≥10x 字面要求）；
+2. 收益跨阶段（Phase 1 + Phase 4 + 未来 Phase）；
+3. 路径 A 的"接受下界"会让"≥10x"硬约束出现永久例外，长期维护负担；
+4. 与 §0 原则 1（一次 FFI）一致——入口优化是减少 FFI 内的工作量，不是新增 FFI。
+
+**PM 行动**：
+- Phase 4 收尾判据（短期）：StopIf S01 实施 O1 优化；S01/S03 parse 暂以"已知结构性限制 + 待路径 B 实施"完成 Phase 4；
+- 转呈用户决策（长期）：是否启动路径 B（新开 Phase）或接受路径 A（修订硬约束）。
+
+### 16.4 §16 范围结论汇总
+
+| 问题 | 推荐方案 | Phase 4 收尾出口 | 后续 |
+|------|---------|----------------|------|
+| StopIf B1 类 | 实施 O1（S01 用 try_eval_simple_cmp）+ 路径 B 长期投资 | S01/S03 parse 暂以"已知结构性限制"完成 Phase 4 | 路径 B 需用户决策 |
+| 错误路径 D 类 | 方案 2（剥离为 4.x） | 正常路径全场景 ≥10x + D 类剥离 | 4.x 子任务 + p_err_overflow 用户决策 |
+| Phase 1 B1 同档 | 路径 B（推荐）或路径 A | Phase 4 收尾不阻塞 | 用户决策启动路径 B 或修订硬约束 |
+
+**ARCH 设计完成。等待 PM 与 REV 审查。**
 

@@ -1,0 +1,31 @@
+{
+  "label": "A1_O1off",
+  "timestamp": "2026-07-28 01:24:19",
+  "repeat": 5,
+  "results": [
+    {
+      "key": "E01",
+      "name": "E01 Array(0, Index()) parse",
+      "number": 10000,
+      "crs_ns": 205.4500044323504,
+      "pc_ns": 1963.320001959801,
+      "speedup": 9.556193524475068
+    },
+    {
+      "key": "S01",
+      "name": "S01 StopIf(x==0) x=1 parse [positive control]",
+      "number": 5000,
+      "crs_ns": 255.699991248548,
+      "pc_ns": 3000.4399828612804,
+      "speedup": 11.734220123397515
+    },
+    {
+      "key": "i01",
+      "name": "i01 Array(10, Index()) parse [negative control]",
+      "number": 5000,
+      "crs_ns": 332.2799922898412,
+      "pc_ns": 3564.2199916765094,
+      "speedup": 10.726556140544002
+    }
+  ]
+}

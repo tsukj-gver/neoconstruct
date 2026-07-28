@@ -103,3 +103,26 @@ prompt: "包含子任务信息、必读文件、输出要求的完整指令"
 - `AGENTS.md`（System Rules 核心，按 base §AGENTS.md 维护标准 维护）
 - `experiments/**`
 - `MEMORY.md` / `experiences.md`（LTM）
+
+## 构造器清单维护（PM 主维护责任）
+
+**单一事实源**：`docs/constructors-inventory.csv`（主清单）+ `docs/perf-scenarios.csv`（性能场景）
+
+**PM 是清单主维护者**——其他角色按列辅助。维护触发时机：
+
+| 触发时机 | PM 动作 | 涉及 CSV 列 |
+|---------|---------|-------------|
+| 子任务 ACCEPTED 时 | 同步状态 + 性能数据 + 不达标场景 | inventory: status/impl_phase/impl_module/parse_min_x~perf_data_source/unmet_scenarios；perf-scenarios: 追加测量点行 |
+| 用户面 Python 导出变更 | 同步公开导出条目 | inventory: 新增/删除行 |
+| 性能数据复测（如环境升级后） | 更新 perf-scenarios 测量点 + inventory min/max 范围 | perf-scenarios: py_ns_per_call/rs_ns_per_call/speedup_x/meets_10x；inventory: parse_min_x~build_max_x |
+
+**ARCH 辅助**：新构造器设计文档落地时（DESIGNING 阶段），ARCH 在 inventory.csv 追加骨架行（status=not_implemented，仅填 category/name/python_class/notes）。详见 `architect-extension.md §新构造器设计同步清单`。
+
+**AUDITOR 审计**：Phase 阶段验收时，AUDITOR 必查"清单与代码一致性"（status 字段 ↔ 实际实现、impl_module ↔ 真实文件存在、perf_data_source ↔ 源文件存在）。详见 `auditor-extension.md §构造器清单一致性审计`。
+
+**维护红线**：
+- 数据来源指针必须精确到 `文件:行号`（L-02 对策）
+- 性能数据必须从源文件复制原值，不可估算（L-02 对策）
+- 不删除历史测量点（如 v4 PyCallable 数据保留作趋势证据，phase 列标版本）
+- 未测量字段留空，不填 0/N/A/null
+- 编辑 CSV 后必须用工具验证列数合规（每行 13 列 inventory / 17 列 perf-scenarios）
