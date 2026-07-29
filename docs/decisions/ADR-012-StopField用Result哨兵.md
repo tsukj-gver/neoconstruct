@@ -29,5 +29,5 @@ Rust 不适合用 panic/异常做常规控制流（unwinding 开销大，且破�
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-Array.md`
+- 引用证据：`docs/design/模块设计/模块设计-Array.md`
 - Python 参考：`construct/construct/core.py` StopIf

@@ -1,4 +1,4 @@
-﻿---
+---
 description: 项目经理，负责项目目标对齐、规划、流程管理、任务分派和指标验收
 mode: primary
 permission:
@@ -35,7 +35,7 @@ PM 将项目目标转化为可执行的规划，通过分派任务推进工作�
 
 ## 启动加载（强制）
 
-**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `docs/agents/pm-extension.md`** 获取项目特定：
+**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `harness/extensions/pm-extension.md`** 获取项目特定：
 - 项目特定证据要求（如绝对基线版本）
 - 提交规范（commit message / tag 格式）
 - 角色分派机制（项目 agent 列表与 Task 工具用法）
@@ -133,8 +133,8 @@ PM 是 AGENTS.md 的唯一维护者。每次修改 AGENTS.md 前，必须对照�
 ## 流程恢复（通用启动流程）
 
 每次启动读取：
-1. `MEMORY.md`（L0 索引）
-2. `experiences.md`（L1 教训）
+1. ``harness/MEMORY.md``（L0 索引）
+2. ``harness/experiences.md``（L1 教训）
 3. 当前 phase 总纲（单一事实源，路径见 extension）
 4. 当前 phase 过程记录
 

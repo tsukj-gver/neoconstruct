@@ -29,7 +29,7 @@ last_updated: 2026-07-28
 | `ConstructError → PyErr` 转换 | **~1,200-1,500** | **~53%** |
 | 合计 | ~2,300-2,500 | 100% |
 
-错误抛出路径的 FFI / Python 调用来源（设计 `docs/design/模块设计-错误路径优化.md §1.2`，F1-F8 逐项分解）：
+错误抛出路径的 FFI / Python 调用来源（设计 `docs/design/模块设计/模块设计-错误路径优化.md §1.2`，F1-F8 逐项分解）：
 
 | # | FFI 来源 | 估算 ns | 备注 |
 |---|---------|--------:|------|
@@ -105,7 +105,7 @@ F7 的 `__init__` 字节码（`construct-rs/python/construct/_errors.py:46-53`�
 
 ### 性能（VET Controlled A/B Test 实测，非估算）
 
-数据源：`plans/phase4-array/过程记录.md §4.x-VET`（VET 独立复测，2026-07-28 同会话 3 轮交替测量均值）。
+数据源：`plans/phase4-array/traces/4.x-错误路径.md §4.x-VET`（VET 独立复测，2026-07-28 同会话 3 轮交替测量均值）。
 
 | 场景 | 优化前 | 优化后（B 状态） | Δ (B-A) | 达标判据 |
 |------|------:|----------------:|--------:|---------|
@@ -185,12 +185,12 @@ O3 是项目首次在错误路径使用 `unsafe` raw CPython C API（`pyo3::ffi`
 
 ## Relations
 
-- **关联教训**：`experiences.md §L-09`（跨时段性能对比消除法归因失效）
+- **关联教训**：`harness/experiences.md §L-09`（跨时段性能对比消除法归因失效）
   - VET 用 Controlled A/B Test 验证 O1-O4 真实生效（Δ=+1.53x >0.5x 显著），而非依赖跨时段单次对比。
   - DEV OBS-DEV-2 假设 i02_idx_n100 改善（INVEST 10x → 4.x 后 17.3x）归因 crate LTO 副作用，被 Controlled A/B Test 证伪（A 状态 18.06x vs B 状态 17.77x，Δ=-0.29x <0.3x 波动），实际是 17 天跨时段测量环境漂移。L-09 对策有效。
 - **关联 ADR**：`ADR-016 P0-3 lazy path 错误传播`（互补关系，见下表）
-- **设计文档**：`docs/design/模块设计-错误路径优化.md`（§1 a_err_eof 优化 + §1.3 O1-O4 + §1.3.1 unsafe 安全前置 + §3 ADR-019 候选评估）
-- **实测数据**：`plans/phase4-array/过程记录.md §4.x-VET`（VET Controlled A/B Test 完整数据 + DLL hash 验证 + T6 子类化兼容性 20/20 PASS）
+- **设计文档**：`docs/design/模块设计/模块设计-错误路径优化.md`（§1 a_err_eof 优化 + §1.3 O1-O4 + §1.3.1 unsafe 安全前置 + §3 ADR-019 候选评估）
+- **实测数据**：`plans/phase4-array/traces/4.x-错误路径.md §4.x-VET`（VET Controlled A/B Test 完整数据 + DLL hash 验证 + T6 子类化兼容性 20/20 PASS）
 - **实现位置**：`construct-rs/src/error.rs::try_fast_path_alloc`（L740-825）+ `is_builtin_class`（L560-579）+ `From<ConstructError> for PyErr`（L857-895）
 - **测试位置**：T6 子类化兼容性测试（`experiments/phase4_4x_t6_verify.py`，VET 独立验证 20/20 PASS）+ `error.rs` 测试模块 8 个新单元测试（L1606-1901）
 - **首次验证**：Phase 4.x（错误路径 D 类优化，2026-07-28 ACCEPTED）

@@ -19,7 +19,7 @@
     # parse：从字节构造实例
     parsed = MyMsg.parse(built)
 
-设计依据：``docs/架构设计.md`` §A（Python 接口设计）、§D.3（Python 包结构）。
+设计依据：``docs/design/基础设施/架构设计.md`` §A（Python 接口设计）、§D.3（Python 包结构）。
 """
 
 from ._errors import (

@@ -1,0 +1,77 @@
+#!/bin/sh
+# pre-commit hook for construct-rs CI smoke gate (META-CI-1d)
+#
+# 设计依据：docs/design/CI冒烟门禁设计.md §3（触发时机）+ §3.2（pre-commit 设计理由）
+#
+# 行为：
+#   - 调用 run_smoke.ps1 -Level "L1,L4"（pre-commit 默认快速门禁：质量 + 一致性）
+#   - 不跑 L2（maturin develop + smoke 矩阵太慢，会迫使开发者禁用 hook）
+#   - 不跑 L3（bench 10+ 分钟，commit 频率不可承载）
+#   - 失败时 exit 1 阻断 commit；开发者紧急情况可用 git commit --no-verify 绕过
+#
+# 安装方式（默认不安装）：
+#   powershell -File testing/ci/install_hook.ps1
+#
+# 卸载方式：
+#   rm .git/hooks/pre-commit
+#   （或临时禁用：git commit --no-verify）
+#
+# 注意：本 hook 是 POSIX sh 脚本（Git for Windows 自带 sh 解释器），
+#       内部通过 powershell.exe 调用 run_smoke.ps1。
+
+# 重定向输出到 stderr（git hook 惯例，避免污染 commit message 处理）
+exec 1>&2
+
+# 定位项目根（hook 在 .git/hooks/ 下，cwd 是项目根）
+REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "$REPO_ROOT" ]; then
+    echo "[pre-commit] ERROR: cannot resolve repo root" >&2
+    exit 1
+fi
+
+SMOKE_RUNNER="$REPO_ROOT/testing/ci/run_smoke.ps1"
+if [ ! -f "$SMOKE_RUNNER" ]; then
+    echo "[pre-commit] ERROR: run_smoke.ps1 not found at: $SMOKE_RUNNER" >&2
+    echo "[pre-commit]        (META-CI-1 应已完成；如缺失请检查仓库状态)" >&2
+    exit 1
+fi
+
+echo "[pre-commit] Running CI smoke gate (L1 quality + L4 consistency)..."
+echo "[pre-commit]   This takes ~30s-2min. To bypass: git commit --no-verify"
+
+# 调用 PowerShell 跑快速门禁（L1 + L4）
+# -Level 参数始终加双引号（PS 5.1 native comma 是数组操作符）
+# -ExecutionPolicy Bypass 避免执行策略限制
+powershell.exe -NoProfile -ExecutionPolicy Bypass \
+    -File "$SMOKE_RUNNER" -Level "L1,L4"
+exit_code=$?
+
+case $exit_code in
+    0)
+        echo "[pre-commit] Smoke gate PASS (exit 0). Proceeding with commit."
+        exit 0
+        ;;
+    1)
+        echo "" >&2
+        echo "[pre-commit] FAIL: Smoke gate reported failure (exit 1)." >&2
+        echo "[pre-commit]        See logs above for failing step." >&2
+        echo "[pre-commit]        Common fixes:" >&2
+        echo "[pre-commit]          - cargo build / clippy / fmt / test failure (L1)" >&2
+        echo "[pre-commit]          - CSV format or pointer broken (L4)" >&2
+        echo "[pre-commit]        To bypass in emergency: git commit --no-verify" >&2
+        echo "[pre-commit]        (bypass is recorded in reflog; use sparingly)" >&2
+        exit 1
+        ;;
+    2)
+        echo "" >&2
+        echo "[pre-commit] FAIL: Invalid -Level parameter (exit 2)." >&2
+        echo "[pre-commit]        This is a hook configuration bug." >&2
+        exit 1
+        ;;
+    *)
+        echo "" >&2
+        echo "[pre-commit] FAIL: Smoke gate exited with unexpected code $exit_code." >&2
+        echo "[pre-commit]        See logs above. Treat as failure." >&2
+        exit 1
+        ;;
+esac

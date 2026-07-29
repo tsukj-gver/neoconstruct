@@ -36,4 +36,4 @@ last_updated: 2026-07-27
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-表达式系统.md`
+- 引用证据：`docs/design/模块设计/模块设计-表达式系统.md`

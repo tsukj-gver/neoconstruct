@@ -8,7 +8,7 @@
 5. _collect_field_descriptors 与 _apply_dataclass_field_config
 6. dataclass 集成（RO init=False，default → kw_only）— 需要 Rust 扩展
 
-设计依据：docs/模块设计-表达式系统.md §2.1-§2.3
+设计依据：docs/design/模块设计/模块设计-表达式系统.md §2.1-§2.3
 """
 
 import inspect

@@ -1,7 +1,7 @@
 """16 种 Int* 格式 + Bytes + GreedyBytes 的 parse/build 往返测试。
 
 设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）、
-``docs/架构设计.md`` §A.4（类型描述符）。
+``docs/design/基础设施/架构设计.md`` §A.4（类型描述符）。
 
 每个测试用例：
 1. 构造单字段的 StructMixin 子类

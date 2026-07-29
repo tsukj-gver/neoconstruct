@@ -1,6 +1,6 @@
 """construct-rs vs Python construct 2.10.70 性能基准测试。
 
-设计依据：``docs/架构设计.md`` §G.4（验证方法）。
+设计依据：``docs/design/基础设施/架构设计.md`` §G.4（验证方法）。
 
 7 个用例矩阵（B1-B7），每个用例测量 parse 与 build 两个方向，对照：
 - **construct-rs**：本项目（Rust 内核 + Python 包层）

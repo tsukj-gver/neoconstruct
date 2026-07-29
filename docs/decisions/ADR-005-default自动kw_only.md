@@ -26,5 +26,5 @@ dataclass 的 `field(default=value)` 与位置参数顺序冲突——有默认�
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-表达式系统.md`
-- 关联：dataclass mixin 设计见 `docs/design/Mixin设计.md`
+- 引用证据：`docs/design/模块设计/模块设计-表达式系统.md`
+- 关联：dataclass mixin 设计见 `docs/design/基础设施/Mixin设计.md`

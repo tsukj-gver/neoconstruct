@@ -31,4 +31,4 @@ PyCallable 路径传给谓词的 context proxy **必须**是 `construct.lib.cont
 
 - 被 ADR-014 替代（v5 用户硬约束 #1-#4）
 - 关联事件：用户 2026-06-30 打回 Phase 4 验收
-- 关联教训：`experiences.md#L-04`（跨阶段模式未沉淀——v4 决策路径隐藏）+ `experiences.md#L-02`（理论估算替代实证数据——v4 性能估算无物理推导）
+- 关联教训：`harness/experiences.md#L-04`（跨阶段模式未沉淀——v4 决策路径隐藏）+ `harness/experiences.md#L-02`（理论估算替代实证数据——v4 性能估算无物理推导）

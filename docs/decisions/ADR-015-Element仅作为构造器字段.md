@@ -61,5 +61,5 @@ RepeatUntil 在迭代时调 **`Context::set_expr_value_only(element_field_idx, e
 ## Relations
 
 - 与 Index 决策平行（Index 仅作为构造器字段）
-- 引用证据：`docs/design/模块设计-Array.md` §2.5.3（一致性论证）/ §4.3.5（API 说明）/ §4.7.1（Element 字段语义）
+- 引用证据：`docs/design/模块设计/模块设计-Array.md` §2.5.3（一致性论证）/ §4.3.5（API 说明）/ §4.7.1（Element 字段语义）
 - 关联 ADR：ADR-014（RepeatUntil 终止表达式）

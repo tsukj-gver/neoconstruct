@@ -1,6 +1,6 @@
 """construct-rs Python 异常层次。
 
-设计依据：``docs/架构设计.md`` §B.8。
+设计依据：``docs/design/基础设施/架构设计.md`` §B.8。
 
 所有异常携带 ``message`` 与可选的 ``path`` 属性，``str(e)`` 格式与 Python construct
 2.10.70 对齐：path 非 None 时为 ``"Error in path {path}\\n{message}"``。

@@ -26,5 +26,5 @@ bit 顺序默认 MSB-first。LSB-first 通过 BitsSwapped 包装实现，**不�
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-BitStream.md`
+- 引用证据：`docs/design/模块设计/模块设计-BitStream.md`
 - Python 参考：`construct/construct/core.py` Bitwise / BitsSwapped

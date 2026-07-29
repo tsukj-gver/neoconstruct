@@ -1,7 +1,7 @@
 """错误场景测试。
 
 设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）与
-``docs/架构设计.md`` §B.8（错误映射）。
+``docs/design/基础设施/架构设计.md`` §B.8（错误映射）。
 
 覆盖：
 - StreamError：字节不足、流读/写失败

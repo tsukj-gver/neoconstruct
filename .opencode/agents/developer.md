@@ -1,4 +1,4 @@
-﻿---
+---
 description: 开发者，负责代码实现和单元测试编写。被 PM 分派执行开发任务，需根据设计文档编码并完成自检
 mode: subagent
 permission:
@@ -6,7 +6,11 @@ permission:
     "*": "deny"
     "construct-rs/**": "allow"
     "plans/**/过程记录.md": "allow"
+    "plans/**/traces/**": "allow"
+    "plans/meta/**": "allow"
     "experiments/**": "allow"
+    "harness/**": "allow"
+    "testing/**": "allow"
   bash:
     "*": "allow"
     "git push*": "deny"
@@ -36,7 +40,7 @@ permission:
 
 ## 启动加载（强制）
 
-**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `docs/agents/developer-extension.md`** 获取项目特定：
+**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `harness/extensions/developer-extension.md`** 获取项目特定：
 - 工作流状态名与子任务标识格式
 - 实现语言编码红线（如 Rust 编码红线）
 - 项目特定自检项（如性能门禁 S-PERF）

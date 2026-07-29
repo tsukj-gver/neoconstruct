@@ -1,0 +1,249 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 9,
+  "timestamp": "2026-07-29T00:00:00+08:00",
+  "author": "pm (AHE iteration 9 — 过程记录拆分 + 目录重组)",
+  "scope_summary": "解决 plans/phase4-array/过程记录.md（11837 行/755KB）严重臃肿导致的检索低效。三层治理：(1) 物理拆分为 12 个 phase4 traces + 5 个 META traces；(2) META 类 cross-phase 资产从 phase4 抽离到新建 plans/meta/；(3) docs/design/ 10 个文件按 模块设计/ + 基础设施/ 分类。L-07 对策：predicted_impact 含全量 cross-ref 扫描结果（200 处 broken refs）。L-10 候选：规范存在 ≠ 实际执行（§5 per-子任务规范自 iteration 3 已存在但从未执行）",
+  "evaluate_evidence": {
+    "trace_file": "experiments/eval-2026-07-29-iter9-dogfood.md",
+    "task_category": "执行类",
+    "task_description": "过程记录物理拆分 + META 抽离 + docs/design 子目录化",
+    "failures_classified": [
+      "Failure #1: §5 per-子任务文件规范自 iter3 已存在（plans/phaseN/过程记录-X.Y.md + TRACE-<phase>.<task>）但实际从未执行——候选 L-10（规范存在 ≠ 实际执行）",
+      "Failure #2: META 类 cross-phase 资产堆积在 phase4 目录（22 个 H2 段中 ~40% 是 META-INV/META-CI）——结构性目录错位",
+      "Failure #3: L-07 教训事件#3——文件重组类 iteration 漏 cross-ref 持续存在（本次扫描发现 200 处，远超 iter3 的 42 处）"
+    ],
+    "analyze_summary": "iter9 启动前执行 L-07 对策 §A1 全量扫描（explore agent），识别 6 个风险点 + 200 处 broken refs，其中 P0=137（CSV 行号引用）+ P1=16（agent glob + 阶段总纲）+ P2=~70（设计文档互引）+ P3=~70（过程记录内部，归档时保留）。R3 隐藏代码依赖（run_l4_consistency.py C5/C6）触发新增 DEV 子任务"
+  },
+  "changes": [
+    {
+      "change_id": "ch_032",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "plans/meta/ + plans/phase4-array/traces/ + plans/phase4-array/archive/（目录骨架 + 17 个 trace 文件 + 2 个 META 索引）",
+      "summary": "拆分 phase4 过程记录.md（11837 行）为 12 个 phase4 traces（4.0-设计流/4.1-ArrayNode/4.2-GreedyRangeNode/4.3-PrefixedArrayNode/4.4-Index-StopIf/4.5-RepeatUntil/4.6-集成测试/4.7-per-iter优化/4.x-性能调查/4.x-错误路径/4-AUDIT-Phase4审计/Phase4-阶段验收）+ 抽离 META-INV/META-CI 到 plans/meta/（4 个 CI traces: 1a/1b/1c/1d + 1 个 INV trace: v1v2-CSV格式）+ 重写 phase4/索引.md + 创建 meta/CI-冒烟门禁/索引.md + meta/INV-构造器清单/索引.md",
+      "failure_evidence": "phase4/过程记录.md 11837 行/755KB，60+ H2 段全堆单文件，单子任务检索需扫描全文件",
+      "root_cause": "(1) iter3 §5 per-子任务规范从未执行；(2) META 类 cross-phase 资产按时间产出（phase4 期间）堆叠到 phase4 目录，无物理隔离",
+      "targeted_fix": "按 H2 段子任务边界物理拆分；META 类按 cross-phase 资产属性抽到 plans/meta/；每个 trace 含独立 frontmatter（id: TRACE-phase4-<X.Y> 或 TRACE-meta-<CI/INV>-<id> / status / owners / manifest_refs）",
+      "predicted_impact": {
+        "expected_fixes": [
+          "单子任务检索 token 消耗降 10-50x（11837 行 → 100-1500 行/文件）",
+          "META 类 cross-phase 资产与 phase4 物理隔离，未来 phase 可独立引用",
+          "frontmatter 粒度从 1（phase 级）→ 17（子任务级），机器可解析 per-子任务状态",
+          "phase4/索引.md 从 33 行升级为真正导航枢纽"
+        ],
+        "at_risk_regressions": [
+          "L-07 风险：拆分触发 ~200 处 broken refs（详见 cross_reference_check）",
+          "R3 隐藏代码依赖：run_l4_consistency.py C5/C6 校验逻辑（CSV 行号引用）必须同步修改（ch_040）",
+          "R2 段落归属判断：§4.6-E01-INVEST 归入 4.6-集成测试.md（PM 决策）",
+          "若未来不强制 §5 阈值，phase5+ 可能重演臃肿——ch_036 加 1000 行强制阈值是防线"
+        ],
+        "rationale": "规范来源 HARNESS.md §7 组件正交性（cross-phase 与 phase 专属物理隔离）+ 文档元数据规范 §5 per-子任务模板（iter3 引入但未执行）"
+      }
+    },
+    {
+      "change_id": "ch_033",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "plans/phase4-array/过程记录.md → plans/phase4-array/archive/过程记录-archive-20260728.md",
+      "summary": "原 11837 行文件归档：rename + frontmatter 加 status: archived + superseded_by: [TRACE-phase4-*]",
+      "failure_evidence": "拆分后原文件不应保留为活跃文件（避免双源真相），但完全删除会丢失原始时序",
+      "root_cause": "归档原则：历史快照保留但隔离",
+      "targeted_fix": "rename 为 archive/过程记录-archive-20260728.md；frontmatter status: archived；文件头加注释'本文件为 2026-07-28 快照，所有内容已拆分到 traces/，路径引用可能失效'；内部 ~70 处 docs/design 旧路径引用按 L-07 教训保留作历史快照",
+      "predicted_impact": {
+        "expected_fixes": ["目录干净（活跃文件区与归档区物理隔离）", "git history 完整保留（rename 而非 delete）"],
+        "at_risk_regressions": ["若 agent 误读 archive/ 当活跃数据，可能产生混淆——索引.md 必须 显式标注 archive/ 性质"],
+        "rationale": "规范来源 L-07 教训（历史快照保留）+ HARNESS.md §7 组件正交性"
+      }
+    },
+    {
+      "change_id": "ch_034",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "docs/design/ 模块设计/ + 基础设施/（10 个文件移动）",
+      "summary": "10 个设计文件子目录化：模块设计/（6 个：模块设计-Array/Array性能优化/BitStream/Context-Vec优化/表达式系统/错误路径优化）+ 基础设施/（4 个：架构设计/FFI设计/Mixin设计/CI冒烟门禁设计）",
+      "failure_evidence": "docs/design/ 单层平铺 10 个文件，模块设计与 cross-phase 基础设施设计混杂",
+      "root_cause": "无分类原则——所有 .md 都堆 design/ 根",
+      "targeted_fix": "保留磁盘实际文件名（不重命名，规避 R1）；按 docs/design/模块设计/ + docs/design/基础设施/ 物理分类",
+      "predicted_impact": {
+        "expected_fixes": ["设计文档分类清晰（模块 = phase 专属；基础设施 = cross-phase）", "未来新增设计文档有明确归属规则"],
+        "at_risk_regressions": ["L-07 风险：~145 处外部引用需同步更新（详见 cross_reference_check）", "若未来无明确分类规则，可能再次混杂——文档元数据规范.md 补充分类准则是防线"],
+        "rationale": "规范来源 HARNESS.md §7 组件正交性"
+      }
+    },
+    {
+      "change_id": "ch_035",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": ".opencode/agents/{developer,vetter,reviewer,auditor}.md + opencode.json",
+      "summary": "P0 权限扩展：4 个 agent 文件 permissions 追加 'plans/**/traces/**' + 'plans/meta/**' glob（保留原 plans/**/过程记录.md 兼容历史 phase）",
+      "failure_evidence": "原 glob 'plans/**/过程记录.md' 是精确文件名匹配，拆分后 DEV/REV/VET/AUDITOR 对 traces/*.md 与 plans/meta/*.md 全部失去写权限",
+      "root_cause": "iter3 引入 glob 时未预见 per-子任务拆分需求",
+      "targeted_fix": "permissions 追加 'plans/**/traces/**': 'allow' + 'plans/meta/**': 'allow'；保留原 'plans/**/过程记录.md': 'allow' 兼容 phase0/1/2/2.5/3；archive/ 不加（归档只读原则）；architect.md 不改（PM 决策 R5：plans/meta/ 由 PM 维护）",
+      "predicted_impact": {
+        "expected_fixes": ["DEV/REV/VET/AUDITOR 恢复对新 trace 文件的写权限", "历史 phase0-3 过程记录权限不变"],
+        "at_risk_regressions": ["若 opencode glob 不支持 ** 跨多级目录，需调整为 'plans/*/traces/*' + 'plans/meta/*' 等——执行时验证"],
+        "rationale": "规范来源 opencode 框架 permission 机制 + AGENTS.md §2 文件读写权限"
+      }
+    },
+    {
+      "change_id": "ch_036",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "docs/文档元数据规范.md",
+      "summary": "P1 规范 enforcement：§5 加目录结构约定（plans/phaseN/traces/ + archive/ + plans/meta/）+ 强制阈值（单文件 > 1000 行或 > 5 个 H2 子任务必须拆分）+ AUDITOR 第 8 类审计项指针",
+      "failure_evidence": "iter3 §5 per-子任务规范存在但从未执行（无 enforcement）",
+      "root_cause": "规范未配 enforcement 机制——AUDITOR 无相关审计项、无强制阈值",
+      "targeted_fix": "§5 加目录结构示意图；§5.1 加'单文件强制拆分阈值'；提示 AUDITOR 第 8 类审计（trace 文件大小趋势）",
+      "predicted_impact": {
+        "expected_fixes": ["规范有 enforcement——未来 phase5+ 必须走新结构", "AUDITOR 有审计依据"],
+        "at_risk_regressions": ["若 AUDITOR 不实际执行审计，规范仍可能被绕过——这是流程层风险，需 phase 子任务流程配合"],
+        "rationale": "规范来源 L-10 候选教训（规范存在 ≠ 实际执行）"
+      }
+    },
+    {
+      "change_id": "ch_037",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "docs/perf-scenarios.csv + docs/constructors-inventory.csv",
+      "summary": "P0 CSV source_ref 格式迁移：137 处 '过程记录.md:NNNN' → 'traces/X.Y-name.md'（无行号无锚点，最稳定格式）",
+      "failure_evidence": "拆分后原行号 NNNN 全部失效；L4 一致性核查 C5/C6（行号校验）会全 FAIL",
+      "root_cause": "CSV 设计初未考虑文件重组——行号引用天然脆弱",
+      "targeted_fix": "source_ref 列从 '过程记录.md:NNNN;...' 改为 'traces/X.Y-name.md;...'；保留 ';plans/00-项目进度.md:NN' 等其他源不动；C5/C6 校验逻辑同步修改（ch_040）",
+      "predicted_impact": {
+        "expected_fixes": ["CSV 引用永久稳定（不依赖行号/锚点）", "L4 门禁恢复正常工作（依赖 ch_040）"],
+        "at_risk_regressions": ["丢失行号级精度（改为文件级）——但 CSV 已有 phase/task/scenario 列表达语义，可接受", "若 ch_040 未同步，L4 门禁仍 FAIL——ch_037 与 ch_040 必须配对完成"],
+        "rationale": "PM 决策 R3/R4：文件存在性校验是稳定最小集"
+      }
+    },
+    {
+      "change_id": "ch_038",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "experiences.md + docs/decisions/ADR-020 + docs/agents/architect-extension.md + docs/reviews/* + docs/analysis/* + plans/phase0-3/* + plans/00-项目进度.md",
+      "summary": "P1/P2 cross-reference 修复（~70 处活跃文件）：experiences.md L-09 §4.6-E01-INVEST 段、ADR-020 META-CI 段、ADR-001~019 设计文档引用、architect-extension.md 3 处、reviews/analysis 5 处、phase0-3 过程记录与总纲 ~30 处、00-项目进度.md",
+      "failure_evidence": "L-07 全量扫描识别的 P1/P2 引用",
+      "root_cause": "iter3 以来积累的引用未对齐本次重组",
+      "targeted_fix": "统一修复规则：docs/design/模块设计-*.md → docs/design/模块设计/模块设计-*.md；docs/design/{架构,FFI,Mixin,CI冒烟门禁}设计.md → docs/design/基础设施/*；§4.6-E01-INVEST → traces/4.6-集成测试.md §4.6-E01-INVEST；META-CI-1{a,b,c,d} → plans/meta/CI-冒烟门禁/traces/1{a,b,c,d}-*.md",
+      "predicted_impact": {
+        "expected_fixes": ["所有活跃文档引用对齐新结构"],
+        "at_risk_regressions": ["修复面广（~70 处分布在 ~35 个文件）——可能漏改，需 commit 前 grep 二次校验"],
+        "rationale": "L-07 教训对策 §A2：拆分类 iteration 必须修 cross-ref"
+      }
+    },
+    {
+      "change_id": "ch_039",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": "construct-rs/python/ + construct-rs/tests/ + construct-rs/Cargo.toml + construct-rs/pyproject.toml + experiments/*.py（非 src/）",
+      "summary": "R7 顺带修复预先 broken refs：construct-rs/python/、tests/、Cargo.toml、pyproject.toml、experiments/ 中已存在的 docs/架构设计.md / docs/模块设计-Array.md 等缺 design/ 前缀的 broken refs（统一改为新路径 docs/design/基础设施/ + docs/design/模块设计/）",
+      "failure_evidence": "L-07 扫描发现的预先存在 broken（非本次引入）",
+      "root_cause": "历史文档移动留下的 stale 引用，无人修复",
+      "targeted_fix": "统一改为新路径；construct-rs/src/ 不动（DEV 业务代码范围）",
+      "predicted_impact": {
+        "expected_fixes": ["预先 broken 借机修复，追溯链完整"],
+        "at_risk_regressions": ["src/ 内仍有 broken，留待 DEV 后续处理"],
+        "rationale": "L-07 对策 §A2：拆分是修复 stale 引用的天然时机"
+      }
+    },
+    {
+      "change_id": "ch_040",
+      "component": "tool_implementations",
+      "subtype": "update",
+      "file_path": "experiments/ci/run_l4_consistency.py",
+      "summary": "【DEV 子任务】L4 C5/C6 校验逻辑修改：支持新 CSV 格式（'traces/X.md' 无行号）+ 兼容旧格式（'path:NNNN' 行号）",
+      "failure_evidence": "CSV source_ref 格式从 '过程记录.md:NNNN' 改为 'traces/X.md' 后，C5/C6 按行号校验的逻辑会全 FAIL",
+      "root_cause": "L4 校验逻辑与 CSV 格式紧耦合（行号解析正则）",
+      "targeted_fix": "C5/C6 解析逻辑：若 source_ref 项含 ':' → 按行号校验（兼容历史）；若不含 ':' → 按文件存在性校验（新格式）",
+      "predicted_impact": {
+        "expected_fixes": ["L4 门禁恢复工作 + 兼容历史 CSV 数据"],
+        "at_risk_regressions": ["若 DEV 实施时正则有 bug，可能 silently skip 校验——需 VET 审查"],
+        "rationale": "R3 隐藏代码依赖必须配对修复"
+      }
+    },
+    {
+      "change_id": "ch_041",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "experiments/eval-2026-07-29-iter9-dogfood.md",
+      "summary": "iter9 dogfood 轨迹（第 5 份 Evaluate 证据）",
+      "failure_evidence": "iter6 §C1 协议要求每 AHE iteration 产出 dogfood",
+      "root_cause": "常规 Evaluate 实践",
+      "targeted_fix": "含 task_id / tool_calls / decision_points / failures（含 L-10 候选识别）/ outcome / Analyze",
+      "predicted_impact": {
+        "expected_fixes": ["§C 协议第 5 次验证", "L-10 候选沉淀判断"],
+        "at_risk_regressions": [],
+        "rationale": "Evaluate 常规 dogfood"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "iter9 启动前分派 explore agent 执行全量扫描（L-07 对策 §A1），扫描整个 workspace（除 construct/ + construct-rs/src/ + .git/），识别 ~200 处受影响引用",
+    "scan_summary": {
+      "total_affected_files": 50,
+      "total_references": 200,
+      "by_priority": {
+        "P0_data_integrity": 137,
+        "P1_permission_and_phase_entry": 16,
+        "P2_active_doc_refs": 70,
+        "P3_archive_internal_self_refs": 70
+      }
+    },
+    "key_risks_identified": [
+      "R1: 任务描述的 4 个设计文件名错误（CI冒烟门禁设计.md 而非 CI冒烟门禁.md 等）——PM 决策保留磁盘实际名",
+      "R2: §4.6-E01-INVEST 段落归属——PM 决策归入 traces/4.6-集成测试.md",
+      "R3: run_l4_consistency.py C5/C6 隐藏代码依赖——ch_040 配对修复",
+      "R4: 锚点稳定性——PM 决策 CSV 用文件级引用（无锚点）",
+      "R5: ARCH 对 plans/meta/ 权限——PM 决策 plans/meta/ 由 PM 维护",
+      "R6: archive/ 权限——PM 决策归档只读",
+      "R7: 预先 broken refs（construct-rs/python/ 等）——ch_039 顺带修复"
+    ],
+    "at_risk_regressions_categories": {
+      "path_regression": [
+        "docs/design/ 10 文件移动触发 ~145 处引用更新（ch_038 + ch_039）",
+        "phase4 过程记录.md 拆分触发 137 处 CSV 引用更新（ch_037）"
+      ],
+      "metadata_regression": [
+        "新建 trace 文件 frontmatter（id: TRACE-phase4-<X.Y> / TRACE-meta-<CI/INV>-<id>），需符合 §3 文档类型前缀"
+      ],
+      "functional_regression": [
+        "run_l4_consistency.py 校验逻辑（ch_040）——若漏改 L4 门禁全 FAIL",
+        "若 agent glob（ch_035）未先于拆分执行，写 trace 文件会被 opencode 拒绝"
+      ]
+    }
+  },
+  "process_lesson": {
+    "title": "L-10 候选（规范存在 ≠ 实际执行）+ L-07 事件#3（文件重组漏 cross-ref）",
+    "description": "iter3 引入 §5 per-子任务文件规范（plans/phaseN/过程记录-X.Y.md + TRACE-<phase>.<task>），但到 iter9 才首次执行——3 年内 6 个 phase 全部违反，根因是规范无 enforcement（无强制阈值 + 无 AUDITOR 审计项）。同时本次扫描发现 200 处 broken refs，远超 iter3 的 42 处，证明 L-07 教训的'文件重组类 iteration 漏 cross-ref'是反复出现的模式（事件#3）",
+    "lesson_home": "本 manifest + experiments/eval-2026-07-29-iter9-dogfood.md",
+    "preventive_check": "iter10 应：(1) 若 L-10 候选达沉淀阈值（≥3 次同类失败），正式写入 experiences.md；(2) §5 加 enforcement 后，AUDITOR 第 8 类审计项实际生效验证；(3) 文件重组类 iteration 强制 §A1 全量扫描作为 manifest 录入条件"
+  },
+  "verification": {
+    "status": "verified_with_followups",
+    "scheduled_at": "Phase 5 启动时验证：(1) phase4 单子任务检索 token 是否真的下降（vs phase0-3 旧结构）；(2) §5 强制阈值是否实际阻止 phase5+ 臃肿；(3) AUDITOR 第 8 类审计是否实际触发；(4) plans/meta/ 是否被未来 phase 实际引用；(5) L4 门禁（ch_040 后）是否恢复正常工作；(6) L-10 候选是否在 iter10+ 沉淀",
+    "completed_at": "2026-07-29",
+    "result": {
+      "expected_fixes_verified": [
+        "phase4/traces/ 含 12 个文件 ✓",
+        "meta/CI-冒烟门禁/traces/ 含 6 个文件 + INV 含 1 个文件 ✓",
+        "archive/过程记录-archive-20260728.md status: archived ✓",
+        "活跃文件中 phase4 过程记录.md 引用 0 处残留 ✓",
+        "活跃文件中 docs/design/模块设计-[^/] 引用 0 处残留（仅 archive + manifest 保留作历史快照）✓",
+        "L4 C5+C6 PASS（ch_040 配对修复）✓",
+        "19 个 trace 文件 frontmatter 完整 ✓"
+      ],
+      "unexpected_fixes": [
+        "iter9 启动前 explore agent 全量扫描识别 R3 隐藏代码依赖（run_l4_consistency.py C5/C6）—— manifest 起草时未预见，扫描后补 ch_040",
+        "construct-rs/python/ + tests/ 中 16 处预先 broken refs（R7）借机修复",
+        "trace 文件内 50 处旧 docs/design 路径引用修复（原计划按 L-07 教训保留作快照，实际修复以保持 trace 文件作为活跃文档的正确性）"
+      ],
+      "regressions_observed": [],
+      "false_predictions": [
+        "无核心 false prediction——所有 P0/P1/P2 预测均触发并完成"
+      ]
+    },
+    "verification_method_pre_commit": "执行清单：(a) Get-ChildItem plans/phase4-array/traces/*.md 返回 12 个文件 + plans/meta/CI-冒烟门禁/traces/*.md 返回 6 个 + plans/meta/INV-构造器清单/traces/*.md 返回 1 个 ✓；(b) archive/过程记录-archive-20260728.md 存在 + frontmatter status: archived ✓；(c) grep -r '过程记录\\.md:' docs/ plans/ .opencode/ AGENTS.md experiences.md 仅命中 archive/ + manifest 内文件 ✓；(d) grep -r 'docs/design/模块设计-' 仅命中 archive/ + manifest/ 内文件 ✓（历史快照保留）；(e) L4 C5+C6 PASS（experiments/ci/run_l4_consistency.py 实测）；(f) 19 个 trace 文件 frontmatter 完整 ✓"
+  }
+}

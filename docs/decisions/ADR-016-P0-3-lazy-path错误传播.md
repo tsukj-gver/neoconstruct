@@ -51,6 +51,6 @@ enum Path {
 
 - 首次验证：Phase 1（StructNode）
 - 推广：Phase 4.7（Array 系列）
-- 关联教训：`experiences.md#L-04`（Phase 4 未采用此模式导致性能塌方后补迁移）
+- 关联教训：`harness/experiences.md#L-04`（Phase 4 未采用此模式导致性能塌方后补迁移）
 - 引用证据：`docs/reviews/架构审查-重复代码与抽象质量.md` §1.2
 - 强制规范：每个新 Node 设计文档必须含"模式采用声明"段（见 `docs/decisions/README.md`）

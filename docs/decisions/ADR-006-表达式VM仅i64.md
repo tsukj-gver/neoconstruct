@@ -30,5 +30,5 @@ last_updated: 2026-07-27
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-表达式系统.md`
-- 关联教训：`experiences.md#L-01`（中间表示层违反）— 表达式 VM 内的 i64 操作不跨 FFI
+- 引用证据：`docs/design/模块设计/模块设计-表达式系统.md`
+- 关联教训：`harness/experiences.md#L-01`（中间表示层违反）— 表达式 VM 内的 i64 操作不跨 FFI

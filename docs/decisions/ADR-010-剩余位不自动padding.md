@@ -27,5 +27,5 @@ Bitwise 解析若干 BitsField 后可能剩余不足 8 位。Python construct �
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-BitStream.md`
+- 引用证据：`docs/design/模块设计/模块设计-BitStream.md`
 - Python 参考：`construct/construct/core.py` Bitwise

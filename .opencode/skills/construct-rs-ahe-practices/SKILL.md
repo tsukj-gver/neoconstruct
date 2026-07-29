@@ -29,7 +29,7 @@ description: construct-rs 项目对 AHE（Agentic Harness Engineering）通用�
 1. 用 `grep -r "docs/<旧路径>" --include="*.md" .`（或 plans/ 等）列出所有引用旧路径的位置
 2. 把每个引用作为 manifest `at_risk_regressions` 字段的**具体条目**（格式："文件 X 第 Y 行引用 Z 会 broken"）
 3. 在 `targeted_fix` 字段明确"批量替换 N 处引用为新路径"
-4. **漏报后果**：iteration 3 实测 42 处 broken refs 完全未预测（详见 `experiences.md#L-07`），导致 commit 后需要 verify 修复
+4. **漏报后果**：iteration 3 实测 42 处 broken refs 完全未预测（详见 `harness/experiences.md#L-07`），导致 commit 后需要 verify 修复
 
 #### A2. Frontmatter 新增清单（涉及 frontmatter 规范时强制）
 
@@ -93,7 +93,7 @@ AUDITOR 审计 manifest 时，若修改涉及文件重组但 `at_risk_regression
 
 | 类别 | 示例任务 | 检验的 harness 能力 |
 |------|---------|---------------------|
-| **启动类** | 新 agent 读 AGENTS.md / MEMORY.md / experiences.md 后回答"Phase 4 当前状态及阻塞点" | LTM 索引可读性 / 跨文件指针一致性 |
+| **启动类** | 新 agent 读 AGENTS.md / harness/MEMORY.md / harness/experiences.md 后回答"Phase 4 当前状态及阻塞点" | LTM 索引可读性 / 跨文件指针一致性 |
 | **检索类** | 找 P0-3 lazy path 模式的设计决策记录 / 找 §0 原则对照表模板 | ADR / 教训索引检索效率 |
 | **执行类** | 一个完整子任务（PENDING → ... → ACCEPTED） | 工作流合规 / 角色隔离 / manifest 生成 |
 
@@ -109,12 +109,12 @@ AUDITOR 审计 manifest 时，若修改涉及文件重组但 `at_risk_regression
 | `task_category` | 启动类 / 检索类 / 执行类 |
 | `tool_calls` | 工具调用序列（含次数 + 重复检测——同操作 ≥2 次记为 repeat） |
 | `decision_points` | 关键决策点 + 依据（**引用规范条款必须标注来源，详见 §E2**） |
-| `failures` | 失败/重试/用户驳斥 + 模式分类（与 experiences.md L-XX 对齐） |
+| `failures` | 失败/重试/用户驳斥 + 模式分类（与 harness/experiences.md L-XX 对齐） |
 | `outcome` | 完成 / 部分完成 / 失败 |
 
 ### C4. 失败模式分类（强制对齐 L-XX）
 
-每个 failure 必须尝试对齐到 `experiences.md` 已有教训（L-01~L-08）：
+每个 failure 必须尝试对齐到 `harness/experiences.md` 已有教训（L-01~L-08）：
 
 - 若匹配 L-XX → 在轨迹中标注 `L-XX`，可立即触发 manifest 生成
 - 若不匹配任何 L-XX → 标记 `候选 L-XX`，进入 Analyze 步骤评估是否新增教训
@@ -126,13 +126,13 @@ AUDITOR 审计 manifest 时，若修改涉及文件重组但 `at_risk_regression
 1. 跨轨迹找模式化失败（同一失败在 2+ 份轨迹中出现 → 模式化）
 2. 提取根因（不是"工具报错"，而是"为什么 agent 不知道正确用法"）
 3. 若现有 L-XX 对策可覆盖 → 不新增教训，触发对应对策
-4. 若无覆盖 → 在 `experiences.md` 新增 L-XX，同时在 §D（本节）补充对应 Evaluate 检查项
+4. 若无覆盖 → 在 `harness/experiences.md` 新增 L-XX，同时在 §D（本节）补充对应 Evaluate 检查项
 
 ---
 
 ## D. AHE 规范解读检查清单（L-08 对策）
 
-> **规范来源**：本节是项目级补充，对策对应 `experiences.md §L-08`（AHE 规范解读层错误）。
+> **规范来源**：本节是项目级补充，对策对应 `harness/experiences.md §L-08`（AHE 规范解读层错误）。
 > L-08 是 iter5 dogfood 首次发现的认知层错误，比 L-07（执行层 predicted_impact 漏报）更基础。
 
 ### D1. 触发条件（强制）
@@ -169,7 +169,7 @@ manifest / 轨迹文件 / 过程记录中所有 `failure_evidence` / `root_cause
 | `AGENTS.md §Z` | 项目 System Rules | `AGENTS.md §3 工作流` |
 | `construct-rs-ahe-practices §W` | 项目级 AHE 补充（本 skill） | `construct-rs-ahe-practices §D2` |
 | `auditor.md` / `pm.md` 等 | 项目级 agent 角色定义 | `auditor.md §审计清单` |
-| `experiences.md §L-XX` | 跨阶段教训 | `experiences.md §L-07` |
+| `harness/experiences.md §L-XX` | 跨阶段教训 | `harness/experiences.md §L-07` |
 
 ### D4. "X 角色未执行 Y 流程" 判断的强制前置检查
 
@@ -201,8 +201,8 @@ PM 发现"某角色未执行某流程"时，**禁止**直接判定为漏洞。�
 ## 关联文档
 
 - 通用 AHE skill：`.opencode/skills/agentic-harness-engineering/SKILL.md`
-- 教训 L-07：`experiences.md#L-07`（执行层：predicted_impact 漏报）
-- 教训 L-08：`experiences.md#L-08`（认知层：AHE 规范解读错误）
+- 教训 L-07：`harness/experiences.md#L-07`（执行层：predicted_impact 漏报）
+- 教训 L-08：`harness/experiences.md#L-08`（认知层：AHE 规范解读错误）
 - 文档元数据规范：`docs/文档元数据规范.md`
 - 历史失败证据：`manifests/change_2026-07-27-docs-restructure.json` verification.regressions_observed
 - iter5 dogfood 轨迹：`experiments/eval-2026-07-27-iter5-dogfood.md`（本次 iteration 自身轨迹，作为首份 Evaluate 证据）
@@ -213,4 +213,4 @@ PM 发现"某角色未执行某流程"时，**禁止**直接判定为漏洞。�
 
 - 本 skill 由 PM 维护
 - 通用 AHE skill 升级时（从上游同步），本 skill 不受影响（项目特定）
-- 新发现的 AHE 实践盲区应同时沉淀到 `experiences.md#L-XX` 和本 skill 的对应检查项
+- 新发现的 AHE 实践盲区应同时沉淀到 `harness/experiences.md#L-XX` 和本 skill 的对应检查项

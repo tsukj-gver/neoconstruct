@@ -24,7 +24,7 @@ last_updated: 2026-07-28
 
 ### 1.2 VET 之前排查（H1-H4）的不充分性
 
-VET 在 4.6 审查中用 4 个假设排查 E01 矛盾（过程记录 offset 7386-7398）：
+VET 在 4.6 审查中用 4 个假设排查 E01 矛盾（详见 `plans/phase4-array/traces/4.6-集成测试.md §4.6-E01-INVEST`，原 offset 7386-7398）：
 
 | 假设 | VET 论断 | 充分性 |
 |------|---------|--------|
@@ -254,7 +254,7 @@ E01 当前稳态 9.4-9.7x，是 B1 类边界场景（零工作量 + 入口开销
 - 怀疑性能回归时，PM 优先分派 ARCH 做 Controlled A/B Test（同会话交替 + 对照组），而非依赖跨时段单次测量对比。
 - performance-gate SKILL 可新增"边界场景回归判定"章节：Rust 侧 <300ns 的场景，加速比下降需用 Rust 侧绝对 ns 趋势确认（而非仅加速比），且需 ≥3 轮采样。
 
-**此为建议，是否沉淀 L-09 由 PM 决策**（AGENTS.md §5：PM 是 experiences.md 维护决策者）。
+**此为建议，是否沉淀 L-09 由 PM 决策**（AGENTS.md §5：PM 是 harness/experiences.md 维护决策者）。
 
 ---
 

@@ -34,5 +34,5 @@ Python construct 用 `this.xxx` 表达字段引用，运行时通过 `Path` 对�
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-表达式系统.md`
+- 引用证据：`docs/design/模块设计/模块设计-表达式系统.md`
 - 关联 Python 源码：`construct/construct/expr.py`（Path 类）

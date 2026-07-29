@@ -31,5 +31,5 @@ parse 直接返回 Python `list`，**不包装为 ListContainer 子类**。
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-Array.md`
+- 引用证据：`docs/design/模块设计/模块设计-Array.md`
 - Python 参考：`construct/construct/lib/containers.py` ListContainer

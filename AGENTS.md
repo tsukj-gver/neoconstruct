@@ -2,7 +2,7 @@
 
 > 项目级 System Rules（最高优先级）。所有角色（PM / ARCH / DEV / REV / VET / AUDITOR）启动时必读。
 > 遵循 HARNESS.md v1.0 + AHE §演化循环（Evaluate → Analyze → Improve → Verify）。
-> 详细角色职责见 `.opencode/agents/<role>.md`；详细规范入口见 `MEMORY.md`。
+> 详细角色职责见 `.opencode/agents/<role>.md`；详细规范入口见 `harness/MEMORY.md`。
 
 ## 0. 项目定位（违反即推倒重来）
 
@@ -19,7 +19,7 @@
 7. **错误处理**：`Result<T, ConstructError>` + `thiserror`，错误携带 `path` 字段
 8. **Stream 抽象**：纯 Rust 内部抽象，不跨 FFI
 
-> **历史教训**：违反上述原则的实现，性能仅为原版 0.3-1.8x。本项目于 2026-06-21 推倒重来。详见 `experiences.md §L-01`。
+> **历史教训**：违反上述原则的实现，性能仅为原版 0.3-1.8x。本项目于 2026-06-21 推倒重来。详见 `harness/experiences.md §L-01`。
 
 ## 1. 工作流管道
 
@@ -40,16 +40,16 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 
 | 角色 | 可写 | 只读/禁止 |
 |------|------|----------|
-| PM | 除业务代码外的全部（`plans/`、`docs/`、`.opencode/`、`experiments/`） | `construct-rs/src/`、`construct/` |
-| ARCH | `docs/`（设计文档）、`experiments/` | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`plans/phaseN/过程记录.md`、`experiments/` | `docs/`、`plans/phaseN/总纲.md` |
-| REV / VET / AUDITOR | `plans/phaseN/过程记录.md`、`experiments/` | 全部 |
+| PM | 除业务代码外的全部（`harness/`、`plans/`、`docs/`、`.opencode/`、`testing/`、`experiments/`） | `construct-rs/src/`、`construct/` |
+| ARCH | `docs/`（设计文档）、`experiments/`、`harness/extensions/`（自己角色）、`testing/`（设计调整） | `plans/`、`construct/` |
+| DEV | `construct-rs/src/**`、`plans/**/traces/**`、`plans/meta/**`、`testing/`（CI runner 实施）、`harness/`（自身轨迹记录） | `docs/`、`plans/phaseN/总纲.md` |
+| REV / VET / AUDITOR | `plans/**/traces/**`、`plans/meta/**`、`testing/`、`harness/` | 全部 |
 
-**禁止**（全员）：`construct/`（Python 原版只读参考）/ `construct-rs/src/` 业务代码（仅 DEV）/ 已验收阶段总纲（除非 PM 授权）
+**禁止**（全员）：`construct/`（Python 原版只读参考）/ `construct-rs/src/` 业务代码（仅 DEV）/ 已验收阶段总纲（除非 PM 授权）/ `.opencode/skills/agentic-harness-engineering/`（通用 AHE skill，L-08 防护，不可项目化修改）
 
 ## 3. 全员红线
 
-- **§0 不可违反**：parse 返回 dict 跨 FFI / build 接收 dict 跨 FFI / 引入输入输出 trait 抽象层 → 立即驳回（详见 `experiences.md §L-01`）
+- **§0 不可违反**：parse 返回 dict 跨 FFI / build 接收 dict 跨 FFI / 引入输入输出 trait 抽象层 → 立即驳回（详见 `harness/experiences.md §L-01`）
 - **质量门禁**（每次出口必须通过）：`cargo build` + `cargo clippy`（零 warning）+ `cargo fmt --check` + `cargo test`（全 PASS）。详见 `developer.md §自检清单`
 - **Rust 编码红线**：禁止 `unwrap()`/`expect()`/panic 在非测试代码 / 禁止 `TODO`/`FIXME` / 禁止硬编码魔法数字 / 所有 `pub` 项必须有 `///` 文档注释 / parse/build 对称。详见 `developer.md §Rust 编码红线`
 - **跨阶段决策**：所有新功能设计不可违反 `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）
@@ -63,14 +63,14 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 任何角色启动时按序读取：
 
 1. 本文件（System Rules 核心）
-2. `MEMORY.md`（L0 索引：项目定位 / 阶段索引 / Harness 组件 / 教训索引 / 性能快照）
-3. `experiences.md`（L1 教训：L-01~L-08 模式化失败，全员决策前对照）
+2. `harness/MEMORY.md`（L0 索引：项目定位 / 阶段索引 / Harness 组件 / 教训索引 / 性能快照）
+3. `harness/experiences.md`（L1 教训：L-01~L-10 模式化失败，全员决策前对照）
 4. `.opencode/agents/<role>.md`（**通用 base**：跨工程身份/职责/返回格式框架）
-5. `docs/agents/<role>-extension.md`（**项目特定 extension**：工作流状态/检查清单/文件路径，由 base 强制约定加载）
+5. `harness/extensions/<role>-extension.md`（**项目特定 extension**：工作流状态/检查清单/文件路径，由 base 强制约定加载）
 6. `plans/phaseN/总纲.md`（当前 phase 单一事实源）
 7. 涉及 AHE iteration 时：`.opencode/skills/construct-rs-ahe-practices/SKILL.md`
 8. 涉及性能子任务时：`.opencode/skills/performance-gate/SKILL.md`
-9. 涉及过程记录填写时：`docs/文档元数据规范.md`
+9. 涉及过程记录填写时：`harness/metadata-convention.md`
 
 ## 5. 内容准入标准
 

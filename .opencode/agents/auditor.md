@@ -5,7 +5,11 @@ permission:
   edit:
     "*": "deny"
     "plans/**/过程记录.md": "allow"
+    "plans/**/traces/**": "allow"
+    "plans/meta/**": "allow"
     "experiments/**": "allow"
+    "harness/**": "allow"
+    "testing/**": "allow"
   bash:
     "*": "allow"
     "git push*": "deny"
@@ -39,7 +43,7 @@ permission:
 
 ## 启动加载（强制）
 
-**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `docs/agents/auditor-extension.md`** 获取项目特定：
+**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `harness/extensions/auditor-extension.md`** 获取项目特定：
 - 工作流状态名与子任务标识格式
 - 项目特定审计项（如 AHE §演化循环 Evaluate 触发合规）
 - 审计算畴边界（项目特定 L-XX 对策）

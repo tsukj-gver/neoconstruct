@@ -1,0 +1,182 @@
+{
+  "manifest_version": "1.0",
+  "harness_spec_version": "1.0",
+  "iteration": 10,
+  "timestamp": "2026-07-29T13:00:00+08:00",
+  "author": "pm (AHE iteration 10 — harness 集中 + testing 分离)",
+  "scope_summary": "解决两个结构问题：(1) 用例 vs experiment 混用——CI 是正式测试基础设施，应独立于 experiments/；(2) harness 文件散布——MEMORY.md/experiences.md/manifests/docs/agents/文档元数据规范.md/eval-*.md 应集中到 harness/ 目录。新建 harness/ 承载 LTM + manifests + extensions + metadata-convention + evaluations；新建 testing/ci/ 承载 CI runner（从 experiments/ci/ 迁入）；experiments/ 仅保留一次性实验",
+  "evaluate_evidence": {
+    "trace_file": "harness/evaluations/eval-2026-07-29-iter10-dogfood.md（迁移后路径）",
+    "task_category": "执行类（AHE iteration，harness 重组）",
+    "task_description": "harness 文件集中到 harness/ + testing/experiment 分离",
+    "failures_classified": [
+      "Failure #1: experiments/ 目录混了三类内容（CI 基础设施 + 历史 Rust 实验 + Phase 一次性调查），无清晰边界",
+      "Failure #2: harness 资产散布 7 处（根目录 + manifests/ + docs/agents/ + docs/文档元数据规范.md + experiments/eval-*.md），无集中管理",
+      "L-10 教训持续验证：'规范存在 ≠ 实际执行'——本应集中的资产因无 enforcement 持续散布"
+    ],
+    "analyze_summary": "iter10 启动前执行 L-07 对策 §A1 全量扫描（explore agent），识别 38 文件 / 165 引用 / 7 个风险点。R2/R3 类隐藏代码依赖（run_l3_perf.py 3 处硬编码 + pre-commit.template 行 32）已识别，将随迁移同步修复"
+  },
+  "scan_completed": {
+    "scan_report_file": "manifests/iter10-scan-report.md",
+    "total_affected_files": 38,
+    "total_references": 165,
+    "by_priority": {
+      "P0_startup_and_code_deps": 14,
+      "P1_ci_hook_and_skill": 6,
+      "P2_docs_and_traces": 18
+    },
+    "key_risks_identified": [
+      "R1: pre-commit.template 行 32 硬编码 experiments/ci/run_smoke.ps1",
+      "R2: run_l3_perf.py 3 处硬编码（known_exemptions.json / reports/ / ab_harness.ps1）—— 不修则 L3 静默 FAIL",
+      "R3: 6 个 base agent + AGENTS.md §4 '启动链'必须原子同步",
+      "R4: docs/agents/ 迁空后需删除空目录",
+      "R5: plans/00-项目进度.md 相对链接 ../MEMORY.md 会 broken",
+      "R6: 通用 AHE skill 是诱饵，不可修改（L-08 防护）",
+      "R7: eval-*.md 双向引用（自身迁移 + 被 manifest trace_file 引用）"
+    ]
+  },
+  "changes": [
+    {
+      "change_id": "ch_046",
+      "component": "long_term_memory",
+      "subtype": "create",
+      "file_path": "harness/（新建目录 + 迁入 6 类资产）",
+      "summary": "新建 harness/ 集中：MEMORY.md / experiences.md / manifests/ / extensions/（原 docs/agents/）/ metadata-convention.md（原 docs/文档元数据规范.md）/ evaluations/（原 experiments/eval-*.md）",
+      "failure_evidence": "harness 资产散布 7 处，无集中管理；MEMORY.md/experiences.md 在根目录被 88 处文档引用",
+      "root_cause": "iter3-9 逐步引入 harness 资产但无集中原则",
+      "targeted_fix": "物理迁移 + 88 处引用同步更新",
+      "predicted_impact": {
+        "expected_fixes": ["harness 资产单一入口", "项目根目录干净（仅 AGENTS.md / opencode.json / harness/ / testing/ / docs/ / plans/ / construct-rs/）"],
+        "at_risk_regressions": ["L-07 风险：88 处引用需同步", "R3 风险：6 base agent + AGENTS.md §4 启动链原子同步"],
+        "rationale": "用户明确指令 + HARNESS.md §7 组件归类"
+      }
+    },
+    {
+      "change_id": "ch_047",
+      "component": "tool_implementations",
+      "subtype": "create",
+      "file_path": "testing/ci/（新建目录 + 迁入 experiments/ci/ 全部内容）",
+      "summary": "新建 testing/ci/ 承载 CI 基础设施：L1/L2/L3/L4 runner + ab_test + known_exemptions.json + install_hook.ps1 + pre-commit.template + README + reports/",
+      "failure_evidence": "experiments/ci/ 是 META-CI 实施（ADR-020 沉淀的正式 CI 门禁），不是实验——与 experiments/ 语义冲突",
+      "root_cause": "META-CI-1 实施时（2026-07-28）暂放 experiments/ci/，未独立 testing 目录",
+      "targeted_fix": "experiments/ci/ → testing/ci/；同步修复 run_l3_perf.py 3 处硬编码 + pre-commit.template 行 32 + 18 处文档引用",
+      "predicted_impact": {
+        "expected_fixes": ["CI 基础设施语义清晰", "experiments/ 仅剩一次性实验（符合目录名语义）"],
+        "at_risk_regressions": ["R2 风险：run_l3_perf.py 硬编码不修则 L3 静默 FAIL", "R1 风险：pre-commit.template 行 32 硬编码"],
+        "rationale": "用户明确指令：'用例和 experiment 混用不对'"
+      }
+    },
+    {
+      "change_id": "ch_048",
+      "component": "system_rules",
+      "subtype": "update",
+      "file_path": "AGENTS.md §4 + .opencode/agents/{pm,architect,developer,reviewer,vetter,auditor}.md + opencode.json",
+      "summary": "P0 启动链原子同步：AGENTS.md §4 启动入口 5 处 + 6 个 base agent 启动加载段 7 处 + opencode.json instructions 不变（仍 AGENTS.md 入口）",
+      "failure_evidence": "R3 风险：6 base + AGENTS.md §4 必须原子同步，漏改任一即该角色 agent 启动 broken",
+      "root_cause": "extension 迁到 harness/extensions/ 后，base agent 的强制 read 约定必须同步",
+      "targeted_fix": "docs/agents/<role>-extension.md → harness/extensions/<role>-extension.md（6 base）；MEMORY.md → harness/MEMORY.md；experiences.md → harness/experiences.md；docs/文档元数据规范.md → harness/metadata-convention.md",
+      "predicted_impact": {
+        "expected_fixes": ["启动链保持完整"],
+        "at_risk_regressions": ["若 7 文件未原子提交，中间状态 agent 启动会 broken——commit 前必须 grep 验证零残留"],
+        "rationale": "opencode 框架约束 + L-07 教训"
+      }
+    },
+    {
+      "change_id": "ch_049",
+      "component": "tool_implementations",
+      "subtype": "update",
+      "file_path": "testing/ci/run_l3_perf.py（迁入后）",
+      "summary": "修复 R2 隐藏代码依赖：3 处硬编码路径改用 Path(__file__).parent 相对解析",
+      "failure_evidence": "行 62/63/769 硬编码 PROJECT_ROOT / 'experiments' / 'ci' / ...，迁移后失效",
+      "root_cause": "iter META-CI-1c 实施时硬编码绝对路径",
+      "targeted_fix": "改为 Path(__file__).parent / 'known_exemptions.json' 等（一劳永逸消除硬编码）",
+      "predicted_impact": {
+        "expected_fixes": ["L3 性能门禁恢复工作 + 未来不再受目录迁移影响"],
+        "at_risk_regressions": ["若改错相对深度，L3 仍 FAIL——需 VET 审查 + 实测 PASS 验证"],
+        "rationale": "R3 类隐藏代码依赖 + L-07 教训对策"
+      }
+    },
+    {
+      "change_id": "ch_050",
+      "component": "tool_implementations",
+      "subtype": "update",
+      "file_path": "testing/ci/pre-commit.template（迁入后）",
+      "summary": "修复 R1 隐藏代码依赖：行 32 SMOKE_RUNNER 路径改 experiments/ci → testing/ci",
+      "failure_evidence": "pre-commit.template 行 32 硬编码 $REPO_ROOT/experiments/ci/run_smoke.ps1",
+      "root_cause": "install_hook.ps1 复制此模板到 .git/hooks/，复制后静态",
+      "targeted_fix": "SMOKE_RUNNER=\"$REPO_ROOT/testing/ci/run_smoke.ps1\" + 行 13 注释同步",
+      "predicted_impact": {
+        "expected_fixes": ["未来 install_hook.ps1 复制的 hook 正确工作"],
+        "at_risk_regressions": ["如有人已安装旧 hook，需 install_hook.ps1 -Force 重装——迁移说明需提示"],
+        "rationale": "R1 风险消除"
+      }
+    },
+    {
+      "change_id": "ch_051",
+      "component": "long_term_memory",
+      "subtype": "update",
+      "file_path": ".opencode/agents/*.md permissions + opencode.json",
+      "summary": "P0 权限更新：4 个 agent 文件 permissions 追加 'harness/**' + 'testing/**' glob（保留原 experiments/** 兼容历史实验）",
+      "failure_evidence": "原 glob 'experiments/**' 仅覆盖 experiments/，迁移后 CI runner 在 testing/ci/ 失去写权限；harness/ 也无权限",
+      "root_cause": "iter9 权限扩展时未预见 harness/ + testing/ 拆分",
+      "targeted_fix": "permissions 追加 'harness/**': 'allow' + 'testing/**': 'allow'",
+      "predicted_impact": {
+        "expected_fixes": ["DEV/VET/AUDITOR 恢复对新 testing/ci/ 和 harness/ 的写权限"],
+        "at_risk_regressions": ["opencode glob 兼容性——需实测验证"],
+        "rationale": "AGENTS.md §2 文件读写权限"
+      }
+    }
+  ],
+  "cross_reference_check": {
+    "executed": true,
+    "method": "iter10 启动前分派 explore agent 全量扫描，扫描整个 workspace（除 construct/ + construct-rs/src/ + .git/ + target/ + node_modules/），识别 38 文件 / 165 处引用",
+    "scan_report_file": "manifests/iter10-scan-report.md",
+    "at_risk_regressions_categories": {
+      "path_regression": [
+        "MEMORY.md / experiences.md 移动触发 88 处引用更新",
+        "experiments/ci/ → testing/ci/ 触发 18 处文档引用 + 4 处代码硬编码更新",
+        "docs/agents/ → harness/extensions/ 触发 6 个 base agent + AGENTS.md §4 启动链原子同步"
+      ],
+      "metadata_regression": ["迁移文件 frontmatter id 保留（仍唯一标识）"],
+      "functional_regression": [
+        "R2 run_l3_perf.py 不修则 L3 静默 FAIL",
+        "R1 pre-commit.template 行 32 不修则未来 hook broken",
+        "R3 启动链不同步则 agent 启动 broken"
+      ]
+    }
+  },
+  "process_lesson": {
+    "title": "L-10 教训持续验证 + iter9 manifest verified_with_followups 关闭",
+    "description": "iter10 是 iter9（过程记录拆分）的自然延续——都是 harness 重组类 iteration。L-10 教训（规范存在 ≠ 实际执行）在 iter9 §9 强制阈值引入后首次检验：iter10 主动启动（PM 识别 + 用户指令），无 enforcement 漏洞。同时 iter9 manifest 的 followups（如 phase5+ 是否实际按 §5.1 执行）将在 Phase 5 启动时验证",
+    "lesson_home": "本 manifest + harness/evaluations/eval-2026-07-29-iter10-dogfood.md",
+    "preventive_check": "iter11 应：(1) 验证 iter10 后启动链稳定（agent 启动加载正确）；(2) 验证 testing/ci/ L1-L4 实际工作；(3) Phase 5 完成后审查 §5.1/§9 enforcement 实际生效"
+  },
+  "verification": {
+    "status": "verified_with_followups",
+    "scheduled_at": "Phase 5 启动时验证：(1) agent 启动链稳定；(2) L1 smoke 在 Phase 5 环境正常；(3) L-11 对策在后续 PM 决策中生效",
+    "completed_at": "2026-07-29",
+    "result": {
+      "expected_fixes_verified": [
+        "harness/ 含 MEMORY.md / experiences.md / metadata-convention.md / extensions/(6) / evaluations/(6) / manifests/(10) ✓",
+        "testing/ci/ 含全部 CI runner（L1/L2/L3/L4 + ab_test + hook + reports）✓",
+        "docs/agents/ 空目录已删除 ✓",
+        "experiments/ 仅剩一次性实验 ✓",
+        "L4 C1-C10 全 PASS ✓",
+        "run_l3_perf.py 改用 Path(__file__).parent（R2 消除）✓",
+        "pre-commit.template 行 32 改 testing/ci/（R1 消除）✓",
+        "6 base agent + AGENTS.md §4 启动链原子同步 + grep 零残留 ✓"
+      ],
+      "unexpected_fixes": [
+        "experiments/__pycache__ + testing/ci/__pycache__ 清理",
+        "3 个 README 新增（harness/ + testing/ + experiments/）"
+      ],
+      "regressions_observed": [
+        "L1 smoke PowerShell 中文编码问题（预先存在，非 iter10 引入）—— run_smoke.ps1 中文注释在 PS 5.1 解析异常"
+      ],
+      "false_predictions": [
+        "无核心 false prediction——所有 P0/P1/P2 + R1/R2/R3 预测均触发并完成"
+      ]
+    },
+    "verification_method_pre_commit": "(a) grep 'docs/agents/' .opencode/agents/ AGENTS.md → 零命中 ✓；(b) grep 裸 MEMORY.md/experiences.md 在活跃文件 → 零命中 ✓；(c) L4 C1-C10 全 PASS ✓；(d) git diff .opencode/skills/agentic-harness-engineering/ → 空（L-08 防护）✓；(e) run_l3_perf.py Path(__file__).parent 改造后 L4 PASS ✓"
+  }
+}

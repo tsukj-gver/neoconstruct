@@ -57,11 +57,11 @@ RepeatUntil 用户面 API `RepeatUntil(terminator, subcon, discard)` 中 `termin
 - 正面：用户面 API 表面可预测性能（无隐藏慢路径）
 - 正面：与 Phase 2 表达式系统完全统一
 - 负面：用户复杂终止逻辑需改用 Adapter
-- 中性：性能门禁上调至 ≥10x（数值推导见 `docs/design/模块设计-Array.md` §8.3）
+- 中性：性能门禁上调至 ≥10x（数值推导见 `docs/design/模块设计/模块设计-Array.md` §8.3）
 
 ## Relations
 
 - 替代 ADR-013
 - 关联事件：用户 2026-06-30 Phase 4 重审硬约束（见 `plans/phase4-array/总纲.md`）
-- 引用证据：`docs/design/模块设计-Array.md` §8.3（≥10x 数值推导）
-- 关联教训：`experiences.md#L-01`（一次 FFI）+ `experiences.md#L-04`（决策路径隐藏）
+- 引用证据：`docs/design/模块设计/模块设计-Array.md` §8.3（≥10x 数值推导）
+- 关联教训：`harness/experiences.md#L-01`（一次 FFI）+ `harness/experiences.md#L-04`（决策路径隐藏）

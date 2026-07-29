@@ -31,8 +31,8 @@ last_updated: 2026-07-28
 | 本地仓库，禁止 git push | `pm-extension.md §提交规范` | 排除 GitHub Actions / 远程 CI 服务器 |
 | Windows PowerShell 5.1 运行环境 | 开发环境 | 脚本必须 PS 5.1 兼容（`;` 分隔 / `; if ($?) {}` 依赖 / comma 数组操作符陷阱） |
 | 跨 phase 改动引入隐蔽回归风险 | Phase 4 多次性能调查（E01 O1 / 4.x p_err_overflow） | 需要日常化的回归检测，而非仅在 phase 验收时审 |
-| L-03 教训（PM 接受不对等证据） | `experiences.md §L-03` | baseline 不能自动更新，否则回归被"洗白"无法检测 |
-| L-09 教训（跨时段性能对比消除法归因失效） | `experiences.md §L-09` | 性能回归判定必须用 Controlled A/B Test，不可依赖跨时段单次对比 |
+| L-03 教训（PM 接受不对等证据） | `harness/experiences.md §L-03` | baseline 不能自动更新，否则回归被"洗白"无法检测 |
+| L-09 教训（跨时段性能对比消除法归因失效） | `harness/experiences.md §L-09` | 性能回归判定必须用 Controlled A/B Test，不可依赖跨时段单次对比 |
 | 双 CSV 单一事实源 | `docs/constructors-inventory.csv` + `docs/perf-scenarios.csv` | 一致性核查自动化（AUDITOR 第 7 类日常化） |
 
 ### 与 META-CI 整体 ACCEPTED 的关系
@@ -50,7 +50,7 @@ last_updated: 2026-07-28
 **架构**（设计 §2.3）：
 
 ```
-experiments/ci/
+testing/ci/
 ├── run_smoke.ps1              # 主入口（PowerShell，调度 L1-L4）
 ├── lib_smoke.ps1              # 共享函数（venv 解析 / 日志 / 环境采集）
 ├── run_l1_quality.ps1         # L1 质量门禁（PowerShell：cargo build/clippy/fmt/test/maturin）
@@ -207,7 +207,7 @@ PM 手动编辑 docs/perf-scenarios.csv（遵守 pm-extension.md §CSV 编辑规
 | L1 质量 | cargo build/clippy/fmt/test + maturin develop | 5 步全 PASS | `AGENTS.md §3` + `developer.md §自检清单` |
 | L2 功能 | 40 构造器 × 用户面 smoke（39 直接 smoke + StopIf 间接覆盖） | 双对照 Python construct 2.10.70 | `docs/constructors-inventory.csv` 40 implemented |
 | L3 性能 | baseline diff + 三档判据 | **154 baseline 数据点**（当前 SCENARIO_DEFS 覆盖 5 场景，全场景 Phase 5 follow-up） | `docs/perf-scenarios.csv` |
-| L4 一致性 | CSV 格式 + 指针 + 自洽 + 源码比对 | **CSV 一致性 10 项 check（C1-C10）** | `docs/agents/auditor-extension.md §第 7 类审计项` |
+| L4 一致性 | CSV 格式 + 指针 + 自洽 + 源码比对 | **CSV 一致性 10 项 check（C1-C10）** | `harness/extensions/auditor-extension.md §第 7 类审计项` |
 
 ### 当前限制（L3 仅覆盖 5 场景）
 
@@ -246,7 +246,7 @@ L3 通过 `reports/known_exemptions.json`（PM 主维护）管理已知豁免场
 
 ### 本次 ADR-020 起草时同步处理的修订
 
-**TD-META-CI-2（9 项设计文档修订）**——已修订 `docs/design/CI冒烟门禁设计.md`：
+**TD-META-CI-2（9 项设计文档修订）**——已修订 `docs/design/基础设施/CI冒烟门禁设计.md`：
 
 | 修订 ID | 修订位置 | 修订内容 | 来源 |
 |---------|---------|---------|------|
@@ -260,11 +260,11 @@ L3 通过 `reports/known_exemptions.json`（PM 主维护）管理已知豁免场
 | OBS-2a | §4.4 | C5/C6 当前仅检查指针行号存在，未检查"内容非空"（PM 决策保持现状，加注释说明） | 1a VET OBS-2 |
 | OBS-3a | §4.1 | `run_l1_quality.ps1` L87 裸 `Write-Host $tailPreview` 合理例外（多行 stderr 预览，Write-CiLog 设计为单行无法承载） | 1a VET OBS-3 |
 
-**TD-META-CI-5（Markdown 报告 construct_py_version）**——已修订 `experiments/ci/run_l3_perf.py:build_report_markdown`（line 656 后新增 `- construct_py_version` 行，与 JSON schema 对齐）。
+**TD-META-CI-5（Markdown 报告 construct_py_version）**——已修订 `testing/ci/run_l3_perf.py:build_report_markdown`（line 656 后新增 `- construct_py_version` 行，与 JSON schema 对齐）。
 
 ### 跨阶段模式沉淀（L-04 对策）
 
-本 ADR 沉淀 META-CI 整体方法学，避免后续 phase 重新决策 CI 架构（L-04 对策：新模式验证后必须沉淀为 ADR）。后续 phase 的 CI 改动（如 Phase 5 补全 SCENARIO_DEFS）应引用本 ADR + `docs/design/CI冒烟门禁设计.md`，而非重新设计。
+本 ADR 沉淀 META-CI 整体方法学，避免后续 phase 重新决策 CI 架构（L-04 对策：新模式验证后必须沉淀为 ADR）。后续 phase 的 CI 改动（如 Phase 5 补全 SCENARIO_DEFS）应引用本 ADR + `docs/design/基础设施/CI冒烟门禁设计.md`，而非重新设计。
 
 ## Alternatives Considered
 
@@ -304,17 +304,17 @@ L3 通过 `reports/known_exemptions.json`（PM 主维护）管理已知豁免场
 ## Relations
 
 - **关联教训**：
-  - `experiences.md §L-09`（跨时段性能对比消除法归因失效）→ 决策点 4（性能回归判据三档）+ Controlled A/B Test 升级路径是 L-09 对策的**工程化**
-  - `experiences.md §L-03`（PM 接受不对等证据）→ 决策点 3（baseline 不自动更新）是 L-03 对策的**工程化**
-  - `experiences.md §L-04`（跨阶段模式未沉淀）→ 本 ADR 本身是 L-04 对策的执行（META-CI 整体 ACCEPTED 触发沉淀）
-  - `experiences.md §L-02`（理论估算替代实证数据）→ known_exemptions.json 21 条目全部精确匹配 CSV（VET 抽样 6 条对照源行号），baseline_speedup 字段从源文件复制
+  - `harness/experiences.md §L-09`（跨时段性能对比消除法归因失效）→ 决策点 4（性能回归判据三档）+ Controlled A/B Test 升级路径是 L-09 对策的**工程化**
+  - `harness/experiences.md §L-03`（PM 接受不对等证据）→ 决策点 3（baseline 不自动更新）是 L-03 对策的**工程化**
+  - `harness/experiences.md §L-04`（跨阶段模式未沉淀）→ 本 ADR 本身是 L-04 对策的执行（META-CI 整体 ACCEPTED 触发沉淀）
+  - `harness/experiences.md §L-02`（理论估算替代实证数据）→ known_exemptions.json 21 条目全部精确匹配 CSV（VET 抽样 6 条对照源行号），baseline_speedup 字段从源文件复制
 - **关联规范**：
   - `.opencode/skills/performance-gate/SKILL.md Checkpoint 4`（Cross-Time Performance Comparison / 回归判定）→ Controlled A/B Test 升级路径的判据规范来源（>0.5x 回归 / <0.3x 波动 / 0.3-0.5x 加测）
-  - `docs/agents/auditor-extension.md §第 7 类审计项`（构造器清单一致性）→ L4 一致性核查（C1-C10）的规范来源，L4 是其自动化日常版本
-  - `docs/agents/pm-extension.md §构造器清单维护`（PM 主维护责任）→ baseline 维护责任归属，L3 只读不写
-- **设计文档**：`docs/design/CI冒烟门禁设计.md`（854 行，§0-§8 + 附录 A/B）—— 本 ADR 的完整设计依据，本次 ADR-020 起草时同步修订 9 项滞后（TD-META-CI-2）
-- **实现位置**：`experiments/ci/`（run_smoke.ps1 / lib_smoke.ps1 / run_l1_quality.ps1 / run_l2_functional.ps1 / run_l3_perf.{ps1,py} / run_l4_consistency.py / install_hook.ps1 / pre-commit.template / ab_test/ / known_exemptions.json / reports/）
-- **实测数据**：`plans/phase4-array/过程记录.md §META-CI-1{a,b,c,d}`（4 子任务 DEV 报告）+ `§META-CI-1{a,b,c,d}-VET`（4 子任务 VET 审查报告，独立复跑确认）+ `§META-CI 整体: PM 阶段验收`（整体 ACCEPTED 记录，2026-07-28）
+  - `harness/extensions/auditor-extension.md §第 7 类审计项`（构造器清单一致性）→ L4 一致性核查（C1-C10）的规范来源，L4 是其自动化日常版本
+  - `harness/extensions/pm-extension.md §构造器清单维护`（PM 主维护责任）→ baseline 维护责任归属，L3 只读不写
+- **设计文档**：`docs/design/基础设施/CI冒烟门禁设计.md`（854 行，§0-§8 + 附录 A/B）—— 本 ADR 的完整设计依据，本次 ADR-020 起草时同步修订 9 项滞后（TD-META-CI-2）
+- **实现位置**：`testing/ci/`（run_smoke.ps1 / lib_smoke.ps1 / run_l1_quality.ps1 / run_l2_functional.ps1 / run_l3_perf.{ps1,py} / run_l4_consistency.py / install_hook.ps1 / pre-commit.template / ab_test/ / known_exemptions.json / reports/）
+- **实测数据**：`plans/meta/CI-冒烟门禁/traces/1a-L1L4门禁.md` / `1b-L2功能门禁.md` / `1c-L3性能回归.md` / `1d-触发与hook.md`（4 子任务 DEV 报告 + VET 审查报告）+ `plans/meta/CI-冒烟门禁/traces/整体-PM阶段验收.md`（整体 ACCEPTED 记录，2026-07-28；iter9 抽离到 plans/meta/）
 - **首次验证**：META-CI 整体（1a/1b/1c/1d，2026-07-28 ACCEPTED，4 子任务全部 VET 通过）
 - **未来复用**：Phase 5+（SCENARIO_DEFS 全场景映射补全）及未来 Phase 的 CI 改动应引用本 ADR + 设计文档，而非重新设计
 

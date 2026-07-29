@@ -2,9 +2,9 @@
 表达式类型系统（FieldRef/ExprRef）与 Schema 编译管线（纯 Python 实现）。
 
 设计依据：
-- ``docs/架构设计.md`` §A.2（StructMixin）、§A.3（field）、§A.6（空类）、
+- ``docs/design/基础设施/架构设计.md`` §A.2（StructMixin）、§A.3（field）、§A.6（空类）、
   §E.1-E.6（编译管线）
-- ``docs/模块设计-表达式系统.md`` §2.1（三种 field 函数）、§2.2（default 与 kw_only）、
+- ``docs/design/模块设计/模块设计-表达式系统.md`` §2.1（三种 field 函数）、§2.2（default 与 kw_only）、
   §2.3（FieldRef/ExprRef 类型系统）、§2.4（context= 跨层引用）
 
 核心流程：
@@ -665,7 +665,7 @@ def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descripto
     调 ``desc.set_compiled_expr_params(ops, element_field_idx, index_field_indices)``，
     并把编译产物写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
 
-    设计依据：``docs/模块设计-Array.md`` §6.3.1 DEV 实现要点。
+    设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.3.1 DEV 实现要点。
 
     :raises CompilationError: terminator 不引用任何 Element 字段。
     """

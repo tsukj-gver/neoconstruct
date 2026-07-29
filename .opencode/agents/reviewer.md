@@ -1,11 +1,15 @@
-﻿---
+---
 description: 审查员，负责设计检视——在开发前确保设计在延续性、性能、整体性、可行性、完备性上没有问题
 mode: subagent
 permission:
   edit:
     "*": "deny"
     "plans/**/过程记录.md": "allow"
+    "plans/**/traces/**": "allow"
+    "plans/meta/**": "allow"
     "experiments/**": "allow"
+    "harness/**": "allow"
+    "testing/**": "allow"
   bash:
     "*": "allow"
     "git push*": "deny"
@@ -36,7 +40,7 @@ permission:
 
 ## 启动加载（强制）
 
-**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `docs/agents/reviewer-extension.md`** 获取项目特定：
+**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `harness/extensions/reviewer-extension.md`** 获取项目特定：
 - 项目特定检视补充（如核心原则对照 / FFI 量化分析 / 特定技术栈可行性）
 - 参考实现位置（如 Python 原版源码）
 - 跨阶段决策记录位置

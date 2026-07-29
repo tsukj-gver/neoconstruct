@@ -5,7 +5,11 @@ permission:
   edit:
     "*": "deny"
     "plans/**/过程记录.md": "allow"
+    "plans/**/traces/**": "allow"
+    "plans/meta/**": "allow"
     "experiments/**": "allow"
+    "harness/**": "allow"
+    "testing/**": "allow"
   bash:
     "*": "allow"
     "git push*": "deny"
@@ -36,7 +40,7 @@ permission:
 
 ## 启动加载（强制）
 
-**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `docs/agents/vetter-extension.md`** 获取项目特定：
+**本文件是跨工程通用基础。启动时必须 read 项目根目录下 `harness/extensions/vetter-extension.md`** 获取项目特定：
 - 参考实现位置（如 Python 原版源码）与对照方法名
 - 实现语言特定的错误处理 / 资源安全 / 命名风格要求
 - 项目特定驳回目标状态与文件路径

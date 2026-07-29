@@ -70,4 +70,4 @@ last_updated: 2026-07-28
 - 新增 ADR：编号自增（下一号 21）
 - 修订决策：**不修改原 ADR**，新建 ADR 并在原 ADR 加 `superseded_by`，新 ADR 加 `supersedes`
 - 模式采用：新设计文档必须在 frontmatter `depends_on` 列出相关 ADR
-- 教训关联：若决策源于失败教训，在 ADR 的 Relations 段引用 `experiences.md#L-XX`
+- 教训关联：若决策源于失败教训，在 ADR 的 Relations 段引用 `harness/experiences.md#L-XX`

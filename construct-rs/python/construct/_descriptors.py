@@ -1,7 +1,7 @@
 """类型描述符的 Python 侧重导出（纯 Python 委托层）。
 
-设计依据：``docs/架构设计.md`` §A.4（类型描述符）、§D.3（Python 包结构）、
-``docs/模块设计-BitStream.md`` §8.2（bit 描述符）。
+设计依据：``docs/design/基础设施/架构设计.md`` §A.4（类型描述符）、§D.3（Python 包结构）、
+``docs/design/模块设计/模块设计-BitStream.md`` §8.2（bit 描述符）。
 
 实际的描述符 ``pyclass`` 定义在 Rust 侧（``src/descriptors/``），由
 ``_construct_rust`` 扩展模块提供。本模块将其重导出，供 ``__init__.py``
@@ -74,7 +74,7 @@ except ImportError:  # pragma: no cover
 # ---------------------------------------------------------------------------
 # Phase 3.1: BitsInteger / Bit / Nibble / Octet 纯 Python 描述符
 #
-# 设计依据：``docs/模块设计-BitStream.md`` §8.2。
+# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §8.2。
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
@@ -185,7 +185,7 @@ def Octet():
 # ---------------------------------------------------------------------------
 # Phase 3.2: Bitwise 描述符
 #
-# 设计依据：``docs/模块设计-BitStream.md`` §8.2、§11。
+# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §8.2、§11。
 #
 # ``Bitwise(subcon)`` 是核心包装器，将字节流转为 bit 流。construct-rs 通过
 # type name "BitwiseDescriptor" 识别，递归编译内部 subcon（bitwise=true 上下文），
@@ -246,7 +246,7 @@ def Bitwise(subcon):
 # ---------------------------------------------------------------------------
 # Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped 描述符
 #
-# 设计依据：``docs/模块设计-BitStream.md`` §4.2 / §4.4 / §4.5 / §4.6 / §8.2。
+# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §4.2 / §4.4 / §4.5 / §4.6 / §8.2。
 #
 # - ``PaddingDescriptor``：根据编译期 ``bitwise`` 上下文编译为 ``BitPaddingNode``
 #   （bit 域，pattern 严格 0x00/0x01）或 ``PaddingNode``（字节域）。
@@ -459,7 +459,7 @@ def ByteSwapped(subcon):
 # ---------------------------------------------------------------------------
 # Phase 4: Array 描述符
 #
-# 设计依据：``docs/模块设计-Array.md`` §6.2.2 / §6.3。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.2.2 / §6.3。
 #
 # ``Array(count, subcon, discard=False)`` 是固定次数数组描述符，对应 Python
 # construct 的 ``Array``。construct-rs 通过 type name "ArrayDescriptor" 识别，
@@ -550,7 +550,7 @@ def Array(count, subcon, discard=False):
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.2: GreedyRange 描述符
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.2 / §6.3。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.2 / §6.3。
 #
 # ``GreedyRange(subcon, discard=False)`` 是读到流结束的数组描述符，对应 Python
 # construct 的 ``GreedyRange``。construct-rs 通过 type name "GreedyRangeDescriptor"
@@ -625,7 +625,7 @@ def GreedyRange(subcon, discard=False):
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.3: PrefixedArray 描述符
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.6 / §6.3。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.6 / §6.3。
 #
 # ``PrefixedArray(countfield, subcon)`` 是前缀长度数组描述符，对应 Python
 # construct 的 ``PrefixedArray``。construct-rs 通过 type name "PrefixedArrayDescriptor"
@@ -709,7 +709,7 @@ def PrefixedArray(countfield, subcon):
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.4: Index / StopIf 描述符
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.4 / §4.5 / §6.3。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.4 / §4.5 / §6.3。
 #
 # - ``Index()``：取当前数组迭代下标（对应 Python construct 的 ``Index``）。
 #   construct-rs 中 IndexNode 是用户访问数组下标的唯一机制（v3 决策 §3.3），
@@ -787,7 +787,7 @@ def Index():
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.5 v5: Element 描述符（v5 新增）
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.7 / §6.3.1。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.7 / §6.3.1。
 #
 # ``Element()`` 是 RepeatUntil 终止表达式中"当前元素"的引用入口。
 # 与 Index 字段平行（Index 是 Array 内"当前下标"引用入口）。
@@ -810,7 +810,7 @@ class ElementDescriptor:
 
     ``_expr_params`` 协议返回空 dict：Element 无表达式参数。
 
-    设计依据：``docs/模块设计-Array.md`` §4.7。
+    设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.7。
     """
 
     __slots__ = ()
@@ -931,7 +931,7 @@ def StopIf(condfunc):
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.5: RepeatUntil 描述符
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3 / §10.1。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.3 / §6.3 / §10.1。
 #
 # ``RepeatUntil(predicate, subcon, discard=False)`` 是终止表达式数组描述符，对应
 # Python construct 的 ``RepeatUntil``。construct-rs 通过 type name "RepeatUntilDescriptor"
@@ -949,7 +949,7 @@ def StopIf(condfunc):
 # ---------------------------------------------------------------------------
 # Phase 4 子任务 4.5 v5: RepeatUntil 描述符（v5 完全重写）
 #
-# 设计依据：``docs/模块设计-Array.md`` §4.3 / §6.3.1 / §13（v5）。
+# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.3 / §6.3.1 / §13（v5）。
 #
 # v5 用户硬约束：
 # - 删除 AST 识别器（``_AST_OP_TO_EXPROP`` / ``_try_compile_repeat_predicate``）

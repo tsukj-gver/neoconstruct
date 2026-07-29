@@ -168,7 +168,7 @@ Phase 15 验收失败案例（2026-06-19）：
   3. 首个实现后无烟雾测试检查点
   4. PM 接受了"没测对比"作为"对比达标"
 
-Phase 4 E01 O1 回归根因调查案例（2026-07-28，对应 `experiences.md §L-09`）：
+Phase 4 E01 O1 回归根因调查案例（2026-07-28，对应 `harness/experiences.md §L-09`）：
 
 - **质疑**：用户提出 E01 从 4.7 PM 验收 10.56x 变为 4.6 VET 复测 9.51x（-1.05x），可能是 O1 引入
 - **VET 之前 H1 排查**："O1 只改 stop_if.rs，E01 不调用 StopIf，cargo 未重编译"——论断事实错误（实测 cargo 重编译产生不同 DLL）
@@ -180,7 +180,7 @@ Phase 4 E01 O1 回归根因调查案例（2026-07-28，对应 `experiences.md §
 
 **Who**: 任何怀疑性能回归的角色（VET / PM / 用户）触发，ARCH 或 VET 执行 Controlled A/B Test。
 
-**规范来源**：`experiences.md §L-09`（跨时段性能对比消除法归因失效）
+**规范来源**：`harness/experiences.md §L-09`（跨时段性能对比消除法归因失效）
 
 ### 触发场景
 

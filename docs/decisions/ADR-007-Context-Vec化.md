@@ -31,6 +31,6 @@ PyDict 仍保留（用于 Python 侧属性访问），但表达式 VM 不再走 
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-Context-Vec优化.md`
+- 引用证据：`docs/design/模块设计/模块设计-Context-Vec优化.md`
 - 关联分析：`docs/analysis/perf-p0-analysis.md`
 - 实施：Phase 2.5 E1-E3 全部 ~10-12x（见 `plans/00-项目进度.md`）

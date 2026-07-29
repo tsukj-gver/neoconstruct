@@ -21,7 +21,7 @@ Phase 2 实现的 parse 路径：
 
 **这条路径违反 AGENTS.md §0（一次 FFI / 无中间表示）**——dict 跨越 FFI 边界。Phase 1 设计修订 R1/R2/R3 都未发现此违反。详见 `docs/archive/phase1/设计修订-parse路径优化.md` R3 修订记录。
 
-关联教训：`experiences.md#L-01`（中间表示层违反）。
+关联教训：`harness/experiences.md#L-01`（中间表示层违反）。
 
 ## Decision
 
@@ -41,6 +41,6 @@ parse 路径改造：
 
 ## Relations
 
-- 引用证据：`docs/design/模块设计-Context-Vec优化.md` / `docs/archive/phase1/设计修订-parse路径优化-借用实例dict.md`
-- 关联教训：`experiences.md#L-01`（中间表示层违反） + `experiences.md#L-05`（优化 A 路径忽略 B 路径）
+- 引用证据：`docs/design/模块设计/模块设计-Context-Vec优化.md` / `docs/archive/phase1/设计修订-parse路径优化-借用实例dict.md`
+- 关联教训：`harness/experiences.md#L-01`（中间表示层违反） + `harness/experiences.md#L-05`（优化 A 路径忽略 B 路径）
 - 修订历史：R1/R2/R3 → R4（详见 `docs/archive/phase1/`）

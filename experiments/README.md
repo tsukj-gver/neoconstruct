@@ -1,20 +1,35 @@
-# experiments/
+---
+id: README-experiments
+status: active
+phase: meta
+last_updated: 2026-07-29
+---
 
-试验场。任何角色都可以在此目录写代码做实验——测元操作耗时、验证行为、诊断问题。
+# experiments/ — 一次性实验
 
-## 规则
+> iter10（2026-07-29）澄清目录语义：本目录**仅用于一次性实验**（验证方案可行性 / 历史 benchmark / 调查快照）。
+> 正式测试基础设施在 `testing/ci/`；过程记录在 `plans/`；harness 资产在 `harness/`。
 
-- 这里不是业务代码，不影响交付物
-- 不需要通过 cargo build / clippy / test 的质量门禁
-- 实验代码不需要文档注释、不需要编码规范
-- 产出实验数据后，数据本身可以引用到设计文档/审查报告/验收记录中
-- 代码可以是 Rust（standalone，不链接库）、Python、或任意脚本
+## 当前内容
 
-## 典型用途
+| 子目录/文件 | 类型 | 说明 |
+|------------|------|------|
+| `bench_bits/` | 历史 Rust 实验 | BitStream benchmark 实验（Phase 3 期间），含 target/ 编译产物 |
+| `bench_phase33/` | 历史 Rust 实验 | Phase 3.3 Rust benchmark 实验，含 target/ |
+| `phase4_investigation_data/` | 调查数据 | Phase 4 性能调查测量数据 |
+| `_snapshot_4x/` | DLL 快照 | 4.x 错误路径 Controlled A/B Test 的 DLL 对照快照 |
+| `phase1_smoke.py` | 一次性脚本 | Phase 1 冒烟验证 |
+| `phase2_smoke.py` | 一次性脚本 | Phase 2 冒烟验证 |
+| `phase4_4x_t6_verify.py` | 一次性脚本 | Phase 4.x T6 验证 |
+| `phase4_repeat_until_examples.py` | 一次性脚本 | RepeatUntil 示例验证 |
+| `phase4_bench_summary.py` | 一次性脚本 | Phase 4 benchmark 汇总 |
 
-| 角色 | 用途 |
-|------|------|
-| ARCH | 测量元操作耗时（CPython API 调用、内存分配等），为性能预估提供实测基础 |
-| VET | 编写验证程序，实证检查 Rust vs Python 行为是否一致 |
-| PM | 运行诊断实验，收集数据验证性能数据的逻辑一致性 |
-| DEV | 原型验证、方案对比 |
+## 使用原则
+
+- ✅ **放这里**：验证某方案是否可行的实验脚本 / 一次性调查数据 / 历史 benchmark
+- ❌ **不放这里**：正式测试用例（→ `construct-rs/tests/`）/ CI 基础设施（→ `testing/`）/ 持续维护的 benchmark（→ `construct-rs/benches/`）
+
+## 清理建议
+
+- `bench_bits/target/` 和 `bench_phase33/target/` 是 Rust 编译产物，可加入 .gitignore 或定期清理
+- 历史脚本（phase*_smoke.py）保留作参考，不再活跃维护
