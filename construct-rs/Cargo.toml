@@ -31,6 +31,13 @@ enum_dispatch = "0.3"
 # maturin 在 pyproject.toml 中显式启用 pyo3/extension-module。
 default = []
 
+# Phase 6.0：bench_context_ops.rs 迁移到 tests/rust/ 子目录。
+# cargo 默认只收集 tests/*.rs 顶层文件，不递归子目录，需显式 [[test]] 段声明。
+# 见 docs/design/基础设施/测试框架设计.md §0.2 交付物 + 附录 A 步骤 6（改进-4）。
+[[test]]
+name = "bench_context_ops"
+path = "tests/rust/bench_context_ops.rs"
+
 # Release 构建优化（P0-1，参照 pydantic-core Cargo.toml）：
 # - lto = "fat"：跨 crate 全量内联，使 pyo3 小函数（set_item、bind 等）内联进 validator。
 # - codegen-units = 1：单编译单元，最大化优化空间。

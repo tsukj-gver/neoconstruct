@@ -15,6 +15,11 @@ v5 重写后测试覆盖：
 import sys
 import traceback
 
+# 顶部 import：让 pytest 收集时可用（原 standalone 模式 import 在 main() 里，
+# pytest 直接调 test 函数会 NameError）。main() 里的 global import 保留兼容。
+from construct._descriptors import RepeatUntilDescriptor
+from construct import Int8ub, CompilationError
+
 
 # ============================================================
 # v5 callable 拒绝（用户硬约束 #1）
