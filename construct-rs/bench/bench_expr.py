@@ -15,7 +15,7 @@
 
     python tests/benchmark_expr.py
 
-输出：stdout 打印对比表 + 详细日志写 ``tests/benchmark_expr_results.txt``。
+输出：stdout 打印对比表 + 详细日志写 ``bench/results/benchmark_expr_results.txt``。
 
 通过标准（§8.7）：
 - E1-E3 parse 方向 ≥8x（硬目标）
@@ -335,8 +335,8 @@ def check_gates(results: dict) -> list[str]:
 
 
 def write_results_file(results: dict, table: str, failures: list[str]) -> Path:
-    """将完整结果写入 tests/benchmark_expr_results.txt。"""
-    out_path = Path(__file__).resolve().parent / "benchmark_expr_results.txt"
+    """将完整结果写入 bench/results/benchmark_expr_results.txt。"""
+    out_path = Path(__file__).resolve().parent / "results" / "benchmark_expr_results.txt"
 
     lines = []
     lines.append("=" * 70)

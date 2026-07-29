@@ -32,7 +32,7 @@ Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build}
 
     python tests/benchmark_bitstream.py
 
-输出：stdout 打印对比表 + 详细日志写 ``tests/benchmark_bitstream_results.txt``。
+输出：stdout 打印对比表 + 详细日志写 ``bench/results/benchmark_bitstream_results.txt``。
 
 通过标准（Phase 3 总纲 S-PERF）：
 - BitStruct parse/build 几何平均 ≥10x vs Python construct 2.10.70
@@ -710,8 +710,8 @@ def write_results_file(
     cases: list[str],
     derived_text: str = "",
 ) -> Path:
-    """将完整结果写入 tests/benchmark_bitstream_results.txt。"""
-    out_path = Path(__file__).resolve().parent / "benchmark_bitstream_results.txt"
+    """将完整结果写入 bench/results/benchmark_bitstream_results.txt。"""
+    out_path = Path(__file__).resolve().parent / "results" / "benchmark_bitstream_results.txt"
 
     # 构造 case → (phase, desc) 映射
     case_meta = {cid: (phase, desc) for cid, phase, desc in CASES}

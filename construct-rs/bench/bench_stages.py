@@ -409,7 +409,7 @@ def build_report(rs: dict, py: dict) -> str:
 
 
 def write_results_file(report: str, rs: dict, py: dict) -> Path:
-    out_path = Path(__file__).resolve().parent / "bench_stages_results.txt"
+    out_path = Path(__file__).resolve().parent / "results" / "bench_stages_results.txt"
 
     lines = []
     lines.append("=" * 78)

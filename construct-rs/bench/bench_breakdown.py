@@ -311,8 +311,8 @@ def format_report(results: list[dict]) -> str:
 
 
 def write_results_file(report: str, results: list[dict]) -> Path:
-    """写完整结果到 tests/bench_breakdown_results.txt。"""
-    out_path = Path(__file__).resolve().parent / "bench_breakdown_results.txt"
+    """写完整结果到 bench/results/bench_breakdown_results.txt。"""
+    out_path = Path(__file__).resolve().parent / "results" / "bench_breakdown_results.txt"
 
     lines = []
     lines.append("=" * 72)
