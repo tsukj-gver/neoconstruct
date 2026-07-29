@@ -1,6 +1,6 @@
 """Phase 1 功能 smoke：FormatField / Bytes / GreedyBytes / Struct / StructRef.
 
-设计依据：docs/design/CI冒烟门禁设计.md §4.2 + §1.1 B 类 + §6.2（子任务 1b 范围）。
+设计依据：docs/design/基础设施/CI冒烟门禁设计.md §4.2 + §1.1 B 类 + §6.2（子任务 1b 范围）。
 
 覆盖范围（inventory.csv Phase 1 implemented）：
   - FormatField 16 个 Int 单例（Int8ub/Int8ul/Int8sb/Int8sl + Int16*4 + Int32*4 + Int64*4）

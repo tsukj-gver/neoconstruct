@@ -1,6 +1,6 @@
 """Phase 2 功能 smoke：Tell / Computed / Bytes(expr) 表达式系统.
 
-设计依据：docs/design/CI冒烟门禁设计.md §4.2 + §1.1 B 类 + §6.2（子任务 1b 范围）。
+设计依据：docs/design/基础设施/CI冒烟门禁设计.md §4.2 + §1.1 B 类 + §6.2（子任务 1b 范围）。
 
 覆盖范围（inventory.csv Phase 2 / 2.5 implemented）：
   - Bytes(count)（impl_phase=2 表达式路径）

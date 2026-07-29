@@ -18,7 +18,7 @@ last_updated: 2026-07-27
 > **处理者**：ARCH
 > **日期**：2026-06-24
 > **前置文档**：`docs/archive/phase1/设计修订-parse路径优化.md`（R3，方案 B'）、
->   `docs/design/模块设计-Context-Vec优化.md`（Phase 2.5 Vec 化）
+>   `docs/design/模块设计/模块设计-Context-Vec优化.md`（Phase 2.5 Vec 化）
 > **状态**：初版，待 REV 检视
 
 ---
