@@ -1,4 +1,4 @@
-# run_l2_functional.ps1 - L2 功能门禁（META-CI-1b）
+﻿# run_l2_functional.ps1 - L2 功能门禁（META-CI-1b）
 #
 # 设计依据：docs/design/基础设施/CI冒烟门禁设计.md §4.2（L2 详细规范）+ §6.2（子任务 1b 范围）
 #           + §1.1 B 类脚本清单（含 OBS-1 修订）
@@ -76,43 +76,46 @@ if (-not $ReportPath) {
 # --------------------------------------------------------------------
 # L2 脚本调度矩阵（顺序执行）
 # --------------------------------------------------------------------
+# 双轨制（Phase 6.0 引入，设计 §3）：
+#   - 旧轨（smoke）：$SMOKE_METADATA 元数据注册表 + glob 自动展开 experiments/ 下脚本
+#   - 新轨（pytest）：追加段，自动发现 tests/{parity,integration,errors}/ 下 test_*.py
+#
 # 每项：phase / script / target(CRS|PC) / expected(pass|known_broken|deprecated)
 #       coverage：该脚本覆盖的构造器（用于覆盖度报告）
-$MATRIX = @(
-    @{ Phase="1";   Script="phase1_smoke.py";                    Target="CRS"; Expected="pass"
-       Coverage="FormatField(16 Int 单例) / Bytes(count) / GreedyBytes / Struct B1-B2 / ModbusRTU" }
-    @{ Phase="2";   Script="phase2_smoke.py";                    Target="CRS"; Expected="pass"
-       Coverage="Bytes(const) / Bytes(this.field) / Bytes(a+b) / Computed(a+b) / Tell + Computed (E1-E3)" }
+#
+# 旧轨改造（设计 §3.2.1）：$MATRIX 硬编码 → $SMOKE_METADATA（只记元数据）+ glob 展开路径
+$SMOKE_METADATA = @{
+    "phase1_smoke.py"                    = @{ Phase="1";   Target="CRS"; Expected="pass";           Coverage="FormatField(16) / Bytes / Struct B1-B2 / ModbusRTU" }
+    "phase2_smoke.py"                    = @{ Phase="2";   Target="CRS"; Expected="pass";           Coverage="Bytes(const/expr) / Computed / Tell (E1-E3)" }
+    "vet_phase3_binary.py"               = @{ Phase="3";   Target="PC";  Expected="pass";           Coverage="bits2integer / integer2bits / swapbytesinbits" }
+    "vet_phase3_bits_integer.py"         = @{ Phase="3";   Target="PC";  Expected="known_broken";   Coverage="Bitwise(Bit/Nibble/Octet).parse/build 基线" }
+    "vet_phase32_bitstruct.py"           = @{ Phase="3.2"; Target="CRS"; Expected="pass";           Coverage="Bitwise / BitStruct / BitsInteger 基本场景" }
+    "vet_phase32_deep.py"                = @{ Phase="3.2"; Target="CRS"; Expected="pass";           Coverage="Bitwise / BitStruct 跨字节 / 嵌套 / swapped" }
+    "test_phase33.py"                    = @{ Phase="3.3"; Target="CRS"; Expected="pass";           Coverage="BitStruct + Padding / Bytewise / BitsSwapped" }
+    "phase4_smoke_greedy_range.py"       = @{ Phase="4";   Target="CRS"; Expected="pass";           Coverage="GreedyRange (parse/build/discard/fallback/empty)" }
+    "phase4_smoke_prefixed_array.py"     = @{ Phase="4";   Target="CRS"; Expected="pass";           Coverage="PrefixedArray (含嵌套/Int16ub countfield)" }
+    "phase4_smoke_repeat_until.py"       = @{ Phase="4";   Target="CRS"; Expected="deprecated";     Coverage="RepeatUntil v4 PyCallable（已弃用）" }
+    "phase4_repeat_until_examples.py"    = @{ Phase="4";   Target="CRS"; Expected="pass";           Coverage="RepeatUntil v5 21 样例" }
+    "v4_smoke_test.py"                   = @{ Phase="1-4"; Target="CRS"; Expected="deprecated";     Coverage="RepeatUntil v4 V-1~V-5 修正" }
+}
 
-    @{ Phase="3";   Script="vet_phase3_binary.py";               Target="PC";  Expected="pass"
-       Coverage="bits2integer / integer2bits / swapbytesinbits (BitsInteger 底层)" }
-    @{ Phase="3";   Script="vet_phase3_bits_integer.py";         Target="PC";  Expected="known_broken"
-       Coverage="Bitwise(Bit/Nibble/Octet/BitsInteger).parse/build 原版行为基线"
-       Note="Python construct 2.10.70 在 Python 3.14 上 Bitwise RestreamedBytesIO 兼容性问题；脚本本身设计为 PC venv 跑" }
+# glob 自动展开 experiments/ 下所有 .py 脚本，匹配 $SMOKE_METADATA 的 key
+$smokeScripts = Get-ChildItem -Path $experimentsDir -Filter "*.py" -ErrorAction SilentlyContinue |
+    Where-Object { $_.Name -in $SMOKE_METADATA.Keys }
 
-    @{ Phase="3.2"; Script="vet_phase32_bitstruct.py";           Target="CRS"; Expected="pass"
-       Coverage="Bitwise / BitStruct / BitsInteger / Bit / Nibble 基本场景" }
-    @{ Phase="3.2"; Script="vet_phase32_deep.py";                Target="CRS"; Expected="pass"
-       Coverage="Bitwise / BitStruct 跨字节 / 嵌套 / swapped / 64bit 深度场景" }
-    @{ Phase="3.3"; Script="test_phase33.py";                    Target="CRS"; Expected="pass"
-       Coverage="BitStruct + Padding / Bytewise / BitsSwapped / ByteSwapped / 错误路径"
-       Note="OBS-1 补入" }
-
-    @{ Phase="4";   Script="phase4_smoke_greedy_range.py";       Target="CRS"; Expected="pass"
-       Coverage="GreedyRange (parse/build/discard/fallback/empty)" }
-    @{ Phase="4";   Script="phase4_smoke_prefixed_array.py";     Target="CRS"; Expected="pass"
-       Coverage="PrefixedArray (含嵌套/Int16ub countfield/signed negative/overflow 错误路径)" }
-    @{ Phase="4";   Script="phase4_smoke_repeat_until.py";       Target="CRS"; Expected="deprecated"
-       Coverage="RepeatUntil v4 PyCallable 路径（已弃用）"
-       Note="v5 删除 PyCallable (ADR-014)；由 phase4_repeat_until_examples.py 取代；FAIL 不阻断" }
-    @{ Phase="4";   Script="phase4_repeat_until_examples.py";    Target="CRS"; Expected="pass"
-       Coverage="RepeatUntil v5 21 用户面样例（Element/Index/Expr/parse-build 对称/discard/嵌套）"
-       Note="OBS-1 补入" }
-
-    @{ Phase="1-4"; Script="v4_smoke_test.py";                   Target="CRS"; Expected="deprecated"
-       Coverage="RepeatUntil v4 V-1~V-5 修正（PyCallable + Container）"
-       Note="v5 删除 PyCallable + Container lib 已下线；FAIL 不阻断；与 phase4_repeat_until_examples.py 部分覆盖重叠" }
-)
+# 构造 $MATRIX（动态）
+$MATRIX = @()
+foreach ($f in $smokeScripts) {
+    $meta = $SMOKE_METADATA[$f.Name]
+    $MATRIX += [pscustomobject]@{
+        Phase    = $meta.Phase
+        Script   = $f.Name
+        Target   = $meta.Target
+        Expected = $meta.Expected
+        Coverage = $meta.Coverage
+        Note     = $meta.Note
+    }
+}
 
 # --------------------------------------------------------------------
 # 执行单个 smoke 脚本
@@ -236,6 +239,83 @@ for ($i = 0; $i -lt $MATRIX.Count; $i++) {
         note         = $entry.Note
         output_tail  = ($r.Output -split "`n" | Select-Object -Last 10) -join "`n"
         error        = $r.Error
+    }
+}
+
+# --------------------------------------------------------------------
+# 新轨：pytest 自动发现（Phase 6.0 引入，设计 §3.2.2）
+# --------------------------------------------------------------------
+# 自动收集 tests/{parity,integration,errors}/ 下 test_*.py，在 CRS venv 跑。
+# pytest 失败（exit != 0）阻断 L2（与旧轨 Expected="pass" 同语义）。
+# pytest 不可用时 WARN skip（不阻断）。
+Write-CiLog ""
+Write-CiLog "==== L2 pytest track start ====" -Level STEP
+
+$pytestRoot = Join-Path $paths.CrsDir "tests"
+$pytestTargets = @(
+    (Join-Path $pytestRoot "parity"),
+    (Join-Path $pytestRoot "integration"),
+    (Join-Path $pytestRoot "errors")
+)
+
+# 检查 pytest 是否在 CRS venv 可用
+$prevPref = $ErrorActionPreference
+$ErrorActionPreference = "SilentlyContinue"
+$pytestCheck = & $CrsPython -m pytest --version 2>&1 | Out-String
+$pytestCheckCode = $LASTEXITCODE
+$ErrorActionPreference = $prevPref
+
+if ($pytestCheckCode -ne 0) {
+    Write-CiLog "pytest not available in CRS venv (exit=$pytestCheckCode), skip pytest track" -Level WARN
+} else {
+    Write-CiLog "pytest available: $($pytestCheck.Trim())" -Level INFO
+    foreach ($target in $pytestTargets) {
+        if (-not (Test-Path -LiteralPath $target)) {
+            Write-CiLog "pytest target dir not exist, skip: $target" -Level WARN
+            continue
+        }
+        $targetName = Split-Path $target -Leaf
+        Write-CiLog "pytest: tests/$targetName" -Level STEP
+        $sw = [System.Diagnostics.Stopwatch]::StartNew()
+        $prevPref2 = $ErrorActionPreference
+        $ErrorActionPreference = "SilentlyContinue"
+        $output = & $CrsPython -m pytest $target "-v" "--tb=short" 2>&1 | Out-String
+        $code = $LASTEXITCODE
+        $ErrorActionPreference = $prevPref2
+        $sw.Stop()
+        $elapsedSec = [math]::Round($sw.Elapsed.TotalSeconds, 2)
+
+        # 控制台摘要
+        # exit code 约定：0=pass，5=no tests collected（空目录，WARN 不阻断），其他=FAIL 阻断
+        if ($code -eq 0) {
+            Write-CiLog "PASS  pytest:$targetName (exit=0, ${elapsedSec}s)" -Level OK -Indent 1
+        } elseif ($code -eq 5) {
+            Write-CiLog "EMPTY pytest:$targetName (exit=5, no tests collected, ${elapsedSec}s) — dir empty, not blocking" -Level WARN -Indent 1
+        } else {
+            Write-CiLog "FAIL  pytest:$targetName (exit=$code, ${elapsedSec}s) — blocks L2" -Level ERROR -Indent 1
+            $tailPreview = ($output -split "`n" | Select-Object -Last 8) -join "`n"
+            Write-Host $tailPreview -ForegroundColor DarkGray
+        }
+
+        # pytest 结果合并到 scriptResults（统一报告）
+        # exit 5（空目录）视为 passed=$true 且 expected="empty"（不阻断 L2）
+        $isPassed = ($code -eq 0 -or $code -eq 5)
+        $effectiveExpected = if ($code -eq 5) { "empty" } else { "pass" }
+        $scriptResults += [pscustomobject]@{
+            phase        = "pytest"
+            script       = "pytest:" + $targetName
+            target_venv  = "CRS"
+            expected     = $effectiveExpected
+            passed       = $isPassed
+            exit_code    = [int]$code
+            elapsed_sec  = $elapsedSec
+            coverage     = "pytest auto-discovery"
+            note         = "Phase 6.0+ new track"
+            output_tail  = ($output -split "`n" | Select-Object -Last 10) -join "`n"
+            error        = $null
+        }
+        # 仅 exit != 0 且 != 5 时阻断（exit 5 = 空目录，待步骤 6 迁移后自然有测试）
+        if ($code -ne 0 -and $code -ne 5) { $mustPassFailed = $true }
     }
 }
 

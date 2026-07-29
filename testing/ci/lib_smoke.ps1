@@ -1,4 +1,4 @@
-# lib_smoke.ps1 - CI 冒烟门禁共享函数库（META-CI-1a）
+﻿# lib_smoke.ps1 - CI 冒烟门禁共享函数库（META-CI-1a）
 #
 # 设计依据：docs/design/基础设施/CI冒烟门禁设计.md §4.1 + §6.2 + 附录 A
 #
