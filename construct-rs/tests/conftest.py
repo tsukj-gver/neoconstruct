@@ -1,16 +1,27 @@
-"""pytest 全局配置：确保 construct-rs 包优先于 site-packages 中的同名 Python 包。
+"""pytest 全局配置 + session 级共享 fixtures。
 
-背景：基准测试需要安装 Python 原版 ``construct==2.10.70`` 作为绝对基线（`.opencode/skills/performance-gate/SKILL.md` Checkpoint 2）。该包与 construct-rs 同名，安装在 site-packages 下。pytest 默认
-将 site-packages 置于 sys.path 前部，会导致 ``import construct`` 误命中 Python
-原版（无 Rust 扩展）。
+设计依据：docs/design/基础设施/测试框架设计.md §2.1（conftest.py 扩展契约）
 
-本文件在测试收集前加载（早于任何 ``import construct``），通过显式 sys.path 操纵
-确保 construct-rs 的 ``python/`` 目录优先。
+职责：
+1. sys.path 操纵：确保 construct-rs 包优先于 site-packages 中的同名 Python 包
+   （基准测试需要安装 Python 原版 ``construct==2.10.70`` 作为绝对基线，与
+   construct-rs 同名，安装在 site-packages 下。pytest 默认把 site-packages
+   放在 sys.path 前部，会导致 ``import construct`` 误命中 Python 原版）。
+2. venv / 路径 fixtures：供 parity helper（子进程隔离）与 bench runner 复用
+3. 共享 fixtures：测试数据目录 / 临时文件 / 编码参数化（v2 从原 _helpers/fixtures.py
+   合并到此处，pytest 自动发现惯例，消除"需显式 import 才生效"的隐性依赖）
 """
+
+from __future__ import annotations
 
 import os
 import sys
+import uuid
+from pathlib import Path
 
+import pytest
+
+# ===== 保留：sys.path 操纵（幂等保护） =====
 # construct-rs 的 Python 包源码根目录：tests/ 的上一级 + python/
 _CRS_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "python"))
 
@@ -20,7 +31,117 @@ if _CRS_ROOT not in sys.path or sys.path[0] != _CRS_ROOT:
     sys.path.insert(0, _CRS_ROOT)
 
 # 清除任何已缓存的 construct 模块（以防之前在其他 conftest 阶段被预导入）。
-# 仅在尚未导入 construct 时无操作。
 for _key in list(sys.modules):
     if _key == "construct" or _key.startswith("construct."):
         del sys.modules[_key]
+
+# ===== 路径常量（供 fixture 与 helper 复用） =====
+_TESTS_DIR = Path(__file__).resolve().parent
+_PROJECT_ROOT = _TESTS_DIR.parent                  # construct-rs/
+_CRS_PYTHON_DIR = _PROJECT_ROOT / "python"         # construct-rs/python/
+
+# 子进程隔离用的 venv 解析。
+# **环境适配（偏离设计文档 §2.1）**：设计文档沿用旧 test_phase4_parity.py 的路径
+# `crs_venv` / `crs_venv_py`，但实际环境这两个 venv 已废弃（Scripts 为空），
+# 当前活跃 venv 是 `crs_venv_new` / `crs_venv_py_new`（与 testing/ci/lib_smoke.ps1
+# 的 Resolve-ProjectPaths 一致）。此处采用实际路径。
+_VENV_ROOT = Path(r"<opencode-temp>")
+_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_new" / "Scripts" / "python.exe"
+_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_new" / "Scripts" / "python.exe"
+
+
+# ===== session 级 venv / 路径 fixtures =====
+
+@pytest.fixture(scope="session")
+def crs_python_dir() -> str:
+    """construct-rs/python/ 目录绝对路径（子进程 sys.path 注入用）。"""
+    return str(_CRS_PYTHON_DIR)
+
+
+@pytest.fixture(scope="session")
+def rs_python() -> str:
+    """CRS venv 的 python.exe（含 construct-rs wheel）。
+
+    解析顺序：
+      1. 环境变量 CRS_PYTHON（CI 覆盖用）
+      2. 默认 venv 路径 _DEFAULT_RS_PYTHON
+      3. fallback sys.executable（最后手段，可能两个 construct 冲突）
+    """
+    env = os.environ.get("CRS_PYTHON")
+    if env and Path(env).exists():
+        return env
+    if _DEFAULT_RS_PYTHON.exists():
+        return str(_DEFAULT_RS_PYTHON)
+    return sys.executable
+
+
+@pytest.fixture(scope="session")
+def py_python() -> str:
+    """PC venv 的 python.exe（含 Python construct 2.10.70）。
+
+    解析顺序同 rs_python，环境变量名 PC_PYTHON。
+    """
+    env = os.environ.get("PC_PYTHON")
+    if env and Path(env).exists():
+        return env
+    if _DEFAULT_PY_PYTHON.exists():
+        return str(_DEFAULT_PY_PYTHON)
+    return sys.executable
+
+
+@pytest.fixture(scope="session")
+def venv_pair(rs_python, py_python) -> dict:
+    """聚合 fixture：返回 venv 配置字典。
+
+    **硬性契约（设计 v2 硬性-1）**：dict 的 key 名与 ``run_parity_case`` /
+    ``BenchRunner.__init__`` 的形参名一一对齐，调用方可直接
+    ``run_parity_case(impl, case_id, case_definitions, **venv_pair)`` 解包。
+
+    返回：
+        {"rs_python": str, "py_python": str, "crs_python_dir": str}
+    """
+    return {
+        "rs_python": rs_python,
+        "py_python": py_python,
+        "crs_python_dir": str(_CRS_PYTHON_DIR),
+    }
+
+
+# ===== 共享 fixtures（v2 从原 _helpers/fixtures.py 合并，pytest 自动发现） =====
+
+@pytest.fixture(scope="session")
+def test_data_dir() -> Path:
+    """测试数据目录：tests/_helpers/data/（放二进制样本文件）。
+
+    目录可能尚未创建（按需由测试自行 mkdir）；fixture 仅返回路径约定。
+    """
+    return _TESTS_DIR / "_helpers" / "data"
+
+
+@pytest.fixture
+def tmp_binary_file(tmp_path) -> Path:
+    """临时二进制文件工厂，返回 tmp_path 下随机命名的 .bin 文件路径。
+
+    返回 Path 对象（不创建文件，由测试自行 write）。每次调用生成唯一名。
+    """
+    return tmp_path / f"{uuid.uuid4().hex}.bin"
+
+
+@pytest.fixture(params=[
+    "utf8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be", "ascii",
+])
+def encoding(request) -> str:
+    """编码参数化 fixture，Phase 6.2 Strings parity 用。
+
+    注意（整体性，REV 检视提到）：6.2 Strings DEV 实施时需校验这些 encoding
+    字符串与 Python construct / construct-rs 侧的编码名解析兼容（如 "utf8"
+    vs "utf-8"）。Python ``bytes.decode("utf8")`` 可接受，但 construct-rs
+    侧需确认。
+    """
+    return request.param
+
+
+@pytest.fixture
+def case_template():
+    """通用 case 模板工厂：返回一个空 dict 供测试填充 case 结构（保留供未来扩展）。"""
+    return {"case_id": "", "desc": "", "data": b"", "expected": None}
