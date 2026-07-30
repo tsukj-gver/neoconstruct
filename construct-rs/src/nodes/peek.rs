@@ -9,12 +9,11 @@
 //! （不消费字节）。Python 用 try/except/finally 实现此语义；construct-rs 用
 //! `ParseStream::seek` + Result 匹配（§0 #8 Stream 抽象纯 Rust 内部）。
 //!
-//! ## 已知差异（设计 §5.3 PE-3）
+//! ## ExplicitError 处理（设计 §5.3 PE-3，Phase 7 升级）
 //!
 //! Python `Peek` 在 inner.parse 抛 `ExplicitError` 时**不吞掉**（向上传播）。
-//! construct-rs 当前 `ConstructError` 枚举无 `Explicit` 变体（PM 决策 6.3-D2：
-//! Phase 6 不引入）。`is_explicit_error` 占位实现统一返回 `false`——所有
-//! 错误都被 Peek 吞掉（返回 Py_None）。Phase 7 Select 实现时若需引入，再补。
+//! Phase 7 引入 `ConstructError::Explicit` 变体后，[`is_explicit_error`] 已升级为
+//! 真实分类（`matches!(e, ConstructError::Explicit { .. })`），Explicit 错误向上传播。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -37,10 +36,10 @@ use crate::nodes::Node;
 /// - build：no-op（对齐 Python `return obj`，但 construct-rs build 不返回值）
 /// - sizeof：返回 0
 ///
-/// # ExplicitError 处理（设计 §5.3 PE-3）
+/// # ExplicitError 处理（设计 §5.3 PE-3，Phase 7 升级）
 ///
-/// construct-rs 当前无 `ConstructError::Explicit` 变体（PM 决策 6.3-D2）。
-/// [`is_explicit_error`] 占位返回 `false`，所有错误都被吞掉。
+/// Phase 7 起 [`is_explicit_error`] 真实分类：`ConstructError::Explicit` 变体
+/// 不被 Peek 吞掉，直接向上传播（对齐 Python `except ExplicitError: raise`）。
 #[derive(Debug)]
 pub struct PeekNode {
     /// 被预读的子树根。
@@ -63,13 +62,10 @@ impl PeekNode {
 
 /// 判断错误是否为"ExplicitError 等价物"（不被 Peek 吞掉）。
 ///
-/// **PM 决策 6.3-D2（Phase 6 不引入 ExplicitError 变体）**：当前 `ConstructError`
-/// 枚举无 `Explicit` 变体。本函数占位返回 `false`——所有错误都被 Peek 吞掉。
-///
-/// 未来若引入 `ConstructError::Explicit` 变体（如 Phase 7 Select 需要），
-/// 改为 `matches!(e, ConstructError::Explicit { .. })` 一行即可。
-fn is_explicit_error(_e: &ConstructError) -> bool {
-    false
+/// Phase 7 升级（设计 §1.4 / §5.3 PE-3 收尾）：`ConstructError::Explicit` 变体
+/// 已引入，本函数返回 `true` 表示该错误属于 Explicit 类，Peek 不吞掉、直接传播。
+fn is_explicit_error(e: &ConstructError) -> bool {
+    matches!(e, ConstructError::Explicit { .. })
 }
 
 impl Construct for PeekNode {
@@ -311,23 +307,36 @@ mod tests {
     }
 
     // ======================================================================
-    // is_explicit_error 占位
+    // is_explicit_error（Phase 7 升级为真实分类）
     // ======================================================================
 
     #[test]
-    fn is_explicit_error_always_false_in_phase6() {
-        // PM 决策 6.3-D2：Phase 6 不引入 Explicit 变体
-        let err = ConstructError::Stream {
-            message: "test".to_string(),
+    fn is_explicit_error_detects_explicit_variant() {
+        // Phase 7 升级：ConstructError::Explicit 不被 Peek 吞掉。
+        let explicit = ConstructError::Explicit {
+            message: "user-raised".to_string(),
             path: "root".to_string(),
         };
-        assert!(!is_explicit_error(&err));
+        assert!(is_explicit_error(&explicit));
 
-        let err = ConstructError::Generic {
+        // 其他错误仍被吞掉。
+        let stream_err = ConstructError::Stream {
             message: "test".to_string(),
             path: "root".to_string(),
         };
-        assert!(!is_explicit_error(&err));
+        assert!(!is_explicit_error(&stream_err));
+
+        let generic_err = ConstructError::Generic {
+            message: "test".to_string(),
+            path: "root".to_string(),
+        };
+        assert!(!is_explicit_error(&generic_err));
+
+        let select_err = ConstructError::Select {
+            message: "test".to_string(),
+            path: "root".to_string(),
+        };
+        assert!(!is_explicit_error(&select_err));
     }
 
     // ======================================================================

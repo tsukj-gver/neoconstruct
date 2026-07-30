@@ -37,22 +37,29 @@ pub mod bytewise;
 pub mod common;
 pub mod computed;
 pub mod element;
+pub mod focused_seq;
 pub mod format_field;
 pub mod greedy_bytes;
 pub mod greedy_range;
+pub mod if_then_else;
 pub mod index;
 pub mod padding;
 pub mod pass;
 pub mod peek;
+pub mod pointer;
+pub mod prefixed;
 pub mod prefixed_array;
 pub mod raw_copy;
 pub mod rebuild;
 pub mod repeat_until;
+pub mod seek;
+pub mod select;
 pub mod stop_if;
 pub mod strings;
 pub mod struct_node;
 pub mod struct_ref;
 pub mod subconstruct;
+pub mod switch;
 pub mod tell;
 pub mod transform;
 pub mod varint;
@@ -73,22 +80,29 @@ use bytewise::BytewiseNode;
 use computed::ComputedNode;
 use element::ElementNode;
 use enum_dispatch::enum_dispatch;
+use focused_seq::FocusedSeqNode;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use greedy_range::GreedyRangeNode;
+use if_then_else::IfThenElseNode;
 use index::IndexNode;
 use padding::PaddingNode;
 use pass::PassNode;
 use peek::PeekNode;
+use pointer::PointerNode;
+use prefixed::PrefixedNode;
 use prefixed_array::PrefixedArrayNode;
 use pyo3::prelude::*;
 use raw_copy::RawCopyNode;
 use rebuild::RebuildNode;
 use repeat_until::RepeatUntilNode;
+use seek::SeekNode;
+use select::SelectNode;
 use stop_if::StopIfNode;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
 use subconstruct::SubconstructNode;
+use switch::SwitchNode;
 use tell::TellNode;
 use transform::TransformNode;
 pub use varint::VarIntNode;
@@ -292,6 +306,29 @@ pub enum Node {
     NullTerminated(crate::nodes::strings::NullTerminatedNode),
     /// null 剥离包装器（持有任意 inner，Phase 6.2）。
     NullStripped(crate::nodes::strings::NullStrippedNode),
+    // === Phase 7.1 Conditional（4 个新变体） ===
+    /// 双分支条件节点（对应 Python construct `IfThenElse`，Phase 7.1）。
+    /// 条件可为常量或 ExprProgram；then/else 都是 `Box<Node>`。
+    IfThenElse(IfThenElseNode),
+    /// 多分支条件节点（对应 Python construct `Switch`，Phase 7.1）。
+    /// keyfunc 走 ExprProgram(i64) + FieldRef(PyObject) 混合（PM 决策 1）。
+    Switch(SwitchNode),
+    /// 多分支尝试节点（对应 Python construct `Select`，Phase 7.1）。
+    /// 遍历 subcons，首个成功者胜出；ExplicitError 穿透。
+    Select(SelectNode),
+    /// 聚焦字段序列节点（对应 Python construct `FocusedSeq`，Phase 7.1）。
+    /// context nesting + 返回单聚焦字段值。
+    FocusedSeq(FocusedSeqNode),
+    // === Phase 7.2 Streams（3 个新变体） ===
+    /// 流定位节点（对应 Python construct `Seek`，Phase 7.2）。
+    /// parse/build 执行 stream.seek；sizeof 永远 Err。
+    Seek(SeekNode),
+    /// 绝对偏移读写节点（对应 Python construct `Pointer`，Phase 7.2）。
+    /// seek 到 offset 处理 subcon 再 seek 回；sizeof 返回 0。
+    Pointer(PointerNode),
+    /// 长度前缀子流节点（对应 Python construct `Prefixed`，Phase 7.2）。
+    /// lengthfield 给出字节数，subcon 在子流上处理。
+    Prefixed(PrefixedNode),
 }
 
 impl Node {
@@ -333,6 +370,21 @@ impl Node {
             Node::PascalString(p) => p.has_expressions(),
             Node::NullTerminated(n) => n.has_expressions(),
             Node::NullStripped(n) => n.has_expressions(),
+            // Phase 7.1：Conditional 系列。
+            // IfThenElse：仅 Expr 条件返回 true（与 StopIf 同模式）。
+            // Switch：IntExpr / FieldRef 引用字段返回 true（ConstInt 返回 false）。
+            // Select / FocusedSeq：递归检查子树（与 Bitwise / Transform 同模式）。
+            Node::IfThenElse(i) => i.has_expressions(),
+            Node::Switch(s) => s.has_expressions(),
+            Node::Select(s) => s.has_expressions(),
+            Node::FocusedSeq(f) => f.has_expressions(),
+            // Phase 7.2：Streams 系列。
+            // Seek：仅 Expr at 返回 true（与 StopIf 同模式）。
+            // Pointer：Expr offset 或 subcon 含表达式。
+            // Prefixed：lengthfield 或 subcon 含表达式（与 PrefixedArray 同模式）。
+            Node::Seek(s) => s.has_expressions(),
+            Node::Pointer(p) => p.has_expressions(),
+            Node::Prefixed(p) => p.has_expressions(),
             _ => false,
         }
     }

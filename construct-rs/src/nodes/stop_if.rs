@@ -126,19 +126,51 @@ impl StopIfNode {
     ///   未命中走通用 [`eval_expr_int`]（5-op `(e&0xFF)==0` / 复合表达式等）。
     ///   fast-path 范式与 [`crate::nodes::repeat_until::RepeatUntilNode::eval_terminator`]
     ///   一致（4.5 v5.1 已验证）。
+    ///
+    /// Phase 7 重构：转发到 [`eval_condition`] 公共辅助函数（设计 §2.3），
+    /// 与 [`crate::nodes::if_then_else::IfThenElseNode`] 共用同一份求值逻辑。
     fn eval_cond(&self, ctx: &Context<'_>, py: Python<'_>) -> Result<bool, ConstructError> {
-        match &self.cond {
-            StopIfCondition::Always => Ok(true),
-            StopIfCondition::Never => Ok(false),
-            StopIfCondition::Expr(prog) => {
-                // O1 fast-path（设计 §16.1.3-O1）：命中常见 3-op 比较模式时内联求值。
-                let v = if let Some(fast) = prog.try_eval_simple_cmp(ctx, py) {
-                    fast?
-                } else {
-                    eval_expr_int(prog, ctx, py)?
-                };
-                Ok(v != 0)
-            }
+        eval_condition(&self.cond, ctx, py)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 公共辅助：eval_condition（Phase 7 提取，IfThenElse / StopIf 共用）
+// ---------------------------------------------------------------------------
+
+/// 求值条件（StopIf / IfThenElse 共用，设计 §2.3）。
+///
+/// - [`StopIfCondition::Always`] → `true`
+/// - [`StopIfCondition::Never`] → `false`
+/// - [`StopIfCondition::Expr`] → fast-path `try_eval_simple_cmp` / 通用
+///   [`eval_expr_int`]，非零为真（对齐 Python truthy 语义）。
+///
+/// # 性能（设计 §8.1）
+///
+/// - `Always` / `Never`：编译期常量分支，零运行时求值。
+/// - `Expr`：先尝试 fast-path（3-op 比较模式内联求值，省 ~10ns/调用），
+///   未命中走通用 VM（5-op 或复合表达式）。
+///
+/// # 错误传播
+///
+/// 求值失败（字段缺失、context 未初始化等）错误向上传播
+/// （[`ConstructError::ExprFieldMissing`] / [`ConstructError::ExprContext`] 等）。
+pub(crate) fn eval_condition(
+    cond: &StopIfCondition,
+    ctx: &Context<'_>,
+    py: Python<'_>,
+) -> Result<bool, ConstructError> {
+    match cond {
+        StopIfCondition::Always => Ok(true),
+        StopIfCondition::Never => Ok(false),
+        StopIfCondition::Expr(prog) => {
+            // O1 fast-path（设计 §16.1.3-O1）：命中常见 3-op 比较模式时内联求值。
+            let v = if let Some(fast) = prog.try_eval_simple_cmp(ctx, py) {
+                fast?
+            } else {
+                eval_expr_int(prog, ctx, py)?
+            };
+            Ok(v != 0)
         }
     }
 }

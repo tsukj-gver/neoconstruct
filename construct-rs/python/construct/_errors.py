@@ -25,6 +25,8 @@ Python 异常                    Rust ConstructError 变体
 :class:`StopFieldError`       ``ConstructError::StopField`` (Phase 4)
 :class:`IndexFieldError`      ``ConstructError::IndexField`` (Phase 4)
 :class:`StringError`          ``ConstructError::String`` (Phase 6.2)
+:class:`ExplicitError`        ``ConstructError::Explicit`` (Phase 7)
+:class:`SelectError`          ``ConstructError::Select`` (Phase 7)
 ============================  ==========================================
 
 .. note::
@@ -197,6 +199,37 @@ class StringError(ConstructError):
     """
 
 
+class ExplicitError(ConstructError):
+    """显式错误：用户主动抛出（Select / Peek 不吞掉，直接向上传播）。
+
+    对应 Python construct 的 ``ExplicitError``（core.py L89）和 Rust 的
+    ``ConstructError::Explicit``。
+
+    Phase 7 新增（PM 决策 2 / ADR-022 PE-3 收尾）。
+
+    触发场景（Python construct 中）：
+
+    - 用户在 Adapter 回调中 ``raise ExplicitError`` → Select / Peek 不吞掉
+    - ``Error`` 构造器（core.py 未定义独立类，Phase 7+ 暂不实现）parse/build 时抛出
+
+    construct-rs 已知差异 D1（设计 §1.5 / §12）：当前 Rust 侧
+    ``From<PyErr> for ConstructError`` 统一转 ``Generic``，无法保留 Python 侧的
+    ``ExplicitError`` 类型信息。Phase 7 范围内此异常类供 Rust 内部主动构造的
+    ``ConstructError::Explicit`` 变体映射（Select / Peek 识别 Explicit 时传播），
+    用户 Python 路径的完整 parity 待 Phase 8+ 修复 ``From<PyErr>`` 后达成。
+    """
+
+
+class SelectError(ConstructError):
+    """Select 错误：所有 subcon 都未成功。
+
+    对应 Python construct 的 ``SelectError``（core.py L109）和 Rust 的
+    ``ConstructError::Select``。
+
+    Phase 7 新增：Select 构造器遍历全部 subcons 后无成功者时触发。
+    """
+
+
 # ---------------------------------------------------------------------------
 # Phase 6.2: StringEncoded 兼容性别名（设计 §3.7.2 / §3.7.3）
 #
@@ -255,4 +288,6 @@ __all__ = [
     "StopFieldError",
     "IndexFieldError",
     "StringError",
+    "ExplicitError",
+    "SelectError",
 ]

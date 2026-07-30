@@ -25,6 +25,7 @@
 from ._errors import (
     CompilationError,
     ConstructError,
+    ExplicitError,
     FieldLengthError,
     FormatFieldError,
     GenericConstructError,
@@ -33,6 +34,7 @@ from ._errors import (
     PaddingError,
     RangeError,
     RepeatError,
+    SelectError,
     SizeofError,
     StopFieldError,
     StreamError,
@@ -162,6 +164,13 @@ try:
         RebuildDescriptor,
         Pass,
         PassDescriptor,
+        # Phase 7.2: Streams (Seek / Pointer / Prefixed)
+        Seek,
+        SeekDescriptor,
+        Pointer,
+        PointerDescriptor,
+        Prefixed,
+        PrefixedDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
@@ -169,6 +178,24 @@ except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
 # Phase 6.3: 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
 try:
     from ._adapters import Adapter, AdapterDescriptor, SymmetricAdapter
+except ImportError:  # pragma: no cover
+    pass
+
+# Phase 7.1: Conditional 构造器（If / IfThenElse / Switch / Select / FocusedSeq）。
+# Python 用户面 + Descriptor 类（不依赖 Rust pyclass，通过 type name 识别）。
+try:
+    from ._conditional import (
+        If,
+        IfThenElse,
+        IfThenElseDescriptor,
+        Switch,
+        SwitchDescriptor,
+        Select,
+        SelectDescriptor,
+        FocusedSeq,
+        FocusedSeqDescriptor,
+        Renamed,
+    )
 except ImportError:  # pragma: no cover
     pass
 
@@ -295,10 +322,28 @@ __all__ = [
     "RebuildDescriptor",
     "Pass",
     "PassDescriptor",
+    # Phase 7.2: Streams
+    "Seek",
+    "SeekDescriptor",
+    "Pointer",
+    "PointerDescriptor",
+    "Prefixed",
+    "PrefixedDescriptor",
     # Phase 6.3: 用户面 Adapter 基类
     "Adapter",
     "AdapterDescriptor",
     "SymmetricAdapter",
+    # Phase 7.1: Conditional 构造器
+    "If",
+    "IfThenElse",
+    "IfThenElseDescriptor",
+    "Switch",
+    "SwitchDescriptor",
+    "Select",
+    "SelectDescriptor",
+    "FocusedSeq",
+    "FocusedSeqDescriptor",
+    "Renamed",
     # 编译产物
     "CompiledSchema",
     # 异常
@@ -317,5 +362,7 @@ __all__ = [
     "StopFieldError",
     "IndexFieldError",
     "StringError",
+    "ExplicitError",
+    "SelectError",
     "StringEncoded",
 ]

@@ -47,32 +47,40 @@ use crate::nodes::bytes_integer::BytesIntegerNode;
 use crate::nodes::bytewise::BytewiseNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::element::ElementNode;
+use crate::nodes::focused_seq::{FocusedSeqField, FocusedSeqNode};
 use crate::nodes::format_field::FormatFieldNode;
 use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::greedy_range::GreedyRangeNode;
+use crate::nodes::if_then_else::IfThenElseNode;
 use crate::nodes::index::IndexNode;
 use crate::nodes::padding::PaddingNode;
 use crate::nodes::pass::PassNode;
 use crate::nodes::peek::PeekNode;
+use crate::nodes::pointer::{PointerNode, PointerOffset};
+use crate::nodes::prefixed::PrefixedNode;
 use crate::nodes::prefixed_array::PrefixedArrayNode;
 use crate::nodes::raw_copy::RawCopyNode;
 use crate::nodes::rebuild::RebuildNode;
 use crate::nodes::repeat_until::RepeatUntilNode;
+use crate::nodes::seek::{SeekNode, SeekOffset};
+use crate::nodes::select::SelectNode;
 use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
 use crate::nodes::strings::encoding::Encoding;
 use crate::nodes::strings::{
     CStringNode, GreedyStringNode, NullStrippedNode, NullTerminatedNode, PaddedStringNode,
     PascalStringNode,
 };
-use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
+use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::subconstruct::SubconstructNode;
+use crate::nodes::switch::{SwitchCase, SwitchKey, SwitchNode};
 use crate::nodes::tell::TellNode;
 use crate::nodes::transform::{ByteTransform, TransformNode};
 use crate::nodes::varint::VarIntNode;
 use crate::nodes::zigzag::ZigZagNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
+use crate::stream::Whence;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyTuple, PyType};
 
@@ -785,6 +793,119 @@ fn build_node_from_descriptor(
         // 双重识别保证：直接用 AdapterDescriptor 基类的用户和继承 Adapter 的用户都能工作。
         "AdapterDescriptor" => {
             return Ok(Node::AdapterCallback(build_adapter_callback_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // === Phase 7.1 Conditional（4 个新分支）===
+        // IfThenElseDescriptor → IfThenElseNode（双分支条件）。
+        // condfunc 编译期分类（与 StopIfDescriptor 同模式）：
+        //   - Python bool → StopIfCondition::Always / Never
+        //   - FieldRef/ExprRef → StopIfCondition::Expr（从 expr_programs[field_index]["cond"] 取）
+        // thensubcon / elsesubcon 递归编译（沿用 field_index，与 BitwiseDescriptor 同模式）。
+        "IfThenElseDescriptor" => {
+            return Ok(Node::IfThenElse(build_if_then_else_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // SwitchDescriptor → SwitchNode（多分支条件，PM 决策 1：A+B 混合）。
+        // keyfunc 编译期分类（ConstInt / IntExpr / FieldRef / 复杂表达式拒绝）。
+        // cases 是 Python dict，编译期展开为 Vec<SwitchCase>。
+        // default 递归编译（None → Pass，对齐 Python L4032）。
+        "SwitchDescriptor" => {
+            return Ok(Node::Switch(build_switch_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // SelectDescriptor → SelectNode（多分支尝试）。
+        // subcons 是 Python list，递归编译每个元素（与 PrefixedArray subcons 同模式）。
+        "SelectDescriptor" => {
+            let subcons_obj = desc
+                .getattr("subcons")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "SelectDescriptor missing 'subcons' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let subcons_list =
+                subcons_obj
+                    .downcast::<PyList>()
+                    .map_err(|_| ConstructError::Compilation {
+                        message: format!(
+                            "SelectDescriptor 'subcons' must be a list (field index {})",
+                            field_index
+                        ),
+                    })?;
+            let mut nodes = Vec::with_capacity(subcons_list.len());
+            for sub_desc in subcons_list.iter() {
+                let sub_node = build_node_from_descriptor(
+                    py,
+                    &sub_desc,
+                    field_index,
+                    expr_programs,
+                    field_names,
+                    false,
+                )?;
+                nodes.push(sub_node);
+            }
+            return Ok(Node::Select(SelectNode::new(nodes)));
+        }
+        // FocusedSeqDescriptor → FocusedSeqNode（聚焦字段序列，设计 §5）。
+        // parsebuildfrom 在编译期解析为 focus_idx。
+        // subcons 是 Python list（Renamed 包装或匿名 subcon）。
+        "FocusedSeqDescriptor" => {
+            return Ok(Node::FocusedSeq(build_focused_seq_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // === Phase 7.2 Streams（3 个新分支） ===
+        // SeekDescriptor → SeekNode（流定位）。
+        // at 可为 int 常量或 FieldRef/ExprRef 表达式（与 StopIf condfunc 同模式）。
+        // whence 是 int 0/1/2，编译期翻译为 Whence enum。
+        "SeekDescriptor" => {
+            return Ok(Node::Seek(build_seek_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
+        // PointerDescriptor → PointerNode（绝对偏移读写）。
+        // offset 可为 int 或 FieldRef/ExprRef（与 Seek at 同模式）。
+        // relativeOffset 是 bool。
+        // stream 参数非 None 时编译期拒绝（已知限制：换流不支持）。
+        // subcon 递归编译（沿用 field_index，与 BitwiseDescriptor 同模式；P3.1 限制：
+        // subcon 不支持含表达式的子描述符）。
+        "PointerDescriptor" => {
+            return Ok(Node::Pointer(build_pointer_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // PrefixedDescriptor → PrefixedNode（长度前缀子流）。
+        // lengthfield + subcon 双重递归编译（与 PascalString 同模式）。
+        // includelength 是 bool。
+        "PrefixedDescriptor" => {
+            return Ok(Node::Prefixed(build_prefixed_node(
                 py,
                 desc,
                 field_index,
@@ -1710,6 +1831,397 @@ fn build_stop_if_node(
     Ok(StopIfNode::new(StopIfCondition::Expr(program)))
 }
 
+// ---------------------------------------------------------------------------
+// Phase 7.1 Conditional：Descriptor → Node 编译辅助函数
+//
+// 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §2.4 / §3.6 / §5.4。
+//
+// 共同模式：
+// - condfunc / keyfunc 在编译期分类（常量 / 表达式），与 StopIfDescriptor 同源
+// - thensubcon / elsesubcon / cases / subcons 递归编译（沿用 field_index）
+// - 复杂表达式编译期拒绝（Switch keyfunc，引导用户用 Computed 预计算）
+// ---------------------------------------------------------------------------
+
+/// 从 Python 描述符的 `condfunc` 属性分类为 [`StopIfCondition`]。
+///
+/// 共用逻辑（StopIf / IfThenElse）：
+/// - Python `True` / `False`（或 int 1/0）→ [`StopIfCondition::Always`] / [`StopIfCondition::Never`]
+/// - FieldRef/ExprRef → 从 `expr_programs[field_index][param_name]` 取 ExprOp 列表 →
+///   [`StopIfCondition::Expr`]
+fn classify_condfunc(
+    py: Python<'_>,
+    cond_obj: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    param_name: &str,
+    descriptor_name: &str,
+) -> Result<StopIfCondition, ConstructError> {
+    // 1. 尝试常量分类：True → Always，False → Never。
+    if let Ok(b) = cond_obj.extract::<bool>() {
+        return Ok(if b {
+            StopIfCondition::Always
+        } else {
+            StopIfCondition::Never
+        });
+    }
+
+    // 2. 表达式路径：从 expr_programs[field_index][param_name] 取 ExprOp 列表。
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "{} has non-constant condfunc but no expression program was provided \
+                 (field index {})",
+                descriptor_name, field_index
+            ),
+        })?;
+
+    let field_exprs_dict =
+        field_exprs
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: format!(
+                    "{} expression program must be a dict (field index {})",
+                    descriptor_name, field_index
+                ),
+            })?;
+
+    let ops_list = field_exprs_dict
+        .get_item(param_name)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get '{}' from {} expression programs: {} (field index {})",
+                param_name, descriptor_name, e, field_index
+            ),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "{} has non-constant condfunc but '{}' key missing in expression \
+                 program (field index {})",
+                descriptor_name, param_name, field_index
+            ),
+        })?;
+
+    let ops = parse_expr_ops_from_py(&ops_list)?;
+    Ok(StopIfCondition::Expr(ExprProgram::new(ops)))
+}
+
+/// 从 `IfThenElseDescriptor` 构建 `IfThenElseNode`（设计 §2.4）。
+fn build_if_then_else_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<IfThenElseNode, ConstructError> {
+    let cond_obj = desc
+        .getattr("condfunc")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "IfThenElseDescriptor missing 'condfunc' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let cond = classify_condfunc(
+        py,
+        &cond_obj,
+        field_index,
+        expr_programs,
+        "cond",
+        "IfThenElseDescriptor",
+    )?;
+
+    let then_desc = desc
+        .getattr("thensubcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "IfThenElseDescriptor missing 'thensubcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let then_node = build_node_from_descriptor(
+        py,
+        &then_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    let else_desc = desc
+        .getattr("elsesubcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "IfThenElseDescriptor missing 'elsesubcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let else_node = build_node_from_descriptor(
+        py,
+        &else_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    Ok(IfThenElseNode::new(cond, then_node, else_node))
+}
+
+/// 从 `SwitchDescriptor` 构建 `SwitchNode`（设计 §3.6，PM 决策 1：A+B 混合）。
+fn build_switch_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<SwitchNode, ConstructError> {
+    // 1. 分类 keyfunc
+    let key_obj = desc
+        .getattr("keyfunc")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "SwitchDescriptor missing 'keyfunc' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    let key = if let Ok(b) = key_obj.extract::<bool>() {
+        // Python bool 也是 int（True == 1, False == 0）
+        SwitchKey::ConstInt(if b { 1 } else { 0 })
+    } else if let Ok(k) = key_obj.extract::<i64>() {
+        SwitchKey::ConstInt(k)
+    } else {
+        // 表达式路径：从 expr_programs[field_index] 取 "key"
+        let field_exprs = expr_programs.get(field_index).and_then(Option::as_ref);
+        let field_exprs_dict = field_exprs
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "Switch keyfunc is not a constant but no expression program was \
+                     provided (field index {}). For complex expressions like \
+                     'this.x + 1', use Computed(this.x + 1) to pre-compute, then \
+                     Switch(this.key, ...).",
+                    field_index
+                ),
+            })?
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "Switch expression program must be a dict".to_string(),
+            })?;
+
+        if let Ok(Some(key_ops)) = field_exprs_dict.get_item("key") {
+            // 路线 A：IntExpr
+            let ops = parse_expr_ops_from_py(&key_ops)?;
+            SwitchKey::IntExpr(ExprProgram::new(ops))
+        } else {
+            // 都无 → 复杂表达式拒绝
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "Switch keyfunc is a complex expression that cannot be compiled to \
+                     IntExpr or FieldRef (field index {}). construct-rs only supports \
+                     single field references (this.n) or int constants as keyfunc. \
+                     For complex expressions like 'this.x + 1', use Computed(this.x + 1) \
+                     to pre-compute, then Switch(this.key, ...).",
+                    field_index
+                ),
+            });
+        }
+    };
+
+    // 2. 展开 cases dict
+    let cases_obj = desc
+        .getattr("cases")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "SwitchDescriptor missing 'cases' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let cases_dict = cases_obj
+        .downcast::<PyDict>()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "SwitchDescriptor 'cases' must be a dict (field index {})",
+                field_index
+            ),
+        })?;
+    let mut cases = Vec::with_capacity(cases_dict.len());
+    for item in cases_dict.items() {
+        let case_key: Bound<PyAny> = item.get_item(0).map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to read Switch case key: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+        let case_subcon: Bound<PyAny> =
+            item.get_item(1).map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "failed to read Switch case subcon: {} (field index {})",
+                    e, field_index
+                ),
+            })?;
+        let case_node = build_node_from_descriptor(
+            py,
+            &case_subcon,
+            field_index,
+            expr_programs,
+            field_names,
+            false,
+        )?;
+        cases.push(SwitchCase::new(py, case_key.clone().unbind(), case_node));
+    }
+
+    // 3. default subcon
+    let default_obj = desc
+        .getattr("default")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "SwitchDescriptor missing 'default' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let default_node = if default_obj.is_none() {
+        Node::Pass(PassNode::new())
+    } else {
+        build_node_from_descriptor(
+            py,
+            &default_obj,
+            field_index,
+            expr_programs,
+            field_names,
+            false,
+        )?
+    };
+
+    Ok(SwitchNode::new(key, cases, default_node))
+}
+
+/// 从 `FocusedSeqDescriptor` 构建 `FocusedSeqNode`（设计 §5.4）。
+fn build_focused_seq_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<FocusedSeqNode, ConstructError> {
+    // 1. parsebuildfrom → focus 字段名
+    let pbf_obj = desc
+        .getattr("parsebuildfrom")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "FocusedSeqDescriptor missing 'parsebuildfrom' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let focus_name: String = pbf_obj.extract().map_err(|_| ConstructError::Compilation {
+        message: format!(
+            "FocusedSeqDescriptor 'parsebuildfrom' must be a string (field index {}). \
+                 construct-rs only supports string parsebuildfrom (e.g. 'num'). Lambda \
+                 context functions are not supported.",
+            field_index
+        ),
+    })?;
+
+    // 2. subcons list → Vec<FocusedSeqField>
+    let subcons_obj = desc
+        .getattr("subcons")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "FocusedSeqDescriptor missing 'subcons' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let subcons_list =
+        subcons_obj
+            .downcast::<PyList>()
+            .map_err(|_| ConstructError::Compilation {
+                message: format!(
+                    "FocusedSeqDescriptor 'subcons' must be a list (field index {})",
+                    field_index
+                ),
+            })?;
+
+    let mut fields: Vec<FocusedSeqField> = Vec::new();
+    let mut focus_idx: Option<usize> = None;
+
+    for sub_desc_bound in subcons_list.iter() {
+        // Renamed 包装：含 name + subcon；匿名 subcon：无 name。
+        let name_opt: Option<String> = if sub_desc_bound.hasattr("name").unwrap_or(false) {
+            let name_obj =
+                sub_desc_bound
+                    .getattr("name")
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!(
+                            "FocusedSeq subcon 'name' attribute access failed: {} (field index {})",
+                            e, field_index
+                        ),
+                    })?;
+            if name_obj.is_none() {
+                None
+            } else {
+                name_obj.extract::<String>().ok()
+            }
+        } else {
+            None
+        };
+
+        // 获取实际 subcon：Renamed.subcon 或 desc 自身
+        let inner_desc = if sub_desc_bound.hasattr("subcon").unwrap_or(false) {
+            sub_desc_bound
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "FocusedSeq subcon 'subcon' attribute access failed: {} (field index {})",
+                        e, field_index
+                    ),
+                })?
+        } else {
+            sub_desc_bound.clone()
+        };
+
+        let node = build_node_from_descriptor(
+            py,
+            &inner_desc,
+            field_index,
+            expr_programs,
+            field_names,
+            false,
+        )?;
+
+        // 检查 focus_name 匹配
+        if let Some(ref n) = name_opt {
+            if n == &focus_name && focus_idx.is_none() {
+                // FS-8: 重复字段名 → 取第一个匹配（与 Python finalret 覆盖语义一致）
+                focus_idx = Some(fields.len());
+            }
+            fields.push(FocusedSeqField::new_named(
+                FieldName::new(py, n.clone()),
+                node,
+            ));
+        } else {
+            fields.push(FocusedSeqField::new_anonymous(node));
+        }
+    }
+
+    // FS-2/FS-4: focus 字段必须存在且为命名字段
+    let focus_idx = focus_idx.ok_or_else(|| ConstructError::Compilation {
+        message: format!(
+            "FocusedSeq parsebuildfrom='{}' does not match any named field in subcons \
+             (field index {}). parsebuildfrom must match a named field (Renamed wrapper \
+             with matching 'name').",
+            focus_name, field_index
+        ),
+    })?;
+
+    // 4. has_expressions：递归 fields 子树
+    let has_expressions = fields.iter().any(|f| f.node().has_expressions());
+
+    Ok(FocusedSeqNode::new(fields, focus_idx, has_expressions))
+}
+
 /// 从 `RepeatUntilDescriptor` 构建 `RepeatUntilNode`（v5 阶段 6 完全重写）。
 ///
 /// **阶段 1 临时占位**：v5 重写RepeatUntilNode 数据结构与编译逻辑，
@@ -2023,6 +2535,290 @@ fn build_adapter_callback_node(
         .unbind();
 
     Ok(AdapterCallbackNode::new(subcon_node, decode, encode))
+}
+
+// ---------------------------------------------------------------------------
+// Phase 7.2 Streams：Seek / Pointer / Prefixed 编译辅助函数
+//
+// 设计依据：`docs/design/模块设计/模块设计-Streams.md` §3.6。
+//
+// 共同模式：
+// - SeekDescriptor / PointerDescriptor 的 at / offset 可为 int 常量或 FieldRef/ExprRef
+//   表达式。表达式路径从 expr_programs[field_index][param_name] 取 ExprOp 列表
+//   （与 BytesDescriptor length / StopIfDescriptor cond / ComputedDescriptor func 同模式）。
+// - PointerDescriptor / PrefixedDescriptor 的 subcon / lengthfield 递归编译
+//   （沿用 field_index，与 BitwiseDescriptor / PascalStringDescriptor 同模式）。
+//   P3.1 限制：subcon / lengthfield 不支持含表达式的子描述符（Python 侧
+//   `_extract_and_compile_exprs` 不递归 inner）。
+// ---------------------------------------------------------------------------
+
+/// 从 Python 描述符读取 `at` / `offset` 参数并构建对应的 Seek/Pointer offset 变体。
+///
+/// 共用辅助函数（SeekDescriptor.at 和 PointerDescriptor.offset 同模式）。
+///
+/// # 参数
+///
+/// - `py`：GIL token。
+/// - `desc`：Python 描述符。
+/// - `param_name`：参数名（"at" / "offset"）。
+/// - `field_index`：字段索引。
+/// - `expr_programs`：每字段的表达式程序。
+///
+/// # 路径
+///
+/// - Python int 常量 → `SeekOffset::Const` / `PointerOffset::Const`
+/// - FieldRef/ExprRef → 从 `expr_programs[field_index][param_name]` 取 ExprOp 列表
+fn build_seek_or_pointer_offset(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    param_name: &str,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<(Option<i64>, Option<ExprProgram>), ConstructError> {
+    let value_obj = desc
+        .getattr(param_name)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "descriptor missing '{}' attribute: {} (field index {})",
+                param_name, e, field_index
+            ),
+        })?;
+
+    // 尝试 extract 为 i64（常量路径）。失败表示是表达式。
+    match value_obj.extract::<i64>() {
+        Ok(n) => Ok((Some(n), None)),
+        Err(_) => {
+            // 表达式路径：从 expr_programs[field_index][param_name] 取
+            let field_exprs = expr_programs
+                .get(field_index)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| ConstructError::Compilation {
+                    message: format!(
+                        "field has non-constant {} but no expression program was provided \
+                         (field index {})",
+                        param_name, field_index
+                    ),
+                })?;
+            let field_exprs_dict = field_exprs.bind(py).downcast::<PyDict>().map_err(|_| {
+                ConstructError::Compilation {
+                    message: format!(
+                        "{} expression program must be a dict (field index {})",
+                        param_name, field_index
+                    ),
+                }
+            })?;
+            let ops_list = field_exprs_dict
+                .get_item(param_name)
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "failed to get '{}' from expression programs: {} (field index {})",
+                        param_name, e, field_index
+                    ),
+                })?
+                .ok_or_else(|| ConstructError::Compilation {
+                    message: format!(
+                        "field has non-constant {} but '{}' key missing in expression program \
+                         (field index {})",
+                        param_name, param_name, field_index
+                    ),
+                })?;
+            let ops = parse_expr_ops_from_py(&ops_list)?;
+            Ok((None, Some(ExprProgram::new(ops))))
+        }
+    }
+}
+
+/// 从 `SeekDescriptor` 构建 [`SeekNode`]（Phase 7.2 §3.6.2）。
+///
+/// 编译路径（参照 StopIfDescriptor 的 "condfunc" 模式 + BytesDescriptor 的 length 模式）：
+/// 1. 从 desc 读取 `at`：
+///    - Python int 常量 → [`SeekOffset::Const`]
+///    - FieldRef/ExprRef → 从 `expr_programs[field_index]["at"]` 取 ExprOp 列表 →
+///      [`SeekOffset::Expr`]
+/// 2. 从 desc 读取 `whence`（int 0/1/2）→ [`Whence::from_python_int`]
+fn build_seek_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<SeekNode, ConstructError> {
+    let (const_at, expr_at) =
+        build_seek_or_pointer_offset(py, desc, "at", field_index, expr_programs)?;
+    let at = match (const_at, expr_at) {
+        (Some(n), None) => SeekOffset::Const(n),
+        (None, Some(prog)) => SeekOffset::Expr(prog),
+        _ => {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "SeekDescriptor 'at' resolution failed (field index {})",
+                    field_index
+                ),
+            });
+        }
+    };
+
+    // whence：默认 0（Start）。Python int → Whence enum。
+    let whence_val: i64 = desc
+        .getattr("whence")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "SeekDescriptor missing 'whence' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .extract()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "SeekDescriptor 'whence' attribute must be int 0/1/2 (field index {})",
+                field_index
+            ),
+        })?;
+    let whence = Whence::from_python_int(whence_val)?;
+
+    Ok(SeekNode::new(at, whence))
+}
+
+/// 从 `PointerDescriptor` 构建 [`PointerNode`]`（Phase 7.2 §3.6.2）。
+///
+/// 编译路径（参照 PascalStringDescriptor lengthfield 递归 + StopIf condfunc 表达式）：
+/// 1. 从 desc 读取 `offset`：常量 → Const；表达式 → 从 expr_programs[field_index]["offset"] 取
+/// 2. 从 desc 读取 `relativeOffset`（bool，默认 False）
+/// 3. 递归编译 `subcon`（沿用 field_index，与 BitwiseDescriptor 同模式，不递归 inner 表达式）
+/// 4. 校验 `stream` 属性为 None（非 None 编译期拒绝，文档化已知限制）
+fn build_pointer_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<PointerNode, ConstructError> {
+    // 1. offset（常量或表达式）
+    let (const_off, expr_off) =
+        build_seek_or_pointer_offset(py, desc, "offset", field_index, expr_programs)?;
+    let offset = match (const_off, expr_off) {
+        (Some(n), None) => PointerOffset::Const(n),
+        (None, Some(prog)) => PointerOffset::Expr(prog),
+        _ => {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "PointerDescriptor 'offset' resolution failed (field index {})",
+                    field_index
+                ),
+            });
+        }
+    };
+
+    // 2. relativeOffset（bool，默认 False）
+    let relative: bool = match desc.getattr("relativeOffset") {
+        Ok(v) => v.extract().map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "PointerDescriptor 'relativeOffset' attribute must be bool (field index {})",
+                field_index
+            ),
+        })?,
+        Err(_) => false,
+    };
+
+    // 3. 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PointerDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let subcon_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 4. 校验 stream 参数为 None（换流不支持，已知限制）
+    //    若 Python 描述符没有 stream 属性，跳过校验（兼容旧版）。
+    if let Ok(stream_attr) = desc.getattr("stream") {
+        if !stream_attr.is_none() {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "PointerDescriptor 'stream' parameter (stream switching) is not supported \
+                     in construct-rs (field index {}). Use the default stream (stream=None).",
+                    field_index
+                ),
+            });
+        }
+    }
+
+    Ok(PointerNode::new(offset, relative, subcon_node))
+}
+
+/// 从 `PrefixedDescriptor` 构建 [`PrefixedNode`]`（Phase 7.2 §3.6.2）。
+///
+/// 编译路径（参照 PascalStringDescriptor，双重子描述符递归）：
+/// 1. 递归编译 `lengthfield`（沿用 field_index，与 PascalString 同模式）
+/// 2. 递归编译 `subcon`（同上）
+/// 3. 读取 `includelength`（bool，默认 False）
+fn build_prefixed_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<PrefixedNode, ConstructError> {
+    // 1. 递归编译 lengthfield（沿用 field_index）。
+    let lengthfield_desc =
+        desc.getattr("lengthfield")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "PrefixedDescriptor missing 'lengthfield' attribute: {} (field index {})",
+                    e, field_index
+                ),
+            })?;
+    let lengthfield_node = build_node_from_descriptor(
+        py,
+        &lengthfield_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 2. 递归编译 subcon（同上）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PrefixedDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let subcon_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 3. includelength（bool，默认 False）。
+    let includelength: bool = match desc.getattr("includelength") {
+        Ok(v) => v.extract().map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "PrefixedDescriptor 'includelength' attribute must be bool (field index {})",
+                field_index
+            ),
+        })?,
+        Err(_) => false,
+    };
+
+    Ok(PrefixedNode::new(
+        lengthfield_node,
+        subcon_node,
+        includelength,
+    ))
 }
 
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。

@@ -287,6 +287,43 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    /// 显式错误：用户主动抛出（对应 Python construct `ExplicitError`，core.py L89）。
+    ///
+    /// **不被 Select / Peek 吞掉**——直接向上传播。Python 中由 `Error` 构造器
+    /// （Phase 7 暂不实现）或用户在 `_emitparse`/Adapter 回调中主动抛出。
+    ///
+    /// Phase 7 引入（PM 决策 2 / ADR-022 PE-3 收尾，设计 §1.2）。
+    ///
+    /// 触发场景：
+    /// - Select 遍历 subcons 时，某 subcon 抛 Explicit → Select 直接传播（不尝试后续）
+    /// - Peek 预读时，inner 抛 Explicit → Peek 直接传播（不返回 Py_None）
+    ///
+    /// **已知差异 D1**（设计 §1.5 / §12）：当前 `From<PyErr> for ConstructError`
+    /// 统一转 `Generic`，无法保留 Python 侧的 `ExplicitError` 类型信息。Phase 7
+    /// 范围内 Rust 不主动构造 Explicit 变体（仅供 Select/Peek 识别用，未来
+    /// Phase 8+ 修复 `From<PyErr>` 后用户路径才能完整 parity）。
+    #[error("explicit error: {message} at {path}")]
+    Explicit {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// Select 错误：所有 subcon 都未成功（对应 Python construct `SelectError`，core.py L109）。
+    ///
+    /// 触发场景：[`crate::nodes::select::SelectNode`] 的 `parse` / `build` 遍历全部
+    /// subcons 后无成功者。
+    ///
+    /// Phase 7 引入（设计 §1.2 / §4.2）。
+    #[error("select error: {message} at {path}")]
+    Select {
+        /// 错误详情（如 "no subconstruct matched"）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -312,7 +349,9 @@ impl ConstructError {
             | ConstructError::Range { message, .. }
             | ConstructError::Repeat { message, .. }
             | ConstructError::IndexField { message, .. }
-            | ConstructError::String { message, .. } => Some(message),
+            | ConstructError::String { message, .. }
+            | ConstructError::Explicit { message, .. }
+            | ConstructError::Select { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
@@ -342,7 +381,9 @@ impl ConstructError {
             | ConstructError::Repeat { path, .. }
             | ConstructError::StopField { path }
             | ConstructError::IndexField { path, .. }
-            | ConstructError::String { path, .. } => Some(path),
+            | ConstructError::String { path, .. }
+            | ConstructError::Explicit { path, .. }
+            | ConstructError::Select { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -394,6 +435,8 @@ impl ConstructError {
             ConstructError::StopField { .. } => "StopField",
             ConstructError::IndexField { .. } => "IndexField",
             ConstructError::String { .. } => "String",
+            ConstructError::Explicit { .. } => "Explicit",
+            ConstructError::Select { .. } => "Select",
         }
     }
 
@@ -496,7 +539,9 @@ impl ConstructError {
             | ConstructError::Repeat { path, .. }
             | ConstructError::StopField { path }
             | ConstructError::IndexField { path, .. }
-            | ConstructError::String { path, .. } => *path = new_path,
+            | ConstructError::String { path, .. }
+            | ConstructError::Explicit { path, .. }
+            | ConstructError::Select { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -556,6 +601,14 @@ struct ExceptionClasses {
     /// Python construct 的 `StringError`（core.py L54），String 系列构造器的
     /// 编解码失败 / 非 Unicode 输入等。
     string_error: Py<PyType>,
+    /// 对应 `ConstructError::Explicit`（Phase 7）。
+    /// Python construct 的 `ExplicitError`（core.py L89），用户主动抛出的错误
+    /// （Select / Peek 不吞掉，直接向上传播）。
+    explicit_error: Py<PyType>,
+    /// 对应 `ConstructError::Select`（Phase 7）。
+    /// Python construct 的 `SelectError`（core.py L109），Select 遍历全部
+    /// subcons 后无成功者。
+    select_error: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -586,14 +639,15 @@ impl ExceptionClasses {
     ///
     /// # 返回
     ///
-    /// `true` 表示 `cls_ptr` 等于 14 个内置异常类之一，可进入 fast-path；
+    /// `true` 表示 `cls_ptr` 等于 16 个内置异常类之一，可进入 fast-path；
     /// `false` 表示用户子类化或未知类，走慢路径。
     fn is_builtin_class(&self, cls_ptr: *mut ffi::PyObject) -> bool {
         // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
         // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
         //
         // Phase 6.2：数组扩容 13 → 14（新增 string_error，设计 §3.8.3）。
-        let builtin_ptrs: [*mut ffi::PyObject; 14] = [
+        // Phase 7：数组扩容 14 → 16（新增 explicit_error / select_error，设计 §1.3）。
+        let builtin_ptrs: [*mut ffi::PyObject; 16] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
             self.field_length_error.as_ptr(),
@@ -608,6 +662,8 @@ impl ExceptionClasses {
             self.stop_field_error.as_ptr(),
             self.index_field_error.as_ptr(),
             self.string_error.as_ptr(),
+            self.explicit_error.as_ptr(),
+            self.select_error.as_ptr(),
         ];
         builtin_ptrs.contains(&cls_ptr)
     }
@@ -652,6 +708,8 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         stop_field_error: get("StopFieldError")?,
         index_field_error: get("IndexFieldError")?,
         string_error: get("StringError")?,
+        explicit_error: get("ExplicitError")?,
+        select_error: get("SelectError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -705,6 +763,10 @@ fn select_exception_class<'py>(
         ConstructError::IndexField { .. } => &classes.index_field_error,
         // Phase 6.2：String 系列错误映射到 Python StringError（core.py L54）。
         ConstructError::String { .. } => &classes.string_error,
+        // Phase 7：显式错误映射到 Python ExplicitError（core.py L89）。
+        ConstructError::Explicit { .. } => &classes.explicit_error,
+        // Phase 7：Select 错误映射到 Python SelectError（core.py L109）。
+        ConstructError::Select { .. } => &classes.select_error,
     };
     // cls.bind(py) 返回 &Bound<'py, PyType>，借用 cls（借自 classes）。
     // 不调 clone()，避免 incref/decref 各一次。
@@ -732,7 +794,7 @@ fn build_exception_instance<'py>(
 
 /// O3 fast-path：绕过 Python `__init__` 直接构造异常实例（4.x 错误路径 D 类优化）。
 ///
-/// 仅对 [`ExceptionClasses`] 缓存的 13 个内置异常类启用（指针相等比较判定，见
+/// 仅对 [`ExceptionClasses`] 缓存的 16 个内置异常类启用（指针相等比较判定，见
 /// [`ExceptionClasses::is_builtin_class`]）。用户子类化的异常返回 `None`，由调用方
 /// 走 [`build_exception_instance`] 慢路径以保证用户的 `__init__` 被调用。
 ///
@@ -1194,6 +1256,8 @@ mod tests {
             "class StopFieldError(ConstructError): pass\n",
             "class IndexFieldError(ConstructError): pass\n",
             "class StringError(ConstructError): pass\n",
+            "class ExplicitError(ConstructError): pass\n",
+            "class SelectError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run test classes definition");
@@ -1220,6 +1284,8 @@ mod tests {
             stop_field_error: get("StopFieldError"),
             index_field_error: get("IndexFieldError"),
             string_error: get("StringError"),
+            explicit_error: get("ExplicitError"),
+            select_error: get("SelectError"),
         }
     }
 
@@ -1617,6 +1683,8 @@ mod tests {
             "class StopFieldError(ConstructError): pass\n",
             "class IndexFieldError(ConstructError): pass\n",
             "class StringError(ConstructError): pass\n",
+            "class ExplicitError(ConstructError): pass\n",
+            "class SelectError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run aligned test classes definition");
@@ -1643,6 +1711,8 @@ mod tests {
             stop_field_error: get("StopFieldError"),
             index_field_error: get("IndexFieldError"),
             string_error: get("StringError"),
+            explicit_error: get("ExplicitError"),
+            select_error: get("SelectError"),
         }
     }
 
