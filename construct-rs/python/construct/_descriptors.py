@@ -1058,7 +1058,7 @@ def RepeatUntil(terminator, subcon, discard=False):
 
     限制（Phase 4.5 v5）：
 
-    - **不接收 Python lambda / callable**（用户硬约束 #1）。如传入 callable，
+    - **不接收 Python lambda / callable**（用户硬约束 #1）。如传入 callable,
       ``RepeatUntilDescriptor.__init__`` 立即抛 ``CompilationError``。
     - 终止表达式必须引用 Element 字段（编译期校验，否则 ``terminator must reference
       an Element field`` 错误）。
@@ -1074,6 +1074,272 @@ def RepeatUntil(terminator, subcon, discard=False):
     :return: ``RepeatUntilDescriptor`` 实例。
     """
     return RepeatUntilDescriptor(terminator, subcon, discard)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.3: 内置 Adapter 描述符（Subconstruct / Peek / RawCopy / Rebuild / Pass）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Adapter核心.md`` §6.4。
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到对应的 Node 变体（详见 compile.rs Phase 6.3 分支）。
+#
+# 双层分工（PM 决策 2）：
+# - **内置 Adapter**（本节 5 个）：Rust Node 变体，性能 ≥10x（用户主动选具体名）
+# - **用户面 Adapter**（_adapters.py）：Python 类，用户继承写 _decode/_encode
+#   性能不设硬门禁（用户主动接受 Python 层解码开销）
+# ---------------------------------------------------------------------------
+
+
+class SubconstructDescriptor:
+    """``Subconstruct(subcon)`` 描述符。
+
+    单子构造器包装：parse/build/sizeof 全部转发给 subcon。对应 Python
+    construct 的 ``Subconstruct``（core.py L787）。
+
+    Python 中 Subconstruct 是抽象基类（Adapter/RawCopy/Peek/Rebuild 等的父类），
+    construct-rs 把它实现为**具体节点**，主要供未来 Pointer/Prefixed 复用，
+    以及作为其他内置 Adapter 的实现基础。
+
+    ``_expr_params`` 协议返回空 dict：Subconstruct 自身无表达式参数
+    （inner subcon 的表达式由递归处理）。
+    """
+
+    __slots__ = ("subcon",)
+
+    _expr_params = {}
+
+    def __init__(self, subcon):
+        """初始化 Subconstruct 描述符。
+
+        :param subcon: 被包装的子构造器。
+        """
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "Subconstruct({!r})".format(self.subcon)
+
+
+def Subconstruct(subcon):
+    """创建一个 Subconstruct 描述符（纯转发包装）。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            x: int = field(Subconstruct(Int8ub))
+
+    :param subcon: 被包装的子构造器。
+    :return: ``SubconstructDescriptor`` 实例。
+    """
+    return SubconstructDescriptor(subcon)
+
+
+class PeekDescriptor:
+    """``Peek(subcon)`` 描述符。
+
+    预读节点：parse 子解析后回退 stream 到入口位置（不消费字节）。
+    对应 Python construct 的 ``Peek``（core.py L4486）。
+
+    - parse：返回 subcon.parse 结果（不消费字节，seek 回入口位置）；
+      子解析失败时吞掉错误返回 None
+    - build：no-op
+    - sizeof：0
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ("subcon",)
+
+    _expr_params = {}
+
+    def __init__(self, subcon):
+        """初始化 Peek 描述符。
+
+        :param subcon: 被预读的子构造器。
+        """
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "Peek({!r})".format(self.subcon)
+
+
+def Peek(subcon):
+    """创建一个 Peek 描述符。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            a: int = field(Peek(Int8ub))      # 不消费字节
+            b: int = field(Int8ub)            # 读同一字节
+
+        P.parse(b"\\x10")  # → P(a=16, b=16)
+
+    :param subcon: 被预读的子构造器。
+    :return: ``PeekDescriptor`` 实例。
+    """
+    return PeekDescriptor(subcon)
+
+
+class RawCopyDescriptor:
+    """``RawCopy(subcon)`` 描述符。
+
+    原始字节捕获节点：parse 返回 ``dict(data, value, offset1, offset2, length)``。
+    对应 Python construct 的 ``RawCopy``（core.py L4761）。
+
+    - parse：记录 offset1 → subcon.parse → offset2 → seek 回 offset1 重读 raw bytes
+    - build：含 ``'data'`` 键直接 write；含 ``'value'`` 键调 subcon.build；否则错误
+    - sizeof：subcon.sizeof
+
+    ``_expr_params`` 协议返回空 dict。
+
+    已知差异（设计 §5.3 RC-build-1）：construct-rs 的 build 不返回值，
+    用户无法拿到 build 出的 raw bytes。需要 raw bytes 应走 parse 路径。
+    """
+
+    __slots__ = ("subcon",)
+
+    _expr_params = {}
+
+    def __init__(self, subcon):
+        """初始化 RawCopy 描述符。
+
+        :param subcon: 被捕获原始字节的子构造器。
+        """
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "RawCopy({!r})".format(self.subcon)
+
+
+def RawCopy(subcon):
+    """创建一个 RawCopy 描述符。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            x: dict = field(RawCopy(Int8ub))
+
+        parsed = P.parse(b"\\xff")
+        # parsed.x == {"data": b"\\xff", "value": 255, "offset1": 0,
+        #              "offset2": 1, "length": 1}
+
+    :param subcon: 被捕获原始字节的子构造器。
+    :return: ``RawCopyDescriptor`` 实例。
+    """
+    return RawCopyDescriptor(subcon)
+
+
+class RebuildDescriptor:
+    """``Rebuild(subcon, func)`` 描述符。
+
+    build 时基于表达式重算字段。对应 Python construct 的 ``Rebuild``（core.py L2975）。
+
+    - parse：转发 subcon.parse
+    - build：忽略传入 obj，求值 func 表达式 → subcon.build(value)
+    - sizeof：subcon.sizeof
+
+    必须作为 RO 字段使用（``rfield(Rebuild(...))``）。若用 ``field(...)`` (rw)
+    或 ``wfield(...)`` (wo)，编译期拒绝。
+
+    ``_expr_params`` 协议返回 ``{"func": <expr>}``：编译期将 expr 翻译为 ExprOp
+    指令列表，存入 expr_programs 的 "func" 键（与 ComputedDescriptor 同模式）。
+
+    限制（设计 §5.3 RB-callable）：func 必须是 Phase 2 表达式
+    （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
+    （与 ADR-014 RepeatUntil v5 同脉络）。
+
+    ``_field_kind`` 属性返回 "ro"，由 _mixin._apply_dataclass_field_config 识别，
+    决定 dataclass 字段配置（init=False，parse 时由 force_setattr 覆盖）。
+    """
+
+    __slots__ = ("subcon", "func")
+
+    def __init__(self, subcon, func):
+        """初始化 Rebuild 描述符。
+
+        :param subcon: 被包装的子构造器（用于 parse/sizeof，以及 build 的最终写入）。
+        :param func: build 时求值的表达式（FieldRef/ExprRef/int 组合，**不接受 callable**）。
+        """
+        self.subcon = subcon
+        self.func = func
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议。
+
+        返回 ``{"func": self.func}``。当 func 是 FieldRef/ExprRef 时编译为 ExprOp；
+        int 常量也走表达式路径（ExprProgram 包装 Const）。
+        """
+        return {"func": self.func}
+
+    @property
+    def _field_kind(self):
+        """字段种类协议（ADR-004）。
+
+        返回 "ro"：Rebuild 必须作为 RO 字段使用（值不来自用户输入）。
+        与 Computed/Tell 同类。
+        """
+        return "ro"
+
+    def __repr__(self):
+        return "Rebuild({!r}, {!r})".format(self.subcon, self.func)
+
+
+def Rebuild(subcon, func):
+    """创建一个 Rebuild 描述符。
+
+    使用方式（必须作为 RO 字段，用 ``rfield`` 包装）::
+
+        from construct import this  # 假设的引用机制
+
+        @dataclass
+        class P(StructMixin):
+            items: list = field(Int8ub[3])
+            count: int = rfield(Rebuild(Int8ub, this.items.length))
+
+        P.parse(b"\\x03\\x01\\x02\\x03")  # → P(items=[1,2,3], count=3)
+        P(items=[4,5,6]).build()          # → b"\\x03\\x04\\x05\\x06"
+
+    限制：
+
+    - **不接收 Python callable / lambda**（同 RepeatUntil v5）。如传入 callable，
+      编译期无法转换为 ExprOp，会报 CompilationError。
+    - 必须作为 RO 字段使用（``rfield(Rebuild(...))``）。
+
+    :param subcon: 被包装的子构造器。
+    :param func: build 时求值的表达式（FieldRef/ExprRef/int 组合）。
+    :return: ``RebuildDescriptor`` 实例。
+    """
+    return RebuildDescriptor(subcon, func)
+
+
+class PassDescriptor:
+    """``Pass`` 描述符（singleton）。
+
+    No-op 节点：parse 返回 None；build 不写字节；sizeof=0。
+    对应 Python construct 的 ``Pass``（core.py L4687）。
+
+    主要用于 Phase 7 ``If``/``Switch`` 的默认值（如 ``If(cond, then)`` 等价于
+    ``IfThenElse(cond, then, Pass)``）。
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ()
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Pass()"
+
+
+# Pass singleton（与 GreedyBytes 单例同模式）。
+# Pass 无参数，全局共享一个实例即可。
+Pass = PassDescriptor()
 
 
 __all__ = [
@@ -1133,4 +1399,15 @@ __all__ = [
     # Phase 4.5 v5 Element
     "ElementDescriptor",
     "Element",
+    # Phase 6.3 内置 Adapter
+    "SubconstructDescriptor",
+    "Subconstruct",
+    "PeekDescriptor",
+    "Peek",
+    "RawCopyDescriptor",
+    "RawCopy",
+    "RebuildDescriptor",
+    "Rebuild",
+    "PassDescriptor",
+    "Pass",
 ]

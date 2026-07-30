@@ -35,6 +35,7 @@
 use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
+use crate::nodes::adapter_callback::AdapterCallbackNode;
 use crate::nodes::array::{ArrayNode, CountSource};
 use crate::nodes::bit_padding::BitPaddingNode;
 use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
@@ -48,11 +49,16 @@ use crate::nodes::greedy_bytes::GreedyBytesNode;
 use crate::nodes::greedy_range::GreedyRangeNode;
 use crate::nodes::index::IndexNode;
 use crate::nodes::padding::PaddingNode;
+use crate::nodes::pass::PassNode;
+use crate::nodes::peek::PeekNode;
 use crate::nodes::prefixed_array::PrefixedArrayNode;
+use crate::nodes::raw_copy::RawCopyNode;
+use crate::nodes::rebuild::RebuildNode;
 use crate::nodes::repeat_until::RepeatUntilNode;
 use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
+use crate::nodes::subconstruct::SubconstructNode;
 use crate::nodes::tell::TellNode;
 use crate::nodes::transform::{ByteTransform, TransformNode};
 use crate::nodes::Node;
@@ -611,7 +617,113 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
-        _ => {}
+        // Phase 6.3：内置 Adapter 系列（Subconstruct/Peek/RawCopy/Rebuild/Pass）。
+        // 设计 §6.3 / compile.rs §6.3。
+        //
+        // SubconstructDescriptor → SubstructNode（纯转发）。
+        // 递归编译 inner subcon（沿用 field_index，与 BitwiseDescriptor 同模式）。
+        "SubconstructDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "SubstructDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
+            return Ok(Node::Subconstruct(SubconstructNode::new(inner_node)));
+        }
+        // PeekDescriptor → PeekNode（seek 回退）。
+        "PeekDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "PeekDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
+            return Ok(Node::Peek(PeekNode::new(inner_node)));
+        }
+        // RawCopyDescriptor → RawCopyNode（捕获原始字节）。
+        "RawCopyDescriptor" => {
+            let inner_desc = desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!(
+                        "RawCopyDescriptor missing 'subcon' attribute: {} (field index {})",
+                        e, field_index
+                    ),
+                })?;
+            let inner_node = build_node_from_descriptor(
+                py,
+                &inner_desc,
+                field_index,
+                expr_programs,
+                field_names,
+                false,
+            )?;
+            return Ok(Node::RawCopy(RawCopyNode::new(inner_node)));
+        }
+        // RebuildDescriptor → RebuildNode（build 时基于表达式重算）。
+        // func 表达式从 expr_programs[field_index]["func"] 取（与 ComputedDescriptor 同模式）。
+        "RebuildDescriptor" => {
+            return Ok(Node::Rebuild(build_rebuild_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // PassDescriptor → PassNode（no-op）。
+        "PassDescriptor" => return Ok(Node::Pass(PassNode::new())),
+        // AdapterDescriptor → AdapterCallbackNode（用户面 Adapter 嵌入 Struct 钩子）。
+        // PM 决策 6.3-D1 接受。subcon 在 Rust 内执行，_decode/_encode 通过 Py<PyAny> 引用回调。
+        //
+        // 识别方式（双重）：
+        // 1. type name == "AdapterDescriptor"（直接匹配，用户用 AdapterDescriptor 基类）
+        // 2. duck typing：desc 同时拥有可调用的 _decode 和 _encode 方法
+        //    （识别任意用户 Adapter 子类，无需用户重设 __class__.__name__）。
+        // 双重识别保证：直接用 AdapterDescriptor 基类的用户和继承 Adapter 的用户都能工作。
+        "AdapterDescriptor" => {
+            return Ok(Node::AdapterCallback(build_adapter_callback_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        _ => {
+            // Phase 6.3 Adapter duck typing 分支：识别用户继承的 Adapter 子类
+            // （type name 非 "AdapterDescriptor"）。通过 hasattr 检查 _decode/_encode。
+            if is_adapter_like(desc) {
+                return Ok(Node::AdapterCallback(build_adapter_callback_node(
+                    py,
+                    desc,
+                    field_index,
+                    expr_programs,
+                    field_names,
+                )?));
+            }
+        }
     }
 
     // 6. 全部失败 → Compilation error
@@ -1296,6 +1408,155 @@ fn build_repeat_until_node(
     ))
 }
 
+/// 从 `RebuildDescriptor` 构建 `RebuildNode`（Phase 6.3）。
+///
+/// 对应 Python construct `Rebuild(subcon, func)`（core.py L2975）。
+///
+/// # 编译路径
+///
+/// 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+/// 2. 从 `expr_programs[field_index]["func"]` 取 ExprOp 列表 → ExprProgram。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// subcon 不支持含表达式的子描述符（Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+///
+/// # 差异记录（设计 §5.3 RB-callable）
+///
+/// Python Rebuild.func 可以是任意 callable lambda。construct-rs 收窄为仅 Phase 2 表达式
+/// （与 ADR-014 RepeatUntil v5 同脉络）。RebuildDescriptor 的 `_field_kind` 返回 "ro"，
+/// 编译期校验用户使用 `rfield(Rebuild(...))` 包装（RB-4 编译期拒绝 RW 包装）。
+fn build_rebuild_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<RebuildNode, ConstructError> {
+    // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "RebuildDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 2. 从 expr_programs[field_index]["func"] 取 ExprOp 列表。
+    //    与 ComputedDescriptor 的 "func" 同模式。
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "Rebuild field has no expression program (field index {}); \
+                 'func' expression is required. \
+                 Note: Rebuild func must be a Phase 2 expression (FieldRef/ExprRef/int), \
+                 Python callable (lambda) is not supported (same constraint as RepeatUntil v5).",
+                field_index
+            ),
+        })?;
+    let field_exprs_dict =
+        field_exprs
+            .bind(py)
+            .downcast::<PyDict>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "Rebuild expression program must be a dict".to_string(),
+            })?;
+    let ops_obj = field_exprs_dict
+        .get_item("func")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to get 'func' from Rebuild expression programs: {} (field index {})",
+                e, field_index
+            ),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "Rebuild missing 'func' in expression programs (field index {})",
+                field_index
+            ),
+        })?;
+    let ops = parse_expr_ops_from_py(&ops_obj)?;
+    let func = ExprProgram::new(ops);
+
+    Ok(RebuildNode::new(inner_node, func))
+}
+
+/// 从 `AdapterDescriptor` 构建 `AdapterCallbackNode`（Phase 6.3，PM 决策 6.3-D1 接受）。
+///
+/// 对应 Python construct `Adapter(subcon)` 基类的嵌入用法（core.py L813）。
+///
+/// # 编译路径
+///
+/// 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+/// 2. 取 AdapterDescriptor 的 `_decode` / `_encode` bound method 引用。
+///
+/// # §0 合规性（设计 §4.4）
+///
+/// AdapterCallbackNode 在执行树内，2 次 FFI（parse 入口 + _decode 回调）。
+/// 用户主动继承 Adapter = 显式接受折衷（PM 决策 2）。不违反 §0 #1。
+fn build_adapter_callback_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<AdapterCallbackNode, ConstructError> {
+    // 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "AdapterDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let subcon_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // 2. 取 _decode / _encode bound method（含 self）。
+    //    AdapterDescriptor 应是用户 Adapter 子类的实例（或包装），其 _decode/_encode
+    //    是 bound method（Python descriptor 协议自动绑定 self）。
+    let decode = desc
+        .getattr("_decode")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "AdapterDescriptor missing '_decode' method: {} (field index {}). \
+                 Ensure the field is an Adapter subclass instance with _decode defined.",
+                e, field_index
+            ),
+        })?
+        .unbind();
+    let encode = desc
+        .getattr("_encode")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "AdapterDescriptor missing '_encode' method: {} (field index {}). \
+                 Ensure the field is an Adapter (or SymmetricAdapter) subclass instance.",
+                e, field_index
+            ),
+        })?
+        .unbind();
+
+    Ok(AdapterCallbackNode::new(subcon_node, decode, encode))
+}
+
 /// 将 Python 侧的 ExprOp 元组列表解析为 `Vec<ExprOp>`。
 ///
 /// Python 侧编译器（`_compile_expr_tree`）将表达式树翻译为后序遍历的元组列表，
@@ -1404,7 +1665,7 @@ fn parse_expr_ops_from_py(ops_list: &Bound<'_, PyAny>) -> Result<Vec<ExprOp>, Co
 
 /// 判断给定的 Python 类型对象是否为 StructMixin 子类。
 ///
-/// 识别条件：该类型拥有 [`STRUCTMIXIN_COMPILED_ATTR`]（`_construct_compiled`）属性。
+/// 识别条件：该类型拥有 [`STRUCTMIXIN_COMPILED_ATTR]（`_construct_compiled`）属性。
 /// 该属性由纯 Python 的 StructMixin 在 `__init_subclass__` 中设置，存在即表示
 /// 该类型已被编译系统接管（可能是已编译的 schema，或尚未编译的延迟桩）。
 ///
@@ -1420,6 +1681,46 @@ fn is_structmixin_subclass(cls: &Bound<'_, PyType>) -> Result<bool, ConstructErr
             ),
             path: String::new(),
         })
+}
+
+/// 判断描述符是否"看起来像 Adapter"（Phase 6.3 duck typing 识别）。
+///
+/// 用于识别用户继承的 Adapter 子类（type name 非 "AdapterDescriptor"）。
+/// 通过同时具备可调用的 `_decode` 和 `_encode` 方法判定。
+///
+/// # 防御性
+///
+/// - 仅检查属性存在 + callable，不调用方法（无副作用）。
+/// - StructMixin 子类（同时有 _construct_compiled）已在前面分支返回，不会误判。
+/// - FormatFieldDescriptor / BytesDescriptor 等无 _decode/_encode，不会误判。
+///
+/// # 错误
+///
+/// - `hasattr` 内部抛出异常时返回 `false`（保守起见，不视为 Adapter）。
+fn is_adapter_like(desc: &Bound<'_, PyAny>) -> bool {
+    let has_decode = desc
+        .hasattr("_decode")
+        .map(|h| {
+            h && {
+                // 进一步检查 _decode 是 callable（防御性，避免误判有同名属性的对象）
+                desc.getattr("_decode")
+                    .map(|d| d.is_callable())
+                    .unwrap_or(false)
+            }
+        })
+        .unwrap_or(false);
+    if !has_decode {
+        return false;
+    }
+    desc.hasattr("_encode")
+        .map(|h| {
+            h && {
+                desc.getattr("_encode")
+                    .map(|d| d.is_callable())
+                    .unwrap_or(false)
+            }
+        })
+        .unwrap_or(false)
 }
 
 /// 为编译期错误附加字段名上下文。

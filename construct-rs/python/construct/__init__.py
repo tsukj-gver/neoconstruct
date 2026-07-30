@@ -112,8 +112,25 @@ try:
         # Phase 4.5 v5: Element
         Element,
         ElementDescriptor,
+        # Phase 6.3: 内置 Adapter
+        Subconstruct,
+        SubconstructDescriptor,
+        Peek,
+        PeekDescriptor,
+        RawCopy,
+        RawCopyDescriptor,
+        Rebuild,
+        RebuildDescriptor,
+        Pass,
+        PassDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
+    pass
+
+# Phase 6.3: 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
+try:
+    from ._adapters import Adapter, AdapterDescriptor, SymmetricAdapter
+except ImportError:  # pragma: no cover
     pass
 
 # CompiledSchema 编译产物类型（用户通常不直接使用，但导出供类型注解与调试）。
@@ -191,6 +208,21 @@ __all__ = [
     # Phase 4.5 v5: Element
     "Element",
     "ElementDescriptor",
+    # Phase 6.3: 内置 Adapter
+    "Subconstruct",
+    "SubconstructDescriptor",
+    "Peek",
+    "PeekDescriptor",
+    "RawCopy",
+    "RawCopyDescriptor",
+    "Rebuild",
+    "RebuildDescriptor",
+    "Pass",
+    "PassDescriptor",
+    # Phase 6.3: 用户面 Adapter 基类
+    "Adapter",
+    "AdapterDescriptor",
+    "SymmetricAdapter",
     # 编译产物
     "CompiledSchema",
     # 异常

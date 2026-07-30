@@ -26,6 +26,7 @@
 //! - 填充节点：[`BitPaddingNode`](bit_padding::BitPaddingNode)（bit 级填充，Phase 3.3）、
 //!   [`PaddingNode`](padding::PaddingNode)（字节级填充，Phase 3.3）
 
+pub mod adapter_callback;
 pub mod array;
 pub mod bit_padding;
 pub mod bits_integer;
@@ -40,11 +41,16 @@ pub mod greedy_bytes;
 pub mod greedy_range;
 pub mod index;
 pub mod padding;
+pub mod pass;
+pub mod peek;
 pub mod prefixed_array;
+pub mod raw_copy;
+pub mod rebuild;
 pub mod repeat_until;
 pub mod stop_if;
 pub mod struct_node;
 pub mod struct_ref;
+pub mod subconstruct;
 pub mod tell;
 pub mod transform;
 
@@ -52,6 +58,7 @@ use crate::context::Context;
 use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
+use adapter_callback::AdapterCallbackNode;
 use array::ArrayNode;
 use bit_padding::BitPaddingNode;
 use bits_integer::BitsIntegerNode;
@@ -66,12 +73,17 @@ use greedy_bytes::GreedyBytesNode;
 use greedy_range::GreedyRangeNode;
 use index::IndexNode;
 use padding::PaddingNode;
+use pass::PassNode;
+use peek::PeekNode;
 use prefixed_array::PrefixedArrayNode;
 use pyo3::prelude::*;
+use raw_copy::RawCopyNode;
+use rebuild::RebuildNode;
 use repeat_until::RepeatUntilNode;
 use stop_if::StopIfNode;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
+use subconstruct::SubconstructNode;
 use tell::TellNode;
 use transform::TransformNode;
 
@@ -232,6 +244,24 @@ pub enum Node {
     /// RepeatUntilNode 在迭代时 set_expr_value_raw/set_expr_value_py 借用设置；build 是 no-op；
     /// sizeof 返回 0；has_expressions 返回 false。
     Element(ElementNode),
+    /// 单子构造器包装节点（对应 Python Subconstruct）。Phase 6.3 新增。
+    /// 持有 `Box<Node>`，parse/build/sizeof 全部转发给 inner。
+    Subconstruct(SubconstructNode),
+    /// 预读不消费流节点（对应 Python Peek）。Phase 6.3 新增。
+    /// parse 后 seek 回入口位置；build 是 no-op；sizeof 返回 0。
+    Peek(PeekNode),
+    /// 原始字节捕获节点（对应 Python RawCopy）。Phase 6.3 新增。
+    /// parse 返回 dict(data,value,offset1,offset2,length)。
+    RawCopy(RawCopyNode),
+    /// build 时基于表达式重算字段节点（对应 Python Rebuild）。Phase 6.3 新增。
+    /// 必须作为 RO 字段使用（与 Computed 同类）。build 求值表达式后调 inner.build。
+    Rebuild(RebuildNode),
+    /// No-op 节点（对应 Python Pass）。Phase 6.3 新增（Phase 7 If/Switch 默认值依赖）。
+    /// parse 返回 Py_None；build 不写字节；sizeof 返回 0。
+    Pass(PassNode),
+    /// 用户面 Adapter 嵌入 Struct 字段的钩子节点（PM 决策 6.3-D1 接受）。
+    /// Phase 6.3 新增。subcon 在 Rust 内执行，_decode/_encode 通过 Rust→Python 回调。
+    AdapterCallback(AdapterCallbackNode),
 }
 
 impl Node {
@@ -257,6 +287,14 @@ impl Node {
             Node::Index(i) => i.has_expressions(),
             Node::StopIf(s) => s.has_expressions(),
             Node::Element(e) => e.has_expressions(),
+            // Phase 6.3：内置 Adapter 递归检查 inner（与 Bitwise/Transform 同模式）。
+            Node::Subconstruct(s) => s.inner().has_expressions(),
+            Node::Peek(p) => p.inner().has_expressions(),
+            Node::RawCopy(r) => r.inner().has_expressions(),
+            // Rebuild 含 func 表达式，总返回 true。
+            Node::Rebuild(_) => true,
+            // Pass / AdapterCallback 无表达式字段（AdapterCallback 的 _decode/_encode
+            // 是 Python 回调，不走 ExprProgram）。
             _ => false,
         }
     }
@@ -318,6 +356,12 @@ impl Node {
             // 真实数据——值由 RepeatUntilNode 在迭代时借用设置）。
             // 设计 §4.7.4。
             Node::Element(_) => Ok(py.None()),
+            // Phase 6.3：Rebuild 作为 RO 字段时，求值表达式得到 i64 → PyLong。
+            // 与 Computed 同模式（设计 §1.4.3 / §3.2）。
+            Node::Rebuild(r) => {
+                let v = crate::expr::eval_expr_int(r.func(), ctx, py)?;
+                Ok(v.into_py(py))
+            }
             // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
             _ => Err(ConstructError::Generic {
                 message: format!(
