@@ -8,6 +8,7 @@ from construct import (
     StructMixin, field, rfield, Bytes, Byte, Int16ub,
     GreedyBytes, VarInt, GreedyRange, Int32ul,
     Seek, Pointer, Prefixed,
+    CompilationError,
 )
 from dataclasses import dataclass
 
@@ -174,6 +175,36 @@ def test_seek_whence_end_in_struct():
     print(f"PASS: test_seek_whence_end_in_struct")
 
 
+# ---------------------------------------------------------------------------
+# Phase 7.3 parity 补充（VET 观察 1 / 设计 §7.3 P8）
+# ---------------------------------------------------------------------------
+
+
+def test_pointer_stream_non_none_rejected():
+    """Pointer(stream=非 None) 编译期拒绝（设计 §3.3 已知限制 + VET 7.2 观察 1）。
+
+    Python construct 允许 Pointer 换流（stream=context lambda）；
+    construct-rs 不支持，编译期抛 CompilationError。
+    """
+    try:
+        @dataclass
+        class P(StructMixin):
+            x: bytes = field(Pointer(8, Bytes(1), stream=lambda ctx: None))
+        # 若 __init_subclass__ 没抛，显式失败
+        print("FAIL: Pointer(stream=非 None) 应该编译期拒绝")
+        return
+    except CompilationError as e:
+        msg = str(e)
+        # 错误消息含 "stream" 提示
+        assert "stream" in msg.lower() or "Pointer" in msg, \
+            f"错误消息应含 'stream' 或 'Pointer'，实际：{msg!r}"
+        print(f"PASS: test_pointer_stream_non_none_rejected (err={msg[:80]!r})")
+        return
+    except Exception as e:
+        print(f"FAIL: 期望 CompilationError，实际 {type(e).__name__}: {e!r}")
+        return
+
+
 if __name__ == "__main__":
     tests = [
         test_pointer_parse_positive,
@@ -191,6 +222,7 @@ if __name__ == "__main__":
         test_prefixed_subconsumes_less,
         test_prefixed_varint_greedyrange,
         test_prefixed_greedybytes,
+        test_pointer_stream_non_none_rejected,
     ]
     passed = 0
     failed = 0

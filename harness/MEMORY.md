@@ -7,7 +7,14 @@ last_updated: 2026-07-29
 
 # MEMORY.md — Project Long-Term Memory Index
 
-> **Phase 6 完成（2026-07-30 ACCEPTED）**：
+> **Phase 7 完成（2026-07-30 ACCEPTED）**：
+> - 7.1 Conditional（5 个：IfThenElse/Switch/Select/FocusedSeq + ExplicitError + If macro）
+> - 7.2 Streams（3 个：Seek/Pointer/Prefixed + Stream 扩展：BuildStream.seek + ParseStream.seek_whence）
+> - 7.3 bench 70 测量点 + A/B Test 复测 parse 全部 ≥10x（原 27 项不达标确认是测量漂移）
+> - tag `phase-7-complete`
+> - 教训 L-13（docstring 未跟随语法演进）+ L-14（设计硬约束认知需交叉验证）沉淀
+> - BytesInteger u128 fast-path 修复（2.82x → 9.01x/12.02x，L-14 教训触发）
+> 构造器总进度：~70→~78/134（~53%→~58%）
 > - 6.0 测试框架重构（parity helper + bench runner + L2 双轨制）
 > - 6.1 Primitives 收尾 17 个（VarInt/ZigZag/BytesInteger + Float half crate + 别名）
 > - 6.2 Strings 7 个（6 Node + utf16/32 raw FFI，ADR-021）
@@ -64,7 +71,7 @@ last_updated: 2026-07-29
 | META-INV 构造器清单 | ✅ 完成（iter9 抽离到 plans/meta/） | — | `plans/meta/INV-构造器清单/索引.md` |
 | 5 Struct + FFI 入口优化 | ✅ 完成（2026-07-29 ACCEPTED，目标自然达成，tag phase-5-complete） | `phase-5-complete` | `plans/phase5-struct-ffi/总纲.md` |
 | 6 Primitives 收尾 + Strings + Adapter 核心 | ✅ 完成（2026-07-30 ACCEPTED，tag phase-6-complete） | `phase-6-complete` | `plans/phase6-primitives-strings-adapter/总纲.md` |
-| 7 Conditional + Streams | ⚪ 已立项（2026-07-29，Phase 6 完成后启动） | — | `plans/phase7-conditional-streams/总纲.md` |
+| 7 Conditional + Streams | ✅ 完成（2026-07-30 ACCEPTED，tag phase-7-complete） | `phase-7-complete` | `plans/phase7-conditional-streams/总纲.md` |
 | 8+ | ⚪ | — | 待用户指定 |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
@@ -131,6 +138,8 @@ last_updated: 2026-07-29
 | L-10 | 规范存在 ≠ 实际执行（无 enforcement） | iter9 沉淀：iter3 §5 per-子任务规范到 iter9 才首次执行 |
 | L-11 | PM 对用户指令的语义误判 | iter10 沉淀：双引号"关闭iter10"被误判为"取消"，实际是"完成" |
 | L-12 | PM 角色越界深入技术/代码细节 | Phase 6 立项沉淀：PM 自己 grep 源码查依赖（应分派 ARCH），违背 pm.md base §PM 不做的事 |
+| L-13 | docstring 未跟随语法演进 | Phase 7 审查沉淀：Phase 2 废弃 `this` 但 15+ docstring 残留 `this.xxx` |
+| L-14 | 设计硬约束认知需交叉验证 | RawCopy 质疑沉淀：ARCH 把"必须拷贝"当硬约束，漏了 Rust 内置 hashfunc 零拷贝路径 |
 
 ---
 

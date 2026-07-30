@@ -496,7 +496,8 @@ def ByteSwapped(subcon):
 # - FieldRef/ExprRef → ``CountSource::Expr``（从 expr_programs 取 "count" 键）
 #
 # 限制（§6.2.2 P3.1）：inner subcon 暂不支持含表达式的子描述符
-# （如 ``Array(N, Bytes(this.m))``）。需将 inner 表达式扁平化到字段层级。
+# （如 ``Array(N, Bytes(m))`` 中 ``m`` 是字段引用）。需将 inner 表达式
+# 扁平化到字段层级（``m`` 必须是同 Struct 内已声明的 int 字段）。
 # ---------------------------------------------------------------------------
 
 
@@ -552,17 +553,17 @@ def Array(count, subcon, discard=False):
 
     固定次数数组。对应 Python construct 的 ``Array``。
 
-    使用方式::
+    使用方式（count 为字段引用，``count`` 必须是同 Struct 内已声明的 int 字段）::
 
         @dataclass
         class Header(StructMixin):
             count: int = field(Int8ub)
-            items: list = field(Array(this.count, Byte))
+            items: list = field(Array(count, Byte))
 
     运算符重载：``Byte[5]`` 等价于 ``Array(5, Byte)``（Python construct 推荐语法）。
 
     限制（Phase 4）：inner subcon 不支持含表达式的子描述符（如
-    ``Array(N, Bytes(this.m))``）。若需 inner 表达式，请将 inner 扁平化为
+    ``Array(N, Bytes(m))``）。若需 inner 表达式，请将 inner 扁平化为
     独立字段。
 
     :param count: 元素数量（int 或 FieldRef/ExprRef 表达式）。
@@ -1409,12 +1410,12 @@ def PaddedString(length, encoding):
 
         P.parse(b"hello\\x00\\x00\\x00\\x00\\x00")  # → P(name="hello")
 
-    使用方式（表达式长度）::
+    使用方式（表达式长度，``n`` 必须是同 Struct 内已声明的 int 字段）::
 
         @dataclass
         class P(StructMixin):
             n: int = field(Int8ub)
-            name: str = field(PaddedString(this.n, "utf8"))
+            name: str = field(PaddedString(n, "utf8"))
 
     parse 行为：读 length 字节 → 右剥离 pad（编码单元全零字节串）→ decode。
     build 行为：encode → 若 encoded > length 报 PaddingError，否则补 pad 到 length。
@@ -1841,17 +1842,20 @@ class RebuildDescriptor:
 def Rebuild(subcon, func):
     """创建一个 Rebuild 描述符。
 
-    使用方式（必须作为 RO 字段，用 ``rfield`` 包装）::
-
-        from construct import this  # 假设的引用机制
+    使用方式（必须作为 RO 字段，用 ``rfield`` 包装；func 是 Phase 2 表达式）::
 
         @dataclass
         class P(StructMixin):
-            items: list = field(Int8ub[3])
-            count: int = rfield(Rebuild(Int8ub, this.items.length))
+            x: int = field(Int8ub)
+            y: int = rfield(Rebuild(Int8ub, x + 1))   # build 时 y = x + 1
 
-        P.parse(b"\\x03\\x01\\x02\\x03")  # → P(items=[1,2,3], count=3)
-        P(items=[4,5,6]).build()          # → b"\\x03\\x04\\x05\\x06"
+        P.parse(b"\\x03\\x04")  # → P(x=3, y=4)        # parse 转发 subcon
+        P(x=5).build()          # → b"\\x05\\x06"      # build 时 y 由 x+1 计算
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：Rebuild(Byte, this.x + 1)  ← this.x 引用 context
+        # construct-rs：Rebuild(Int8ub, x + 1)  ← 直接用字段名 x
 
     限制：
 
@@ -1965,10 +1969,18 @@ def Seek(at, whence=0):
         d = Sequence(Seek(-2, 2), Bytes(1))
         # 从末尾退 2 字节再读
 
-    使用方式（表达式 at）::
+    使用方式（表达式 at，``offset`` 必须是同 Struct 内已声明的 int 字段）::
 
-        from construct import this
-        d = Sequence(Seek(this.offset), Bytes(1))
+        @dataclass
+        class P(StructMixin):
+            offset: int = field(Int8ub)
+            pos: int = field(Seek(offset))
+            tail: bytes = field(Bytes(1))
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：d = Sequence(Seek(this.offset), Bytes(1))  ← this.offset 引用 context
+        # construct-rs：在 StructMixin 内用 ``field(Seek(offset))`` 引用字段名
 
     :param at: 定位偏移（int 或 FieldRef/ExprRef 表达式）。
     :param whence: 0=Start / 1=Current / 2=End（默认 0）。

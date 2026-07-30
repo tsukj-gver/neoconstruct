@@ -29,6 +29,8 @@
 | L-10 | 规范存在 ≠ 实际执行（无 enforcement） | 1+（iter3→iter9） | §5 per-子任务规范 3 年未执行 / phase4 过程记录累积到 11837 行 | §L-10 |
 | L-11 | PM 对用户指令的语义误判 | 1（iter10） | iter10 一度误标 DEFERRED（用户指令"关闭"被理解为"取消"，实际是"完成"） | §L-11 |
 | L-12 | PM 角色越界深入技术/代码细节 | 1（Phase 6 立项） | PM 自己 grep Python 源码查构造器依赖（应分派 ARCH），违背 pm.md base §PM 不做的事 | §L-12 |
+| L-13 | docstring 未跟随语法演进 | 1（Phase 7 审查） | Phase 2 废弃 `this` 但 15+ 处 docstring 示例残留 `this.xxx`，用户审阅时发现 | §L-13 |
+| L-14 | 设计硬约束认知需交叉验证 | 1（RawCopy 质疑） | ARCH 把"CPython bytes 不可变→必须拷贝"当硬约束，漏了 Rust 内置 hashfunc 零拷贝路径 | §L-14 |
 
 ---
 
@@ -415,6 +417,65 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 - 用户纠正后，PM 立即把"Phase 6↔Phase 7 依赖核查 + Phase 6 分析报告 + 测试框架设计"打包分派给 ARCH
 - 本教训立即沉淀（不等反复 3 次——PM 角色边界破坏会持续侵蚀流程管理质量）
+
+---
+
+## L-13: docstring 未跟随语法演进
+
+> **核心约束**：语法/设计变更时，必须同步清理所有 docstring / 注释 / 示例代码中的旧语法残留。docstring 是用户直接看到的 API 文档，旧语法残留会误导用户。
+
+**模式描述**：项目演进中某个语法或 API 被废弃（如 Phase 2 废弃 `this`，改为字段名直接引用），实现代码和设计文档同步更新了，但 docstring / 注释 / 示例代码中的旧语法未清理。结果用户读 docstring 时看到旧语法，照抄后失败（NameError / ImportError），或对设计意图产生误解。
+
+**反复出现事件**：
+
+| # | 时间 | 事件 | 证据 |
+|---|------|------|------|
+| 1 | 2026-07-30 | **Phase 2 废弃 `this` 但 docstring 残留**：construct-rs 在 Phase 2 明确废弃 `this.xxx` 语法（改为字段名直接引用 `Bytes(count)`），但 `_descriptors.py`（15+ 处）+ `_conditional.py`（8+ 处）+ ARCH 质疑文档（3 处）的 docstring/示例仍写 `this.xxx`。用户审阅 ARCH 质疑文档时发现并质疑"this 不是废弃了吗"。 | `docs/design/queries/确认-表达式系统this语法.md`（ARCH 全量 grep 确认实现零残留，纯文档笔误） |
+
+**根因**：
+
+1. **变更范围不完整**：Phase 2 废弃 `this` 时，改了实现（编译路径走 `id(descriptor) → field_index`）+ 设计文档（表达式系统设计），但没清理 docstring 示例。变更范围清单遗漏了"所有 docstring / 注释 / 示例代码"。
+2. **无 CI 检查**：没有"语法废弃后 grep 残留"的自动化检查。如果 CI 有 `grep "this\." construct-rs/python/` 断言为 0，Phase 2 完成时就能发现。
+3. **docstring 不在 reviewer 检查清单**：REV 审查设计文档时聚焦架构/接口/性能，不逐行检查 docstring 示例语法是否与当前语法一致。
+
+**对策**（agent 必须执行）：
+
+- **PM**（变更管理）：任何语法/API 废弃时，变更范围清单必须含"全工作区 grep 旧语法"步骤。具体：
+  - 废弃 `this` → `grep -rn "\bthis\b" construct-rs/python/ construct-rs/src/ docs/` 应为 0（不含注释引用 Python 原版）
+  - 废弃 `PyCallable` → `grep -rn "PyCallable\|callable" construct-rs/python/` 检查
+- **DEV**（代码维护）：新增/修改 docstring 时，示例代码必须用**当前项目语法**（非 Python 原版语法）。如需引用原版作对比，显式标注"Python construct 原版写法"
+- **REV/VET**（审查）：审查清单加一条"docstring 示例语法是否与当前项目一致"
+- **CI**（自动化）：考虑在 L1/L4 门禁加"废弃语法残留检查"（维护一个 deprecated_patterns.json）
+
+---
+
+## L-14: 设计硬约束认知需交叉验证
+
+> **核心约束**：识别"硬约束"（XX 不可行 / XX 是固有开销）时，必须枚举至少 2 条实现路径交叉验证。不可基于单一实现路径推断硬约束。
+
+**模式描述**：ARCH 在设计分析中识别出某个"硬约束"（如"CPython bytes 不可变 → 跨 FFI 必须拷贝"），但这个约束是基于**单一实现路径**（Python callable 跨 FFI）推断的，没有交叉验证**其他路径**（如 Rust 内置实现零拷贝）。结果用户追问时发现约束不成立——存在更优路径被遗漏。
+
+**反复出现事件**：
+
+| # | 时间 | 事件 | 证据 |
+|---|------|------|------|
+| 1 | 2026-07-30 | **RawCopy/Checksum "必须拷贝"硬约束被推翻**：ARCH 第一轮回应说"CPython bytes 不可变 → 跨 FFI 必须拷贝"是硬约束，RawCopy 拷贝不可优化。用户追问"为什么要在 Python 层面拷贝"——ARCH 补充评估发现：如果 hashfunc 在 Rust 层面实现（sha2 crate），整个流程零拷贝（FFI 入口 `PyBytes::as_bytes()` 借用 buffer 不拷贝 + Rust 内置哈希操作 `&[u8]`）。ARCH 承认"把单一路径当硬约束"是盲点。 | `docs/design/queries/质疑-能否不用RawCopy.md §7-§10`（ARCH 修正 6 处原结论） |
+
+**根因**：
+
+1. **单一路径推断**：ARCH 分析 Checksum 时聚焦"Python callable hashfunc"这条路径（Python construct 原版模式），推断"跨 FFI 传 bytes 必须拷贝"。没有枚举"Rust 内置 hashfunc"这条替代路径做交叉验证。
+2. **"硬约束"标签的惰性**：一旦某个结论被标为"硬约束/固有开销"，后续分析不再质疑它。ARCH 在 §0 共通根因预判中写"parse PyObject 构造是 CPython 固有税"——虽然部分正确，但这个标签阻碍了进一步优化思考。
+3. **§0 对照的副作用**：§0 原则对照容易产生"这是硬约束"的直觉——但 §0 约束的是架构层面（无中间表示层 / 无 trait 抽象），不约束实现层面（如 hashfunc 在 Rust 还是 Python）。
+
+**对策**（agent 必须执行）：
+
+- **ARCH**（设计分析）：识别"硬约束"时必须执行**交叉验证清单**：
+  - 该约束是基于哪条实现路径推断的？
+  - 是否有替代实现路径（如 Rust 内置 vs Python callable / 编译期 vs 运行期 / 安全 vs unsafe）？
+  - 替代路径是否被 §0 或其他 ADR 排除？如未排除，不可标"硬约束"
+- **PM**（验收转发）：用户质疑"硬约束"时，PM 必须**立即转发 ARCH 重新评估**，不可替 ARCH 辩护（如"ARCH 说了是硬约束"）。PM 无技术能力判断硬约束是否成立。
+- **REV**（设计检视）：审查设计文档中的"硬约束/固有开销/不可避免"等措辞时，检查是否有交叉验证证据。如仅有单一路径论证 → 标注"需交叉验证"
+- **任何角色**：遇到"XX 不可行"的结论时，自问"是否枚举了所有实现路径？"
 
 ---
 

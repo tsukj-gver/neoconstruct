@@ -4,14 +4,20 @@
 //! Python 参考：`construct/construct/core.py:1203-1292`（BytesInteger 类）、
 //! `construct/construct/lib/binary.py:38-92`（integer2bytes / bytes2integer 工具）。
 //!
-//! ## 双路径设计（D-2 决策）
+//! ## 三档路径设计（D-2 决策 + 6.1-fix u128 扩展）
 //!
-//! - **fast-path（length ≤ 8）**：Rust 原生 u64/i64 + endian 转换，零 Python 调用
-//! - **slow-path（length > 8）**：调用 Python `int.from_bytes` / `int.to_bytes`
+//! - **u64 fast-path（length ≤ 8）**：Rust 原生 u64/i64 + endian 转换，零 Python 调用
+//! - **u128 fast-path（9 ≤ length ≤ 16）**：Rust 原生 u128/i128 + pyo3 `IntoPy`，
+//!   零 unsafe（pyo3 内部封装 `_PyLong_FromByteArray`，由 pyo3 维护者审计，
+//!   与 `u64::into_py` 内部调 `PyLong_FromLongLong` 同性质）。
+//!   设计依据：`docs/design/queries/设计质疑-BytesInteger-num-bigint.md` §3.1。
+//! - **slow-path（length > 16）**：调用 Python `int.from_bytes` / `int.to_bytes`
 //!   （CPython 公开稳定 API，自 Python 3.2 起，无 unsafe raw FFI）
 //!
-//! fast-path 覆盖主场景（协议通常用 Int24=3 字节），slow-path 仅触发于显式
-//! `BytesInteger(16+)` 罕见用法（如大整数 / 哈希）。详见设计 §1.5.1 D-2 决策表。
+//! u64/u128 fast-path 覆盖绝大多数实际用法（UUID / GUID / SHA-1 / MD5 / IPv6 数值
+//! 表示均为 16 字节），slow-path 仅触发于显式 `BytesInteger(17+)` 极罕见用法
+//! （如 RSA 模数通常用 Bytes 而非 BytesInteger）。详见设计 §1.5.1 D-2 决策表
+//! 与设计质疑 §3.3 / §4.1。
 //!
 //! ## Int24 系列
 //!
@@ -31,8 +37,12 @@ use crate::stream::{BuildStream, ParseStream};
 use pyo3::conversion::IntoPy;
 use pyo3::prelude::*;
 
-/// fast-path 上限：length ≤ 8 走 Rust 原生 u64/i64；> 8 走 Python 慢路径。
-const FAST_PATH_MAX_LEN: usize = 8;
+/// u64 fast-path 上限：length ≤ 8 走 Rust 原生 u64/i64。
+const U64_PATH_MAX: usize = 8;
+
+/// u128 fast-path 上限：9 ≤ length ≤ 16 走 Rust 原生 u128/i128 + pyo3 `IntoPy`。
+/// 设计依据：`docs/design/queries/设计质疑-BytesInteger-num-bigint.md` §3.1。
+const U128_PATH_MAX: usize = 16;
 
 /// 任意字节长度整数节点（对应 Python construct `BytesInteger`）。
 ///
@@ -100,8 +110,8 @@ impl super::Construct for BytesIntegerNode {
         }
         let data = stream.read(self.length, path)?;
 
-        if self.length <= FAST_PATH_MAX_LEN {
-            // ---- fast-path：Rust 原生 u64/i64 + endian 转换 ----
+        if self.length <= U64_PATH_MAX {
+            // ---- u64 fast-path：Rust 原生 u64/i64 + endian 转换 ----
             // 将 data 补齐到 8 字节（按 endian 决定补齐方向与符号扩展）。
             let mut buf = [0u8; 8];
             if self.swapped {
@@ -134,6 +144,40 @@ impl super::Construct for BytesIntegerNode {
                     Ok(val_u64.into_py(py))
                 }
             }
+        } else if self.length <= U128_PATH_MAX {
+            // ---- u128 fast-path：Rust 原生 u128/i128 + pyo3 IntoPy（6.1-fix 新增） ----
+            // 逻辑与 u64 fast-path 同构，仅位宽从 8 → 16 字节。
+            // pyo3 0.22 原生支持 u128/i128 IntoPy（内部走 _PyLong_FromByteArray 类路径）。
+            let mut buf = [0u8; 16];
+            if self.swapped {
+                // little endian：data 放低位（buf 前段），高位补 0（或符号扩展 0xFF）
+                buf[..self.length].copy_from_slice(data);
+                if self.signed && (data[self.length - 1] & 0x80 != 0) {
+                    for b in &mut buf[self.length..] {
+                        *b = 0xFF;
+                    }
+                }
+                let val_u128 = u128::from_le_bytes(buf);
+                if self.signed {
+                    Ok((val_u128 as i128).into_py(py))
+                } else {
+                    Ok(val_u128.into_py(py))
+                }
+            } else {
+                // big endian：data 放高位（buf 后段），低位补 0（或符号扩展 0xFF）
+                buf[16 - self.length..].copy_from_slice(data);
+                if self.signed && (data[0] & 0x80 != 0) {
+                    for b in &mut buf[..16 - self.length] {
+                        *b = 0xFF;
+                    }
+                }
+                let val_u128 = u128::from_be_bytes(buf);
+                if self.signed {
+                    Ok((val_u128 as i128).into_py(py))
+                } else {
+                    Ok(val_u128.into_py(py))
+                }
+            }
         } else {
             // ---- slow-path：调用 Python int.from_bytes（D-2 决策，无 unsafe） ----
             parse_bigint_from_bytes(py, data, self.signed, self.swapped, path)
@@ -157,8 +201,8 @@ impl super::Construct for BytesIntegerNode {
             });
         }
 
-        if self.length <= FAST_PATH_MAX_LEN {
-            // ---- fast-path：extract i64/u64 → 字节序转换 → write ----
+        if self.length <= U64_PATH_MAX {
+            // ---- u64 fast-path：extract i64/u64 → 字节序转换 → write ----
             let (val_u64, is_negative_signed) = if self.signed {
                 let val: i64 = obj.extract::<i64>().map_err(|_| {
                     make_int_error("value is not an integer or out of i64 range", obj, path)
@@ -185,6 +229,37 @@ impl super::Construct for BytesIntegerNode {
             } else {
                 // big endian：高字节在前（buf 后段）
                 &buf[8 - self.length..]
+            };
+            stream.write(bytes_to_write);
+            Ok(())
+        } else if self.length <= U128_PATH_MAX {
+            // ---- u128 fast-path：extract i128/u128 → 字节序转换 → write（6.1-fix 新增） ----
+            let (val_u128, is_negative_signed) = if self.signed {
+                let val: i128 = obj.extract::<i128>().map_err(|_| {
+                    make_int_error("value is not an integer or out of i128 range", obj, path)
+                })?;
+                (val as u128, val < 0)
+            } else {
+                let val: u128 = obj.extract::<u128>().map_err(|_| {
+                    make_int_error("value is not an integer or out of u128 range", obj, path)
+                })?;
+                (val, false)
+            };
+            // 范围检查（与 Python integer2bytes 一致：超范围报 IntegerError）
+            self.check_range_u128(val_u128, is_negative_signed, obj, path)?;
+
+            let buf = if self.swapped {
+                val_u128.to_le_bytes()
+            } else {
+                val_u128.to_be_bytes()
+            };
+            // 截取 self.length 字节（按 endian 决定截取位置）
+            let bytes_to_write: &[u8] = if self.swapped {
+                // little endian：低字节在前（buf 前段）
+                &buf[..self.length]
+            } else {
+                // big endian：高字节在前（buf 后段）
+                &buf[16 - self.length..]
             };
             stream.write(bytes_to_write);
             Ok(())
@@ -270,6 +345,71 @@ impl BytesIntegerNode {
                 ));
             }
             // bits == 64 时 u64 全范围有效，无需额外检查
+        }
+        Ok(())
+    }
+
+    /// u128 fast-path build 范围检查（6.1-fix 新增，对齐 Python `lib/binary.py:integer2bytes`）。
+    ///
+    /// 校验 val_u128 / val_i128 是否能装入 `length`（9-16）字节的 unsigned / signed 表示。
+    /// 超范围返回 IntegerError（对齐 Python core.py:1259-1260）。
+    ///
+    /// # 边界处理
+    ///
+    /// - `length` 范围由调用方保证为 9..=16（`U64_PATH_MAX < length <= U128_PATH_MAX`）。
+    /// - `bits = length * 8` 范围为 72..=128。
+    /// - signed `bits == 128`（即 length=16）时直接判 i128 全范围有效
+    ///   （不能用 `1i128 << 127`：它会 wrap 成 i128::MIN，`half - 1` 再溢出 panic）。
+    /// - unsigned `bits == 128` 时同理判为 u128 全范围有效。
+    /// - bits ∈ [72, 120]（length ∈ [9, 15]）时 `1 << (bits-1)` / `1 << bits` 远小于类型上界，安全。
+    fn check_range_u128(
+        &self,
+        val_u128: u128,
+        is_negative_signed: bool,
+        obj: &Bound<'_, PyAny>,
+        path: &Path,
+    ) -> Result<(), ConstructError> {
+        if self.signed {
+            // 有符号范围：[-2^(bits-1), 2^(bits-1) - 1]，bits ∈ [72, 128]
+            let bits = (self.length as u32) * 8;
+            // 将 val_u128 位模式解释为 i128（two's complement）
+            let val_i128: i128 = val_u128 as i128;
+            // is_negative_signed 标志来自原 i128；val_i128 已含正确符号
+            let _ = is_negative_signed;
+            if bits >= 128 {
+                // length == 16：i128 全范围有效，无需检查。
+                // （注意：1i128 << 127 会得到 i128::MIN，half-1 再溢出，故必须显式判断。）
+            } else {
+                // bits ∈ [72, 120]，half = 2^(bits-1) ∈ [2^71, 2^119]，half-1 不溢出 i128。
+                let half: i128 = 1i128 << (bits - 1);
+                let max_pos: i128 = half - 1;
+                let min_neg: i128 = -half;
+                if val_i128 < min_neg || val_i128 > max_pos {
+                    return Err(out_of_range_int_error(
+                        obj,
+                        self.length,
+                        /* signed */ true,
+                        path,
+                    ));
+                }
+            }
+        } else {
+            // 无符号范围：[0, 2^bits - 1]，bits ∈ [72, 128]
+            let bits = (self.length as u32) * 8;
+            if bits >= 128 {
+                // length == 16：u128 全范围有效，无需检查。
+            } else {
+                // bits ∈ [72, 120]，1u128 << bits = 2^bits ∈ [2^72, 2^120]，远小于 u128::MAX。
+                let max_unsigned: u128 = (1u128 << bits) - 1;
+                if val_u128 > max_unsigned {
+                    return Err(out_of_range_int_error(
+                        obj,
+                        self.length,
+                        /* signed */ false,
+                        path,
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -373,6 +513,31 @@ fn make_int_error<M: Into<String>>(msg: M, obj: &Bound<'_, PyAny>, path: &Path) 
     let _ = obj; // 标记参数已使用（msg 已含 repr 时可省略 obj）
     ConstructError::Integer {
         message: msg.into(),
+        path: path.to_string(),
+    }
+}
+
+/// 构造 "out of range" IntegerError（对齐 Python core.py:1259-1260 `raise IntegerError(str(e))`）。
+///
+/// `signed` 控制错误信息措辞，`length` 为字节长度。
+/// 用于 `check_range` / `check_range_u128` 超范围分支，减少 repr 格式化重复。
+fn out_of_range_int_error(
+    obj: &Bound<'_, PyAny>,
+    length: usize,
+    signed: bool,
+    path: &Path,
+) -> ConstructError {
+    let kind = if signed { "signed" } else { "unsigned" };
+    let repr = obj
+        .repr()
+        .ok()
+        .and_then(|r| r.to_str().ok().map(String::from))
+        .unwrap_or_else(|| "<unknown>".to_string());
+    ConstructError::Integer {
+        message: format!(
+            "value {} out of range for {} BytesInteger({})",
+            repr, kind, length
+        ),
         path: path.to_string(),
     }
 }
@@ -538,15 +703,144 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — slow-path（> 8 字节）
+    // parse — u128 fast-path（9-16 字节，6.1-fix 新增）
     // ======================================================================
 
     #[test]
-    fn parse_bigint_16bytes_zero_slow_path() {
+    fn parse_u128_16bytes_zero_fast_path() {
         with_py(|py| {
-            // BytesInteger(16).parse(b'\x00' * 16) == 0（slow-path）
+            // BytesInteger(16).parse(b'\x00' * 16) == 0（u128 fast-path）
             let node = BytesIntegerNode::new(16, false, false);
             let mut stream = ParseStream::new(&[0x00; 16]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let val: i64 = result.bind(py).extract().expect("extract");
+            assert_eq!(val, 0);
+        });
+    }
+
+    #[test]
+    fn parse_u128_16bytes_unsigned_big_endian() {
+        with_py(|py| {
+            // BytesInteger(16).parse(b'\x00'*15 + b'\x2A') == 42（big endian）
+            let node = BytesIntegerNode::new(16, false, false);
+            let mut data = [0u8; 16];
+            data[15] = 0x2A;
+            let mut stream = ParseStream::new(&data);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // 42 在 i64 范围内，extract i64 验证
+            let val: i64 = result.bind(py).extract().expect("extract");
+            assert_eq!(val, 42);
+        });
+    }
+
+    #[test]
+    fn parse_u128_16bytes_unsigned_little_endian() {
+        with_py(|py| {
+            // BytesInteger(16, swapped=True).parse(b'\x2A' + b'\x00'*15) == 42（little endian）
+            let node = BytesIntegerNode::new(16, false, true);
+            let mut data = [0u8; 16];
+            data[0] = 0x2A;
+            let mut stream = ParseStream::new(&data);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let val: i64 = result.bind(py).extract().expect("extract");
+            assert_eq!(val, 42);
+        });
+    }
+
+    #[test]
+    fn parse_u128_16bytes_signed_minus_one() {
+        with_py(|py| {
+            // BytesInteger(16, signed=True).parse(b'\xFF'*16) == -1（符号扩展）
+            let node = BytesIntegerNode::new(16, true, false);
+            let mut stream = ParseStream::new(&[0xFF; 16]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let val: i64 = result.bind(py).extract().expect("extract");
+            assert_eq!(val, -1);
+        });
+    }
+
+    #[test]
+    fn parse_u128_16bytes_unsigned_max_u128() {
+        with_py(|py| {
+            // BytesInteger(16).parse(b'\xFF'*16) == 2**128 - 1（u128 上界）
+            // 结果超出 i64，需用 Python 比较表达式验证
+            let node = BytesIntegerNode::new(16, false, false);
+            let mut stream = ParseStream::new(&[0xFF; 16]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // 直接与 Python 构造的期望值比较（PyAny ==）
+            let expected = py.eval_bound("2**128 - 1", None, None).expect("eval");
+            assert!(result.bind(py).eq(&expected).expect("eq comparison"));
+        });
+    }
+
+    #[test]
+    fn parse_u128_9bytes_signed_min_negative() {
+        with_py(|py| {
+            // BytesInteger(9, signed=True).parse(b'\x80' + b'\x00'*8) == -2**71
+            // 9 字节 signed 最小值，符号扩展后经 from_be_bytes 得 -2**71
+            let node = BytesIntegerNode::new(9, true, false);
+            let mut data = [0u8; 9];
+            data[0] = 0x80;
+            let mut stream = ParseStream::new(&data);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            // -2**71 超出 i64 范围（i64::MIN = -2**63），用 Python 比较
+            let expected = py.eval_bound("-(2**71)", None, None).expect("eval");
+            assert!(result.bind(py).eq(&expected).expect("eq comparison"));
+        });
+    }
+
+    #[test]
+    fn parse_u128_9bytes_unsigned_little_endian() {
+        with_py(|py| {
+            // BytesInteger(9, swapped=True).parse(b'\x01' + b'\x00'*8) == 1
+            let node = BytesIntegerNode::new(9, false, true);
+            let mut data = [0u8; 9];
+            data[0] = 0x01;
+            let mut stream = ParseStream::new(&data);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let val: i64 = result.bind(py).extract().expect("extract");
+            assert_eq!(val, 1);
+        });
+    }
+
+    // ======================================================================
+    // parse — slow-path（> 16 字节，6.1-fix 边界调整）
+    // ======================================================================
+
+    #[test]
+    fn parse_bigint_17bytes_zero_slow_path() {
+        with_py(|py| {
+            // BytesInteger(17).parse(b'\x00' * 17) == 0（>16 字节走 Python slow-path）
+            let node = BytesIntegerNode::new(17, false, false);
+            let mut stream = ParseStream::new(&[0x00; 17]);
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
             let result = node
@@ -685,13 +979,13 @@ mod tests {
     }
 
     // ======================================================================
-    // build — slow-path（> 8 字节）
+    // build — u128 fast-path（9-16 字节，6.1-fix 新增）
     // ======================================================================
 
     #[test]
-    fn build_bigint_16bytes_slow_path() {
+    fn build_u128_16bytes_2pow64_fast_path() {
         with_py(|py| {
-            // BytesInteger(16).build(2**64) → 16 字节（slow-path）
+            // BytesInteger(16).build(2**64) → 16 字节（u128 fast-path）
             // 2^64 在 16 字节 big endian 中：bit 64 → byte index 7（16-8-1=7）
             // 实测：(2**64).to_bytes(16, 'big') == b'\x00'*7 + b'\x01' + b'\x00'*8
             let node = BytesIntegerNode::new(16, false, false);
@@ -708,9 +1002,109 @@ mod tests {
     }
 
     #[test]
-    fn build_bigint_overflow_returns_integer_error() {
+    fn build_u128_16bytes_max_unsigned() {
         with_py(|py| {
-            // BytesInteger(16).build(2**128) → IntegerError（Python to_bytes OverflowError）
+            // BytesInteger(16).build(2**128 - 1) → b'\xFF'*16（u128 上界）
+            let node = BytesIntegerNode::new(16, false, false);
+            let obj = py.eval_bound("2**128 - 1", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0xFF; 16]);
+        });
+    }
+
+    #[test]
+    fn build_u128_16bytes_signed_negative() {
+        with_py(|py| {
+            // BytesInteger(16, signed=True).build(-1) → b'\xFF'*16（two's complement）
+            let node = BytesIntegerNode::new(16, true, false);
+            let obj = py.eval_bound("-1", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0xFF; 16]);
+        });
+    }
+
+    #[test]
+    fn build_u128_16bytes_little_endian() {
+        with_py(|py| {
+            // BytesInteger(16, swapped=True).build(42) → b'\x2A' + b'\x00'*15
+            let node = BytesIntegerNode::new(16, false, true);
+            let obj = py.eval_bound("42", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let mut expected = [0u8; 16];
+            expected[0] = 0x2A;
+            assert_eq!(stream.as_bytes(), &expected[..]);
+        });
+    }
+
+    #[test]
+    fn build_u128_9bytes_signed_min() {
+        with_py(|py| {
+            // BytesInteger(9, signed=True).build(-2**71) → b'\x80' + b'\x00'*8
+            // -2**71 是 9 字节 signed 最小值，72 位 two's complement = 2^71 = 0x80_00...00
+            let node = BytesIntegerNode::new(9, true, false);
+            let obj = py.eval_bound("-(2**71)", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let mut expected = [0u8; 9];
+            expected[0] = 0x80;
+            assert_eq!(stream.as_bytes(), &expected[..]);
+        });
+    }
+
+    #[test]
+    fn build_u128_9bytes_unsigned_overflow_returns_integer_error() {
+        with_py(|py| {
+            // BytesInteger(9).build(2**72) → IntegerError（超 9 字节无符号上界 2**72 - 1）
+            // 走 check_range_u128，checked_shl(72) 得 max=2**72-1，2**72 超限报错
+            let node = BytesIntegerNode::new(9, false, false);
+            let obj = py.eval_bound("2**72", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Integer { .. }));
+        });
+    }
+
+    #[test]
+    fn build_u128_9bytes_signed_overflow_returns_integer_error() {
+        with_py(|py| {
+            // BytesInteger(9, signed=True).build(2**71) → IntegerError
+            // 9 字节 signed 上界 = 2**71 - 1，2**71 超限报错
+            let node = BytesIntegerNode::new(9, true, false);
+            let obj = py.eval_bound("2**71", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Integer { .. }));
+        });
+    }
+
+    #[test]
+    fn build_u128_16bytes_overflow_returns_integer_error() {
+        with_py(|py| {
+            // BytesInteger(16).build(2**128) → IntegerError
+            // 2**128 超出 u128 范围，pyo3 extract::<u128> 失败 → IntegerError
             let node = BytesIntegerNode::new(16, false, false);
             let obj = py.eval_bound("2**128", None, None).expect("eval");
             let mut stream = BuildStream::new();
@@ -720,6 +1114,29 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             assert!(matches!(err, ConstructError::Integer { .. }));
+        });
+    }
+
+    // ======================================================================
+    // build — slow-path（> 16 字节，6.1-fix 边界调整）
+    // ======================================================================
+
+    #[test]
+    fn build_bigint_17bytes_slow_path() {
+        with_py(|py| {
+            // BytesInteger(17).build(2**128) → 17 字节（>16 字节走 Python slow-path）
+            // 2^128 在 17 字节 big endian 中：bit 128 → byte index 0
+            // 实测：(2**128).to_bytes(17, 'big') == b'\x01' + b'\x00'*16
+            let node = BytesIntegerNode::new(17, false, false);
+            let obj = py.eval_bound("2**128", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let mut expected = [0u8; 17];
+            expected[0] = 0x01;
+            assert_eq!(stream.as_bytes(), &expected[..]);
         });
     }
 
@@ -766,6 +1183,73 @@ mod tests {
                 .parse(py, &mut pstream, &mut ctx, &mut path)
                 .expect("parse");
             assert_eq!(result.bind(py).extract::<i64>().unwrap(), -123456);
+        });
+    }
+
+    #[test]
+    fn round_trip_u128_16bytes_large_value() {
+        // 16 字节往返一致性（u128 fast-path，超 i64 大数用 Python 比较）
+        with_py(|py| {
+            let node = BytesIntegerNode::new(16, false, false);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+
+            // 2**100 + 12345（超 i64 但远小于 u128 上界）
+            let obj = py.eval_bound("2**100 + 12345", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+
+            let mut pstream = ParseStream::new(&bytes);
+            let result = node
+                .parse(py, &mut pstream, &mut ctx, &mut path)
+                .expect("parse");
+            assert!(result.bind(py).eq(&obj).expect("eq comparison"));
+        });
+    }
+
+    #[test]
+    fn round_trip_u128_16bytes_signed_negative() {
+        // 16 字节有符号往返（符号扩展对称性）
+        with_py(|py| {
+            let node = BytesIntegerNode::new(16, true, false);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+
+            // -(2**70 + 999)（超 i64 负数，用 Python 比较）
+            let obj = py.eval_bound("-(2**70 + 999)", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+
+            let mut pstream = ParseStream::new(&bytes);
+            let result = node
+                .parse(py, &mut pstream, &mut ctx, &mut path)
+                .expect("parse");
+            assert!(result.bind(py).eq(&obj).expect("eq comparison"));
+        });
+    }
+
+    #[test]
+    fn round_trip_u128_16bytes_little_endian() {
+        with_py(|py| {
+            let node = BytesIntegerNode::new(16, false, true);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+
+            let obj = py.eval_bound("2**100 + 777", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            let bytes = stream.into_bytes();
+
+            let mut pstream = ParseStream::new(&bytes);
+            let result = node
+                .parse(py, &mut pstream, &mut ctx, &mut path)
+                .expect("parse");
+            assert!(result.bind(py).eq(&obj).expect("eq comparison"));
         });
     }
 

@@ -48,6 +48,12 @@ NODES_MOD_RS = PROJECT_ROOT / "construct-rs" / "src" / "nodes" / "mod.rs"
 DESCRIPTORS_PY = (
     PROJECT_ROOT / "construct-rs" / "python" / "construct" / "_descriptors.py"
 )
+# Phase 7+ 用户面分散到多个模块（_conditional.py / _adapters.py），
+# 仅查 _descriptors.py 会漏报。统一扫描 construct-rs/python/construct/ 下
+# 所有 __all__ 定义。
+PYTHON_PKG_DIR = (
+    PROJECT_ROOT / "construct-rs" / "python" / "construct"
+)
 
 INVENTORY_EXPECTED_COLUMNS = 13
 PERF_SCENARIOS_EXPECTED_COLUMNS = 17
@@ -458,16 +464,29 @@ def _load_nodes_mod_modules() -> List[str]:
 
 
 def _load_descriptor_exports() -> List[str]:
-    """从 _descriptors.py 的 __all__ 列表提取导出符号。"""
-    if not DESCRIPTORS_PY.exists():
-        return []
-    text = DESCRIPTORS_PY.read_text(encoding="utf-8")
-    # 匹配 __all__ = [ ... ] 块
-    m = re.search(r"__all__\s*=\s*\[(.*?)\]", text, flags=re.DOTALL)
-    if not m:
-        return []
-    body = m.group(1)
-    return re.findall(r'"([^"]+)"', body)
+    """从 _descriptors.py 的 __all__ 列表提取导出符号。
+
+    Phase 7+ 扩展：用户面分散到多个模块（_conditional.py / _adapters.py），
+    统一扫描 PYTHON_PKG_DIR 下所有 .py 文件的 __all__ 列表。
+    """
+    exports: List[str] = []
+    # 优先保留对 DESCRIPTORS_PY 的引用（向后兼容）
+    candidate_files = [DESCRIPTORS_PY] if DESCRIPTORS_PY.exists() else []
+    # Phase 7+: 扫描整个 Python 包目录下所有 .py 文件
+    if PYTHON_PKG_DIR.exists():
+        for py_file in sorted(PYTHON_PKG_DIR.glob("*.py")):
+            if py_file not in candidate_files:
+                candidate_files.append(py_file)
+
+    for py_file in candidate_files:
+        text = py_file.read_text(encoding="utf-8")
+        # 匹配 __all__ = [ ... ] 块（每个文件最多 1 个）
+        m = re.search(r"__all__\s*=\s*\[(.*?)\]", text, flags=re.DOTALL)
+        if not m:
+            continue
+        body = m.group(1)
+        exports.extend(re.findall(r'"([^"]+)"', body))
+    return exports
 
 
 def _map_module_to_constructors(module_list: List[str]) -> set:

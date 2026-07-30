@@ -9,7 +9,7 @@ Rust 侧通过 type name 识别 Descriptor，构建对应的 Node。
 
 PM 决策 1（Switch keyfunc = A+B 混合）：keyfunc 接受 int 常量或单字段引用
 （_FieldDescriptor / _ExprRef），编译为 ExprProgram 运行时零 FFI 求值。
-复杂表达式（this.x + 1）编译期拒绝，引导用户用 Computed 预计算。
+复杂表达式（x + 1，其中 x 是字段名）编译期拒绝，引导用户用 Computed 预计算。
 
 PM 决策 2（引入 ExplicitError 变体）：Select / Peek 不吞 ExplicitError，直接传播。
 """
@@ -74,11 +74,20 @@ class IfThenElseDescriptor:
 def IfThenElse(condfunc, thensubcon, elsesubcon):
     """创建一个 IfThenElse 描述符。
 
-    使用方式::
+    使用方式（``x`` 必须是同 Struct 内已声明的 int 字段）::
 
-        d = IfThenElse(this.x > 0, Int8ub, Int16ub)
-        d.parse(b"\\xff", x=1)       # then 分支（Int8ub）
-        d.parse(b"\\xff\\x01", x=0)  # else 分支（Int16ub）
+        @dataclass
+        class P(StructMixin):
+            x: int = field(Int8ub)
+            v: int = field(IfThenElse(x > 0, Int8ub, Int16ub))
+
+        P.parse(b"\\x01\\xff")        # x=1 > 0, then 分支 → P(x=1, v=0xFF)
+        P.parse(b"\\x00\\xff\\x01")   # x=0, else 分支 → P(x=0, v=0xFF01)
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：d = IfThenElse(this.x > 0, Int8ub, Int16ub); d.parse(data, x=1)
+        # construct-rs：在 StructMixin 内用 ``field(IfThenElse(x > 0, ...))``
 
     :param condfunc: 条件（``True`` / ``False`` / FieldRef/ExprRef 表达式）。
     :param thensubcon: 条件为真时的子构造器。
@@ -94,11 +103,20 @@ def If(condfunc, subcon):
     对应 Python construct 的 ``If``（core.py L3912）。
     Rust 不新增 IfNode——Python 用户面 macro 完成等价转换（设计 §2.5）。
 
-    使用方式::
+    使用方式（``x`` 必须是同 Struct 内已声明的 int 字段）::
 
-        d = If(this.x > 0, Byte)
-        d.parse(b"\\xff", x=1)  # then 分支
-        d.parse(b"", x=0)       # else 分支（Pass，返回 None）
+        @dataclass
+        class P(StructMixin):
+            x: int = field(Int8ub)
+            v: int = field(If(x > 0, Byte))
+
+        P.parse(b"\\x01\\xff")  # x=1 > 0, 解析 Byte → P(x=1, v=0xFF)
+        P.parse(b"\\x00")       # x=0, Pass（v=None）
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：d = If(this.x > 0, Byte); d.parse(data, x=1)
+        # construct-rs：在 StructMixin 内用 ``field(If(x > 0, ...))``
 
     :param condfunc: 条件（``True`` / ``False`` / FieldRef/ExprRef 表达式）。
     :param subcon: 条件为真时的子构造器。
@@ -126,8 +144,8 @@ class SwitchDescriptor:
 
     PM 决策 1（keyfunc = A+B 混合）：
     - int/bool 常量 → ``SwitchKey::ConstInt``
-    - 单字段 int 表达式（``this.n``）→ ``SwitchKey::IntExpr``（零 FFI）
-    - 复杂表达式（``this.x + 1``）→ 编译期拒绝（引导用户用 Computed 预计算）
+    - 单字段 int 表达式（字段名 ``n`` 直接引用）→ ``SwitchKey::IntExpr``（零 FFI）
+    - 复杂表达式（如 ``x + 1``，x 是字段名）→ 编译期拒绝（引导用户用 Computed 预计算）
 
     :param keyfunc: key 函数。int/bool 常量或单字段引用（``_FieldDescriptor``）。
     :param cases: dict，``{key: subcon}``。key 是 int（常量匹配）。
@@ -152,9 +170,9 @@ class SwitchDescriptor:
             raise CompilationError(
                 "Switch keyfunc must be int/bool constant or Phase 2 expression "
                 "(_FieldDescriptor / _ExprRef), not a Python callable. "
-                "Example: Switch(this.n, {1: Byte, 2: Short}). "
-                "For complex keyfuncs like (this.x + 1), use Computed to "
-                "pre-compute, then Switch(this.key, ...)."
+                "Example: Switch(n, {1: Byte, 2: Short}) where 'n' is a field "
+                "in the same Struct. For complex keyfuncs like (x + 1), use "
+                "Computed to pre-compute, then Switch(key, ...)."
             )
         self.keyfunc = keyfunc
         self.cases = dict(cases) if cases else {}
@@ -181,16 +199,29 @@ class SwitchDescriptor:
 def Switch(keyfunc, cases, default=None):
     """创建一个 Switch 描述符。
 
-    使用方式（int key）::
+    使用方式（int key 常量；``n`` 必须是同 Struct 内已声明的 int 字段）::
 
-        d = Switch(this.n, {1: Int8ub, 2: Int16ub})
-        d.parse(b"\\x05", n=1)  # 5（Int8ub）
-        d.parse(b"\\x00\\x05", n=2)  # 5（Int16ub）
+        @dataclass
+        class P(StructMixin):
+            n: int = field(Int8ub)
+            v: int = field(Switch(n, {1: Int8ub, 2: Int16ub}))
 
-    使用方式（默认值）::
+        P.parse(b"\\x01\\x05")        # n=1 → Int8ub → P(n=1, v=5)
+        P.parse(b"\\x02\\x00\\x05")   # n=2 → Int16ub → P(n=2, v=5)
 
-        d = Switch(this.n, {}, default=Byte)
-        d.parse(b"\\x01", n=255)  # 1（走 default=Byte）
+    使用方式（默认值；未命中 cases 时走 default）::
+
+        @dataclass
+        class P(StructMixin):
+            n: int = field(Int8ub)
+            v: int = field(Switch(n, {}, default=Byte))
+
+        P.parse(b"\\xff\\x01")  # n=255 未命中, default=Byte → P(n=255, v=1)
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：d = Switch(this.n, {1: Int8ub, 2: Int16ub}); d.parse(data)
+        # construct-rs：在 StructMixin 内用 ``field(Switch(n, ...))``
 
     :param keyfunc: key 函数（int/bool 常量或 FieldRef/ExprRef）。
     :param cases: dict，{key: subcon}。
