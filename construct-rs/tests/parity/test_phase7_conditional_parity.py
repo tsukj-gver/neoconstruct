@@ -72,7 +72,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(IfThenElse(True, Int8ub, Int16ub))
         data = bytes([0x42])
-        return P, data, lambda: P(v=0x42), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0x42), lambda o: o.v
 
     if C == 'I2':
         # IfThenElse 常量 cond=False → else 分支
@@ -80,7 +80,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(IfThenElse(False, Int8ub, Int16ub))
         data = bytes([0xAA, 0xBB])
-        return P, data, lambda: P(v=0xAABB), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0xAABB), lambda o: o.v
 
     if C == 'I3':
         # If macro: If(True, Byte) ≡ IfThenElse(True, Byte, Pass)
@@ -88,7 +88,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(If(True, Int8ub))
         data = bytes([0x42])
-        return P, data, lambda: P(v=0x42), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0x42), lambda o: o.v
 
     if C == 'S1':
         # Switch int 常量 key=2 → Int16ub
@@ -96,7 +96,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(Switch(2, {1: Int8ub, 2: Int16ub}))
         data = bytes([0xAA, 0xBB])
-        return P, data, lambda: P(v=0xAABB), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0xAABB), lambda o: o.v
 
     if C == 'S2':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Pass
@@ -104,7 +104,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(Switch(99, {1: Int8ub, 2: Int16ub}, default=Pass))
         data = bytes([])
-        return P, data, lambda: P(v=None), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=None), lambda o: o.v
 
     if C == 'S3':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Int8ub
@@ -112,7 +112,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(Switch(99, {1: Int8ub, 2: Int16ub}, default=Int8ub))
         data = bytes([0x42])
-        return P, data, lambda: P(v=0x42), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0x42), lambda o: o.v
 
     if C == 'SL1':
         # Select 第 1 个成功
@@ -120,7 +120,7 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(Select(Int8ub, Int16ub))
         data = bytes([0x42])
-        return P, data, lambda: P(v=0x42), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0x42), lambda o: o.v
 
     if C == 'SL2':
         # Select 第 1 个失败 + 第 2 个成功
@@ -128,26 +128,21 @@ def _make_case_rs(case_id):
         class P(StructMixin):
             v: int = field(Select(Int16ub, Int8ub))
         data = bytes([0x42])
-        return P, data, lambda: P(v=0x42), lambda o: {'v': o.v}
+        return P, data, lambda: P(v=0x42), lambda o: o.v
 
     if C == 'F1':
         # FocusedSeq 基础场景：parsebuildfrom="num"
-        d = FocusedSeq("num",
-            Bytes(3),                # 匿名 Const(b"SIG") 近似
-            Renamed("num", Int8ub),  # 命名字段
-        )
-        data = bytes([0x53, 0x49, 0x47, 0xFF])  # "SIG" + 0xFF
-        # FocusedSeq 不需 StructMixin 包装；直接 build/parse 单值
-        # _make_case_rs 返回 (cls, parse_data, build_factory, extract)
-        # FocusedSeq.parse 返回单值（int），不是实例
-        # 通过包装 StructMixin 适配 helper API：
+        # 非 focus 字段用 Pass（Python/construct-rs 的 FocusedSeq 对非 focus 字段
+        # build 时传 None；裸 Bytes build(None) 两端都会失败，故用 Pass 占位
+        # 以验证 focus 提取 + 完整往返。匿名消费字节的场景留 Phase 7.3 补充。）
         @dataclass
         class P(StructMixin):
             v: int = field(FocusedSeq("num",
-                Bytes(3),
+                Pass,
                 Renamed("num", Int8ub),
             ))
-        return P, data, lambda: P(v=0xFF), lambda o: {'v': o.v}
+        data = bytes([0xFF])
+        return P, data, lambda: P(v=0xFF), lambda o: o.v
 
     raise ValueError("unknown case: {}".format(case_id))
 
@@ -202,11 +197,12 @@ def _make_case_py(case_id):
 
     if C == 'F1':
         # Python construct FocusedSeq syntax: "name"/subcon
+        # 非 focus 字段用 Pass（与 rs 侧对齐，裸 Bytes 无法 build）
         fmt = FocusedSeq("num",
-            Bytes(3),
+            Pass,
             "num" / Int8ub,
         )
-        data = bytes([0x53, 0x49, 0x47, 0xFF])  # "SIG" + 0xFF
+        data = bytes([0xFF])
         return fmt, data, 0xFF
 
     raise ValueError("unknown case: {}".format(case_id))

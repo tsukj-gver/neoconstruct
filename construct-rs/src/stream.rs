@@ -1,6 +1,7 @@
 //! 字节流游标抽象：parse 用 `ParseStream`，build 用 `BuildStream`。
 //!
-//! 设计依据：`docs/架构设计.md` §C.4、`docs/模块设计-BitStream.md` §3。
+//! 设计依据：`docs/架构设计.md` §C.4、`docs/模块设计-BitStream.md` §3、
+//! `docs/design/模块设计/模块设计-Streams.md` §3.1（Phase 7.2 Stream 基础设施扩展）。
 //!
 //! ## 关键约束
 //!
@@ -21,9 +22,65 @@
 //! 字节级 API 在 `bit_pos != 0` 时调用属契约违反：`read` 在 release 返回 `Stream` Err
 //! （可恢复），`write` / `into_bytes` 在 release 行为未定义但不 panic（与 std `Vec` 等
 //! "无额外运行时检查"API 一致）。所有 panic 路径限定为 `debug_assert!`（仅 debug build）。
+//!
+//! ## Phase 7.2：Stream 基础设施扩展（Seek / Pointer / Prefixed 支撑）
+//!
+//! - [`Whence`] enum：流定位参考点（Start / Current / End），对齐 Python
+//!   `io.SEEK_SET/CUR/END`（0/1/2）。
+//! - [`ParseStream::seek_whence`]：通用 seek，支持 whence=Start/Current/End
+//!   （Pointer 负 offset / relativeOffset 用）。现有 [`ParseStream::seek`] 保留
+//!   （whence=0 专用，向后兼容 Phase 4 GreedyRange/Peek 调用方）。
+//! - [`BuildStream::pos`]：新增字段，写入位置可与 `buf.len()` 分离（覆盖写 / 零填充）。
+//!   现有调用方不调 seek，`pos == buf.len()`，行为零变更（设计附录 A 审计表）。
+//! - [`BuildStream::seek`]：新方法，仅移动指针，零填充延迟到下次 [`BuildStream::write`]。
+//! - [`BuildStream::written_len`]：返回 buf 实际长度（与 [`BuildStream::tell`] 的 pos 区分）。
 
 use crate::error::ConstructError;
 use crate::path::Path;
+
+// ---------------------------------------------------------------------------
+// Phase 7.2：Whence enum（Stream 基础设施扩展）
+//
+// 设计依据：`docs/design/模块设计/模块设计-Streams.md` §3.1.1。
+//
+// 用于 `ParseStream::seek_whence` 与 `BuildStream::seek`，对齐 Python
+// `io.SEEK_SET/CUR/END`（0/1/2）。
+// ---------------------------------------------------------------------------
+
+/// 流定位的参考点，对齐 Python `io.SEEK_SET/CUR/END`（0/1/2）。
+///
+/// 用于 [`ParseStream::seek_whence`] 与 [`BuildStream::seek`]。
+///
+/// # Phase 7.2 引入
+///
+/// Phase 7 前的 `ParseStream::seek(pos, path)` 仅支持 whence=0（绝对定位）。
+/// Pointer 节点（负 offset / relativeOffset=True）需要 whence=1/2 支持，
+/// 引入此枚举统一三参考点语义。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whence {
+    /// 从流开头（绝对定位）。对应 Python whence=0。
+    Start,
+    /// 从当前位置（相对定位）。对应 Python whence=1。
+    Current,
+    /// 从流末尾（at 通常为负）。对应 Python whence=2。
+    End,
+}
+
+impl Whence {
+    /// 从 Python 传入的整数（0/1/2）构造。其他值返回 `Err`（编译期校验）。
+    ///
+    /// 用于编译期 `compile.rs` 从 Python 描述符读取 whence int 字段时校验。
+    pub fn from_python_int(n: i64) -> Result<Self, ConstructError> {
+        match n {
+            0 => Ok(Whence::Start),
+            1 => Ok(Whence::Current),
+            2 => Ok(Whence::End),
+            other => Err(ConstructError::Compilation {
+                message: format!("whence must be 0/1/2, got {}", other),
+            }),
+        }
+    }
+}
 
 /// 解析流：包装输入字节切片，维护字节游标与 bit 游标。
 ///
@@ -157,6 +214,112 @@ impl<'a> ParseStream<'a> {
             });
         }
         self.pos = pos;
+        self.bit_pos = 0;
+        Ok(())
+    }
+
+    /// 通用 seek，支持 whence=Start/Current/End（Phase 7.2 新增）。
+    ///
+    /// 对齐 Python `stream_seek(stream, offset, whence, path)`（core.py L204）。
+    ///
+    /// # 行为
+    ///
+    /// - [`Whence::Start`]：`at < 0` 或 `at > data.len()` → Stream Err；否则 `pos = at`。
+    /// - [`Whence::Current`]：`tell() + at` 溢出 usize 或越界 → Stream Err；否则
+    ///   `pos = tell() + at`。`at` 可为负（向后回退）。
+    /// - [`Whence::End`]：`data.len() + at`，`at` 通常为负（从末尾向前）；
+    ///   `at > 0` → Stream Err（parse 不可超越 EOF，与 Python BytesIO 差异：
+    ///   BytesIO 允许 seek 超过 EOF 但 read 时才报错；parse 场景 seek 超过 EOF
+    ///   无意义，提前报错更清晰，详见设计 §7.1 S6 / 附录 B）。
+    /// - 重置 `bit_pos = 0`（字节对齐，与现有 [`seek`](Self::seek) 一致）。
+    ///
+    /// # 与现有 `seek` 的关系
+    ///
+    /// 现有 [`ParseStream::seek`](Self::seek)（whence=0 专用）保留不变，供
+    /// GreedyRange / Peek 等已有调用方继续使用（避免破坏 Phase 4 已验收代码）。
+    /// 新方法 `seek_whence` 供 Pointer / Seek 使用。
+    pub fn seek_whence(
+        &mut self,
+        at: i64,
+        whence: Whence,
+        path: &Path,
+    ) -> Result<(), ConstructError> {
+        let new_pos: usize = match whence {
+            Whence::Start => {
+                if at < 0 {
+                    return Err(ConstructError::Stream {
+                        message: format!(
+                            "stream seek with whence=0 (Start) requires non-negative offset, got {}",
+                            at
+                        ),
+                        path: path.to_string(),
+                    });
+                }
+                let at_us = at as usize;
+                if at_us > self.data.len() {
+                    return Err(ConstructError::Stream {
+                        message: format!(
+                            "stream seek out of bounds, at={}, data_len={}",
+                            at_us,
+                            self.data.len()
+                        ),
+                        path: path.to_string(),
+                    });
+                }
+                at_us
+            }
+            Whence::Current => {
+                let cur = self.pos as i64;
+                let target = cur.checked_add(at).ok_or_else(|| ConstructError::Stream {
+                    message: format!("stream seek overflow: cur={} + at={}", cur, at),
+                    path: path.to_string(),
+                })?;
+                if target < 0 || target as usize > self.data.len() {
+                    return Err(ConstructError::Stream {
+                        message: format!(
+                            "stream seek out of bounds, target={}, data_len={}",
+                            target,
+                            self.data.len()
+                        ),
+                        path: path.to_string(),
+                    });
+                }
+                target as usize
+            }
+            Whence::End => {
+                if at > 0 {
+                    return Err(ConstructError::Stream {
+                        message: format!(
+                            "stream seek with whence=2 (End) requires non-positive offset on parse stream, got {}",
+                            at
+                        ),
+                        path: path.to_string(),
+                    });
+                }
+                let target = (self.data.len() as i64).checked_add(at).ok_or_else(|| {
+                    ConstructError::Stream {
+                        message: format!(
+                            "stream seek underflow: len={} + at={}",
+                            self.data.len(),
+                            at
+                        ),
+                        path: path.to_string(),
+                    }
+                })?;
+                if target < 0 {
+                    return Err(ConstructError::Stream {
+                        message: format!(
+                            "stream seek out of bounds, target={}, data_len={}",
+                            target,
+                            self.data.len()
+                        ),
+                        path: path.to_string(),
+                    });
+                }
+                target as usize
+            }
+        };
+        self.pos = new_pos;
         self.bit_pos = 0;
         Ok(())
     }
@@ -330,10 +493,29 @@ impl<'a> ParseStream<'a> {
 /// 采用"部分字节缓冲"：bit_pos > 0 时，正在填充的字节暂存于 `current_byte`，
 /// 满 8 bit 后 push 到 `buf`。`current_byte` 中已写入的 bit 永远位于高位
 /// （`bit_pos == 0` 时整字节为 0），未写入的位始终为 0，可安全 `|=`。
+///
+/// # Phase 7.2：pos 字段（写入位置）
+///
+/// 引入 `pos` 字段后，写入位置可与 `buf.len()` 分离，支持覆盖写与零填充：
+/// - `pos < buf.len()`：覆盖写（下次 write 从 pos 开始覆盖，pos 推进，buf.len() 不变）
+/// - `pos > buf.len()`：零填充扩展到 pos（下次 write 前 resize）
+/// - `pos == buf.len()`：末尾追加（原 Phase 1-6 行为）
+///
+/// **向后兼容性**（设计附录 A）：所有现有 build 调用方（StructNode / BitwiseNode /
+/// BytesNode / FormatFieldNode / PrefixedArrayNode 等）不调 seek，`pos` 始终
+/// 等于 `buf.len()`，行为零变更。bit 级 API（`write_bits` / `write_padding_bits`）
+/// 不感知 pos（仍 buf.push 末尾），用 `debug_assert!(pos == buf.len())` 守卫契约。
 #[derive(Debug, Default)]
 pub struct BuildStream {
     /// 输出缓冲。
     buf: Vec<u8>,
+    /// 当前写入位置（字节偏移）。0..=buf.len()。
+    ///
+    /// Phase 7 前无此字段（写入永远是末尾追加）。引入 seek 后，写入位置可与末尾分离：
+    /// - `pos < buf.len()`：覆盖写（下次 write 从 pos 开始覆盖，pos 推进，buf.len() 不变）
+    /// - `pos > buf.len()`：零填充扩展到 pos（下次 write 前 resize）
+    /// - `pos == buf.len()`：末尾追加（原行为）
+    pos: usize,
     /// 当前字节内 bit 偏移（0-7）。0 表示字节对齐。
     bit_pos: u8,
     /// `bit_pos > 0` 时的部分字节（高 `bit_pos` 位有效，低 `8 - bit_pos` 位为 0）。
@@ -352,15 +534,23 @@ impl BuildStream {
     pub fn with_capacity(capacity: usize) -> Self {
         Self {
             buf: Vec::with_capacity(capacity),
+            pos: 0,
             bit_pos: 0,
             current_byte: 0,
         }
     }
 
-    /// 追加写入字节切片（字节级，要求 `bit_pos == 0`）。
+    /// 写入字节切片（字节级，要求 `bit_pos == 0`）。
     ///
-    /// 对齐 Python construct `stream.write`：直接追加，不校验长度
-    /// （长度校验由具体节点如 `BytesNode.build` 负责）。
+    /// Phase 7.2 行为变更（设计 §3.1.3）：现在从 `pos` 开始写，可能覆盖或扩展 buf。
+    ///
+    /// - `pos + data.len() <= buf.len()`：覆盖写（`buf[pos..pos+data.len()] = data`）
+    /// - `pos + data.len() > buf.len()`：先 resize 到 `pos + data.len()`（零填充间隙），
+    ///   再写入 data（覆盖刚填充的零的尾部）
+    /// - 写完后 `pos += data.len()`
+    ///
+    /// 对齐 Python construct `stream.write`：不校验长度（长度校验由具体节点如
+    /// `BytesNode.build` 负责）。
     ///
     /// # bit 对齐前置条件
     ///
@@ -375,15 +565,94 @@ impl BuildStream {
             "byte-level write in bit-unaligned position (bit_pos={})",
             self.bit_pos
         );
-        self.buf.extend_from_slice(data);
+        // 空 write 显式 no-op：避免 pos > buf.len() 时被误扩展（与原 extend_from_slice
+        // 同行为，但 pos 引入后需显式早返回）。
+        if data.is_empty() {
+            return;
+        }
+        let end = self.pos + data.len();
+        if end > self.buf.len() {
+            // 间隙 [buf.len()..end) 用 0x00 填充（Python BytesIO 行为）。
+            self.buf.resize(end, 0u8);
+        }
+        self.buf[self.pos..end].copy_from_slice(data);
+        self.pos = end;
     }
 
-    /// 当前已写入字节数。
+    /// 当前写入位置（字节偏移）。
+    ///
+    /// Phase 7.2 行为变更（设计 §3.1.3）：返回 `pos`（写入位置），不是 `buf.len()`。
+    /// 对齐 Python `io.BytesIO.tell()`（返回当前指针位置）。
+    ///
+    /// 旧调用方（StructNode build）依赖 `tell()` 返回末尾位置——由于 StructNode 不调
+    /// seek，`pos` 始终等于 `buf.len()`，行为不变（向后兼容）。
     ///
     /// 注意：若 `bit_pos != 0`，`tell()` 不包含正在填充的 `current_byte`。
     /// 字节级调用方应在 `bit_pos == 0` 时使用此值。
     pub fn tell(&self) -> usize {
+        self.pos
+    }
+
+    /// 已写入字节数（buf 实际长度，非 pos）。
+    ///
+    /// Phase 7.2 新增。用于 sizeof 计算与顶层 build 收尾。与 [`tell`](Self::tell)
+    /// （返回 pos）区分：seek 后 `pos` 可小于 `buf.len()`，但 `buf.len()` 反映
+    /// 实际已分配/已写入的边界。
+    pub fn written_len(&self) -> usize {
         self.buf.len()
+    }
+
+    /// seek 到指定位置（支持零填充扩展，Phase 7.2 新增）。
+    ///
+    /// 对齐 Python `io.BytesIO.seek(offset, whence)`。
+    ///
+    /// # 行为
+    ///
+    /// - [`Whence::Start`]：`at < 0` → Stream Err；否则 `pos = at`（**不扩展 buf**，
+    ///   仅移动指针；零填充延迟到下次 [`write`](Self::write)，避免无 write 的空 seek
+    ///   浪费内存）
+    /// - [`Whence::Current`]：`pos + at`，`at` 可为负；溢出/负值 → Stream Err
+    /// - [`Whence::End`]：`buf.len() + at`，`at` 可为正（build 允许 seek 超过末尾，
+    ///   下次 write 时零填充）
+    /// - 重置 `bit_pos = 0`、`current_byte = 0`（字节对齐，与 ParseStream 一致）
+    ///
+    /// # 错误
+    ///
+    /// at/whence 组合导致 pos 为负或溢出 → [`ConstructError::Stream`]。
+    pub fn seek(&mut self, at: i64, whence: Whence, path: &Path) -> Result<(), ConstructError> {
+        let new_pos: i64 = match whence {
+            Whence::Start => at,
+            Whence::Current => {
+                (self.pos as i64)
+                    .checked_add(at)
+                    .ok_or_else(|| ConstructError::Stream {
+                        message: format!("BuildStream seek overflow: pos={} + at={}", self.pos, at),
+                        path: path.to_string(),
+                    })?
+            }
+            Whence::End => {
+                (self.buf.len() as i64)
+                    .checked_add(at)
+                    .ok_or_else(|| ConstructError::Stream {
+                        message: format!(
+                            "BuildStream seek overflow: len={} + at={}",
+                            self.buf.len(),
+                            at
+                        ),
+                        path: path.to_string(),
+                    })?
+            }
+        };
+        if new_pos < 0 {
+            return Err(ConstructError::Stream {
+                message: format!("BuildStream seek to negative position: {}", new_pos),
+                path: path.to_string(),
+            });
+        }
+        self.pos = new_pos as usize;
+        self.bit_pos = 0;
+        self.current_byte = 0;
+        Ok(())
     }
 
     /// 消费此流，返回内部的字节缓冲。
@@ -440,6 +709,20 @@ impl BuildStream {
             return;
         }
         debug_assert!(n <= 64, "write_bits: n must be <= 64, got {}", n);
+        // Phase 7.2 守卫：bit API 假设末尾追加模型（self.buf.push），不感知 pos。
+        // 若用户在 Bitwise 域内 seek 使 pos != buf.len() 后再调 bit API，
+        // 会破坏一致性（bit 写到末尾，pos 未推进）。debug build 捕获契约违反。
+        // Pointer/Seek 在 Bitwise 域内行为未定义（设计附录 A 已知限制）。
+        //
+        // 注意：bit API 自身的连续调用通过下方 `self.pos = self.buf.len()` 保持
+        // pos 与 buf.len() 同步（每次 push 后更新），所以连续 bit 写入不会触发
+        // 此 assert。仅"先 seek 再 bit 写"会触发。
+        debug_assert!(
+            self.pos == self.buf.len(),
+            "write_bits after seek (pos={}, buf.len()={}); bit API requires append-only mode",
+            self.pos,
+            self.buf.len()
+        );
 
         // 掩码到低 n 位（防御性：调用方可能传入了未掩码的值）
         let masked = if n < 64 {
@@ -459,6 +742,9 @@ impl BuildStream {
                 let shift = rem_bits + 8 * (full_bytes - 1 - i);
                 self.buf.push(((masked >> shift) & 0xFF) as u8);
             }
+            // Phase 7.2：bit API 不感知 pos，但保持 pos 与 buf.len() 同步
+            // （连续 bit 写入视为追加；seek 后调 bit 写由入口 debug_assert 捕获）。
+            self.pos = self.buf.len();
 
             // 剩余 rem_bits bit：从 masked 的低位逐 bit 写入 current_byte
             if rem_bits > 0 {
@@ -484,6 +770,13 @@ impl BuildStream {
         if n == 0 {
             return;
         }
+        // Phase 7.2 守卫：同 write_bits，bit API 假设末尾追加模型。
+        debug_assert!(
+            self.pos == self.buf.len(),
+            "write_padding_bits after seek (pos={}, buf.len()={}); bit API requires append-only mode",
+            self.pos,
+            self.buf.len()
+        );
         let bit_val: u8 = if bit != 0 { 1 } else { 0 };
 
         // 字节对齐 + 大块：批量 push 相同字节
@@ -494,6 +787,8 @@ impl BuildStream {
             // resize_with 比 push 循环更高效（一次性预留容量）
             let old_len = self.buf.len();
             self.buf.resize(old_len + full_bytes, byte_val);
+            // Phase 7.2：bit API 同步 pos（同 write_bits 批量路径）。
+            self.pos = self.buf.len();
 
             // 剩余 rem_bits bit 逐位写入
             for _ in 0..rem_bits {
@@ -503,6 +798,7 @@ impl BuildStream {
                     self.buf.push(self.current_byte);
                     self.current_byte = 0;
                     self.bit_pos = 0;
+                    self.pos = self.buf.len();
                 }
             }
         } else {
@@ -514,6 +810,7 @@ impl BuildStream {
                     self.buf.push(self.current_byte);
                     self.current_byte = 0;
                     self.bit_pos = 0;
+                    self.pos = self.buf.len();
                 }
             }
         }
@@ -533,6 +830,8 @@ impl BuildStream {
                 self.buf.push(self.current_byte);
                 self.current_byte = 0;
                 self.bit_pos = 0;
+                // Phase 7.2：bit API 同步 pos（同 write_bits 批量路径）。
+                self.pos = self.buf.len();
             }
         }
     }
@@ -1358,5 +1657,394 @@ mod tests {
         let path = root_path();
         let v = reader.read_bits(64, &path).expect("read 64");
         assert_eq!(v, value);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 7.2：Stream 扩展测试（Whence / seek_whence / BuildStream.seek）
+    //
+    // 设计依据：`docs/design/模块设计/模块设计-Streams.md` §7.1（S1-S15）。
+    // ---------------------------------------------------------------------------
+
+    // === Whence enum ===
+
+    #[test]
+    fn whence_from_python_int_recognizes_0_1_2() {
+        assert_eq!(Whence::from_python_int(0).unwrap(), Whence::Start);
+        assert_eq!(Whence::from_python_int(1).unwrap(), Whence::Current);
+        assert_eq!(Whence::from_python_int(2).unwrap(), Whence::End);
+    }
+
+    #[test]
+    fn whence_from_python_int_rejects_other_values() {
+        assert!(Whence::from_python_int(3).is_err());
+        assert!(Whence::from_python_int(-1).is_err());
+        assert!(Whence::from_python_int(100).is_err());
+    }
+
+    // === ParseStream::seek_whence ===
+
+    #[test]
+    fn parse_stream_seek_whence_start_basic() {
+        // S1: whence=Start, at=-1 → Err；正常 at → 设置 pos
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        s.seek_whence(3, Whence::Start, &path).expect("seek to 3");
+        assert_eq!(s.tell(), 3);
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_start_negative_returns_err() {
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        let err = s
+            .seek_whence(-1, Whence::Start, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("non-negative"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+        // 失败时不推进游标
+        assert_eq!(s.tell(), 0);
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_start_beyond_end_returns_err() {
+        // S2: whence=Start, at > data.len() → Err
+        let mut s = ParseStream::new(b"abc");
+        let path = root_path();
+        let err = s
+            .seek_whence(100, Whence::Start, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("out of bounds"), "got: {}", message);
+                assert!(message.contains("data_len=3"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_start_to_end_allowed() {
+        // seek 到末尾允许（pos == data.len()）
+        let mut s = ParseStream::new(b"abc");
+        let path = root_path();
+        s.seek_whence(3, Whence::Start, &path).expect("seek to end");
+        assert_eq!(s.tell(), 3);
+        assert!(s.is_at_end());
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_current_forward() {
+        // S3: whence=Current, tell()=3, at=2 → pos=5
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        s.seek_whence(3, Whence::Start, &path)
+            .expect("initial seek");
+        s.seek_whence(2, Whence::Current, &path)
+            .expect("forward seek");
+        assert_eq!(s.tell(), 5);
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_current_backward() {
+        // S4: whence=Current, tell()=5, at=-2 → pos=3
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        s.seek_whence(5, Whence::Start, &path)
+            .expect("initial seek");
+        s.seek_whence(-2, Whence::Current, &path)
+            .expect("backward seek");
+        assert_eq!(s.tell(), 3);
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_current_overflow_returns_err() {
+        // S5: whence=Current, tell()=usize::MAX, at=1 → checked_add 失败
+        let data = b"abc";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        // 手动构造溢出场景：set pos 到 usize::MAX-1（绕过 data.len() 检查）
+        // 这里直接测 at 极大值
+        let err = s
+            .seek_whence(i64::MAX, Whence::Current, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                // overflow 或 out of bounds（usize::MAX + i64::MAX 触发 checked_add 失败）
+                assert!(
+                    message.contains("overflow") || message.contains("out of bounds"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_current_to_negative_returns_err() {
+        // whence=Current, tell()=1, at=-5 → target=-4 < 0 → Err
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        s.seek_whence(1, Whence::Start, &path).expect("initial");
+        let err = s
+            .seek_whence(-5, Whence::Current, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(
+                    message.contains("out of bounds") || message.contains("overflow"),
+                    "got: {}",
+                    message
+                );
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_end_positive_returns_err() {
+        // S6: whence=End, at=1（正）→ Err（parse 不可超越 EOF）
+        let mut s = ParseStream::new(b"abcdef");
+        let path = root_path();
+        let err = s
+            .seek_whence(1, Whence::End, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("non-positive"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_end_negative_from_eof() {
+        // S7: whence=End, data.len()=10, at=-3 → pos=7
+        let mut s = ParseStream::new(b"0123456789");
+        let path = root_path();
+        s.seek_whence(-3, Whence::End, &path)
+            .expect("seek from end");
+        assert_eq!(s.tell(), 7);
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_end_zero_goes_to_eof() {
+        let mut s = ParseStream::new(b"abc");
+        let path = root_path();
+        s.seek_whence(0, Whence::End, &path).expect("seek to end");
+        assert_eq!(s.tell(), 3);
+        assert!(s.is_at_end());
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_end_too_negative_returns_err() {
+        // whence=End, data.len()=3, at=-5 → target=-2 < 0 → Err
+        let mut s = ParseStream::new(b"abc");
+        let path = root_path();
+        let err = s
+            .seek_whence(-5, Whence::End, &path)
+            .expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("out of bounds"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parse_stream_seek_whence_resets_bit_pos() {
+        // S8: seek_whence 重置 bit_pos（与现有 seek 一致）
+        let mut s = ParseStream::new(&[0xFF, 0xFF]);
+        let path = root_path();
+        // 制造 bit 偏移
+        let _ = s.read_bits(4, &path).expect("read 4 bits");
+        assert_eq!(s.bit_pos(), 4);
+        // seek_whence 应重置 bit_pos
+        s.seek_whence(0, Whence::Start, &path).expect("seek_whence");
+        assert_eq!(s.bit_pos(), 0);
+        assert_eq!(s.tell(), 0);
+    }
+
+    // === BuildStream::seek + pos ===
+
+    #[test]
+    fn build_stream_seek_start_does_not_extend_buf() {
+        // S9: BuildStream.seek whence=Start, at=5 → pos=5（不扩展 buf）
+        let mut s = BuildStream::new();
+        s.write(b"abc"); // buf=[a,b,c], pos=3
+        let path = root_path();
+        s.seek(5, Whence::Start, &path).expect("seek to 5");
+        assert_eq!(s.tell(), 5);
+        // buf 不扩展（零填充延迟到下次 write）
+        assert_eq!(s.written_len(), 3);
+        assert_eq!(s.as_bytes(), b"abc");
+    }
+
+    #[test]
+    fn build_stream_seek_then_write_zero_pads() {
+        // S10: seek(10) + write(b"X"), buf.len()=3 → buf 变为 [0]*10 + [X]（len=11）
+        let mut s = BuildStream::new();
+        s.write(b"abc"); // buf=[a,b,c], pos=3
+        let path = root_path();
+        s.seek(10, Whence::Start, &path).expect("seek to 10");
+        s.write(b"X");
+        assert_eq!(s.tell(), 11);
+        assert_eq!(s.written_len(), 11);
+        let mut expected = vec![0u8; 10];
+        expected.extend_from_slice(b"X");
+        // 前 3 字节是 "abc"（覆盖写时 pos=10 > len=3，先 resize 到 10 填零，再写 X 到 pos=10）
+        // 注意：seek(10) 后 pos=10, buf.len()=3。write(b"X"): end=11, resize(11, 0)
+        // → buf = [a,b,c,0,0,0,0,0,0,0,0], copy X 到 [10..11] → buf=[a,b,c,0,0,0,0,0,0,0,X]
+        let mut expected_with_abc = b"abc".to_vec();
+        expected_with_abc.extend_from_slice(&[0u8; 7]);
+        expected_with_abc.extend_from_slice(b"X");
+        assert_eq!(s.as_bytes(), expected_with_abc.as_slice());
+        // 验证总长
+        assert_eq!(s.as_bytes().len(), 11);
+        // 验证间隙为 0
+        assert_eq!(&s.as_bytes()[3..10], &[0u8; 7]);
+        // 验证末尾是 X
+        assert_eq!(s.as_bytes()[10], b'X');
+        // 抑制未使用变量
+        let _ = expected;
+    }
+
+    #[test]
+    fn build_stream_seek_overwrite_existing() {
+        // S11: buf=[1,2,3], seek(1) + write(b"X") → buf=[1,X,3], pos=2
+        let mut s = BuildStream::new();
+        s.write(&[1u8, 2, 3]);
+        let path = root_path();
+        s.seek(1, Whence::Start, &path).expect("seek to 1");
+        s.write(b"X");
+        assert_eq!(s.as_bytes(), &[1u8, b'X', 3]);
+        assert_eq!(s.tell(), 2);
+        // buf.len() 不变（覆盖写）
+        assert_eq!(s.written_len(), 3);
+    }
+
+    #[test]
+    fn build_stream_seek_end_positive_extends_pos() {
+        // S12: whence=End, buf.len()=5, at=3 → pos=8（下次 write 零填充）
+        let mut s = BuildStream::new();
+        s.write(b"abcde"); // buf.len()=5, pos=5
+        let path = root_path();
+        s.seek(3, Whence::End, &path).expect("seek end +3");
+        assert_eq!(s.tell(), 8);
+        // buf 不扩展（延迟零填充）
+        assert_eq!(s.written_len(), 5);
+        // 写一字节验证零填充
+        s.write(b"X");
+        assert_eq!(s.written_len(), 9);
+        assert_eq!(s.as_bytes()[5..8], [0u8; 3]); // 间隙为 0
+        assert_eq!(s.as_bytes()[8], b'X');
+    }
+
+    #[test]
+    fn build_stream_seek_current_negative() {
+        // S13: whence=Current, pos=5, at=-2 → pos=3
+        let mut s = BuildStream::new();
+        s.write(b"abcde");
+        let path = root_path();
+        s.seek(-2, Whence::Current, &path).expect("seek current -2");
+        assert_eq!(s.tell(), 3);
+    }
+
+    #[test]
+    fn build_stream_seek_current_underflow_returns_err() {
+        // S14: whence=Current, pos=1, at=-5 → new_pos=-4 < 0 → Err
+        let mut s = BuildStream::new();
+        s.write(b"a");
+        let path = root_path();
+        let err = s.seek(-5, Whence::Current, &path).expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("negative"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+        // 失败时不推进游标
+        assert_eq!(s.tell(), 1);
+    }
+
+    #[test]
+    fn build_stream_seek_resets_bit_state() {
+        // S15: seek 重置 bit_pos / current_byte（bit 域内 seek 不支持，但仍重置状态）
+        let mut s = BuildStream::new();
+        s.write_bits(0xAB, 4); // bit_pos=4, current_byte=0xA0
+        let path = root_path();
+        // 此时 pos == buf.len() == 0（partial byte 未 push），seek 仍可调用
+        s.seek(0, Whence::Start, &path).expect("seek 0");
+        assert_eq!(s.bit_pos(), 0);
+    }
+
+    #[test]
+    fn build_stream_seek_start_negative_returns_err() {
+        let mut s = BuildStream::new();
+        let path = root_path();
+        let err = s.seek(-1, Whence::Start, &path).expect_err("should fail");
+        match err {
+            ConstructError::Stream { message, .. } => {
+                assert!(message.contains("negative"), "got: {}", message);
+            }
+            other => panic!("expected Stream, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn build_stream_written_len_distinct_from_tell() {
+        // 验证 written_len 与 tell 在 seek 后分离
+        let mut s = BuildStream::new();
+        s.write(b"hello"); // buf.len()=5, pos=5
+        assert_eq!(s.tell(), 5);
+        assert_eq!(s.written_len(), 5);
+        let path = root_path();
+        s.seek(2, Whence::Start, &path).expect("seek back");
+        // pos 回到 2，但 buf 长度仍是 5
+        assert_eq!(s.tell(), 2);
+        assert_eq!(s.written_len(), 5);
+    }
+
+    // === 向后兼容回归：现有调用方不调 seek，pos == buf.len() ===
+
+    #[test]
+    fn build_stream_backward_compat_sequential_writes_append() {
+        // 模拟 StructNode build：连续 write，无 seek
+        let mut s = BuildStream::new();
+        s.write(b"foo");
+        s.write(b"bar");
+        s.write(b"baz");
+        // 行为应与 Phase 1-6 一致：append-only
+        assert_eq!(s.as_bytes(), b"foobarbaz");
+        assert_eq!(s.tell(), 9);
+        assert_eq!(s.written_len(), 9);
+    }
+
+    #[test]
+    fn build_stream_backward_compat_empty_write_is_noop() {
+        let mut s = BuildStream::new();
+        s.write(b"abc");
+        let len_before = s.written_len();
+        s.write(b"");
+        // 空 write 显式 no-op（pos 不变，buf 不扩展）
+        assert_eq!(s.tell(), 3);
+        assert_eq!(s.written_len(), len_before);
+    }
+
+    #[test]
+    fn build_stream_into_bytes_after_seek_returns_full_buf() {
+        // 验证 into_bytes 返回 buf（不受 pos 影响）
+        let mut s = BuildStream::new();
+        s.write(b"hello");
+        let path = root_path();
+        s.seek(0, Whence::Start, &path).expect("seek back to 0");
+        // pos=0, buf.len()=5
+        let bytes = s.into_bytes();
+        assert_eq!(bytes, b"hello");
     }
 }

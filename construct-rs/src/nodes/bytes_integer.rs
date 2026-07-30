@@ -701,7 +701,7 @@ mod tests {
             let mut path = Path::new();
             node.build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect("build");
-            let mut expected = vec![0u8; 16];
+            let mut expected = [0u8; 16];
             expected[7] = 0x01;
             assert_eq!(stream.as_bytes(), &expected[..]);
         });

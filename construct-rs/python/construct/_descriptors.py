@@ -1891,6 +1891,277 @@ class PassDescriptor:
 Pass = PassDescriptor()
 
 
+# ---------------------------------------------------------------------------
+# Phase 7.2: Streams 描述符（Seek / Pointer / Prefixed）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Streams.md`` §3.6。
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到 "SeekDescriptor" / "PointerDescriptor" / "PrefixedDescriptor" 字符串，
+# 构建对应的 Node 变体（详见 compile.rs Phase 7.2 分支）。
+#
+# - SeekDescriptor：at（int 或 FieldRef/ExprRef）+ whence（int 0/1/2）
+# - PointerDescriptor：offset（int 或表达式）+ subcon + relativeOffset（bool）+ stream（None）
+# - PrefixedDescriptor：lengthfield + subcon + includelength（bool）
+# ---------------------------------------------------------------------------
+
+
+class SeekDescriptor:
+    """``Seek(at, whence=0)`` 描述符（Phase 7.2）。
+
+    流定位节点：parse/build 执行 ``stream.seek(at, whence)``。
+    对应 Python construct 的 ``Seek``（core.py L4594）。
+
+    parse 返回新位置（PyLong）；build 接受任意输入（``flagbuildnone=True`` 兼容）；
+    sizeof 永远返回 ``SizeofError``。
+
+    ``_expr_params`` 协议：当 ``at`` 是 int 时返回 ``{}``（跳过编译）；
+    当 at 是 FieldRef/ExprRef 时返回 ``{"at": self.at}``（编译为 ExprOp 列表）。
+
+    :param at: 定位偏移（int 常量或 FieldRef/ExprRef 表达式）。可为负（whence=2 时）。
+    :param whence: 定位参考点（0=Start / 1=Current / 2=End，默认 0）。
+    """
+
+    __slots__ = ("at", "whence")
+
+    def __init__(self, at, whence=0):
+        """初始化 Seek 描述符。
+
+        :param at: 定位偏移。
+        :param whence: 0/1/2（默认 0）。
+        """
+        self.at = at
+        self.whence = whence
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 ``{"at": self.at}``。当 at 是 int 时跳过编译；
+        当 at 是 FieldRef/ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.at, int) and not isinstance(self.at, bool):
+            return {}
+        return {"at": self.at}
+
+    def __repr__(self):
+        return "Seek(at={!r}, whence={!r})".format(self.at, self.whence)
+
+
+def Seek(at, whence=0):
+    """创建一个 Seek 描述符。
+
+    流定位节点。对应 Python construct 的 ``Seek``。
+
+    使用方式（在 Sequence 内）::
+
+        from construct import Sequence, Seek, Bytes
+        d = Sequence(Bytes(10), Seek(5), Bytes(1))
+        # parse 跳到 pos=5，再读 1 字节
+
+    使用方式（whence=2，从 EOF 向前）::
+
+        d = Sequence(Seek(-2, 2), Bytes(1))
+        # 从末尾退 2 字节再读
+
+    使用方式（表达式 at）::
+
+        from construct import this
+        d = Sequence(Seek(this.offset), Bytes(1))
+
+    :param at: 定位偏移（int 或 FieldRef/ExprRef 表达式）。
+    :param whence: 0=Start / 1=Current / 2=End（默认 0）。
+    :return: ``SeekDescriptor`` 实例。
+    """
+    return SeekDescriptor(at, whence)
+
+
+class PointerDescriptor:
+    """``Pointer(offset, subcon, stream=None, relativeOffset=False)`` 描述符（Phase 7.2）。
+
+    绝对偏移读写节点：seek 到 ``offset`` 处理 ``subcon``，再 seek 回原位置
+    （不占主流位置）。对应 Python construct 的 ``Pointer``（core.py L4384）。
+
+    whence 自动计算（对齐 Python ``_pointer_seek``，core.py L4421-4424）：
+
+    - ``relativeOffset=True`` → whence=Current（相对定位）
+    - ``relativeOffset=False`` + ``offset >= 0`` → whence=Start（绝对定位）
+    - ``relativeOffset=False`` + ``offset < 0`` → whence=End（从 EOF 向前）
+
+    ``_expr_params`` 协议：当 ``offset`` 是 int 时返回 ``{}``；当 offset 是
+    FieldRef/ExprRef 时返回 ``{"offset": self.offset}``（编译为 ExprOp 列表）。
+
+    :param offset: 偏移（int 常量或 FieldRef/ExprRef 表达式，可为负）。
+    :param subcon: 被偏移处理的子构造器（描述符）。
+    :param stream: 换流参数。**不支持**（非 None 编译期拒绝，已知限制）。
+    :param relativeOffset: 若 True，offset 解释为相对当前位置；否则绝对（默认 False）。
+    """
+
+    __slots__ = ("offset", "subcon", "stream", "relativeOffset")
+
+    def __init__(self, offset, subcon, stream=None, relativeOffset=False):
+        """初始化 Pointer 描述符。
+
+        :param offset: 偏移。
+        :param subcon: 子构造器。
+        :param stream: 换流（不支持，必须 None）。
+        :param relativeOffset: 是否相对当前位置。
+        """
+        self.offset = offset
+        self.subcon = subcon
+        self.stream = stream
+        self.relativeOffset = relativeOffset
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 ``{"offset": self.offset}``。当 offset 是 int 时跳过编译；
+        当 offset 是 FieldRef/ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.offset, int) and not isinstance(self.offset, bool):
+            return {}
+        return {"offset": self.offset}
+
+    def __repr__(self):
+        return "Pointer(offset={!r}, subcon={!r}, relativeOffset={!r})".format(
+            self.offset, self.subcon, self.relativeOffset
+        )
+
+
+def Pointer(offset, subcon, stream=None, relativeOffset=False):
+    """创建一个 Pointer 描述符。
+
+    绝对偏移读写节点。对应 Python construct 的 ``Pointer``。
+
+    使用方式（正 offset 绝对定位）::
+
+        from construct import Pointer, Bytes
+        d = Pointer(8, Bytes(1))
+        d.parse(b"abcdefghijkl")  # → b"i"（位置 8 的字节）
+        d.build(b"Z")             # → b'\\x00'*8 + b'Z'（零填充到位置 8）
+
+    使用方式（负 offset 从 EOF）::
+
+        d = Pointer(-2, Bytes(1))
+        d.parse(b"abcdefgh")      # → b"g"（倒数第 2 字节）
+
+    使用方式（relativeOffset=True）::
+
+        from construct import Sequence
+        ds = Sequence(Bytes(3), Pointer(2, Bytes(1), relativeOffset=True))
+        # Bytes(3) 后 tell=3，Pointer 相对 +2 → pos=5
+
+    使用方式（Struct 内 Pointer 不占主流位置）::
+
+        from construct import Struct
+        d = Struct("ptr"/Pointer(5, Bytes(1)), "direct"/Bytes(1))
+        result = d.parse(b"01234Xy")
+        # result.ptr == b"X"（位置 5）
+        # result.direct == b"0"（Pointer 已 seek 回 0）
+
+    限制：
+
+    - **stream 参数不支持**（换流）。非 None 编译期拒绝。
+    - **在 Bitwise 域内行为未定义**（bit API 不感知 pos）。
+
+    :param offset: 偏移（int 或 FieldRef/ExprRef 表达式）。
+    :param subcon: 子构造器。
+    :param stream: 换流（不支持，必须 None）。
+    :param relativeOffset: 是否相对当前位置（默认 False）。
+    :return: ``PointerDescriptor`` 实例。
+    """
+    return PointerDescriptor(offset, subcon, stream, relativeOffset)
+
+
+class PrefixedDescriptor:
+    """``Prefixed(lengthfield, subcon, includelength=False)`` 描述符（Phase 7.2）。
+
+    长度前缀子流节点：``lengthfield`` 给出字节数，``subcon`` 在该子流上处理。
+    对应 Python construct 的 ``Prefixed``（core.py L4862）。
+
+    parse 行为：lengthfield.parse → 得 length → ``stream.read(length)`` 取子切片 →
+    ``subcon.parse(子流)``。
+    build 行为：创建 temp BuildStream → subcon.build → ``lengthfield.build(len)`` →
+    写 data 到主流。
+
+    ``_expr_params`` 协议返回空 dict：Prefixed 自身无表达式参数
+    （lengthfield 与 subcon 由递归处理，与 PrefixedArrayDescriptor 同限制：
+    两者均不支持含表达式的子描述符）。
+
+    与 ``PrefixedArray`` 的区别：PrefixedArray 的 lengthfield 是**元素计数**，
+    parse 循环 N 次 inner.parse；Prefixed 的 lengthfield 是**字节计数**，
+    parse 读 N 字节作为子流。
+
+    :param lengthfield: 长度字段（描述符），常见 ``VarInt`` / ``Int16ub`` / ``Byte``。
+    :param subcon: 子构造器（在子流上 parse/build）。
+    :param includelength: 若 True，length 含 lengthfield 自身大小（默认 False）。
+    """
+
+    __slots__ = ("lengthfield", "subcon", "includelength")
+
+    def __init__(self, lengthfield, subcon, includelength=False):
+        """初始化 Prefixed 描述符。
+
+        :param lengthfield: 长度字段。
+        :param subcon: 子构造器。
+        :param includelength: 是否包含 lengthfield 自身大小。
+        """
+        self.lengthfield = lengthfield
+        self.subcon = subcon
+        self.includelength = includelength
+
+    # 类级别常量：Prefixed 无表达式参数（lengthfield/subcon 由递归处理）。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Prefixed(lengthfield={!r}, subcon={!r}, includelength={!r})".format(
+            self.lengthfield, self.subcon, self.includelength
+        )
+
+
+def Prefixed(lengthfield, subcon, includelength=False):
+    """创建一个 Prefixed 描述符。
+
+    长度前缀子流节点。对应 Python construct 的 ``Prefixed``。
+
+    使用方式（基本）::
+
+        from construct import Prefixed, Byte, Bytes
+        d = Prefixed(Byte, Bytes(3))
+        d.parse(b"\\x03abc")    # → b"abc"
+        d.build(b"abc")         # → b"\\x03abc"
+
+    使用方式（includelength=True）::
+
+        from construct import Prefixed, Int16ub, GreedyBytes
+        d = Prefixed(Int16ub, GreedyBytes, includelength=True)
+        d.parse(b"\\x00\\x05abc")   # lengthfield=5，减 Int16ub sizeof=2 → 子流 3 字节
+
+    使用方式（VarInt 前缀）::
+
+        from construct import Prefixed, VarInt, GreedyRange, Int32ul
+        d = Prefixed(VarInt, GreedyRange(Int32ul))
+
+    与 ``PrefixedArray`` 的区别：
+
+    - ``PrefixedArray(Byte, Item)``：Byte 是**元素计数**，循环 N 次 Item.parse
+    - ``Prefixed(Byte, Item)``：Byte 是**字节计数**，读 N 字节作为子流
+
+    限制：
+
+    - sizeof = lengthfield.sizeof + subcon.sizeof（subcon 必须 static size）
+    - lengthfield 与 subcon 均不支持含表达式的子描述符（与 ``Array`` 同限制）
+
+    :param lengthfield: 长度字段（描述符）。
+    :param subcon: 子构造器。
+    :param includelength: 是否包含 lengthfield 自身大小（默认 False）。
+    :return: ``PrefixedDescriptor`` 实例。
+    """
+    return PrefixedDescriptor(lengthfield, subcon, includelength)
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -1996,4 +2267,11 @@ __all__ = [
     "Rebuild",
     "PassDescriptor",
     "Pass",
+    # Phase 7.2 Streams
+    "SeekDescriptor",
+    "Seek",
+    "PointerDescriptor",
+    "Pointer",
+    "PrefixedDescriptor",
+    "Prefixed",
 ]
