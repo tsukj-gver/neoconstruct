@@ -168,6 +168,67 @@ impl GreedyBytesDescriptor {
 }
 
 // ---------------------------------------------------------------------------
+// BytesIntegerDescriptor (Phase 6.1)
+// ---------------------------------------------------------------------------
+
+/// 任意字节长度整数描述符：对应 Python 侧的 `BytesInteger(length, signed, swapped)`。
+///
+/// Phase 6.1 新增。Python 用户通过 `BytesInteger(3, signed=True)` 创建实例，
+/// 编译器读取 `length` / `signed` / `swapped` 字段构建
+/// [`crate::nodes::bytes_integer::BytesIntegerNode`]。
+///
+/// Int24ub/ul/sb/sl 在 Python wrapper 层别名到 `BytesInteger(3, ...)`。
+///
+/// # 字段
+///
+/// - `length`：字节长度（必须 > 0，运行时校验）
+/// - `signed`：是否有符号（two's complement）
+/// - `swapped`：是否小端（true = little endian）
+#[pyclass(frozen, name = "BytesIntegerDescriptor", module = "construct")]
+#[derive(Debug, Clone)]
+pub struct BytesIntegerDescriptor {
+    /// Python 可见属性：字节长度。
+    #[pyo3(get)]
+    pub length: usize,
+    /// Python 可见属性：是否有符号。
+    #[pyo3(get)]
+    pub signed: bool,
+    /// Python 可见属性：是否小端。
+    #[pyo3(get)]
+    pub swapped: bool,
+}
+
+#[pymethods]
+impl BytesIntegerDescriptor {
+    /// 创建一个 `BytesInteger` 描述符。
+    ///
+    /// Python 用法：
+    /// - `BytesInteger(4)` → 4 字节无符号大端
+    /// - `BytesInteger(3, signed=True)` → 3 字节有符号大端（= Int24sb）
+    /// - `BytesInteger(16, swapped=True)` → 16 字节无符号小端（slow-path）
+    ///
+    /// 不做参数校验（length > 0 等），校验在 Node parse/build 时进行
+    /// （对齐 Python 在运行时抛 IntegerError 的行为）。
+    #[new]
+    #[pyo3(signature = (length, signed=false, swapped=false))]
+    pub fn new(length: usize, signed: bool, swapped: bool) -> Self {
+        Self {
+            length,
+            signed,
+            swapped,
+        }
+    }
+
+    /// 返回描述符的 Python 可读表示。
+    fn __repr__(&self) -> String {
+        format!(
+            "BytesIntegerDescriptor(length={}, signed={}, swapped={})",
+            self.length, self.signed, self.swapped
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
 

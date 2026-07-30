@@ -25,6 +25,9 @@ pyo3 = "0.22"
 thiserror = "1.0"
 # 执行树节点静态分派，见 docs/架构设计.md §C.2。
 enum_dispatch = "0.3"
+# Phase 6.1：Float16 IEEE 754 半精度支持（D-1 决策接受 half crate）。
+# 纯 Rust 计算库（不跨 FFI），提供 f16 类型的位运算（from_be_bytes / to_f64 / from_f64）。
+half = "2.4"
 
 [features]
 # 默认不启用 extension-module，使 cargo test 能初始化 Python 解释器（嵌入模式）。

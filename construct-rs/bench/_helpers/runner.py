@@ -76,10 +76,14 @@ class ABResult:
     def welch_t_speedup(self):
         """对 A/B 两组的 speedup 做 Welch t 检验（参考 E01_O1_ab_stats.py）。
 
+        契约：results_a / results_b 必须按 [rs, py, rs, py, ...] 交替排列
+        （由 controlled_ab_test 默认实现保证）。每次 (rs, py) 配对算单次 speedup，
+        repeats 次得到一组 speedup 样本，对两组 speedup 样本做 Welch t。
+
         返回 (t_stat, speedups_a, speedups_b)：
-            - t_stat: Welch t 统计量（描述性）
-            - speedups_a: A 组每次测量的 speedup 列表
-            - speedups_b: B 组每次测量的 speedup 列表
+            - t_stat: Welch t 统计量（描述性，n>=5 才稳健）
+            - speedups_a: A 组每次 (rs, py) 配对的 speedup 列表
+            - speedups_b: B 组每次 (rs, py) 配对的 speedup 列表
         """
         # 每组内 rs vs py 配对算 speedup
         sp_a = [speedup_ratio(r.median_ns, py.median_ns)
@@ -163,6 +167,12 @@ class BenchRunner:
             )
 
         samples_ns = data["per_call_ns"]
+        # 实现要点 2：丢弃前 config.warmup 个 sample（设计 §2.5 硬要求）
+        # 边界防御：若脚本返回的 sample 数 ≤ warmup（如调用方配置错误），
+        # 保留全部 sample 而非切片成空——符合 stats 模块"空序列返回 0.0 不抛异常"契约，
+        # 让上层通过 BenchResult.samples_ns 长度异常发现问题。
+        if 0 < self.config.warmup < len(samples_ns):
+            samples_ns = samples_ns[self.config.warmup:]
         return BenchResult(
             impl=impl,
             scenario=scenario_name,
@@ -202,14 +212,22 @@ class BenchRunner:
 
         参数：
             scenario_a_name / scenario_b_name: A/B 场景名
-            measure_script_a / measure_script_b: A/B 子进程脚本
+            measure_script_a / measure_script_b: A/B 子进程脚本（脚本内 IMPL 变量
+                由 runner 通过 run_scenario 的 impl 参数控制，rs / py 两次复用）
             repeats: 每组重复测量次数（E01 用 3）
+
+        返回的 ABResult.results_a / results_b 按 [rs, py, rs, py, ...] 交替排列，
+        与 welch_t_speedup 的配对契约一致（每次 repeat 跑一对 rs+py 算 speedup）。
         """
         results_a = []
         results_b = []
         for i in range(repeats):
-            results_a.append(self.run_scenario("rs", f"{scenario_a_name}-r{i}", measure_script_a))
-            results_b.append(self.run_scenario("rs", f"{scenario_b_name}-r{i}", measure_script_b))
+            # A 组：rs + py 配对（与 E01_O1_ab_stats.py 的 speedup 计算模式一致）
+            results_a.append(self.run_scenario("rs", f"{scenario_a_name}-rs-r{i}", measure_script_a))
+            results_a.append(self.run_scenario("py", f"{scenario_a_name}-py-r{i}", measure_script_a))
+            # B 组：rs + py 配对
+            results_b.append(self.run_scenario("rs", f"{scenario_b_name}-rs-r{i}", measure_script_b))
+            results_b.append(self.run_scenario("py", f"{scenario_b_name}-py-r{i}", measure_script_b))
         return ABResult(
             scenario_a=scenario_a_name,
             scenario_b=scenario_b_name,

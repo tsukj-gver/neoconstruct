@@ -7,7 +7,15 @@ last_updated: 2026-07-29
 
 # MEMORY.md — Project Long-Term Memory Index
 
-> **Phase 5 完成（2026-07-29 ACCEPTED）**：5.6a 基线重建发现 B1-B4 + StopIf 全场景已 ≥10x（B1 7.6x→11.64x），Phase 2.5/3/4 累积优化使目标自然达成。FFI 优化 DEFERRED（PM 决策 5，用户验收通过）。tag `phase-5-complete`。
+> **Phase 6 完成（2026-07-30 ACCEPTED）**：
+> - 6.0 测试框架重构（parity helper + bench runner + L2 双轨制）
+> - 6.1 Primitives 收尾 17 个（VarInt/ZigZag/BytesInteger + Float half crate + 别名）
+> - 6.2 Strings 7 个（6 Node + utf16/32 raw FFI，ADR-021）
+> - 6.3 Adapter 核心 6+Pass（双层分离：内置 Rust Node / 用户面 Python，ADR-022）
+> - 6.6 bench 223 测量点 + parity 17/17 + ADR-021/022 沉淀
+> - 24 构造器 18/24 ≥10x，6 个不达标全部 PM 决策接受
+> - tag `phase-6-complete`
+> 构造器总进度：40→~70/134（31%→~53%）
 
 # MEMORY.md — Project Long-Term Memory Index
 
@@ -55,7 +63,9 @@ last_updated: 2026-07-29
 | META-CI 冒烟门禁 | ✅ 完成（iter9 抽离到 plans/meta/） | — | `plans/meta/CI-冒烟门禁/索引.md` |
 | META-INV 构造器清单 | ✅ 完成（iter9 抽离到 plans/meta/） | — | `plans/meta/INV-构造器清单/索引.md` |
 | 5 Struct + FFI 入口优化 | ✅ 完成（2026-07-29 ACCEPTED，目标自然达成，tag phase-5-complete） | `phase-5-complete` | `plans/phase5-struct-ffi/总纲.md` |
-| 6+ | ⚪ | — | 待用户指定 |
+| 6 Primitives 收尾 + Strings + Adapter 核心 | ✅ 完成（2026-07-30 ACCEPTED，tag phase-6-complete） | `phase-6-complete` | `plans/phase6-primitives-strings-adapter/总纲.md` |
+| 7 Conditional + Streams | ⚪ 已立项（2026-07-29，Phase 6 完成后启动） | — | `plans/phase7-conditional-streams/总纲.md` |
+| 8+ | ⚪ | — | 待用户指定 |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
 > **iter9 结构变更**：phase4 过程记录.md（11837 行）拆分为 12 个 phase4 traces + 7 个 META traces；META 类 cross-phase 资产抽到 `plans/meta/`；`docs/design/` 子目录化（模块设计/ + 基础设施/）。详见 `plans/phase4-array/索引.md` 和 `harness/metadata-convention.md §5.1/§9`。
@@ -120,6 +130,7 @@ last_updated: 2026-07-29
 | L-09 | 跨时段性能对比消除法归因失效（边界场景） | 性能回归判定 / 跨时段性能对比 |
 | L-10 | 规范存在 ≠ 实际执行（无 enforcement） | iter9 沉淀：iter3 §5 per-子任务规范到 iter9 才首次执行 |
 | L-11 | PM 对用户指令的语义误判 | iter10 沉淀：双引号"关闭iter10"被误判为"取消"，实际是"完成" |
+| L-12 | PM 角色越界深入技术/代码细节 | Phase 6 立项沉淀：PM 自己 grep 源码查依赖（应分派 ARCH），违背 pm.md base §PM 不做的事 |
 
 ---
 

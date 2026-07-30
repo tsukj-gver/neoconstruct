@@ -32,6 +32,7 @@ pub mod bit_padding;
 pub mod bits_integer;
 pub mod bitwise;
 pub mod bytes;
+pub mod bytes_integer;
 pub mod bytewise;
 pub mod common;
 pub mod computed;
@@ -48,11 +49,14 @@ pub mod raw_copy;
 pub mod rebuild;
 pub mod repeat_until;
 pub mod stop_if;
+pub mod strings;
 pub mod struct_node;
 pub mod struct_ref;
 pub mod subconstruct;
 pub mod tell;
 pub mod transform;
+pub mod varint;
+pub mod zigzag;
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -64,6 +68,7 @@ use bit_padding::BitPaddingNode;
 use bits_integer::BitsIntegerNode;
 use bitwise::BitwiseNode;
 use bytes::BytesNode;
+pub use bytes_integer::BytesIntegerNode;
 use bytewise::BytewiseNode;
 use computed::ComputedNode;
 use element::ElementNode;
@@ -86,6 +91,8 @@ use struct_ref::StructRefNode;
 use subconstruct::SubconstructNode;
 use tell::TellNode;
 use transform::TransformNode;
+pub use varint::VarIntNode;
+pub use zigzag::ZigZagNode;
 
 /// 所有构造器节点实现的统一接口。
 ///
@@ -262,6 +269,29 @@ pub enum Node {
     /// 用户面 Adapter 嵌入 Struct 字段的钩子节点（PM 决策 6.3-D1 接受）。
     /// Phase 6.3 新增。subcon 在 Rust 内执行，_decode/_encode 通过 Rust→Python 回调。
     AdapterCallback(AdapterCallbackNode),
+    /// Phase 6.1 新增：LEB128 无符号变长整数（对应 Python construct `VarInt`）。
+    /// fast-path u64 范围；slow-path（>2^64）调缓存 Python 函数。
+    VarInt(VarIntNode),
+    /// Phase 6.1 新增：有符号变长整数（对应 Python construct `ZigZag`）。
+    /// ZigZag 数值变换后复用 VarIntNode 字节编解码。
+    ZigZag(ZigZagNode),
+    /// Phase 6.1 新增：任意字节长度整数（对应 Python construct `BytesInteger`）。
+    /// fast-path（≤8 字节）Rust 原生 u64/i64；slow-path（>8 字节）调 Python int.from_bytes。
+    /// Int24ub/ul/sb/sl 是 length=3 的 Python 层别名。
+    BytesInteger(BytesIntegerNode),
+    // === Phase 6.2 Strings（6 个新变体） ===
+    /// C 风格 null 终止字符串（Phase 6.2）。
+    CString(crate::nodes::strings::CStringNode),
+    /// 贪婪字符串：读到 EOF + decode（Phase 6.2）。
+    GreedyString(crate::nodes::strings::GreedyStringNode),
+    /// 固定长度填充字符串（Phase 6.2）。
+    PaddedString(crate::nodes::strings::PaddedStringNode),
+    /// 长度前缀字符串（Phase 6.2）。
+    PascalString(crate::nodes::strings::PascalStringNode),
+    /// null 终止包装器（持有任意 inner，Phase 6.2）。
+    NullTerminated(crate::nodes::strings::NullTerminatedNode),
+    /// null 剥离包装器（持有任意 inner，Phase 6.2）。
+    NullStripped(crate::nodes::strings::NullStrippedNode),
 }
 
 impl Node {
@@ -295,6 +325,14 @@ impl Node {
             Node::Rebuild(_) => true,
             // Pass / AdapterCallback 无表达式字段（AdapterCallback 的 _decode/_encode
             // 是 Python 回调，不走 ExprProgram）。
+            // Phase 6.2 Strings：
+            // PaddedString 的 BytesLength::Expr 时返回 true；
+            // PascalString / NullTerminated / NullStripped 递归检查 inner 子树；
+            // CString / GreedyString 无表达式（encoding 是编译期 enum）。
+            Node::PaddedString(p) => p.has_expressions(),
+            Node::PascalString(p) => p.has_expressions(),
+            Node::NullTerminated(n) => n.has_expressions(),
+            Node::NullStripped(n) => n.has_expressions(),
             _ => false,
         }
     }

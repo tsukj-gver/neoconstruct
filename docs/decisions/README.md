@@ -2,7 +2,7 @@
 id: ADR-INDEX
 status: active
 phase: meta
-last_updated: 2026-07-28
+last_updated: 2026-07-30
 ---
 
 # ADR Index — 设计决策索引
@@ -58,6 +58,13 @@ last_updated: 2026-07-28
 | [ADR-019](ADR-019-错误抛出fast-path.md) | accepted | 错误抛出 fast-path（绕过 Python `__init__` 直接构造异常实例） | Phase 4.x 验证（a_err_eof 11.34x，首次 unsafe raw FFI） |
 | [ADR-020](ADR-020-CI冒烟门禁方法学.md) | accepted | CI 冒烟门禁方法学（4 层门禁 + Controlled A/B Test 性能回归检测） | META-CI 整体验证（4 子任务 1a/1b/1c/1d，L-03 + L-09 对策工程化） |
 
+### Phase 6：Primitives 收尾 + Strings + Adapter 核心
+
+| ADR | 状态 | 决策 | 备注 |
+|-----|------|------|------|
+| [ADR-021](ADR-021-Strings-UTF16-32-raw-FFI.md) | accepted | Strings UTF-16/32 编解码 unsafe raw FFI（**首次正常路径 unsafe**） | 6.2 Strings 验证；扩展 ADR-019（错误路径）unsafe raw FFI 规范到正常路径；utf8/ascii 保持安全路径 |
+| [ADR-022](ADR-022-用户面Adapter-Python层化.md) | accepted | 用户面 Adapter Python 层化 + 最小 Rust 钩子（AdapterCallbackNode） | 6.3 Adapter 验证；PM 决策 2 双层分离（约束 1 类型层面 + 约束 2 Python 层）落地；§0 #1 合规论证（用户域后处理非执行树） |
+
 ## 状态图例
 
 - `proposed` — 已提出，待讨论
@@ -67,7 +74,7 @@ last_updated: 2026-07-28
 
 ## 维护规则
 
-- 新增 ADR：编号自增（下一号 21）
+- 新增 ADR：编号自增（下一号 23）
 - 修订决策：**不修改原 ADR**，新建 ADR 并在原 ADR 加 `superseded_by`，新 ADR 加 `supersedes`
 - 模式采用：新设计文档必须在 frontmatter `depends_on` 列出相关 ADR
 - 教训关联：若决策源于失败教训，在 ADR 的 Relations 段引用 `harness/experiences.md#L-XX`

@@ -264,6 +264,29 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    /// 字符串错误：编码/解码失败、非 Unicode 输入等。
+    ///
+    /// 对应 Python construct 的 `StringError`（core.py L54）。
+    ///
+    /// Phase 6.2 新增（设计 §3.8 决策 A）：使 String 系列构造器的字符串错误可被
+    /// `except StringError` 精确捕获，与 Python construct 用户面对齐。
+    ///
+    /// 触发场景：
+    /// - `Encoding::decode`：非法字节序列（如无效 UTF-8 字节）
+    /// - `Encoding::encode`：输入非 `str` 类型（如 `bytes`）
+    /// - ASCII 编码遇到非 ASCII 字符（>= 128）
+    ///
+    /// 编码名不合法（`Encoding::from_user_str` 编译期失败）归
+    /// [`Compilation`](Self::Compilation)，原因：编码名在 `__init_subclass__`
+    /// 时确定，属于配置错误而非数据错误。
+    #[error("string error: {message} at {path}")]
+    String {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -288,7 +311,8 @@ impl ConstructError {
             | ConstructError::Padding { message, .. }
             | ConstructError::Range { message, .. }
             | ConstructError::Repeat { message, .. }
-            | ConstructError::IndexField { message, .. } => Some(message),
+            | ConstructError::IndexField { message, .. }
+            | ConstructError::String { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
@@ -317,7 +341,8 @@ impl ConstructError {
             | ConstructError::Range { path, .. }
             | ConstructError::Repeat { path, .. }
             | ConstructError::StopField { path }
-            | ConstructError::IndexField { path, .. } => Some(path),
+            | ConstructError::IndexField { path, .. }
+            | ConstructError::String { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -368,6 +393,7 @@ impl ConstructError {
             ConstructError::Repeat { .. } => "Repeat",
             ConstructError::StopField { .. } => "StopField",
             ConstructError::IndexField { .. } => "IndexField",
+            ConstructError::String { .. } => "String",
         }
     }
 
@@ -469,7 +495,8 @@ impl ConstructError {
             | ConstructError::Range { path, .. }
             | ConstructError::Repeat { path, .. }
             | ConstructError::StopField { path }
-            | ConstructError::IndexField { path, .. } => *path = new_path,
+            | ConstructError::IndexField { path, .. }
+            | ConstructError::String { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -525,6 +552,10 @@ struct ExceptionClasses {
     /// 对应 `ConstructError::IndexField`（Phase 4）。
     /// Python construct 的 `IndexFieldError`，Index 节点 _index 缺失（保留）。
     index_field_error: Py<PyType>,
+    /// 对应 `ConstructError::String`（Phase 6.2）。
+    /// Python construct 的 `StringError`（core.py L54），String 系列构造器的
+    /// 编解码失败 / 非 Unicode 输入等。
+    string_error: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -555,12 +586,14 @@ impl ExceptionClasses {
     ///
     /// # 返回
     ///
-    /// `true` 表示 `cls_ptr` 等于 13 个内置异常类之一，可进入 fast-path；
+    /// `true` 表示 `cls_ptr` 等于 14 个内置异常类之一，可进入 fast-path；
     /// `false` 表示用户子类化或未知类，走慢路径。
     fn is_builtin_class(&self, cls_ptr: *mut ffi::PyObject) -> bool {
         // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
         // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
-        let builtin_ptrs: [*mut ffi::PyObject; 13] = [
+        //
+        // Phase 6.2：数组扩容 13 → 14（新增 string_error，设计 §3.8.3）。
+        let builtin_ptrs: [*mut ffi::PyObject; 14] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
             self.field_length_error.as_ptr(),
@@ -574,6 +607,7 @@ impl ExceptionClasses {
             self.repeat_error.as_ptr(),
             self.stop_field_error.as_ptr(),
             self.index_field_error.as_ptr(),
+            self.string_error.as_ptr(),
         ];
         builtin_ptrs.contains(&cls_ptr)
     }
@@ -617,6 +651,7 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         repeat_error: get("RepeatError")?,
         stop_field_error: get("StopFieldError")?,
         index_field_error: get("IndexFieldError")?,
+        string_error: get("StringError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -668,6 +703,8 @@ fn select_exception_class<'py>(
         ConstructError::Repeat { .. } => &classes.repeat_error,
         ConstructError::StopField { .. } => &classes.stop_field_error,
         ConstructError::IndexField { .. } => &classes.index_field_error,
+        // Phase 6.2：String 系列错误映射到 Python StringError（core.py L54）。
+        ConstructError::String { .. } => &classes.string_error,
     };
     // cls.bind(py) 返回 &Bound<'py, PyType>，借用 cls（借自 classes）。
     // 不调 clone()，避免 incref/decref 各一次。
@@ -1156,6 +1193,7 @@ mod tests {
             "class RepeatError(ConstructError): pass\n",
             "class StopFieldError(ConstructError): pass\n",
             "class IndexFieldError(ConstructError): pass\n",
+            "class StringError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run test classes definition");
@@ -1181,6 +1219,7 @@ mod tests {
             repeat_error: get("RepeatError"),
             stop_field_error: get("StopFieldError"),
             index_field_error: get("IndexFieldError"),
+            string_error: get("StringError"),
         }
     }
 
@@ -1577,6 +1616,7 @@ mod tests {
             "class RepeatError(ConstructError): pass\n",
             "class StopFieldError(ConstructError): pass\n",
             "class IndexFieldError(ConstructError): pass\n",
+            "class StringError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run aligned test classes definition");
@@ -1602,6 +1642,7 @@ mod tests {
             repeat_error: get("RepeatError"),
             stop_field_error: get("StopFieldError"),
             index_field_error: get("IndexFieldError"),
+            string_error: get("StringError"),
         }
     }
 
@@ -1713,7 +1754,7 @@ mod tests {
         Python::with_gil(|py| {
             let classes = build_test_classes_aligned(py);
 
-            let all_classes: [(&Bound<'_, PyType>, &str); 13] = [
+            let all_classes: [(&Bound<'_, PyType>, &str); 14] = [
                 (classes.stream_error.bind(py), "stream"),
                 (classes.format_field_error.bind(py), "format_field"),
                 (classes.field_length_error.bind(py), "field_length"),
@@ -1727,6 +1768,7 @@ mod tests {
                 (classes.repeat_error.bind(py), "repeat"),
                 (classes.stop_field_error.bind(py), "stop_field"),
                 (classes.index_field_error.bind(py), "index_field"),
+                (classes.string_error.bind(py), "string"),
             ];
 
             for (cls, name) in all_classes.iter() {

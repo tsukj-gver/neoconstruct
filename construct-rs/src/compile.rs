@@ -32,7 +32,9 @@
 // 后续升级 pyo3 版本后若修复，可移除此属性。
 #![allow(clippy::useless_conversion)]
 
-use crate::descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
+use crate::descriptors::{
+    BytesDescriptor, BytesIntegerDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor,
+};
 use crate::error::ConstructError;
 use crate::expr::{ExprOp, ExprProgram};
 use crate::nodes::adapter_callback::AdapterCallbackNode;
@@ -40,7 +42,8 @@ use crate::nodes::array::{ArrayNode, CountSource};
 use crate::nodes::bit_padding::BitPaddingNode;
 use crate::nodes::bits_integer::{BitsIntegerNode, MAX_BITS_INTEGER};
 use crate::nodes::bitwise::BitwiseNode;
-use crate::nodes::bytes::BytesNode;
+use crate::nodes::bytes::{BytesLength, BytesNode};
+use crate::nodes::bytes_integer::BytesIntegerNode;
 use crate::nodes::bytewise::BytewiseNode;
 use crate::nodes::computed::ComputedNode;
 use crate::nodes::element::ElementNode;
@@ -56,11 +59,18 @@ use crate::nodes::raw_copy::RawCopyNode;
 use crate::nodes::rebuild::RebuildNode;
 use crate::nodes::repeat_until::RepeatUntilNode;
 use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
+use crate::nodes::strings::encoding::Encoding;
+use crate::nodes::strings::{
+    CStringNode, GreedyStringNode, NullStrippedNode, NullTerminatedNode, PaddedStringNode,
+    PascalStringNode,
+};
 use crate::nodes::struct_node::{FieldMode, StructField, StructNode};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::subconstruct::SubconstructNode;
 use crate::nodes::tell::TellNode;
 use crate::nodes::transform::{ByteTransform, TransformNode};
+use crate::nodes::varint::VarIntNode;
+use crate::nodes::zigzag::ZigZagNode;
 use crate::nodes::Node;
 use crate::schema::CompiledSchema;
 use pyo3::prelude::*;
@@ -344,6 +354,16 @@ fn build_node_from_descriptor(
     // 3. GreedyBytesDescriptor → Node::GreedyBytes
     if desc.extract::<Py<GreedyBytesDescriptor>>().is_ok() {
         return Ok(Node::GreedyBytes(GreedyBytesNode::new()));
+    }
+
+    // 3.5. BytesIntegerDescriptor → Node::BytesInteger (Phase 6.1)
+    if let Ok(b) = desc.extract::<Py<BytesIntegerDescriptor>>() {
+        let b_ref = b.bind(py).get();
+        return Ok(Node::BytesInteger(BytesIntegerNode::new(
+            b_ref.length,
+            b_ref.signed,
+            b_ref.swapped,
+        )));
     }
 
     // 4. StructMixin 子类引用 → Node::StructRef
@@ -694,6 +714,67 @@ fn build_node_from_descriptor(
         }
         // PassDescriptor → PassNode（no-op）。
         "PassDescriptor" => return Ok(Node::Pass(PassNode::new())),
+        // Phase 6.1：VarIntDescriptor → VarIntNode（LEB128 无符号变长整数）。
+        // 纯 Python 描述符（无 Rust pyclass），按 type name 识别。
+        "VarIntDescriptor" => return Ok(Node::VarInt(VarIntNode::new())),
+        // Phase 6.1：ZigZagDescriptor → ZigZagNode（有符号变长整数）。
+        "ZigZagDescriptor" => return Ok(Node::ZigZag(ZigZagNode::new())),
+        // Phase 6.2：CStringDescriptor → CStringNode（C 风格 null 终止字符串）。
+        // 编码字符串在编译期调 Encoding::from_user_str 解析（P2b 拒绝无后缀编码）。
+        "CStringDescriptor" => {
+            return Ok(Node::CString(build_cstring_node(py, desc, field_index)?));
+        }
+        // Phase 6.2：GreedyStringDescriptor → GreedyStringNode（读到 EOF + decode）。
+        "GreedyStringDescriptor" => {
+            return Ok(Node::GreedyString(build_greedy_string_node(
+                py,
+                desc,
+                field_index,
+            )?));
+        }
+        // Phase 6.2：PaddedStringDescriptor → PaddedStringNode（固定长度填充字符串）。
+        // length 可为 int 常量或表达式（与 BytesDescriptor 同模式）。
+        "PaddedStringDescriptor" => {
+            return Ok(Node::PaddedString(build_padded_string_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+            )?));
+        }
+        // Phase 6.2：PascalStringDescriptor → PascalStringNode（长度前缀字符串）。
+        // 递归编译 lengthfield（沿用 field_index，与 BitwiseDescriptor 同模式）。
+        "PascalStringDescriptor" => {
+            return Ok(Node::PascalString(build_pascal_string_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // Phase 6.2：NullTerminatedDescriptor → NullTerminatedNode（null 终止包装器）。
+        // 递归编译 inner subcon（沿用 field_index）。
+        "NullTerminatedDescriptor" => {
+            return Ok(Node::NullTerminated(build_null_terminated_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
+        // Phase 6.2：NullStrippedDescriptor → NullStrippedNode（null 剥离包装器）。
+        // 递归编译 inner subcon（沿用 field_index）。
+        "NullStrippedDescriptor" => {
+            return Ok(Node::NullStripped(build_null_stripped_node(
+                py,
+                desc,
+                field_index,
+                expr_programs,
+                field_names,
+            )?));
+        }
         // AdapterDescriptor → AdapterCallbackNode（用户面 Adapter 嵌入 Struct 钩子）。
         // PM 决策 6.3-D1 接受。subcon 在 Rust 内执行，_decode/_encode 通过 Py<PyAny> 引用回调。
         //
@@ -743,6 +824,393 @@ fn build_node_from_descriptor(
 /// 后者由 `with_field_context` 在上层附加）。
 fn path_for_field(field_index: usize) -> String {
     format!("field {}", field_index)
+}
+
+// ---------------------------------------------------------------------------
+// Phase 6.2 Strings：Descriptor → Node 编译辅助函数
+//
+// 设计依据：`docs/design/模块设计/模块设计-Strings.md` v2 §4.4 / §10.2。
+//
+// 共同模式：
+// - encoding 字符串在编译期调 `Encoding::from_user_str` 解析（PM 决策 6.2-D1）。
+//   失败返回 `ConstructError::Compilation`（携带 P2b/P8 引导文本，由 Rust 侧
+//   `Encoding::from_user_str` 生成）。Python 侧 `__init_subclass__` 会将其映射为
+//   `CompilationError`。
+// - term / pad / include / consume / require 等参数从 Python 描述符对象读取。
+// - 含 inner / lengthfield 的 Node（NullTerminated / NullStripped / PascalString）
+//   递归编译（沿用同一个 field_index 和 expr_programs 切片，与 BitwiseDescriptor /
+//   ArrayDescriptor 同模式；P3.1 限制：inner 不支持含表达式的子描述符）。
+// ---------------------------------------------------------------------------
+
+/// 从 Python 描述符对象读取 `encoding` 属性并解析为 [`Encoding`]。
+///
+/// 编译期一次调用，运行时零开销（设计 D-1）。
+///
+/// # 错误
+///
+/// [`ConstructError::Compilation`]：encoding 缺失、非字符串、或 [`Encoding::from_user_str`]
+/// 失败（未识别 / 无后缀编码，携带 P2b/P8 引导文本）。
+fn parse_encoding_attr(
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+) -> Result<Encoding, ConstructError> {
+    let encoding_obj = desc
+        .getattr("encoding")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "String descriptor missing 'encoding' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let encoding_str: String = encoding_obj
+        .extract()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "String descriptor 'encoding' attribute must be a str (field index {})",
+                field_index
+            ),
+        })?;
+    Encoding::from_user_str(&encoding_str).map_err(|e| match e {
+        // from_user_str 失败时已是 Compilation 变体；附加 field_index 上下文。
+        ConstructError::Compilation { message } => ConstructError::Compilation {
+            message: format!("{} (field index {})", message, field_index),
+        },
+        other => other,
+    })
+}
+
+/// 从 Python 描述符对象读取可选的 `term` 字节串属性。
+///
+/// 用于 [`CStringDescriptor`] / [`NullTerminatedDescriptor`]。
+///
+/// # 参数
+///
+/// - `desc`：Python 描述符。
+/// - `encoding`：已解析的编码（用于生成默认 term）。
+/// - `field_index`：字段索引（错误信息用）。
+///
+/// # 返回
+///
+/// `term` 字节串。若 Python 侧 `term=None`，返回 `encoding.default_term()`
+/// （即编码单元的全零字节串）。
+fn parse_term_attr(
+    desc: &Bound<'_, PyAny>,
+    encoding: Encoding,
+    field_index: usize,
+) -> Result<Vec<u8>, ConstructError> {
+    let term_obj = desc
+        .getattr("term")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "String descriptor missing 'term' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    // None → 默认 term（编码单元全零字节串）
+    if term_obj.is_none() {
+        return Ok(encoding.default_term());
+    }
+    term_obj
+        .extract::<Vec<u8>>()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "String descriptor 'term' attribute must be bytes or None (field index {})",
+                field_index
+            ),
+        })
+}
+
+/// 从 Python 描述符对象读取 `pad` 字节串属性。
+///
+/// 用于 [`NullStrippedDescriptor`]。Python 侧默认 `pad=b"\x00"`。
+fn parse_pad_attr(desc: &Bound<'_, PyAny>, field_index: usize) -> Result<Vec<u8>, ConstructError> {
+    let pad_obj = desc
+        .getattr("pad")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "String descriptor missing 'pad' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    pad_obj
+        .extract::<Vec<u8>>()
+        .map_err(|_| ConstructError::Compilation {
+            message: format!(
+                "String descriptor 'pad' attribute must be bytes (field index {})",
+                field_index
+            ),
+        })
+}
+
+/// 从 Python 描述符对象读取 bool 属性（带默认值）。
+fn parse_bool_attr(
+    desc: &Bound<'_, PyAny>,
+    name: &str,
+    default: bool,
+    field_index: usize,
+) -> Result<bool, ConstructError> {
+    match desc.getattr(name) {
+        Ok(v) => v
+            .extract::<bool>()
+            .map_err(|_| ConstructError::Compilation {
+                message: format!(
+                    "String descriptor '{}' attribute must be bool (field index {})",
+                    name, field_index
+                ),
+            }),
+        Err(_) => Ok(default),
+    }
+}
+
+/// 从 `CStringDescriptor` 构建 [`CStringNode`]（Phase 6.2 §3.1）。
+///
+/// 编译路径：
+/// 1. 解析 `encoding` → [`Encoding`]（编译期一次）。
+/// 2. 解析 `term`（None → encoding 默认 term）。
+/// 3. 解析 `include` / `require`（默认 false / true）。
+///
+/// `consume` 参数当前被 Rust [`CStringNode`] 忽略（与 Python ``CString`` 实际行为一致，
+/// 详见 Strings 设计 §3.1）。
+fn build_cstring_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+) -> Result<CStringNode, ConstructError> {
+    let encoding = parse_encoding_attr(desc, field_index)?;
+    let term = parse_term_attr(desc, encoding, field_index)?;
+    let include = parse_bool_attr(desc, "include", false, field_index)?;
+    let require = parse_bool_attr(desc, "require", true, field_index)?;
+    let _ = py;
+    Ok(CStringNode::with_options(encoding, term, include, require))
+}
+
+/// 从 `GreedyStringDescriptor` 构建 [`GreedyStringNode`]（Phase 6.2 §3.4）。
+fn build_greedy_string_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+) -> Result<GreedyStringNode, ConstructError> {
+    let encoding = parse_encoding_attr(desc, field_index)?;
+    let _ = py;
+    Ok(GreedyStringNode::new(encoding))
+}
+
+/// 从 `PaddedStringDescriptor` 构建 [`PaddedStringNode`]（Phase 6.2 §3.5）。
+///
+/// 编译路径（参照 [`build_node_from_descriptor`] 的 BytesDescriptor 分支）：
+/// 1. 解析 `encoding` → [`Encoding`]。
+/// 2. 解析 `length`：
+///    - Python int 常量 → [`BytesLength::Const`]（校验非负）。
+///    - 非常量（FieldRef/ExprRef）→ 从 `expr_programs[field_index]["length"]` 取
+///      ExprOp 列表 → [`BytesLength::Expr`]。
+fn build_padded_string_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<PaddedStringNode, ConstructError> {
+    let encoding = parse_encoding_attr(desc, field_index)?;
+
+    // 解析 length（与 BytesDescriptor 同模式）。
+    let length_obj = desc
+        .getattr("length")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "PaddedStringDescriptor missing 'length' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+
+    let length = if let Ok(n) = length_obj.extract::<i64>() {
+        // 常量路径（校验非负）。
+        if n < 0 {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "PaddedString length {} must be non-negative (field index {})",
+                    n, field_index
+                ),
+            });
+        }
+        BytesLength::Const(n as usize)
+    } else {
+        // 表达式路径：从 expr_programs[field_index]["length"] 取 ExprOp 列表。
+        let field_exprs = expr_programs
+            .get(field_index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "PaddedString field has non-constant length but no expression program was \
+                     provided (field index {})",
+                    field_index
+                ),
+            })?;
+        let field_exprs_dict =
+            field_exprs
+                .bind(py)
+                .downcast::<PyDict>()
+                .map_err(|_| ConstructError::Compilation {
+                    message: "PaddedString expression program must be a dict".to_string(),
+                })?;
+        let ops_list = field_exprs_dict
+            .get_item("length")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "failed to get 'length' from PaddedString expression programs: {} (field index {})",
+                    e, field_index
+                ),
+            })?
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "PaddedString field has non-constant length but 'length' key missing in \
+                     expression program (field index {})",
+                    field_index
+                ),
+            })?;
+        let ops = parse_expr_ops_from_py(&ops_list)?;
+        let program = ExprProgram::new(ops);
+        BytesLength::Expr(program)
+    };
+
+    Ok(PaddedStringNode::new(length, encoding))
+}
+
+/// 从 `PascalStringDescriptor` 构建 [`PascalStringNode`]（Phase 6.2 §3.6）。
+///
+/// 编译路径：
+/// 1. 递归编译 lengthfield（沿用 field_index；与 BitwiseDescriptor 同模式）。
+/// 2. 解析 `encoding` → [`Encoding`]。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// lengthfield 不支持含表达式的子描述符（Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+fn build_pascal_string_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<PascalStringNode, ConstructError> {
+    let lengthfield_desc =
+        desc.getattr("lengthfield")
+            .map_err(|e| ConstructError::Compilation {
+                message: format!(
+                    "PascalStringDescriptor missing 'lengthfield' attribute: {} (field index {})",
+                    e, field_index
+                ),
+            })?;
+    let lengthfield_node = build_node_from_descriptor(
+        py,
+        &lengthfield_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+    let encoding = parse_encoding_attr(desc, field_index)?;
+    Ok(PascalStringNode::new(lengthfield_node, encoding))
+}
+
+/// 从 `NullTerminatedDescriptor` 构建 [`NullTerminatedNode`]（Phase 6.2 §3.2）。
+///
+/// 编译路径：
+/// 1. 递归编译 inner subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+/// 2. 解析 `term`（None → `b"\x00"` 默认；非 None → 用户传入字节串）。
+/// 3. 解析 `include` / `consume` / `require`（默认 false / true / true）。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// inner subcon 不支持含表达式的子描述符。
+fn build_null_terminated_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<NullTerminatedNode, ConstructError> {
+    let inner_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NullTerminatedDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &inner_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+
+    // term：Python 侧默认 b"\x00"（已在 Descriptor __init__ 保证），此处直接读取。
+    // 不调用 parse_term_attr(encoding, ...)：NullTerminated 不依赖 encoding 单元，
+    // term 是独立的字节串（与 CString 不同，后者默认 term 由 encoding 决定）。
+    let term_obj = desc
+        .getattr("term")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NullTerminatedDescriptor missing 'term' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let term: Vec<u8> = if term_obj.is_none() {
+        vec![0u8]
+    } else {
+        term_obj.extract::<Vec<u8>>().map_err(|_| {
+            ConstructError::Compilation {
+                message: format!(
+                    "NullTerminatedDescriptor 'term' attribute must be bytes or None (field index {})",
+                    field_index
+                ),
+            }
+        })?
+    };
+
+    let include = parse_bool_attr(desc, "include", false, field_index)?;
+    let consume = parse_bool_attr(desc, "consume", true, field_index)?;
+    let require = parse_bool_attr(desc, "require", true, field_index)?;
+
+    Ok(NullTerminatedNode::with_options(
+        inner_node, term, include, consume, require,
+    ))
+}
+
+/// 从 `NullStrippedDescriptor` 构建 [`NullStrippedNode`]（Phase 6.2 §3.3）。
+///
+/// 编译路径：
+/// 1. 递归编译 inner subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
+/// 2. 解析 `pad`（默认 `b"\x00"`）。
+///
+/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+///
+/// inner subcon 不支持含表达式的子描述符。
+fn build_null_stripped_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<NullStrippedNode, ConstructError> {
+    let inner_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NullStrippedDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &inner_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+    let pad = parse_pad_attr(desc, field_index)?;
+    Ok(NullStrippedNode::with_pad(inner_node, pad))
 }
 
 /// 从 `BitsIntegerDescriptor` 构建 `BitsIntegerNode`，编译期完成所有 length 校验。

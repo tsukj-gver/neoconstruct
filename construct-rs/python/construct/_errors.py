@@ -24,6 +24,7 @@ Python 异常                    Rust ConstructError 变体
 :class:`RepeatError`          ``ConstructError::Repeat`` (Phase 4)
 :class:`StopFieldError`       ``ConstructError::StopField`` (Phase 4)
 :class:`IndexFieldError`      ``ConstructError::IndexField`` (Phase 4)
+:class:`StringError`          ``ConstructError::String`` (Phase 6.2)
 ============================  ==========================================
 
 .. note::
@@ -177,6 +178,67 @@ class IndexFieldError(ConstructError):
     """
 
 
+class StringError(ConstructError):
+    """字符串错误：编解码失败、非 Unicode 输入、不支持的编码等。
+
+    对应 Python construct 的 ``StringError``（core.py L54）和 Rust 的
+    ``ConstructError::String``。
+
+    Phase 6.2 新增：String 系列构造器（CString / GreedyString / PaddedString /
+    PascalString）的编解码失败统一映射到此异常类，使用户可通过
+    ``except StringError`` 精确捕获（与 Python construct 一致）。
+
+    触发场景：
+
+    - ``Encoding::decode``：非法字节序列（如无效 UTF-8 字节）
+    - ``Encoding::encode``：输入非 ``str`` 类型（如 ``bytes``）
+    - ASCII 编码遇到非 ASCII 字符（>= 128）
+    - 编码名不合法（``Encoding::from_user_str`` 编译期失败，由 Descriptor 转为此异常）
+    """
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.2: StringEncoded 兼容性别名（设计 §3.7.2 / §3.7.3）
+#
+# Python construct 原版中 ``StringEncoded(subcon, encoding)`` 是 Adapter 子类，
+# 包装任意 bytes-producing Construct 并做 bytes↔str 转换。
+#
+# 在 PM 决策 1 方案 A 下，construct-rs 把编解码逻辑下沉到 CString / GreedyString /
+# PaddedString / PascalString 内部，StringEncoded 失去存在意义。保留名字仅为
+# 向后兼容：一调用即抛 ``StringError``，错误信息引导用户改用具体 String Node。
+#
+# **BREAKING CHANGE**（设计 §3.7.3）：从 Python construct 迁移的用户，如代码用
+# ``StringEncoded(Bytes(4), "utf8")``，需改用 ``PaddedString(4, "utf8")`` 等。
+# 自定义 bytes 来源 + decode 的场景，请走未来 Phase 6.3+ 的用户面 Adapter
+# （继承 ``Adapter`` 写 ``_decode``/``_encode``）。
+# ---------------------------------------------------------------------------
+
+def StringEncoded(subcon=None, encoding=None):  # noqa: D401 (函数名故意大写对齐 Python construct)
+    """兼容性别名（不推荐使用）—— 一调用即抛 :class:`StringError`。
+
+    Phase 6.2 起，编解码逻辑已下沉到 :class:`CString` / :class:`GreedyString` /
+    :class:`PaddedString` / :class:`PascalString` 内部。``StringEncoded`` 在
+    Python construct 中是内部 Adapter（docstring 标注 "Used internally"），
+    construct-rs 不再需要它。
+
+    :param subcon: 任意 Construct 实例（Python construct 兼容参数，construct-rs 忽略）。
+    :param encoding: 编码字符串（Python construct 兼容参数，construct-rs 忽略）。
+    :raises StringError: 始终抛出，错误信息引导用户改用具体 String Node。
+
+    迁移指引：
+
+    - ``StringEncoded(Bytes(4), "utf8")`` → ``PaddedString(4, "utf8")``
+    - ``StringEncoded(GreedyBytes, "utf8")`` → ``GreedyString("utf8")``
+    - 自定义 bytes 来源 + decode → 继承 ``Adapter`` 写 ``_decode``/``_encode``
+      （Phase 6.3+ 用户面 Adapter）。
+    """
+    raise StringError(
+        "StringEncoded is deprecated in construct-rs; use CString / GreedyString / "
+        "PaddedString / PascalString directly. For custom bytes->str adapters, "
+        "inherit from Adapter (Phase 6.3)."
+    )
+
+
 __all__ = [
     "ConstructError",
     "StreamError",
@@ -192,4 +254,5 @@ __all__ = [
     "RepeatError",
     "StopFieldError",
     "IndexFieldError",
+    "StringError",
 ]

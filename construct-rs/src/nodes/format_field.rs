@@ -68,6 +68,19 @@ pub enum PythonFormat {
     SignedInt64Big,
     /// 有符号 8 字节整数，小端（`<q`，对应 `Int64sl`）
     SignedInt64Little,
+    // ---- Phase 6.1 新增：Float 系列 6 个变体（IEEE 754）----
+    /// 半精度 IEEE 754，大端（`>e`，对应 `Float16b`）。Float16 用 `half` crate。
+    Float16Big,
+    /// 半精度 IEEE 754，小端（`<e`，对应 `Float16l`）。
+    Float16Little,
+    /// 单精度 IEEE 754，大端（`>f`，对应 `Float32b`）。
+    Float32Big,
+    /// 单精度 IEEE 754，小端（`<f`，对应 `Float32l`）。
+    Float32Little,
+    /// 双精度 IEEE 754，大端（`>d`，对应 `Float64b`）。
+    Float64Big,
+    /// 双精度 IEEE 754，小端（`<d`，对应 `Float64l`）。
+    Float64Little,
 }
 
 impl PythonFormat {
@@ -77,6 +90,7 @@ impl PythonFormat {
     ///
     /// - `endianity`：字节序字符，`'>'`（大端）、`'<'`（小端）、`'='`（本机）
     /// - `format`：格式字符，`'B'`/`'b'`/`'H'`/`'h'`/`'I'`/`'i'`/`'Q'`/`'q'`
+    ///   （Phase 6.1 新增 `'e'` Float16 / `'f'` Float32 / `'d'` Float64）
     ///
     /// # 返回
     ///
@@ -105,6 +119,13 @@ impl PythonFormat {
             ('Q', false) => Self::UnsignedInt64Little,
             ('q', true) => Self::SignedInt64Big,
             ('q', false) => Self::SignedInt64Little,
+            // Phase 6.1：Float 系列（'e'/'f'/'d' × 2 endian = 6 变体）
+            ('e', true) => Self::Float16Big,
+            ('e', false) => Self::Float16Little,
+            ('f', true) => Self::Float32Big,
+            ('f', false) => Self::Float32Little,
+            ('d', true) => Self::Float64Big,
+            ('d', false) => Self::Float64Little,
             _ => return None,
         })
     }
@@ -116,18 +137,27 @@ impl PythonFormat {
             | Self::UnsignedInt8Little
             | Self::SignedInt8Big
             | Self::SignedInt8Little => 1,
+            // Float16 与 Int16 同为 2 字节（Phase 6.1）
             Self::UnsignedInt16Big
             | Self::UnsignedInt16Little
             | Self::SignedInt16Big
-            | Self::SignedInt16Little => 2,
+            | Self::SignedInt16Little
+            | Self::Float16Big
+            | Self::Float16Little => 2,
+            // Float32 与 Int32 同为 4 字节
             Self::UnsignedInt32Big
             | Self::UnsignedInt32Little
             | Self::SignedInt32Big
-            | Self::SignedInt32Little => 4,
+            | Self::SignedInt32Little
+            | Self::Float32Big
+            | Self::Float32Little => 4,
+            // Float64 与 Int64 同为 8 字节
             Self::UnsignedInt64Big
             | Self::UnsignedInt64Little
             | Self::SignedInt64Big
-            | Self::SignedInt64Little => 8,
+            | Self::SignedInt64Little
+            | Self::Float64Big
+            | Self::Float64Little => 8,
         }
     }
 
@@ -152,6 +182,13 @@ impl PythonFormat {
             Self::UnsignedInt64Little => "<Q",
             Self::SignedInt64Big => ">q",
             Self::SignedInt64Little => "<q",
+            // Phase 6.1：Float 系列 fmtstr
+            Self::Float16Big => ">e",
+            Self::Float16Little => "<e",
+            Self::Float32Big => ">f",
+            Self::Float32Little => "<f",
+            Self::Float64Big => ">d",
+            Self::Float64Little => "<d",
         }
     }
 
@@ -309,6 +346,35 @@ impl super::Construct for FormatFieldNode {
                 let arr = read_array::<8>(stream, path)?;
                 Ok(i64::from_le_bytes(arr).into_py(py))
             }
+            // ---- Phase 6.1：Float 系列 parse 分支 ----
+            // Float16 → PyFloat：Python 无 f16 类型，half::f16::to_f64 转 f64 后创建 PyFloat，
+            // 与 CPython struct 模块 'e' 格式行为一致。
+            PythonFormat::Float16Big => {
+                let arr = read_array::<2>(stream, path)?;
+                let f16_val = half::f16::from_be_bytes(arr);
+                Ok(f16_val.to_f64().into_py(py))
+            }
+            PythonFormat::Float16Little => {
+                let arr = read_array::<2>(stream, path)?;
+                let f16_val = half::f16::from_le_bytes(arr);
+                Ok(f16_val.to_f64().into_py(py))
+            }
+            PythonFormat::Float32Big => {
+                let arr = read_array::<4>(stream, path)?;
+                Ok(f32::from_be_bytes(arr).into_py(py))
+            }
+            PythonFormat::Float32Little => {
+                let arr = read_array::<4>(stream, path)?;
+                Ok(f32::from_le_bytes(arr).into_py(py))
+            }
+            PythonFormat::Float64Big => {
+                let arr = read_array::<8>(stream, path)?;
+                Ok(f64::from_be_bytes(arr).into_py(py))
+            }
+            PythonFormat::Float64Little => {
+                let arr = read_array::<8>(stream, path)?;
+                Ok(f64::from_le_bytes(arr).into_py(py))
+            }
         }
     }
 
@@ -396,6 +462,52 @@ impl super::Construct for FormatFieldNode {
                     .map_err(|_| make_build_error(fmtstr, obj, path))?;
                 stream.write(&val.to_le_bytes());
             }
+            // ---- Phase 6.1：Float 系列 build 分支 ----
+            //
+            // P2 v2 设计要点（详见设计文档 §1.3.3）：
+            // - int→float 兼容：所有 6 个 Float build 分支加 i64/u64 fallback。
+            //   Python `struct.pack('>f', 42)` 接受 int，mashumaro `v: float` 注解运行时不强制。
+            //   Rust 顺序：extract f32/f64（Python float）→ i64 as f32/f64 → u64 as f32/f64。
+            // - Float16 范围检查：超 f16 max（65504）的 finite float手动返回 FormatFieldError，
+            //   对齐 `struct.pack('>e', 70000)` OverflowError→construct FormatFieldError（BC-B12）。
+            //   NaN/Inf 放行（由 from_f64 处理）。
+            // - Float32 范围：extract::<f32>() 对超范围值触发 pyo3 OverflowError（BC-B8）。
+            //   int 输入走 i64/u64 fallback（i64/u64::MAX < f32::MAX，as f32 不溢出）。
+            // - Float64 无范围检查：f64 精度足以容纳所有 i64/u64。
+            PythonFormat::Float16Big => {
+                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let f16_val = if val.is_finite() && val.abs() > F16_MAX_ABS {
+                    return Err(make_build_error(fmtstr, obj, path));
+                } else {
+                    half::f16::from_f64(val)
+                };
+                stream.write(&f16_val.to_be_bytes());
+            }
+            PythonFormat::Float16Little => {
+                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let f16_val = if val.is_finite() && val.abs() > F16_MAX_ABS {
+                    return Err(make_build_error(fmtstr, obj, path));
+                } else {
+                    half::f16::from_f64(val)
+                };
+                stream.write(&f16_val.to_le_bytes());
+            }
+            PythonFormat::Float32Big => {
+                let val: f32 = extract_f32_with_int_fallback(obj, fmtstr, path)?;
+                stream.write(&val.to_be_bytes());
+            }
+            PythonFormat::Float32Little => {
+                let val: f32 = extract_f32_with_int_fallback(obj, fmtstr, path)?;
+                stream.write(&val.to_le_bytes());
+            }
+            PythonFormat::Float64Big => {
+                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                stream.write(&val.to_be_bytes());
+            }
+            PythonFormat::Float64Little => {
+                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                stream.write(&val.to_le_bytes());
+            }
         }
         Ok(())
     }
@@ -466,6 +578,51 @@ where
         .map_err(|_| make_build_error(fmtstr, obj, path))
 }
 
+// ---- Phase 6.1：Float build 辅助函数 ----
+
+/// IEEE 754 half precision 的最大有限正值（65504.0）。
+///
+/// 用于 Float16 build 的范围检查（对齐 Python `struct.pack('>e', 70000)` OverflowError，
+/// 即设计文档 BC-B12）。大于此值的 finite float 手动返回 FormatFieldError。
+const F16_MAX_ABS: f64 = 65504.0;
+
+/// 从 Python 对象提取 f64，带 int fallback（Float16/Float64 build 用）。
+///
+/// P2 v2 修正：Python `struct.pack` 接受 int（自动转 float），mashumaro `v: float`
+/// 注解运行时不强制。Rust 顺序：
+/// 1. `extract::<f64>()`（Python float）
+/// 2. `i64 as f64`（Python int，f64 精度足以容纳所有 i64）
+/// 3. `u64 as f64`（Python int，覆盖 > i64::MAX 范围）
+///
+/// 全部失败 → FormatFieldError（对齐 Python struct.error）。
+fn extract_float_with_int_fallback(
+    obj: &Bound<'_, PyAny>,
+    fmtstr: &str,
+    path: &Path,
+) -> Result<f64, ConstructError> {
+    obj.extract::<f64>()
+        .or_else(|_| obj.extract::<i64>().map(|i| i as f64))
+        .or_else(|_| obj.extract::<u64>().map(|u| u as f64))
+        .map_err(|_| make_build_error(fmtstr, obj, path))
+}
+
+/// 从 Python 对象提取 f32，带 int fallback（Float32 build 用）。
+///
+/// 与 [`extract_float_with_int_fallback`] 平行，但首选项是 `f32`。
+/// Python float 超出 f32 范围时（如 `1e40`）`extract::<f32>` 触发 pyo3
+/// OverflowError → FormatFieldError（对齐 `struct.pack('>f', 1e40)` OverflowError，
+/// 即 BC-B8）。
+fn extract_f32_with_int_fallback(
+    obj: &Bound<'_, PyAny>,
+    fmtstr: &str,
+    path: &Path,
+) -> Result<f32, ConstructError> {
+    obj.extract::<f32>()
+        .or_else(|_| obj.extract::<i64>().map(|i| i as f32))
+        .or_else(|_| obj.extract::<u64>().map(|u| u as f32))
+        .map_err(|_| make_build_error(fmtstr, obj, path))
+}
+
 // ---------------------------------------------------------------------------
 // 单元测试
 // ---------------------------------------------------------------------------
@@ -519,7 +676,10 @@ mod tests {
     fn format_from_chars_invalid_returns_none() {
         assert_eq!(PythonFormat::from_chars('>', 'x'), None);
         assert_eq!(PythonFormat::from_chars('!', 'B'), None);
-        assert_eq!(PythonFormat::from_chars('>', 'f'), None);
+        // Phase 6.1: 'e'/'f'/'d' 现已支持（Float16/32/64）。用其他无效字符验证。
+        assert_eq!(PythonFormat::from_chars('>', 'F'), None);
+        assert_eq!(PythonFormat::from_chars('>', 'E'), None);
+        assert_eq!(PythonFormat::from_chars('>', 'D'), None);
     }
 
     #[test]

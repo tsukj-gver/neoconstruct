@@ -29,7 +29,9 @@ pub mod path;
 pub mod schema;
 pub mod stream;
 
-use descriptors::{BytesDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor};
+use descriptors::{
+    BytesDescriptor, BytesIntegerDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor,
+};
 use nodes::format_field::PythonFormat;
 use pyo3::prelude::*;
 use schema::CompiledSchema;
@@ -79,9 +81,16 @@ fn _construct_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<FormatFieldDescriptor>()?;
     m.add_class::<BytesDescriptor>()?;
     m.add_class::<GreedyBytesDescriptor>()?;
+    m.add_class::<BytesIntegerDescriptor>()?;
 
     // 16 个 FormatFieldDescriptor 预定义单例
     register_format_singletons(py, m)?;
+
+    // Phase 6.1：6 个 Float FormatFieldDescriptor 预定义单例
+    register_float_singletons(py, m)?;
+
+    // Phase 6.1：4 个 Int24 BytesIntegerDescriptor 预定义单例
+    register_int24_singletons(py, m)?;
 
     // GreedyBytes 预定义单例
     m.add("GreedyBytes", Py::new(py, GreedyBytesDescriptor)?)?;
@@ -138,6 +147,45 @@ fn register_format_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResu
 
     for (name, format) in SINGLETONS {
         let desc = Py::new(py, FormatFieldDescriptor::new(name, *format))?;
+        m.add(*name, desc)?;
+    }
+    Ok(())
+}
+
+/// 注册 6 个 Float 格式预定义单例到模块（Phase 6.1）。
+///
+/// 对应 Python construct 的 `Float16b` / `Float16l` / `Float32b` / `Float32l` /
+/// `Float64b` / `Float64l`。每个单例为 `FormatFieldDescriptor` pyclass 实例。
+fn register_float_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    const FLOAT_SINGLETONS: &[(&str, PythonFormat)] = &[
+        ("Float16b", PythonFormat::Float16Big),
+        ("Float16l", PythonFormat::Float16Little),
+        ("Float32b", PythonFormat::Float32Big),
+        ("Float32l", PythonFormat::Float32Little),
+        ("Float64b", PythonFormat::Float64Big),
+        ("Float64l", PythonFormat::Float64Little),
+    ];
+    for (name, format) in FLOAT_SINGLETONS {
+        let desc = Py::new(py, FormatFieldDescriptor::new(name, *format))?;
+        m.add(*name, desc)?;
+    }
+    Ok(())
+}
+
+/// 注册 4 个 Int24 BytesIntegerDescriptor 预定义单例到模块（Phase 6.1）。
+///
+/// 对应 Python construct 的 `Int24ub` / `Int24ul` / `Int24sb` / `Int24sl`。
+/// 每个单例为 `BytesIntegerDescriptor { length: 3, ... }` 实例。
+fn register_int24_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    const INT24_SINGLETONS: &[(&str, bool, bool)] = &[
+        // (name, signed, swapped)
+        ("Int24ub", false, false),
+        ("Int24ul", false, true),
+        ("Int24sb", true, false),
+        ("Int24sl", true, true),
+    ];
+    for (name, signed, swapped) in INT24_SINGLETONS {
+        let desc = Py::new(py, BytesIntegerDescriptor::new(3, *signed, *swapped))?;
         m.add(*name, desc)?;
     }
     Ok(())

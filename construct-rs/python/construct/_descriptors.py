@@ -71,6 +71,32 @@ except ImportError:  # pragma: no cover
     pass
 
 
+# BytesInteger 作为 BytesIntegerDescriptor 的别名导出（Phase 6.1）。
+# 用户通过 BytesInteger(3, signed=True) 创建 BytesIntegerDescriptor 实例。
+try:
+    from ._construct_rust import (
+        BytesIntegerDescriptor,
+        # 同时暴露 BytesInteger 别名（Python construct 兼容名）。
+    )
+    BytesInteger = BytesIntegerDescriptor
+    # Phase 6.1 Float 单例（FormatFieldDescriptor pyclass 实例）
+    from ._construct_rust import (
+        Float16b,
+        Float16l,
+        Float32b,
+        Float32l,
+        Float64b,
+        Float64l,
+        # Phase 6.1 Int24 单例（BytesIntegerDescriptor pyclass 实例）
+        Int24ub,
+        Int24ul,
+        Int24sb,
+        Int24sl,
+    )
+except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
+    pass
+
+
 # ---------------------------------------------------------------------------
 # Phase 3.1: BitsInteger / Bit / Nibble / Octet 纯 Python 描述符
 #
@@ -1077,6 +1103,529 @@ def RepeatUntil(terminator, subcon, discard=False):
 
 
 # ---------------------------------------------------------------------------
+# Phase 6.1: VarInt / ZigZag 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Primitives收尾.md`` §1.4。
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到 "VarIntDescriptor" / "ZigZagDescriptor" 字符串，构建对应的 Node 变体。
+#
+# VarInt: LEB128 无符号变长整数（Google Protocol Buffers 编码）。
+# ZigZag: 有符号变长整数（VarInt + ZigZag 数值变换）。
+# ---------------------------------------------------------------------------
+
+
+class VarIntDescriptor:
+    """``VarInt()`` 描述符。
+
+    LEB128 无符号变长整数。对应 Python construct 的 ``VarInt``
+    （core.py L1601-L1647）。
+
+    编码规则：每字节低 7 位是有效数据，最高位 MSB=1 表示后续还有字节，
+    MSB=0 表示终止。小整数（0-127）仅需 1 字节。
+
+    限制：
+
+    - 仅支持非负整数（build 负数返回 ``IntegerError``，与 Python 一致）
+    - sizeof 永远返回 ``SizeofError``（变长，无法预知）
+
+    ``_expr_params`` 协议返回空 dict：VarInt 无表达式参数。
+    """
+
+    __slots__ = ()
+
+    # 类级别常量：VarInt 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "VarInt()"
+
+
+# VarInt singleton（无参数，全局共享一个实例）。
+VarInt = VarIntDescriptor()
+
+
+class ZigZagDescriptor:
+    """``ZigZag()`` 描述符。
+
+    有符号变长整数。对应 Python construct 的 ``ZigZag``
+    （core.py L1651-L1686）。
+
+    ZigZag 将有符号整数映射为无符号整数后再用 LEB128 编码：
+    0 → 0, -1 → 1, 1 → 2, -2 → 3, 2 → 4, ...
+
+    sizeof 永远返回 ``SizeofError``（变长）。
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ()
+
+    # 类级别常量：ZigZag 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "ZigZag()"
+
+
+# ZigZag singleton（无参数，全局共享一个实例）。
+ZigZag = ZigZagDescriptor()
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.1: 整数别名（Byte / Short / Int / Long）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Primitives收尾.md`` §1.2.1。
+#
+# 这 4 个是 Python 层别名到现有 FormatField 单例：
+#   Byte  = Int8ub   (FormatField(">", "B"))
+#   Short = Int16ub  (FormatField(">", "H"))
+#   Int   = Int32ub  (FormatField(">", "L") → PythonFormat::UnsignedInt32Big)
+#   Long  = Int64ub  (FormatField(">", "Q"))
+# 零 Rust 改动，仅在 Python wrapper 模块加 alias。
+# ---------------------------------------------------------------------------
+try:
+    Byte = Int8ub
+    Short = Int16ub
+    Int = Int32ub
+    Long = Int64ub
+    # Python construct 兼容别名（Half/Single/Double，可选）
+    Half = Float16b
+    Single = Float32b
+    Double = Float64b
+except NameError:  # pragma: no cover - 仅在扩展未构建时触发
+    pass
+
+
+# ---------------------------------------------------------------------------
+# Phase 6.2: Strings 描述符（6 个）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Strings.md`` v2 §4.4 / §10.2。
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到 "CStringDescriptor" / "GreedyStringDescriptor" / ... 字符串，
+# 构建对应的 Node 变体（详见 compile.rs Phase 6.2 分支）。
+#
+# **编码字符串（encoding）**：用户传入字符串（如 ``"utf8"`` / ``"utf_16_le"``），
+# Rust 编译期调 ``Encoding::from_user_str`` 解析为 ``Encoding`` enum。
+# 不接受无后缀编码（``utf16``/``utf32`` 等），错误信息引导用户用显式 _le/_be。
+# （PM 决策 6.2-D1 + P2b + P8，详见 Strings 设计 §2.1.3）
+#
+# **length 字段（PaddedString）**：可为 int 或 FieldRef/ExprRef 表达式，
+# 与 BytesDescriptor 同模式（``_expr_params`` 协议）。
+#
+# 与 Python construct 的差异（设计 §3.7.3 + Strings §10 P5）：
+#
+# - **StringEncoded 不实现为 Node**：兼容别名一调用即抛 StringError（_errors.py）
+# - **无后缀编码拒绝**：``utf16``/``utf_16``/``u16``/``utf32``/``utf_32``/``u32``
+#   在编译期被拒绝，引导用户改用 ``utf_16_le`` / ``utf_16_be`` 等
+# ---------------------------------------------------------------------------
+
+
+class CStringDescriptor:
+    """``CString(encoding, term=None, include=False, consume=True, require=True)`` 描述符。
+
+    C 风格 null 终止字符串。对应 Python construct 的 ``CString``（core.py L1811）。
+
+    Python 原版是 ``StringEncoded(NullTerminated(GreedyBytes, term=...), encoding)``
+    macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A）。
+
+    编码字符串在 Rust 编译期解析（``Encoding::from_user_str``）。
+
+    ``_expr_params`` 协议返回空 dict：CString 无表达式参数。
+
+    :param encoding: 编码字符串（如 ``"utf8"`` / ``"utf_16_le"``）。
+    :param term: 终止符字节串。默认 ``None`` 表示用编码单元的全零字节串
+                  （utf8/ascii = ``b"\\x00"``，utf16 = ``b"\\x00\\x00"``，utf32 = 4 个 0）。
+    :param include: 是否将 term 包含在解码数据中。默认 False。
+    :param consume: 是否消费 term（True=消费；False=seek 回退 unit 字节）。默认 True。
+                     **注意**：当前 CStringNode 实现不暴露 consume（与 Python ``CString``
+                     实际行为一致，详见 Strings 设计 §3.1）；此参数仅为兼容性保留。
+    :param require: 是否在 EOF 时报错。默认 True。
+    """
+
+    __slots__ = ("encoding", "term", "include", "consume", "require")
+
+    def __init__(self, encoding, term=None, include=False, consume=True, require=True):
+        """初始化 CString 描述符。
+
+        :param encoding: 编码字符串。
+        :param term: 终止符字节串（None = 默认）。
+        :param include: 是否将 term 包含在解码数据中。
+        :param consume: 是否消费 term（保留参数，当前实现忽略）。
+        :param require: 是否在 EOF 时报错。
+        """
+        self.encoding = encoding
+        self.term = term
+        self.include = include
+        self.consume = consume
+        self.require = require
+
+    # 类级别常量：CString 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "CString(encoding={!r}, term={!r}, include={!r}, require={!r})".format(
+            self.encoding, self.term, self.include, self.require
+        )
+
+
+def CString(encoding, **kwargs):
+    """创建一个 CString 描述符。
+
+    C 风格 null 终止字符串。对应 Python construct 的 ``CString``。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            name: str = field(CString("utf8"))
+
+        P.parse(b"hello\\x00")  # → P(name="hello")
+
+    支持的编码（PM 决策 6.2-D1）：``ascii`` / ``utf8`` / ``utf_8`` / ``u8`` /
+    ``utf_16_le`` / ``utf_16_be`` / ``utf_32_le`` / ``utf_32_be``。
+
+    **BREAKING CHANGE**：不接受无后缀编码（``utf16`` / ``utf32`` 等），
+    会编译期报错引导用户改用显式 ``_le`` / ``_be`` 后缀（Strings 设计 §2.1.3 P2b）。
+
+    :param encoding: 编码字符串。
+    :param term: 终止符字节串（None = 编码单元全零字节串）。
+    :param include: 是否将 term 包含在解码数据中（默认 False）。
+    :param consume: 是否消费 term（保留参数，当前实现忽略）。
+    :param require: 是否在 EOF 时报错（默认 True）。
+    :return: ``CStringDescriptor`` 实例。
+    """
+    return CStringDescriptor(encoding, **kwargs)
+
+
+class GreedyStringDescriptor:
+    """``GreedyString(encoding)`` 描述符。
+
+    读到流结束并解码。对应 Python construct 的 ``GreedyString``（core.py L1837）。
+
+    Python 原版是 ``StringEncoded(GreedyBytes, encoding)`` macro 嵌套；
+    construct-rs 独立实现（PM 决策 1 方案 A）。
+
+    ``_expr_params`` 协议返回空 dict：GreedyString 无表达式参数。
+
+    :param encoding: 编码字符串。
+    """
+
+    __slots__ = ("encoding",)
+
+    def __init__(self, encoding):
+        """初始化 GreedyString 描述符。
+
+        :param encoding: 编码字符串。
+        """
+        self.encoding = encoding
+
+    # 类级别常量：GreedyString 无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "GreedyString(encoding={!r})".format(self.encoding)
+
+
+def GreedyString(encoding):
+    """创建一个 GreedyString 描述符。
+
+    读到流结束并解码。对应 Python construct 的 ``GreedyString``。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            tail: str = field(GreedyString("utf8"))
+
+        P.parse(b"hello world")  # → P(tail="hello world")
+
+    **BREAKING CHANGE**：不接受无后缀编码（同 CString）。
+
+    :param encoding: 编码字符串。
+    :return: ``GreedyStringDescriptor`` 实例。
+    """
+    return GreedyStringDescriptor(encoding)
+
+
+class PaddedStringDescriptor:
+    """``PaddedString(length, encoding)`` 描述符。
+
+    固定长度填充字符串。对应 Python construct 的 ``PaddedString``（core.py L1747）。
+
+    Python 原版是 ``StringEncoded(FixedSized(length, NullStripped(...)), encoding)``
+    三层 macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A）。
+
+    length 支持：
+    - int 常量 → BytesLength::Const
+    - FieldRef/ExprRef → BytesLength::Expr（从 expr_programs 取 "length" 键）
+
+    ``_expr_params`` 协议：当 ``length`` 是 int 时返回 ``{}``（跳过编译）；
+    当 length 是 FieldRef/ExprRef 时返回 ``{"length": self.length}``（编译为 ExprOp 列表）。
+
+    :param length: 总长度（含数据 + pad），int 或表达式。
+    :param encoding: 编码字符串。
+    """
+
+    __slots__ = ("length", "encoding")
+
+    def __init__(self, length, encoding):
+        """初始化 PaddedString 描述符。
+
+        :param length: 总长度（int 或表达式）。
+        :param encoding: 编码字符串。
+        """
+        self.length = length
+        self.encoding = encoding
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 ``{"length": self.length}``。当 length 是 int 时跳过编译；
+        当 length 是 FieldRef/ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.length, int):
+            return {}
+        return {"length": self.length}
+
+    def __repr__(self):
+        return "PaddedString(length={!r}, encoding={!r})".format(self.length, self.encoding)
+
+
+def PaddedString(length, encoding):
+    """创建一个 PaddedString 描述符。
+
+    固定长度填充字符串。对应 Python construct 的 ``PaddedString``。
+
+    使用方式（常量长度）::
+
+        @dataclass
+        class P(StructMixin):
+            name: str = field(PaddedString(10, "utf8"))
+
+        P.parse(b"hello\\x00\\x00\\x00\\x00\\x00")  # → P(name="hello")
+
+    使用方式（表达式长度）::
+
+        @dataclass
+        class P(StructMixin):
+            n: int = field(Int8ub)
+            name: str = field(PaddedString(this.n, "utf8"))
+
+    parse 行为：读 length 字节 → 右剥离 pad（编码单元全零字节串）→ decode。
+    build 行为：encode → 若 encoded > length 报 PaddingError，否则补 pad 到 length。
+
+    **BREAKING CHANGE**：不接受无后缀编码（同 CString）。
+
+    :param length: 总长度（int 或表达式）。
+    :param encoding: 编码字符串。
+    :return: ``PaddedStringDescriptor`` 实例。
+    """
+    return PaddedStringDescriptor(length, encoding)
+
+
+class PascalStringDescriptor:
+    """``PascalString(lengthfield, encoding)`` 描述符。
+
+    长度前缀字符串。对应 Python construct 的 ``PascalString``（core.py L1778）。
+
+    Python 原版是 ``StringEncoded(Prefixed(lengthfield, GreedyBytes), encoding)``
+    macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A），不依赖 Prefixed（Phase 7）。
+
+    ``_expr_params`` 协议返回空 dict：PascalString 自身无表达式参数
+    （lengthfield 由递归处理，与 PrefixedArrayDescriptor 同限制：lengthfield
+    不支持含表达式的子描述符）。
+
+    :param lengthfield: 长度字段（描述符），常见 ``VarInt`` / ``Int16ub`` / ``Byte``。
+    :param encoding: 编码字符串。
+    """
+
+    __slots__ = ("lengthfield", "encoding")
+
+    def __init__(self, lengthfield, encoding):
+        """初始化 PascalString 描述符。
+
+        :param lengthfield: 长度字段（必须能产生/接收整数）。
+        :param encoding: 编码字符串。
+        """
+        self.lengthfield = lengthfield
+        self.encoding = encoding
+
+    # 类级别常量：PascalString 无表达式参数（lengthfield 由递归处理）。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "PascalString(lengthfield={!r}, encoding={!r})".format(
+            self.lengthfield, self.encoding
+        )
+
+
+def PascalString(lengthfield, encoding):
+    """创建一个 PascalString 描述符。
+
+    长度前缀字符串。对应 Python construct 的 ``PascalString``。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            name: str = field(PascalString(Byte, "utf8"))
+
+        P.parse(b"\\x05hello")  # → P(name="hello")
+        P(name="hi").build()    # → b"\\x02hi"
+
+    parse 行为：解析 lengthfield → 读 N 字节 → decode。
+    build 行为：encode → 取 encoded.len() build lengthfield → 写 encoded。
+
+    **BREAKING CHANGE**：不接受无后缀编码（同 CString）。
+
+    :param lengthfield: 长度字段（描述符）。
+    :param encoding: 编码字符串。
+    :return: ``PascalStringDescriptor`` 实例。
+    """
+    return PascalStringDescriptor(lengthfield, encoding)
+
+
+class NullTerminatedDescriptor:
+    """``NullTerminated(subcon, term=b"\\x00", include=False, consume=True, require=True)`` 描述符。
+
+    null 终止包装器（持有任意 inner subcon）。对应 Python construct 的
+    ``NullTerminated``（core.py L5050）。
+
+    与 ``CStringDescriptor`` 共享扫描算法，但 inner 不限于 GreedyBytes，
+    可以是 Byte / Bytes(n) / Struct 等。
+
+    ``_expr_params`` 协议返回空 dict（inner subcon 由递归处理，与
+    BitwiseDescriptor / PrefixedArrayDescriptor 同限制）。
+
+    :param subcon: 内层子构造器（默认 ``GreedyBytes``，但可传其他）。
+    :param term: 终止符字节串。默认 ``b"\\x00"``。
+    :param include: 是否将 term 包含在累积数据中（默认 False）。
+    :param consume: 是否消费 term（True=消费；False=seek 回退 unit 字节，默认 True）。
+    :param require: 是否在 EOF 时报错（默认 True）。
+    """
+
+    __slots__ = ("subcon", "term", "include", "consume", "require")
+
+    def __init__(self, subcon, term=b"\x00", include=False, consume=True, require=True):
+        """初始化 NullTerminated 描述符。
+
+        :param subcon: 内层子构造器。
+        :param term: 终止符字节串。
+        :param include: 是否将 term 包含在累积数据中。
+        :param consume: 是否消费 term。
+        :param require: 是否在 EOF 时报错。
+        """
+        self.subcon = subcon
+        self.term = term
+        self.include = include
+        self.consume = consume
+        self.require = require
+
+    # 类级别常量：NullTerminated 自身无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "NullTerminated(subcon={!r}, term={!r}, include={!r}, consume={!r}, require={!r})".format(
+            self.subcon, self.term, self.include, self.consume, self.require
+        )
+
+
+def NullTerminated(subcon, term=b"\x00", include=False, consume=True, require=True):
+    """创建一个 NullTerminated 描述符。
+
+    null 终止包装器。对应 Python construct 的 ``NullTerminated``。
+
+    使用方式（默认 term + GreedyBytes inner）::
+
+        @dataclass
+        class P(StructMixin):
+            data: bytes = field(NullTerminated(GreedyBytes))
+
+        P.parse(b"hello\\x00")  # → P(data=b"hello")
+
+    使用方式（自定义 inner）::
+
+        @dataclass
+        class P(StructMixin):
+            value: int = field(NullTerminated(Int32ub, term=b"\\xff\\xff"))
+
+    与 ``CString`` 的区别：``NullTerminated`` 返回 inner 的解析结果
+    （通常是 bytes，inner=GreedyBytes 时）；``CString`` 直接返回 str。
+
+    :param subcon: 内层子构造器。
+    :param term: 终止符字节串。
+    :param include: 是否将 term 包含在累积数据中（默认 False）。
+    :param consume: 是否消费 term（默认 True）。
+    :param require: 是否在 EOF 时报错（默认 True）。
+    :return: ``NullTerminatedDescriptor`` 实例。
+    """
+    return NullTerminatedDescriptor(subcon, term, include, consume, require)
+
+
+class NullStrippedDescriptor:
+    """``NullStripped(subcon, pad=b"\\x00")`` 描述符。
+
+    null 剥离包装器（持有任意 inner subcon）。对应 Python construct 的
+    ``NullStripped``（core.py L5123）。
+
+    parse 行为：读流中剩余所有字节 → 右剥离 pad → 用剥离后字节构造子流调 inner.parse。
+    build 行为：直接调 inner.build（不补 pad；pad 补全由外层 PaddedStringNode 内联实现）。
+
+    ``_expr_params`` 协议返回空 dict（inner subcon 由递归处理）。
+
+    :param subcon: 内层子构造器。
+    :param pad: pad 字节串。默认 ``b"\\x00"``。
+    """
+
+    __slots__ = ("subcon", "pad")
+
+    def __init__(self, subcon, pad=b"\x00"):
+        """初始化 NullStripped 描述符。
+
+        :param subcon: 内层子构造器。
+        :param pad: pad 字节串。
+        """
+        self.subcon = subcon
+        self.pad = pad
+
+    # 类级别常量：NullStripped 自身无表达式参数。
+    _expr_params = {}
+
+    def __repr__(self):
+        return "NullStripped(subcon={!r}, pad={!r})".format(self.subcon, self.pad)
+
+
+def NullStripped(subcon, pad=b"\x00"):
+    """创建一个 NullStripped 描述符。
+
+    null 剥离包装器。对应 Python construct 的 ``NullStripped``。
+
+    使用方式::
+
+        @dataclass
+        class P(StructMixin):
+            data: bytes = field(NullStripped(GreedyBytes))
+
+        # 假设流为 b"hello\\x00\\x00"
+        P.parse(b"hello\\x00\\x00")  # → P(data=b"hello")
+
+    多字节 pad（utf16）::
+
+        NullStripped(GreedyBytes, pad=b"\\x00\\x00")
+
+    :param subcon: 内层子构造器。
+    :param pad: pad 字节串。
+    :return: ``NullStrippedDescriptor`` 实例。
+    """
+    return NullStrippedDescriptor(subcon, pad)
+
+
+# ---------------------------------------------------------------------------
 # Phase 6.3: 内置 Adapter 描述符（Subconstruct / Peek / RawCopy / Rebuild / Pass）
 #
 # 设计依据：``docs/design/模块设计/模块设计-Adapter核心.md`` §6.4。
@@ -1364,6 +1913,30 @@ __all__ = [
     "Int64sb",
     "Int64sl",
     "GreedyBytes",
+    # Phase 6.1 Primitives
+    "BytesIntegerDescriptor",
+    "BytesInteger",
+    "Float16b",
+    "Float16l",
+    "Float32b",
+    "Float32l",
+    "Float64b",
+    "Float64l",
+    "Int24ub",
+    "Int24ul",
+    "Int24sb",
+    "Int24sl",
+    "VarIntDescriptor",
+    "VarInt",
+    "ZigZagDescriptor",
+    "ZigZag",
+    "Byte",
+    "Short",
+    "Int",
+    "Long",
+    "Half",
+    "Single",
+    "Double",
     # Phase 3.1 bit 域描述符
     "BitsIntegerDescriptor",
     "BitsInteger",
@@ -1399,6 +1972,19 @@ __all__ = [
     # Phase 4.5 v5 Element
     "ElementDescriptor",
     "Element",
+    # Phase 6.2 Strings
+    "CStringDescriptor",
+    "CString",
+    "GreedyStringDescriptor",
+    "GreedyString",
+    "PaddedStringDescriptor",
+    "PaddedString",
+    "PascalStringDescriptor",
+    "PascalString",
+    "NullTerminatedDescriptor",
+    "NullTerminated",
+    "NullStrippedDescriptor",
+    "NullStripped",
     # Phase 6.3 内置 Adapter
     "SubconstructDescriptor",
     "Subconstruct",
