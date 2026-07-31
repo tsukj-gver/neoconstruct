@@ -450,6 +450,50 @@ impl<'py> Context<'py> {
         Ok(v)
     }
 
+    /// 按编译期字段索引取原始 PyObject（Phase 8.12 ProcessXor XorPad::Expr 路径用）。
+    ///
+    /// 与 [`Context::get_int_at`](Self::get_int_at) 同样的快速路径，但返回
+    /// 原始 PyObject 引用而非 i64。用于需要保留原对象（bytes/str/任意类型）的场景，
+    /// 如 ProcessXor 的 pad 表达式 `this.pad_field`（pad_field 可能是 int 或 bytes）。
+    ///
+    /// # 性能
+    ///
+    /// 同 [`Context::get_int_at`](Self::get_int_at)（直接读 `expr_values_buf[idx]`）。
+    /// 成功路径零堆分配（返回 `Borrowed<PyAny>`，借用 dict 中的值）。
+    ///
+    /// # 错误
+    ///
+    /// - [`ConstructError::ExprContext`]：expr_values 未初始化。
+    /// - [`ConstructError::ExprFieldMissing`]：槽位为 null。
+    pub fn get_field_at<'a>(
+        &'a self,
+        idx: usize,
+        py: Python<'a>,
+    ) -> Result<Bound<'a, PyAny>, ConstructError> {
+        if self.expr_values_len == 0 {
+            return Err(ConstructError::ExprContext {
+                message: "get_field_at: expr_values not initialized (placeholder context)"
+                    .to_string(),
+                path: String::new(),
+            });
+        }
+        let ptr = if idx < self.expr_values_len {
+            self.expr_values_buf[idx]
+        } else {
+            std::ptr::null_mut()
+        };
+        if ptr.is_null() {
+            return Err(ConstructError::ExprFieldMissing {
+                field: format!("<index {}>", idx),
+                path: String::new(),
+            });
+        }
+        // SAFETY: ptr 来自 set_field_at 写入的 value.as_ptr()，指向 fields dict
+        // 中的值对象。dict 由 self.fields (Bound<PyDict>) 保证存活，值对象因此存活。
+        // 返回 Borrowed 借用，借用周期绑定到 &'py self（dict 在 self.fields 中存活）。
+        Ok(unsafe { Bound::from_borrowed_ptr(py, ptr) })
+    }
+
     /// 注入一个已存在的 `PyDict` 作为 fields（借用外部 dict）。
     ///
     /// 用于 parse 路径优化（R4）：先创建实例，取其 `__dict__`，注入 context，

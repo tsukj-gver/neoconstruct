@@ -27,6 +27,7 @@
 //!   [`PaddingNode`](padding::PaddingNode)（字节级填充，Phase 3.3）
 
 pub mod adapter_callback;
+pub mod aligned;
 pub mod array;
 pub mod bit_padding;
 pub mod bits_integer;
@@ -34,26 +35,41 @@ pub mod bitwise;
 pub mod bytes;
 pub mod bytes_integer;
 pub mod bytewise;
+pub mod check_node;
+pub mod checksum;
 pub mod common;
 pub mod computed;
+pub mod const_node;
+pub mod default_node;
 pub mod element;
+pub mod enum_node;
+pub mod flags_enum;
 pub mod focused_seq;
 pub mod format_field;
 pub mod greedy_bytes;
 pub mod greedy_range;
+pub mod hex;
+pub mod hex_dump;
 pub mod if_then_else;
 pub mod index;
+pub mod mapping;
+pub mod named_tuple;
+pub mod one_of;
 pub mod padding;
 pub mod pass;
 pub mod peek;
 pub mod pointer;
 pub mod prefixed;
 pub mod prefixed_array;
+pub mod probe;
+pub mod process_rotate_left;
+pub mod process_xor;
 pub mod raw_copy;
 pub mod rebuild;
 pub mod repeat_until;
 pub mod seek;
 pub mod select;
+pub mod sequence;
 pub mod stop_if;
 pub mod strings;
 pub mod struct_node;
@@ -61,7 +77,9 @@ pub mod struct_ref;
 pub mod subconstruct;
 pub mod switch;
 pub mod tell;
+pub mod terminated;
 pub mod transform;
+pub mod union;
 pub mod varint;
 pub mod zigzag;
 
@@ -70,6 +88,7 @@ use crate::error::ConstructError;
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use adapter_callback::AdapterCallbackNode;
+use aligned::AlignedNode;
 use array::ArrayNode;
 use bit_padding::BitPaddingNode;
 use bits_integer::BitsIntegerNode;
@@ -77,34 +96,51 @@ use bitwise::BitwiseNode;
 use bytes::BytesNode;
 pub use bytes_integer::BytesIntegerNode;
 use bytewise::BytewiseNode;
+use check_node::CheckNode;
+use checksum::ChecksumNode;
 use computed::ComputedNode;
+use const_node::ConstNode;
+use default_node::DefaultNode;
 use element::ElementNode;
 use enum_dispatch::enum_dispatch;
+use enum_node::EnumNode;
+use flags_enum::FlagsEnumNode;
 use focused_seq::FocusedSeqNode;
 use format_field::FormatFieldNode;
 use greedy_bytes::GreedyBytesNode;
 use greedy_range::GreedyRangeNode;
+use hex::HexNode;
+use hex_dump::HexDumpNode;
 use if_then_else::IfThenElseNode;
 use index::IndexNode;
+use mapping::MappingNode;
+use named_tuple::NamedTupleNode;
+use one_of::{NoneOfNode, OneOfNode};
 use padding::PaddingNode;
 use pass::PassNode;
 use peek::PeekNode;
 use pointer::PointerNode;
 use prefixed::PrefixedNode;
 use prefixed_array::PrefixedArrayNode;
+use probe::ProbeNode;
+use process_rotate_left::ProcessRotateLeftNode;
+use process_xor::{ProcessXorNode, XorPad};
 use pyo3::prelude::*;
 use raw_copy::RawCopyNode;
 use rebuild::RebuildNode;
 use repeat_until::RepeatUntilNode;
 use seek::SeekNode;
 use select::SelectNode;
+use sequence::SequenceNode;
 use stop_if::StopIfNode;
 use struct_node::StructNode;
 use struct_ref::StructRefNode;
 use subconstruct::SubconstructNode;
 use switch::SwitchNode;
 use tell::TellNode;
+use terminated::TerminatedNode;
 use transform::TransformNode;
+use union::UnionNode;
 pub use varint::VarIntNode;
 pub use zigzag::ZigZagNode;
 
@@ -329,6 +365,57 @@ pub enum Node {
     /// 长度前缀子流节点（对应 Python construct `Prefixed`，Phase 7.2）。
     /// lengthfield 给出字节数，subcon 在子流上处理。
     Prefixed(PrefixedNode),
+    // === Phase 8 P0 批次 ===
+    /// 8.1：常量字段节点（对应 Python Const）。parse 校验 == value；build 用 value。
+    Const(ConstNode),
+    /// 8.1：默认值字段节点（对应 Python Default）。build obj=None 时用 value 表达式。
+    Default(DefaultNode),
+    /// 8.1：断言检查节点（对应 Python Check）。必须作为 RO 字段使用。
+    Check(CheckNode),
+    /// 8.8：对齐包装节点（对应 Python Aligned）。填充字节到 modulus 的整数倍。
+    Aligned(AlignedNode),
+    /// 8.4：Hex 显示包装节点（对应 Python Hex，Rust Node 非 AdapterCallback）。
+    Hex(HexNode),
+    /// 8.4：HexDump 显示包装节点（对应 Python HexDump）。
+    HexDump(HexDumpNode),
+    /// 8.5：校验和节点（对应 Python Checksum，双轨 hashfunc + StreamRange）。
+    Checksum(ChecksumNode),
+    /// 8.9：EOF 断言节点（对应 Python Terminated）。
+    Terminated(TerminatedNode),
+    /// 8.9：调试探针节点（对应 Python Probe）。
+    /// [设计质疑] into 字段用 FieldName 而非 ExprProgram（详见 probe.rs 模块级注释）。
+    Probe(ProbeNode),
+    // === Phase 8 P1 批次 ===
+    /// 8.2：枚举映射节点（对应 Python Enum，Rust Node 非 AdapterCallback）。
+    /// decmapping/encmapping 在编译期物化为 Py<PyDict>。
+    Enum(EnumNode),
+    /// 8.2：标志位枚举节点（对应 Python FlagsEnum）。
+    /// flags 物化为 Vec<(Py<PyString>, i64)>，运行时遍历构造 dict。
+    FlagsEnum(FlagsEnumNode),
+    /// 8.2：通用对象映射节点（对应 Python Mapping，无映射时报错）。
+    /// key/value 任意 hashable，与 EnumNode 结构同但语义不同。
+    Mapping(MappingNode),
+    /// 8.3：单值校验节点（对应 Python OneOf）。
+    /// valids 编译期物化为 Py<PyFrozenSet>，C API 查询不计 FFI。
+    OneOf(OneOfNode),
+    /// 8.3：排除值校验节点（对应 Python NoneOf）。
+    /// 与 OneOf 结构同，校验取反。
+    NoneOf(NoneOfNode),
+    /// 8.6：联合体节点（对应 Python Union，多视角 parse）。
+    /// 含 ParseFrom 策略（None/Index/Name/Expr）+ context nesting。
+    Union(UnionNode),
+    /// 8.7：位置序字段序列节点（对应 Python Sequence）。
+    /// parse 产出 PyList；build 接收 list（RO 字段不从 list 取值，C-1）。
+    Sequence(SequenceNode),
+    /// 8.12：XOR 字节变换节点（对应 Python ProcessXor）。
+    /// XorPad enum（Int/Bytes/Expr）含 fast-path（pad==0/全零不变换）。
+    ProcessXor(ProcessXorNode),
+    /// 8.12：位旋转左移节点（对应 Python ProcessRotateLeft）。
+    /// ROTATION_TABLES const 表 + 4 分支位运算。
+    ProcessRotateLeft(ProcessRotateLeftNode),
+    /// 8.11：NamedTuple 包装节点（对应 Python NamedTuple）。
+    /// factory 编译期物化为 Py<PyType>（collections.namedtuple）。
+    NamedTuple(NamedTupleNode),
 }
 
 impl Node {
@@ -385,6 +472,45 @@ impl Node {
             Node::Seek(s) => s.has_expressions(),
             Node::Pointer(p) => p.has_expressions(),
             Node::Prefixed(p) => p.has_expressions(),
+            // Phase 8 P0：Const 递归检查 inner（与 Subconstruct 同模式）。
+            Node::Const(c) => c.inner().has_expressions(),
+            // Default 含 value 表达式，总返回 true（与 Rebuild 同模式）。
+            Node::Default(_) => true,
+            // Check 含 func 表达式，总返回 true（与 Computed 同模式）。
+            Node::Check(_) => true,
+            // Aligned 含 modulus 表达式。
+            // - modulus 是编译期常量（Const）且 inner 无表达式 → false（恢复 static_size 预分配）
+            // - modulus 是运行期表达式 或 inner 含表达式 → true
+            Node::Aligned(a) => a.has_expressions(),
+            // Phase 8.4：Hex/HexDump 递归检查 inner（与 Subconstruct 同模式）。
+            Node::Hex(h) => h.inner().has_expressions(),
+            Node::HexDump(h) => h.inner().has_expressions(),
+            // Phase 8.5：Checksum 递归 checksumfield + 含 start/end 表达式（StreamRange），
+            // 总返回 true（保守处理，与 Rebuild 同模式）。
+            Node::Checksum(_) => true,
+            // Phase 8.9：Terminated 是单元结构体，无表达式。
+            Node::Terminated(_) => false,
+            // Probe 含 into FieldName，引用 Struct 字段时返回 true（与 Switch FieldRef 同模式）。
+            Node::Probe(p) => p.into_field().is_some(),
+            // Phase 8 P1：Enum/FlagsEnum/Mapping 递归检查 inner（与 Subconstruct 同模式）。
+            Node::Enum(e) => e.inner().has_expressions(),
+            Node::FlagsEnum(f) => f.inner().has_expressions(),
+            Node::Mapping(m) => m.inner().has_expressions(),
+            // Phase 8 P1：OneOf/NoneOf 递归检查 inner。
+            Node::OneOf(o) => o.inner().has_expressions(),
+            Node::NoneOf(n) => n.inner().has_expressions(),
+            // Phase 8 P1：Union 编译期预算（与 FocusedSeq 同模式）。
+            Node::Union(u) => u.has_expressions(),
+            // Phase 8 P1：Sequence 编译期预算（与 FocusedSeq 同模式）。
+            Node::Sequence(s) => s.has_expressions(),
+            // Phase 8 P1：ProcessXor inner 子树 + 可能含 Expr pad。
+            Node::ProcessXor(p) => {
+                p.inner().has_expressions() || matches!(p.pad(), XorPad::Expr(_))
+            }
+            // Phase 8 P1：ProcessRotateLeft 恒含 amount/group 表达式。
+            Node::ProcessRotateLeft(_) => true,
+            // Phase 8 P2：NamedTuple 递归检查 inner（与 Subconstruct 同模式）。
+            Node::NamedTuple(n) => n.inner().has_expressions(),
             _ => false,
         }
     }
@@ -452,11 +578,26 @@ impl Node {
                 let v = crate::expr::eval_expr_int(r.func(), ctx, py)?;
                 Ok(v.into_py(py))
             }
-            // 其他节点暂不支持 RO 语义（Phase 3 将扩展 Const/ContextParam）
+            // Phase 8.1：Check 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // （与 StopIf 同模式——实际条件检查由 CheckNode.build 完成，
+            // compute_ro_value 仅占位返回 Py_None，避免 StructNode 强制 getattr）。
+            Node::Check(_) => Ok(py.None()),
+            // Phase 8.9：Terminated 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // （与 StopIf/Check 同模式——Terminated::build 是 no-op，不需要从 obj 取值）。
+            Node::Terminated(_) => Ok(py.None()),
+            // Phase 8.1：Default 作为 RO 字段时，compute_ro_value 求值 value 表达式
+            // （与 Computed/Rebuild 同模式）。随后 StructNode 将结果传给 DefaultNode.build，
+            // 因 obj 非 None，DefaultNode 直接转发 inner.build。
+            Node::Default(d) => {
+                let v = crate::expr::eval_expr_int(d.value(), ctx, py)?;
+                Ok(v.into_py(py))
+            }
+            // 其他节点暂不支持 RO 语义
             _ => Err(ConstructError::Generic {
                 message: format!(
                     "compute_ro_value: node type {:?} is not a valid RO node. \
-                     RO fields must be Tell, Computed, Index, StopIf (Const/ContextParam in Phase 3).",
+                     RO fields must be Tell, Computed, Index, StopIf, Check, Terminated, \
+                     Default, Rebuild, Element, or Const/ContextParam (future).",
                     self
                 ),
                 path: path.to_string(),

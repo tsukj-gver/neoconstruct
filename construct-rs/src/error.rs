@@ -324,6 +324,158 @@ pub enum ConstructError {
         /// 错误发生的路径。
         path: String,
     },
+
+    // --- Phase 8 P0 批次（5 个新变体）---
+    /// 常量字段错误：parse 时 subcon 结果与期望值不符，或 build 时 obj 非 None/期望值。
+    ///
+    /// 对应 Python construct `ConstError`（core.py L74）。
+    ///
+    /// Phase 8.1 引入（设计 §1.1 / §1.2.1）。
+    #[error("const error: {message} at {path}")]
+    Const {
+        /// 错误详情（含期望值与实际值的 repr）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 断言检查错误：Check 节点的表达式求值为假。
+    ///
+    /// 对应 Python construct `CheckError`（core.py L84）。
+    ///
+    /// Phase 8.1 引入（设计 §1.1 / §1.2.3）。
+    #[error("check error: {message} at {path}")]
+    Check {
+        /// 错误详情（如 "check failed during parsing"）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 校验和错误：parse 时 hash 不匹配。
+    ///
+    /// 对应 Python construct `ChecksumError`（core.py L144）。
+    ///
+    /// Phase 8.5 引入（设计 §3.5 / §3.6）。
+    #[error("checksum error: {message} at {path}")]
+    Checksum {
+        /// 错误详情（含 read / computed 的 hex 编码）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 终止符错误：Terminated 节点 parse 时 stream 未到 EOF。
+    ///
+    /// 对应 Python construct `TerminatedError`（core.py L129）。
+    ///
+    /// Phase 8.9 引入（设计 §5.1 / §5.2.1）。
+    #[error("terminated error: {message} at {path}")]
+    Terminated {
+        /// 错误详情（如 "expected end of stream"）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 用户主动取消解析（对应 Python construct `CancelParsing`，core.py L149）。
+    ///
+    /// **仅由 Python 用户代码触发**——用户从 Adapter `_decode` / 自定义 Python
+    /// 代码 `raise CancelParsing()`，跨 FFI 转为 ConstructError::CancelParsing。
+    /// schema.rs parse 入口捕获后返回 Py_None（对齐 Python L418 `except: pass`）。
+    ///
+    /// # 触发场景限制（PM 决策 D-7）
+    ///
+    /// construct-rs 表达式系统不接 lambda（ADR-006），用户无法在 Computed 表达式
+    /// 中 raise CancelParsing。**仅 Python 层用户代码可触发**：
+    /// - 用户继承 Adapter 写 `_decode` 内 raise CancelParsing
+    /// - 用户在 StructMixin 子类的 `__post_init__` 内 raise
+    ///
+    /// # 与 ExplicitError 的区别
+    ///
+    /// CancelParsing 被顶层 catch（schema.rs），parse 返回 None；
+    /// ExplicitError 不被顶层 catch，正常向上传播为 ConstructError。
+    ///
+    /// Phase 8.10 引入（设计 §6）。
+    #[error("cancel parsing at {path}")]
+    CancelParsing {
+        /// 错误发生的路径（顶层 catch 后丢弃，对齐 Python `pass`）。
+        path: String,
+    },
+
+    // --- Phase 8 P1+P2 批次（6 个新变体）---
+    /// 映射错误：Enum/FlagsEnum/Mapping 的 label↔value 查找失败。
+    ///
+    /// 对应 Python construct `MappingError`（core.py L102）。
+    ///
+    /// Phase 8.2 引入（设计 §1.1）。触发场景：
+    /// - Enum build 时 label 不在 encmapping（C-6：bool 边界由编译期处理）
+    /// - FlagsEnum build 时未知 label
+    /// - Mapping parse/build 时 key 不在映射（C-4：包含 TypeError → MappingError 转换）
+    #[error("mapping error: {message} at {path}")]
+    Mapping {
+        /// 错误详情（含期望与实际值的 repr）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 校验错误：OneOf/NoneOf 的值集合校验失败。
+    ///
+    /// 对应 Python construct `ValidationError`（core.py L125）。
+    ///
+    /// Phase 8.3 引入（设计 §2.1）。触发场景：
+    /// - OneOf parse/build 时 obj ∉ valids
+    /// - NoneOf parse/build 时 obj ∈ invalids
+    /// - Validator 子类的 _validate 返回 False
+    #[error("validation error: {message} at {path}")]
+    Validation {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// Union 错误：Union build 时无 subcon 匹配，或 parsefrom 解析失败。
+    ///
+    /// 对应 Python construct `UnionError`（core.py L130）。
+    ///
+    /// Phase 8.6 引入（设计 §3.1）。
+    #[error("union error: {message} at {path}")]
+    Union {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 旋转错误：ProcessRotateLeft 的 group/amount 参数非法或数据长度不对齐。
+    ///
+    /// 对应 Python construct `RotationError`（core.py L138）。
+    ///
+    /// Phase 8.12 引入（设计 §5.5）。触发场景：
+    /// - group < 1
+    /// - data.len() % group != 0
+    #[error("rotation error: {message} at {path}")]
+    Rotation {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// NamedTuple 错误：inner 非 Struct/Sequence/Array/GreedyRange，或字段提取失败。
+    ///
+    /// 对应 Python construct `NamedTupleError`（core.py L120）。
+    ///
+    /// Phase 8.11 引入（设计 §6.1.1）。
+    #[error("namedtuple error: {message} at {path}")]
+    NamedTuple {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
 }
 
 impl ConstructError {
@@ -351,12 +503,24 @@ impl ConstructError {
             | ConstructError::IndexField { message, .. }
             | ConstructError::String { message, .. }
             | ConstructError::Explicit { message, .. }
-            | ConstructError::Select { message, .. } => Some(message),
+            | ConstructError::Select { message, .. }
+            // Phase 8 P0 新增（4 个有 message 字段；CancelParsing 无 message）。
+            | ConstructError::Const { message, .. }
+            | ConstructError::Check { message, .. }
+            | ConstructError::Checksum { message, .. }
+            | ConstructError::Terminated { message, .. }
+            // Phase 8 P1+P2 新增（5 个有 message 字段；CancelParsing 无 message）。
+            | ConstructError::Mapping { message, .. }
+            | ConstructError::Validation { message, .. }
+            | ConstructError::Union { message, .. }
+            | ConstructError::Rotation { message, .. }
+            | ConstructError::NamedTuple { message, .. } => Some(message),
             // 这些变体没有单一 message 字段，完整错误信息通过 to_string() / full_message() 获取。
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
             | ConstructError::ExprStackUnderflow { .. }
-            | ConstructError::StopField { .. } => None,
+            | ConstructError::StopField { .. }
+            | ConstructError::CancelParsing { .. } => None,
         }
     }
 
@@ -383,7 +547,19 @@ impl ConstructError {
             | ConstructError::IndexField { path, .. }
             | ConstructError::String { path, .. }
             | ConstructError::Explicit { path, .. }
-            | ConstructError::Select { path, .. } => Some(path),
+            | ConstructError::Select { path, .. }
+            // Phase 8 P0 新增（5 个变体都携带 path）。
+            | ConstructError::Const { path, .. }
+            | ConstructError::Check { path, .. }
+            | ConstructError::Checksum { path, .. }
+            | ConstructError::Terminated { path, .. }
+            | ConstructError::CancelParsing { path }
+            // Phase 8 P1+P2 新增（5 个变体都携带 path）。
+            | ConstructError::Mapping { path, .. }
+            | ConstructError::Validation { path, .. }
+            | ConstructError::Union { path, .. }
+            | ConstructError::Rotation { path, .. }
+            | ConstructError::NamedTuple { path, .. } => Some(path),
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => None,
         }
     }
@@ -404,7 +580,9 @@ impl ConstructError {
             ConstructError::ExprType { .. }
             | ConstructError::ExprFieldMissing { .. }
             | ConstructError::ExprStackUnderflow { .. }
-            | ConstructError::StopField { .. } => self.to_string(),
+            | ConstructError::StopField { .. }
+            // CancelParsing 也走 Display（无 message 字段，仅 path）。
+            | ConstructError::CancelParsing { .. } => self.to_string(),
             // 其他变体：按 path 拼接。此分支的变体均有 message 字段（message() 返回 Some）。
             _ => match self.path() {
                 Some(p) => format!("Error in path {}\n{}", p, self.message().unwrap_or("")),
@@ -437,6 +615,18 @@ impl ConstructError {
             ConstructError::String { .. } => "String",
             ConstructError::Explicit { .. } => "Explicit",
             ConstructError::Select { .. } => "Select",
+            // Phase 8 P0 新增。
+            ConstructError::Const { .. } => "Const",
+            ConstructError::Check { .. } => "Check",
+            ConstructError::Checksum { .. } => "Checksum",
+            ConstructError::Terminated { .. } => "Terminated",
+            ConstructError::CancelParsing { .. } => "CancelParsing",
+            // Phase 8 P1+P2 新增。
+            ConstructError::Mapping { .. } => "Mapping",
+            ConstructError::Validation { .. } => "Validation",
+            ConstructError::Union { .. } => "Union",
+            ConstructError::Rotation { .. } => "Rotation",
+            ConstructError::NamedTuple { .. } => "NamedTuple",
         }
     }
 
@@ -541,7 +731,19 @@ impl ConstructError {
             | ConstructError::IndexField { path, .. }
             | ConstructError::String { path, .. }
             | ConstructError::Explicit { path, .. }
-            | ConstructError::Select { path, .. } => *path = new_path,
+            | ConstructError::Select { path, .. }
+            // Phase 8 P0 新增（5 个变体都含 path）。
+            | ConstructError::Const { path, .. }
+            | ConstructError::Check { path, .. }
+            | ConstructError::Checksum { path, .. }
+            | ConstructError::Terminated { path, .. }
+            | ConstructError::CancelParsing { path }
+            // Phase 8 P1+P2 新增（5 个变体都含 path）。
+            | ConstructError::Mapping { path, .. }
+            | ConstructError::Validation { path, .. }
+            | ConstructError::Union { path, .. }
+            | ConstructError::Rotation { path, .. }
+            | ConstructError::NamedTuple { path, .. } => *path = new_path,
             ConstructError::Compilation { .. } | ConstructError::UnresolvedReference { .. } => {}
         }
     }
@@ -609,6 +811,38 @@ struct ExceptionClasses {
     /// Python construct 的 `SelectError`（core.py L109），Select 遍历全部
     /// subcons 后无成功者。
     select_error: Py<PyType>,
+    // === Phase 8 P0 新增（5 个变体）===
+    /// 对应 `ConstructError::Const`（Phase 8.1）。
+    /// Python construct 的 `ConstError`（core.py L74）。
+    const_error: Py<PyType>,
+    /// 对应 `ConstructError::Check`（Phase 8.1）。
+    /// Python construct 的 `CheckError`（core.py L84）。
+    check_error: Py<PyType>,
+    /// 对应 `ConstructError::Checksum`（Phase 8.5）。
+    /// Python construct 的 `ChecksumError`（core.py L144）。
+    checksum_error: Py<PyType>,
+    /// 对应 `ConstructError::Terminated`（Phase 8.9）。
+    /// Python construct 的 `TerminatedError`（core.py L129）。
+    terminated_error: Py<PyType>,
+    /// 对应 `ConstructError::CancelParsing`（Phase 8.10）。
+    /// Python construct 的 `CancelParsing`（core.py L149）。用户主动取消解析。
+    cancel_parsing_error: Py<PyType>,
+    // === Phase 8 P1+P2 新增（5 个变体）===
+    /// 对应 `ConstructError::Mapping`（Phase 8.2）。
+    /// Python construct 的 `MappingError`（core.py L102）。
+    mapping_error: Py<PyType>,
+    /// 对应 `ConstructError::Validation`（Phase 8.3）。
+    /// Python construct 的 `ValidationError`（core.py L125）。
+    validation_error: Py<PyType>,
+    /// 对应 `ConstructError::Union`（Phase 8.6）。
+    /// Python construct 的 `UnionError`（core.py L130）。
+    union_error: Py<PyType>,
+    /// 对应 `ConstructError::Rotation`（Phase 8.12）。
+    /// Python construct 的 `RotationError`（core.py L138）。
+    rotation_error: Py<PyType>,
+    /// 对应 `ConstructError::NamedTuple`（Phase 8.11）。
+    /// Python construct 的 `NamedTupleError`（core.py L120）。
+    namedtuple_error: Py<PyType>,
 }
 
 /// 全局 Python 异常类缓存。
@@ -647,7 +881,9 @@ impl ExceptionClasses {
         //
         // Phase 6.2：数组扩容 13 → 14（新增 string_error，设计 §3.8.3）。
         // Phase 7：数组扩容 14 → 16（新增 explicit_error / select_error，设计 §1.3）。
-        let builtin_ptrs: [*mut ffi::PyObject; 16] = [
+        // Phase 8 P0：数组扩容 16 → 21（新增 const/check/checksum/terminated/cancel_parsing）。
+        // Phase 8 P1+P2：数组扩容 21 → 26（新增 mapping/validation/union/rotation/namedtuple）。
+        let builtin_ptrs: [*mut ffi::PyObject; 26] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
             self.field_length_error.as_ptr(),
@@ -664,6 +900,18 @@ impl ExceptionClasses {
             self.string_error.as_ptr(),
             self.explicit_error.as_ptr(),
             self.select_error.as_ptr(),
+            // Phase 8 P0 新增。
+            self.const_error.as_ptr(),
+            self.check_error.as_ptr(),
+            self.checksum_error.as_ptr(),
+            self.terminated_error.as_ptr(),
+            self.cancel_parsing_error.as_ptr(),
+            // Phase 8 P1+P2 新增。
+            self.mapping_error.as_ptr(),
+            self.validation_error.as_ptr(),
+            self.union_error.as_ptr(),
+            self.rotation_error.as_ptr(),
+            self.namedtuple_error.as_ptr(),
         ];
         builtin_ptrs.contains(&cls_ptr)
     }
@@ -710,6 +958,18 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         string_error: get("StringError")?,
         explicit_error: get("ExplicitError")?,
         select_error: get("SelectError")?,
+        // Phase 8 P0 新增。
+        const_error: get("ConstError")?,
+        check_error: get("CheckError")?,
+        checksum_error: get("ChecksumError")?,
+        terminated_error: get("TerminatedError")?,
+        cancel_parsing_error: get("CancelParsing")?,
+        // Phase 8 P1+P2 新增。
+        mapping_error: get("MappingError")?,
+        validation_error: get("ValidationError")?,
+        union_error: get("UnionError")?,
+        rotation_error: get("RotationError")?,
+        namedtuple_error: get("NamedTupleError")?,
     };
 
     // GILOnceCell::set 在已初始化时返回 Err(value)。由于前面已检查，这里应成功；
@@ -767,6 +1027,18 @@ fn select_exception_class<'py>(
         ConstructError::Explicit { .. } => &classes.explicit_error,
         // Phase 7：Select 错误映射到 Python SelectError（core.py L109）。
         ConstructError::Select { .. } => &classes.select_error,
+        // Phase 8 P0 新增（5 个变体）。
+        ConstructError::Const { .. } => &classes.const_error,
+        ConstructError::Check { .. } => &classes.check_error,
+        ConstructError::Checksum { .. } => &classes.checksum_error,
+        ConstructError::Terminated { .. } => &classes.terminated_error,
+        ConstructError::CancelParsing { .. } => &classes.cancel_parsing_error,
+        // Phase 8 P1+P2 新增（5 个变体）。
+        ConstructError::Mapping { .. } => &classes.mapping_error,
+        ConstructError::Validation { .. } => &classes.validation_error,
+        ConstructError::Union { .. } => &classes.union_error,
+        ConstructError::Rotation { .. } => &classes.rotation_error,
+        ConstructError::NamedTuple { .. } => &classes.namedtuple_error,
     };
     // cls.bind(py) 返回 &Bound<'py, PyType>，借用 cls（借自 classes）。
     // 不调 clone()，避免 incref/decref 各一次。
@@ -994,19 +1266,44 @@ impl From<ConstructError> for PyErr {
     }
 }
 
-/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（P0-4 优化）。
+/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（P0-4 优化；Phase 8.10 CancelParsing 识别）。
 ///
 /// 使 `dict.set_item(...)?` 等返回 `PyResult` 的 C API 调用能通过 `?` 直接传播，
 /// 无需在每个调用点写 `map_err` 闭包。错误上下文（字段名、路径）由上层
 /// `StructNode` 通过 [`ConstructError::push_path_segment`] 统一补充。
 ///
 /// 对齐 pydantic-core 的 `ValResult: From<PyErr>`（model_fields.rs:363）。
+///
+/// # Phase 8.10 CancelParsing 识别（设计 §6.2.2）
+///
+/// 用户从 Python 代码 `raise CancelParsing()` 时，pyo3 把 PyErr 传给 Rust。
+/// 本实现检查 PyErr 的类型是否为缓存的 `cancel_parsing_error`（指针相等），
+/// 是则转为 `ConstructError::CancelParsing`（被 schema.rs 顶层 catch），
+/// 否则 fallback 到 `Generic`（原有行为）。
 impl From<PyErr> for ConstructError {
     fn from(e: PyErr) -> Self {
-        ConstructError::Generic {
-            message: e.to_string(),
-            path: String::new(),
-        }
+        Python::with_gil(|py| {
+            // Phase 8.10：识别 CancelParsing（指针相等比较，与 is_builtin_class 同模式）。
+            if let Some(classes) = EXCEPTIONS.get(py) {
+                let err_type_ptr = e.get_type_bound(py).as_ptr();
+                if err_type_ptr == classes.cancel_parsing_error.as_ptr() {
+                    // CancelParsing 在 Python 是 ConstructError 子类，可能携带 path 属性。
+                    // 提取失败时 path 留空（顶层 catch 后 path 会被丢弃，对齐 Python `pass`）。
+                    let path = e
+                        .value_bound(py)
+                        .getattr("path")
+                        .ok()
+                        .and_then(|p| p.extract::<String>().ok())
+                        .unwrap_or_default();
+                    return ConstructError::CancelParsing { path };
+                }
+            }
+            // 默认 fallback（原逻辑）
+            ConstructError::Generic {
+                message: e.to_string(),
+                path: String::new(),
+            }
+        })
     }
 }
 
@@ -1258,6 +1555,18 @@ mod tests {
             "class StringError(ConstructError): pass\n",
             "class ExplicitError(ConstructError): pass\n",
             "class SelectError(ConstructError): pass\n",
+            // Phase 8 P0 新增。
+            "class ConstError(ConstructError): pass\n",
+            "class CheckError(ConstructError): pass\n",
+            "class ChecksumError(ConstructError): pass\n",
+            "class TerminatedError(ConstructError): pass\n",
+            "class CancelParsing(ConstructError): pass\n",
+            // Phase 8 P1+P2 新增。
+            "class MappingError(ConstructError): pass\n",
+            "class ValidationError(ConstructError): pass\n",
+            "class UnionError(ConstructError): pass\n",
+            "class RotationError(ConstructError): pass\n",
+            "class NamedTupleError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run test classes definition");
@@ -1286,6 +1595,18 @@ mod tests {
             string_error: get("StringError"),
             explicit_error: get("ExplicitError"),
             select_error: get("SelectError"),
+            // Phase 8 P0 新增。
+            const_error: get("ConstError"),
+            check_error: get("CheckError"),
+            checksum_error: get("ChecksumError"),
+            terminated_error: get("TerminatedError"),
+            cancel_parsing_error: get("CancelParsing"),
+            // Phase 8 P1+P2 新增。
+            mapping_error: get("MappingError"),
+            validation_error: get("ValidationError"),
+            union_error: get("UnionError"),
+            rotation_error: get("RotationError"),
+            namedtuple_error: get("NamedTupleError"),
         }
     }
 
@@ -1685,6 +2006,18 @@ mod tests {
             "class StringError(ConstructError): pass\n",
             "class ExplicitError(ConstructError): pass\n",
             "class SelectError(ConstructError): pass\n",
+            // Phase 8 P0 新增（与 build_test_classes 同步）。
+            "class ConstError(ConstructError): pass\n",
+            "class CheckError(ConstructError): pass\n",
+            "class ChecksumError(ConstructError): pass\n",
+            "class TerminatedError(ConstructError): pass\n",
+            "class CancelParsing(ConstructError): pass\n",
+            // Phase 8 P1+P2 新增（与 build_test_classes 同步）。
+            "class MappingError(ConstructError): pass\n",
+            "class ValidationError(ConstructError): pass\n",
+            "class UnionError(ConstructError): pass\n",
+            "class RotationError(ConstructError): pass\n",
+            "class NamedTupleError(ConstructError): pass\n",
         );
         py.run_bound(code, None, None)
             .expect("run aligned test classes definition");
@@ -1713,6 +2046,18 @@ mod tests {
             string_error: get("StringError"),
             explicit_error: get("ExplicitError"),
             select_error: get("SelectError"),
+            // Phase 8 P0 新增。
+            const_error: get("ConstError"),
+            check_error: get("CheckError"),
+            checksum_error: get("ChecksumError"),
+            terminated_error: get("TerminatedError"),
+            cancel_parsing_error: get("CancelParsing"),
+            // Phase 8 P1+P2 新增。
+            mapping_error: get("MappingError"),
+            validation_error: get("ValidationError"),
+            union_error: get("UnionError"),
+            rotation_error: get("RotationError"),
+            namedtuple_error: get("NamedTupleError"),
         }
     }
 

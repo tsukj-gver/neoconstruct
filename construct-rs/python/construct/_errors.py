@@ -231,6 +231,157 @@ class SelectError(ConstructError):
 
 
 # ---------------------------------------------------------------------------
+# Phase 8 P0 新增异常类（5 个）
+# ---------------------------------------------------------------------------
+
+
+class ConstError(ConstructError):
+    """常量字段错误：parse 时 subcon 结果与期望值不符，或 build 时 obj 非 None/期望值。
+
+    对应 Python construct 的 ``ConstError``（core.py L74）和 Rust 的
+    ``ConstructError::Const``。
+
+    Phase 8.1 新增：``Const`` 构造器的 parse/build 校验失败时触发
+    （core.py L2832/L2867/L2872）。
+    """
+
+
+class CheckError(ConstructError):
+    """断言检查错误：Check 节点的表达式求值为假。
+
+    对应 Python construct 的 ``CheckError``（core.py L84）和 Rust 的
+    ``ConstructError::Check``。
+
+    Phase 8.1 新增：``Check`` 构造器的表达式求值为假时触发
+    （core.py L3105/L3118/L3122）。
+    """
+
+
+class ChecksumError(ConstructError):
+    """校验和错误：parse 时 hash 不匹配。
+
+    对应 Python construct 的 ``ChecksumError``（core.py L144）和 Rust 的
+    ``ConstructError::Checksum``。
+
+    Phase 8.5 新增：``Checksum`` 构造器的 hash 比对失败时触发
+    （core.py L5574）。
+    """
+
+
+class TerminatedError(ConstructError):
+    """终止符错误：Terminated 节点 parse 时 stream 未到 EOF。
+
+    对应 Python construct 的 ``TerminatedError``（core.py L129）和 Rust 的
+    ``ConstructError::Terminated``。
+
+    Phase 8.9 新增：``Terminated`` 构造器在 stream 仍有剩余字节时触发
+    （core.py L4748）。
+    """
+
+
+class CancelParsing(ConstructError):
+    """用户主动取消解析（仅能由用户代码显式 raise）。
+
+    对应 Python construct 的 ``CancelParsing``（core.py L149）和 Rust 的
+    ``ConstructError::CancelParsing``。
+
+    Phase 8.10 新增（PM 决策 D-7）：
+
+    - 用户在 Adapter ``_decode`` 内 ``raise CancelParsing()`` → parse 入口捕获，返回 None
+    - 用户在 ``__post_init__`` 内 ``raise CancelParsing()`` → 同上
+    - schema.rs ``_parse_raw`` 顶层 catch（对齐 Python core.py L416-419）
+
+    构造-rs 已知差异（设计 §6.5 CP-3/CP-4）：
+
+    - CancelParsing 在 Peek 内层抛出会被 Peek 吞掉返回 None（与 Python 同样行为）
+    - CancelParsing 在 Select 内层抛出会被 Select 当作 subcon 失败继续尝试下一个
+
+    construct-rs 表达式系统不接 lambda（ADR-006），用户无法在 Computed 表达式
+    中 raise CancelParsing——**仅 Python 层用户代码可触发**。
+    """
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P1+P2 新增异常类（5 个）
+# ---------------------------------------------------------------------------
+
+
+class MappingError(ConstructError):
+    """映射错误：Enum/FlagsEnum/Mapping 的 label↔value 查找失败。
+
+    对应 Python construct 的 ``MappingError``（core.py L102）和 Rust 的
+    ``ConstructError::Mapping``。
+
+    Phase 8.2 新增。触发场景：
+
+    - ``Enum`` build 时 label 不在 encmapping
+    - ``FlagsEnum`` build 时未知 label（str/dict 路径）
+    - ``Mapping`` parse/build 时 key 不在映射（**包含 TypeError → MappingError 转换**，
+      C-4：捕获自定义不可哈希 key 的 TypeError）
+    """
+
+
+class ValidationError(ConstructError):
+    """校验错误：OneOf/NoneOf 的值集合校验失败，或 Validator 子类 _validate 返回 False。
+
+    对应 Python construct 的 ``ValidationError``（core.py L125）和 Rust 的
+    ``ConstructError::Validation``。
+
+    Phase 8.3 新增。触发场景：
+
+    - ``OneOf`` parse/build 时 obj ∉ valids（含 C-6 bool 边界：``True == 1`` 视为 int 1）
+    - ``NoneOf`` parse/build 时 obj ∈ invalids
+    - 用户继承 ``Validator`` 实现 ``_validate`` 返回 False
+    """
+
+
+class UnionError(ConstructError):
+    """Union 错误：build 时无 subcon 匹配，或 parsefrom 解析失败。
+
+    对应 Python construct 的 ``UnionError``（core.py L130）和 Rust 的
+    ``ConstructError::Union``。
+
+    Phase 8.6 新增。
+    """
+
+
+class RotationError(ConstructError):
+    """旋转错误：ProcessRotateLeft 的 group/amount 参数非法或数据长度不对齐。
+
+    对应 Python construct 的 ``RotationError``（core.py L138）和 Rust 的
+    ``ConstructError::Rotation``。
+
+    Phase 8.12 新增。触发场景：
+
+    - ``group < 1``
+    - ``len(data) % group != 0``
+    """
+
+
+class NamedTupleError(ConstructError):
+    """NamedTuple 错误：inner 非 Struct/Sequence/Array/GreedyRange，或字段提取失败。
+
+    对应 Python construct 的 ``NamedTupleError``（core.py L120）和 Rust 的
+    ``ConstructError::NamedTuple``。
+
+    Phase 8.11 新增。
+    """
+
+
+class TimestampError(ConstructError):
+    """Timestamp 错误：参数类型错误（unit/epoch 非法）。
+
+    对应 Python construct 的 ``TimestampError``（core.py L128）。
+
+    Phase 8.11 新增。**仅 Python 层使用**（Timestamp macro 是 Python 实现，
+    不进入 Rust ConstructError）。触发场景：
+
+    - ``unit`` 非 int/float/str
+    - ``epoch`` 非 int/Arrow/str
+    """
+
+
+# ---------------------------------------------------------------------------
 # Phase 6.2: StringEncoded 兼容性别名（设计 §3.7.2 / §3.7.3）
 #
 # Python construct 原版中 ``StringEncoded(subcon, encoding)`` 是 Adapter 子类，
@@ -290,4 +441,17 @@ __all__ = [
     "StringError",
     "ExplicitError",
     "SelectError",
+    # Phase 8 P0 新增。
+    "ConstError",
+    "CheckError",
+    "ChecksumError",
+    "TerminatedError",
+    "CancelParsing",
+    # Phase 8 P1+P2 新增。
+    "MappingError",
+    "ValidationError",
+    "UnionError",
+    "RotationError",
+    "NamedTupleError",
+    "TimestampError",
 ]

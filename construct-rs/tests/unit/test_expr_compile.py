@@ -454,9 +454,34 @@ class TestExtractAndCompileExprs:
         result = _extract_and_compile_exprs(Int8ub, {}, "test")
         assert result == {}
 
-    def test_descriptor_with_constant_param_returns_empty(self):
-        """``_expr_params`` 含常量值 → 不编译，返回空 dict。"""
+    def test_descriptor_with_int_constant_param_compiles_as_const(self):
+        """``_expr_params`` 含 int 常量 → 编译为单条 Const ExprOp（DF1 修复）。
+
+        设计 §1.2.2："int 常量也包装为单条 Const"。
+        DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram。
+        """
         desc = _MockExprParamsDescriptor({"length": 4})
+        result = _extract_and_compile_exprs(desc, {}, "test")
+        assert result == {"length": [("const", 4)]}
+
+    def test_descriptor_with_int_constant_zero(self):
+        """int 常量 0 编译为 ``[("const", 0)]``（DF1 常见用例 ``Default(Byte, 0)``）。"""
+        desc = _MockExprParamsDescriptor({"value": 0})
+        result = _extract_and_compile_exprs(desc, {}, "test")
+        assert result == {"value": [("const", 0)]}
+
+    def test_descriptor_with_negative_int_constant(self):
+        """负 int 常量编译为 ``[("const", N)]``。"""
+        desc = _MockExprParamsDescriptor({"value": -1})
+        result = _extract_and_compile_exprs(desc, {}, "test")
+        assert result == {"value": [("const", -1)]}
+
+    def test_descriptor_with_non_int_constant_returns_empty(self):
+        """非 int 常量（bytes/str）不编译，返回空 dict。
+
+        与 int 不同，bytes/str 常量由 Rust 侧直接从描述符读取（如 ConstDescriptor.value）。
+        """
+        desc = _MockExprParamsDescriptor({"value": b"abc"})
         result = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {}
 
@@ -478,15 +503,18 @@ class TestExtractAndCompileExprs:
         assert result == {"length": [("getint", 0), ("getint", 1), ("add",)]}
 
     def test_descriptor_with_mixed_params(self):
-        """``_expr_params`` 含常量和表达式 → 只编译表达式。"""
+        """``_expr_params`` 含 int 常量和表达式 → 全部编译（int 为 Const）。"""
         a = field(Int8ub)
         idx_map = {id(a): 0}
         desc = _MockExprParamsDescriptor({
             "length": a,
-            "padding": 4,  # 常量，不编译
+            "padding": 4,  # int 常量 → Const ExprOp
         })
         result = _extract_and_compile_exprs(desc, idx_map, "test")
-        assert result == {"length": [("getint", 0)]}
+        assert result == {
+            "length": [("getint", 0)],
+            "padding": [("const", 4)],
+        }
 
     def test_descriptor_with_multiple_expr_params(self):
         """``_expr_params`` 含多个表达式参数 → 全部编译。"""

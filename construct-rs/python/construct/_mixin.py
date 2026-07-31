@@ -615,7 +615,14 @@ def _extract_and_compile_exprs(subcon, field_index_map, field_name):
             # 注入已编译的 ExprOp 元组列表）。直接透传，无需再编译。
             # 注意：元素必须是元组（与 _compile_expr_tree 输出格式一致）。
             result[param_name] = param_value
-        # 常量值（int/bytes/str）不编译（留在描述符中供 Rust 侧读取）
+        elif isinstance(param_value, int) and not isinstance(param_value, bool):
+            # DF1 修复：int 常量编译为单条 Const ExprOp。
+            # DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram
+            # （与设计文档 §1.2.2 一致："int 常量也包装为单条 Const"）。
+            # BytesDescriptor.length 的常量路径由 Rust 侧直接从描述符读取，
+            # 此处的 ExprProgram 冗余但无害（Rust 优先 extract::<usize>）。
+            result[param_name] = [("const", param_value)]
+        # 其他常量值（bytes/str）不编译（留在描述符中供 Rust 侧读取）
 
     return result
 

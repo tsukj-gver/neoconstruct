@@ -23,6 +23,7 @@
 #![allow(clippy::useless_conversion)]
 
 use crate::context::Context;
+use crate::error::ConstructError;
 use crate::nodes::{Construct, Node};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
@@ -159,9 +160,18 @@ impl CompiledSchema {
         // dict（has_expressions=false 时）。不再需要入口处判断 has_expressions。
         let mut ctx = Context::placeholder(py);
         let mut path = Path::new();
-        // root.parse 返回用户类实例（StructNode 内部 create_class + 借用 __dict__）
-        let result = self.root.parse(py, &mut stream, &mut ctx, &mut path)?;
-        Ok(result.into_bound(py))
+        // Phase 8.10：顶层 catch CancelParsing（对齐 Python core.py L416-419）。
+        // 用户主动 raise CancelParsing → ConstructError::CancelParsing → 返回 None。
+        // 其他错误正常转 PyErr 向上传播。
+        let parse_result = self.root.parse(py, &mut stream, &mut ctx, &mut path);
+        match parse_result {
+            Ok(result) => Ok(result.into_bound(py)),
+            Err(ConstructError::CancelParsing { .. }) => {
+                // 用户主动取消，返回 None（对齐 Python `except CancelParsing: pass`）。
+                Ok(py.None().into_bound(py))
+            }
+            Err(e) => Err(e.into()),
+        }
     }
 
     /// 从 Python 对象构建字节（build FFI 入口，恰好一次 FFI 穿越）。
@@ -300,6 +310,84 @@ mod tests {
             assert!(
                 retrieved.extract::<Py<CompiledSchema>>().is_ok(),
                 "retrieved attribute should be a CompiledSchema"
+            );
+        });
+    }
+
+    /// Phase 8 P0 VET 驳回修复（D-P0-3）：验证 Aligned 字段 sizeof 修复后
+    /// Struct static_size 预分配恢复。
+    ///
+    /// 修复前：Aligned.sizeof 统一返回 Err → 含 Aligned 字段的 Struct
+    /// static_size 永远为 None → BuildStream 退化为无预分配模式（每次 build 走 realloc）。
+    ///
+    /// 修复后：Aligned(4, Int16ub) 编译期常量 modulus sizeof 成功 → static_size=Some(4)。
+    #[test]
+    fn static_size_restored_when_aligned_has_const_modulus() {
+        use crate::expr::{ExprOp, ExprProgram};
+        use crate::nodes::aligned::AlignedNode;
+        use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
+
+        with_py(|py| {
+            // 构造 Struct 含一个 Aligned(4, Int16ub) 字段。
+            // new_for_test 强制 StructNode.has_expressions=false（模拟编译期
+            // 正确识别 Aligned 常量 modulus 不含表达式的情况）。
+            let aligned = Node::Aligned(AlignedNode::new(
+                Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big)),
+                ExprProgram::new(vec![ExprOp::Const(4)]),
+                0x00,
+            ));
+            let root = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![("field1".to_string(), aligned)],
+            ));
+            let cls = py
+                .eval_bound("type('S', (), {})", None, None)
+                .expect("create type")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let schema = CompiledSchema::new(root, cls, py);
+
+            // 修复后：static_size 应为 Some(4)（Int16ub=2 + pad=2）。
+            // 修复前：Aligned.sizeof 返回 Err → static_size 为 None。
+            assert_eq!(
+                schema.static_size,
+                Some(4),
+                "Aligned(4, Int16ub) const modulus should restore static_size prealloc"
+            );
+        });
+    }
+
+    /// 对照测试：Aligned 字段含运行期 modulus 表达式时，static_size 仍为 None
+    /// （D-P0-3：运行期表达式 sizeof 返回 Err，对齐 Python SizeofError）。
+    #[test]
+    fn static_size_none_when_aligned_has_runtime_modulus() {
+        use crate::expr::{ExprOp, ExprProgram};
+        use crate::nodes::aligned::AlignedNode;
+        use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
+
+        with_py(|py| {
+            let aligned = Node::Aligned(AlignedNode::new(
+                Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big)),
+                ExprProgram::new(vec![ExprOp::GetInt(0)]),
+                0x00,
+            ));
+            // 注意：new_for_test 强制 StructNode.has_expressions=false，
+            // 但 schema.rs 仍会尝试 sizeof（因为 has_expressions=false），
+            // 此时 Aligned.sizeof 对运行期 modulus 返回 Err → static_size=None。
+            let root = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![("field1".to_string(), aligned)],
+            ));
+            let cls = py
+                .eval_bound("type('S', (), {})", None, None)
+                .expect("create type")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let schema = CompiledSchema::new(root, cls, py);
+
+            assert_eq!(
+                schema.static_size, None,
+                "Aligned with runtime modulus should keep static_size None (SizeofError)"
             );
         });
     }

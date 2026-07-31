@@ -37,7 +37,7 @@ use pyo3::prelude::*;
 use schema::CompiledSchema;
 
 // Phase 2 表达式系统核心类型，re-export 供 crate 内其他模块直接使用。
-pub use expr::{eval_expr_int, ExprOp, ExprProgram};
+pub use expr::{eval_expr_any, eval_expr_bool, eval_expr_int, ExprOp, ExprProgram};
 
 /// 返回 construct-rs Rust 内核的版本号字符串。
 ///

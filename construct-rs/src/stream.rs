@@ -336,6 +336,26 @@ impl<'a> ParseStream<'a> {
         self.data
     }
 
+    /// 借用底层缓冲的 `[start..end)` 切片（零拷贝，Phase 8.5 新增）。
+    ///
+    /// 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §3.3.1（L-14 教训触发）。
+    /// 用于 Checksum StreamRange 模式：Rust 内置 hashfunc 直接操作 `&[u8]`，
+    /// 全程零拷贝（不构造 PyBytes）。
+    ///
+    /// # 行为
+    ///
+    /// - `start > end` 或 `end > data.len()`：返回 None
+    /// - 不修改 stream 游标（纯借用查询，与 read 不同）
+    /// - 不要求 bit_pos == 0（切片不消费字节）
+    ///
+    /// # 安全
+    ///
+    /// 返回 `Option<&'a [u8]>`，生命周期绑定到 ParseStream 持有的 `&'a [u8]`
+    /// （即 Python 端 PyBytes 的 buffer，pyo3 GIL 保证有效）。
+    pub fn slice(&self, start: usize, end: usize) -> Option<&'a [u8]> {
+        self.data.get(start..end)
+    }
+
     /// 剩余未读字节数。
     pub fn remaining(&self) -> usize {
         self.data.len().saturating_sub(self.pos)
@@ -988,6 +1008,63 @@ mod tests {
         assert_eq!(s.remaining(), 4);
         let _ = s.read(2, &path).expect("second");
         assert_eq!(s.remaining(), 2);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Phase 8.5：ParseStream::slice
+    // ---------------------------------------------------------------------------
+
+    #[test]
+    fn parse_stream_slice_returns_subslice() {
+        // 基本用法：slice(1, 4) 返回 [1..4)
+        let data = b"abcdef";
+        let s = ParseStream::new(data);
+        assert_eq!(s.slice(1, 4), Some(b"bcd".as_ref()));
+    }
+
+    #[test]
+    fn parse_stream_slice_does_not_advance_cursor() {
+        // slice 不修改游标
+        let data = b"abcdef";
+        let mut s = ParseStream::new(data);
+        let path = root_path();
+        assert_eq!(s.tell(), 0);
+        let _ = s.slice(0, 3);
+        assert_eq!(s.tell(), 0);
+        // 仍可正常 read
+        let chunk = s.read(2, &path).expect("read");
+        assert_eq!(chunk, b"ab");
+    }
+
+    #[test]
+    fn parse_stream_slice_start_greater_than_end_returns_none() {
+        let s = ParseStream::new(b"abcdef");
+        assert_eq!(s.slice(4, 1), None);
+    }
+
+    #[test]
+    fn parse_stream_slice_end_beyond_data_returns_none() {
+        let s = ParseStream::new(b"abc");
+        assert_eq!(s.slice(0, 10), None);
+    }
+
+    #[test]
+    fn parse_stream_slice_full_range() {
+        let s = ParseStream::new(b"abcdef");
+        assert_eq!(s.slice(0, 6), Some(b"abcdef".as_ref()));
+    }
+
+    #[test]
+    fn parse_stream_slice_empty_range() {
+        let s = ParseStream::new(b"abcdef");
+        assert_eq!(s.slice(2, 2), Some(b"".as_ref()));
+    }
+
+    #[test]
+    fn parse_stream_slice_at_end_boundary() {
+        let s = ParseStream::new(b"abc");
+        // end == data.len() 应成功
+        assert_eq!(s.slice(1, 3), Some(b"bc".as_ref()));
     }
 
     // ---------------------------------------------------------------------------

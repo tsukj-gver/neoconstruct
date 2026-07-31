@@ -28,6 +28,13 @@ enum_dispatch = "0.3"
 # Phase 6.1：Float16 IEEE 754 半精度支持（D-1 决策接受 half crate）。
 # 纯 Rust 计算库（不跨 FFI），提供 f16 类型的位运算（from_be_bytes / to_f64 / from_f64）。
 half = "2.4"
+# Phase 8.5：Checksum Rust 内置 hashfunc（L-14 教训触发，零拷贝路径）。
+# 纯 Rust 计算库（不跨 FFI），与 §0 #4（pyo3 核心依赖）不冲突——`half` 已有先例。
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1.4"
+adler = "1.0"
 
 [features]
 # 默认不启用 extension-module，使 cargo test 能初始化 Python 解释器（嵌入模式）。

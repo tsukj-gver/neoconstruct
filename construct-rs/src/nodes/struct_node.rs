@@ -1382,6 +1382,59 @@ mod tests {
     }
 
     #[test]
+    fn ro_terminated_field_build_is_noop() {
+        // TM1 修复：Terminated 作为 RO 字段时 compute_ro_value 返回 Py_None，
+        // 随后 TerminatedNode.build 是 no-op（不写字节，不从 obj 取值）。
+        with_py(|py| {
+            let terminated_node = Node::Terminated(crate::nodes::terminated::TerminatedNode::new());
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "t", terminated_node),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            // obj 只有 RW 字段 'a'，无需为 RO Terminated 提供 't' 属性
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x42})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed");
+            // 只写字段 a 的字节（Terminated 是 no-op）
+            assert_eq!(stream.as_bytes(), &[0x42]);
+        });
+    }
+
+    #[test]
+    fn ro_default_field_build_uses_constant_value() {
+        // DF2 修复：Default(Byte, 0) 作为 RO 字段时 compute_ro_value 求值
+        // value 表达式（Const(0) → PyLong(0)），随后 DefaultNode.build 转发 inner。
+        with_py(|py| {
+            let inner = u8_node();
+            let value = crate::expr::ExprProgram::new(vec![crate::expr::ExprOp::Const(0)]);
+            let default_node =
+                Node::Default(crate::nodes::default_node::DefaultNode::new(inner, value));
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "d", default_node),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            // obj 只有 RW 字段 'a'，Default 的值由 compute_ro_value 计算
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x07})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed");
+            // 字段 a=0x07，Default 值=0x00
+            assert_eq!(stream.as_bytes(), &[0x07, 0x00]);
+        });
+    }
+
+    #[test]
     fn ro_field_parse_stores_value_in_instance() {
         // RO 字段 parse 时正常解析并存入实例（与 RW 相同）。
         with_py(|py| {

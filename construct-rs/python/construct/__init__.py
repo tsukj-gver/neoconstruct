@@ -23,7 +23,11 @@
 """
 
 from ._errors import (
+    CancelParsing,
+    CheckError,
+    ChecksumError,
     CompilationError,
+    ConstError,
     ConstructError,
     ExplicitError,
     FieldLengthError,
@@ -40,6 +44,7 @@ from ._errors import (
     StreamError,
     StringError,
     StringEncoded,
+    TerminatedError,
     UnresolvedReferenceError,
 )
 from ._mixin import StructMixin, BitStructMixin, field, rfield, wfield, Tell, Computed
@@ -171,8 +176,43 @@ try:
         PointerDescriptor,
         Prefixed,
         PrefixedDescriptor,
+        # Phase 8 P0: Const / Default / Check
+        Const,
+        ConstDescriptor,
+        Default,
+        DefaultDescriptor,
+        Check,
+        CheckDescriptor,
+        # Phase 8 P0: Terminated / Probe
+        Terminated,
+        TerminatedDescriptor,
+        Probe,
+        ProbeDescriptor,
+        # Phase 8 P0: Aligned
+        Aligned,
+        AlignedDescriptor,
+        # Phase 8 P0: Hex / HexDump
+        Hex,
+        HexDescriptor,
+        HexDump,
+        HexDumpDescriptor,
+        # Phase 8 P0: Checksum
+        Checksum,
+        ChecksumDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
+    pass
+
+# Phase 8.8: AlignedStruct 宏（不依赖 Rust 扩展）。
+try:
+    from ._macros import AlignedStruct
+except ImportError:  # pragma: no cover
+    pass
+
+# Phase 8.5: HashAlgo Python enum（不依赖 Rust 扩展）。
+try:
+    from ._hashalgo import HashAlgo
+except ImportError:  # pragma: no cover
     pass
 
 # Phase 6.3: 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
@@ -329,6 +369,31 @@ __all__ = [
     "PointerDescriptor",
     "Prefixed",
     "PrefixedDescriptor",
+    # Phase 8 P0: Const / Default / Check
+    "Const",
+    "ConstDescriptor",
+    "Default",
+    "DefaultDescriptor",
+    "Check",
+    "CheckDescriptor",
+    # Phase 8 P0: Terminated / Probe
+    "Terminated",
+    "TerminatedDescriptor",
+    "Probe",
+    "ProbeDescriptor",
+    # Phase 8 P0: Aligned / AlignedStruct
+    "Aligned",
+    "AlignedDescriptor",
+    "AlignedStruct",
+    # Phase 8 P0: Hex / HexDump
+    "Hex",
+    "HexDescriptor",
+    "HexDump",
+    "HexDumpDescriptor",
+    # Phase 8 P0: Checksum / HashAlgo
+    "Checksum",
+    "ChecksumDescriptor",
+    "HashAlgo",
     # Phase 6.3: 用户面 Adapter 基类
     "Adapter",
     "AdapterDescriptor",
@@ -365,4 +430,10 @@ __all__ = [
     "ExplicitError",
     "SelectError",
     "StringEncoded",
+    # Phase 8 P0 新增异常。
+    "ConstError",
+    "CheckError",
+    "ChecksumError",
+    "TerminatedError",
+    "CancelParsing",
 ]

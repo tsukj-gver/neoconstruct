@@ -443,6 +443,83 @@ pub fn eval_expr_int(
     Ok(stack_buf[stack_len])
 }
 
+/// 求值表达式为布尔值（Phase 8.1 Check 节点用）。
+///
+/// 与 [`eval_expr_int`] 同栈式求值，仅将最终 i64 转为 bool
+/// （非零即真，对齐 Python `if not passed` 语义）。
+///
+/// # 错误
+///
+/// 同 [`eval_expr_int`]（向上传播 ExprContext / ExprFieldMissing / ExprDivByZero 等）。
+pub fn eval_expr_bool(
+    program: &ExprProgram,
+    ctx: &Context<'_>,
+    py: Python<'_>,
+) -> Result<bool, ConstructError> {
+    let v = eval_expr_int(program, ctx, py)?;
+    Ok(v != 0)
+}
+
+/// 求值表达式为任意 Python 对象（Phase 8.12 ProcessXor XorPad::Expr 路径用）。
+///
+/// 与 [`eval_expr_int`] 同栈式求值，但最终值通过 `PyObject_*` API 取出原始 PyObject
+/// 而非 i64。用于需要返回 bytes / str / 任意 Python 对象的场景（如 ProcessXor 的
+/// padfunc 表达式求值可能返回 int 或 bytes）。
+///
+/// # 实现说明
+///
+/// 内部仍走 i64 栈式 VM，但 `GetInt` 时直接从 ctx 取 PyObject 引用（同时维持
+/// i64 缓存以支持后续算术）。最终 `pop` 时返回 PyObject（若栈顶是 GetInt 取出的
+/// 原始字段，则返回该字段 PyObject；若栈顶是 Const 计算结果，则返回 i64 PyLong）。
+///
+/// # 限制
+///
+/// - 不支持纯 Const 程序返回 bytes/str（Const 是 i64，仅能返回 PyLong）
+/// - 仅支持"单字段引用"或"i64 算术"两种模式（与 Switch FieldRef 同脉络）
+///
+/// # 错误
+///
+/// 同 [`eval_expr_int`]。
+pub fn eval_expr_any(
+    program: &ExprProgram,
+    ctx: &Context<'_>,
+    py: Python<'_>,
+) -> Result<Py<PyAny>, ConstructError> {
+    if program.is_empty() {
+        return Err(ConstructError::Generic {
+            message: "eval_expr_any: empty expression program".to_string(),
+            path: String::new(),
+        });
+    }
+
+    if program.max_stack() > VM_STACK_SLOTS {
+        return Err(ConstructError::Generic {
+            message: format!(
+                "expression max_stack {} exceeds VM_STACK_SLOTS {}",
+                program.max_stack(),
+                VM_STACK_SLOTS
+            ),
+            path: String::new(),
+        });
+    }
+
+    // 简化策略：先求 i64 结果，若程序是"单 GetInt"模式则返回原始 PyObject
+    // （覆盖 ProcessXor padfunc = this.pad_field 的常见用例）。
+    // 其他模式 fallback 到 i64 → PyLong。
+    let ops = program.ops();
+    if ops.len() == 1 {
+        if let ExprOp::GetInt(idx) = ops[0] {
+            // 单字段引用：返回原始 PyObject（可能是 bytes / str / int / 任意类型）。
+            let val = ctx.get_field_at(idx, py)?;
+            return Ok(val.unbind());
+        }
+    }
+
+    // 通用 fallback：i64 → PyLong（覆盖 Const + 算术）。
+    let v = eval_expr_int(program, ctx, py)?;
+    Ok(v.into_py(py))
+}
+
 /// 压入一个值到固定大小 VM 栈顶。
 ///
 /// 调用方需保证 `len < VM_STACK_SLOTS`（由 [`eval_expr_int`] 入口的

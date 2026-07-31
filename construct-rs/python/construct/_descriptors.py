@@ -2174,6 +2174,778 @@ def Prefixed(lengthfield, subcon, includelength=False):
     return PrefixedDescriptor(lengthfield, subcon, includelength)
 
 
+# ---------------------------------------------------------------------------
+# Phase 8 P0: Const / Default / Check 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §1。
+#
+# 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
+# compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
+# 匹配到 "ConstDescriptor" / "DefaultDescriptor" / "CheckDescriptor" 字符串，
+# 构建对应的 Node 变体（详见 compile.rs Phase 8 P0 分支）。
+#
+# - ConstDescriptor：value（任意 Python 对象，常为 int/bytes/str）+ subcon
+#   subcon 缺省时若 value 是 bytes，自动推断为 Bytes(len(value))（CN-7）。
+# - DefaultDescriptor：value（FieldRef/ExprRef/int）+ subcon
+#   value 编译为 ExprProgram（与 Rebuild func 同模式）。
+# - CheckDescriptor：func（FieldRef/ExprRef/int，编译为 ExprProgram）
+#   必须作为 RO 字段（_field_kind = "ro"）。
+# ---------------------------------------------------------------------------
+
+
+class ConstDescriptor:
+    """``Const(value, subcon=None)`` 描述符。
+
+    常量字段：parse 校验子解析结果 == value；build 用 value（忽略 obj）。
+
+    对应 Python construct 的 ``Const``（core.py L2808）。Python 中
+    ``Const(b"IHDR")`` 会自动用 ``Bytes(4)`` 作为 subcon（针对 bytes value）。
+
+    - parse：inner.parse → ``obj == value`` 检查 → 不等抛 ``ConstError``
+    - build：obj is None 或 obj == value → inner.build(value)；否则 ``ConstError``
+    - sizeof：转发 inner.sizeof
+
+    ``_expr_params`` 协议返回空 dict：Const 自身无表达式参数
+    （value 是常量对象，subcon 由递归处理）。
+
+    :param value: 期望值（int / bytes / str 等任意 Python 对象）。
+    :param subcon: 子构造器（描述符）。None 时根据 value 类型推断。
+    """
+
+    __slots__ = ("value", "subcon")
+
+    _expr_params = {}
+
+    def __init__(self, value, subcon=None):
+        """初始化 Const 描述符。
+
+        :param value: 期望值。
+        :param subcon: 子构造器。None 时根据 value 推断（bytes → Bytes(len)）。
+        """
+        if subcon is None:
+            # CN-7: value 是 bytes 但 subcon 缺省 → Bytes(len(value))
+            if isinstance(value, (bytes, bytearray)):
+                subcon = Bytes(len(value))
+            else:
+                # CN-8: value 非 bytes 且 subcon 缺省 → 编译期错误
+                raise CompilationError(
+                    "Const requires explicit subcon when value is not bytes, "
+                    "e.g. Const(255, Int32ub)"
+                )
+        self.value = value
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "Const({!r}, subcon={!r})".format(self.value, self.subcon)
+
+
+def Const(value, subcon=None):
+    """创建一个 Const 描述符。
+
+    常量字段。对应 Python construct 的 ``Const``（core.py L2808）。
+
+    使用方式（bytes value，subcon 自动推断）::
+
+        from construct import Const
+
+        # 等价于 Const(b"IHDR", Bytes(4))
+        c = Const(b"IHDR")
+        c.parse(b"IHDR")   # → b"IHDR"
+        c.parse(b"JPEG")   # → ConstError
+
+    使用方式（int value，显式 subcon）::
+
+        from construct import Const, Int32ub
+
+        c = Const(255, Int32ub)
+        c.build(None)      # → b'\\xff\\x00\\x00\\x00'
+        c.build(255)       # → b'\\xff\\x00\\x00\\x00'
+        c.build(256)       # → ConstError
+
+    使用方式（Struct 内 magic header）::
+
+        @dataclass
+        class PNG(StructMixin):
+            magic: bytes = field(Const(b"\\x89PNG\\r\\n\\x1a\\n"))
+
+    :param value: 期望值（任意 Python 对象）。
+    :param subcon: 子构造器（None 时根据 value 类型推断）。
+    :return: ``ConstDescriptor`` 实例。
+    """
+    return ConstDescriptor(value, subcon=subcon)
+
+
+class DefaultDescriptor:
+    """``Default(subcon, value)`` 描述符。
+
+    默认值字段：build 时 obj 为 None 则用 value 表达式求值；parse 转发 inner。
+
+    对应 Python construct 的 ``Default``（core.py L3030）。
+
+    - parse：转发 inner.parse
+    - build：obj is None → 求值 value ExprProgram → inner.build；否则 inner.build(obj)
+    - sizeof：转发 inner.sizeof
+
+    ``_expr_params`` 协议返回 ``{"value": self.value}``：编译期将 value 翻译为
+    ExprOp 列表（int 常量也包装为单条 Const，与 Rebuild func 同模式）。
+
+    限制（设计 §1 DF-4）：value 必须是 Phase 2 表达式
+    （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
+    （与 Rebuild 同脉络，ADR-014 硬约束）。
+
+    :param subcon: 子构造器（描述符）。
+    :param value: 默认值（int 常量或 FieldRef/ExprRef 表达式，**不接受 callable**）。
+    """
+
+    __slots__ = ("subcon", "value")
+
+    def __init__(self, subcon, value):
+        """初始化 Default 描述符。
+
+        :param subcon: 子构造器。
+        :param value: 默认值（int 或 FieldRef/ExprRef）。
+        """
+        self.subcon = subcon
+        self.value = value
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 RebuildDescriptor._expr_params 同模式）。
+
+        返回 ``{"value": self.value}``。int 常量也走表达式路径（包装为 Const）。
+        """
+        return {"value": self.value}
+
+    def __repr__(self):
+        return "Default({!r}, {!r})".format(self.subcon, self.value)
+
+
+def Default(subcon, value):
+    """创建一个 Default 描述符。
+
+    默认值字段。对应 Python construct 的 ``Default``（core.py L3030）。
+
+    使用方式（常量默认值）::
+
+        from construct import Default, Byte
+
+        d = Default(Byte, 0)
+        d.build(None)    # → b'\\x00'（用默认值 0）
+        d.build(5)       # → b'\\x05'（用 obj）
+
+    使用方式（字段引用表达式）::
+
+        @dataclass
+        class P(StructMixin):
+            count: int = field(Byte)
+            padded: int = field(Default(Byte, count))   # padded 默认 = count
+
+        P(count=5).build()         # → b'\\x05\\x05'（padded 用 count）
+        P(count=5, padded=9).build()  # → b'\\x05\\x09'（padded 用 obj）
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：Default(Byte, this.count)
+        # construct-rs：Default(Byte, count)
+
+    限制：
+
+    - **不接收 Python callable / lambda**（同 Rebuild）。如传入 callable，
+      编译期无法转换为 ExprOp，会报 CompilationError。
+
+    :param subcon: 子构造器。
+    :param value: 默认值（int 或 FieldRef/ExprRef 表达式）。
+    :return: ``DefaultDescriptor`` 实例。
+    """
+    return DefaultDescriptor(subcon, value)
+
+
+class CheckDescriptor:
+    """``Check(func)`` 描述符。
+
+    断言检查：parse/build 求值表达式，非真抛 ``CheckError``。sizeof 恒为 0。
+
+    对应 Python construct 的 ``Check``（core.py L3081）。
+
+    **必须作为 RO 字段使用**（``rfield(Check(...))``，与 Computed 同类）。
+
+    ``_expr_params`` 协议返回 ``{"func": self.func}``：编译期将 func 翻译为 ExprOp 列表
+    （与 ComputedDescriptor / RebuildDescriptor 同模式）。
+
+    ``_field_kind`` 属性返回 "ro"，由 _mixin._apply_dataclass_field_config 识别，
+    决定 dataclass 字段配置（init=False）。
+
+    限制（设计 §1 CK-5）：func 必须是 Phase 2 表达式
+    （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
+    （与 Rebuild 同脉络，ADR-014 硬约束）。
+
+    :param func: 断言表达式（int 或 FieldRef/ExprRef 组合，**不接受 callable**）。
+    """
+
+    __slots__ = ("func",)
+
+    def __init__(self, func):
+        """初始化 Check 描述符。
+
+        :param func: 断言表达式（int 或 FieldRef/ExprRef）。
+        """
+        self.func = func
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 ComputedDescriptor._expr_params 同模式）。"""
+        return {"func": self.func}
+
+    @property
+    def _field_kind(self):
+        """字段种类协议（ADR-004）。
+
+        返回 "ro"：Check 必须作为 RO 字段使用（值不来自用户输入）。
+        与 Computed / Tell / Rebuild 同类。
+        """
+        return "ro"
+
+    def __repr__(self):
+        return "Check({!r})".format(self.func)
+
+
+def Check(func):
+    """创建一个 Check 描述符。
+
+    断言检查。对应 Python construct 的 ``Check``（core.py L3081）。
+
+    使用方式（必须作为 RO 字段，用 ``rfield`` 包装；func 是 Phase 2 表达式）::
+
+        @dataclass
+        class P(StructMixin):
+            width: int = field(Byte)
+            height: int = field(Byte)
+            _check: None = rfield(Check(width * height > 0))
+
+        P.parse(b"\\x02\\x03")   # → P(width=2, height=3)
+        # Check(width == 0) 表达式不满足 → CheckError
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：Check(this.width * this.height > 0)
+        # construct-rs：Check(width * height > 0)
+
+    限制：
+
+    - **不接收 Python callable / lambda**（同 Computed）。如传入 callable，
+      编译期无法转换为 ExprOp，会报 CompilationError。
+    - 必须作为 RO 字段使用（``rfield(Check(...))``）。
+
+    :param func: 断言表达式（int 或 FieldRef/ExprRef 组合）。
+    :return: ``CheckDescriptor`` 实例。
+    """
+    return CheckDescriptor(func)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P0: Terminated / Probe 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §5。
+#
+# - TerminatedDescriptor：singleton，无参数。parse 时校验 stream EOF。
+# - ProbeDescriptor：into（None 或字段名 str）+ lookahead（None 或 int）。
+#   [设计质疑] into 用 FieldName 而非 ExprProgram（详见 probe.rs 模块级注释）。
+# ---------------------------------------------------------------------------
+
+
+class TerminatedDescriptor:
+    """``Terminated`` 描述符（singleton）。
+
+    EOF 断言：parse 时若 stream 未到 EOF 抛 ``TerminatedError``。
+    对应 Python construct 的 ``Terminated``（core.py L4727）。
+
+    主要用于 Struct 末尾校验已消费所有字节（防止解析漏字节）。
+
+    ``_expr_params`` 协议返回空 dict。
+    """
+
+    __slots__ = ()
+
+    _expr_params = {}
+
+    def __repr__(self):
+        return "Terminated()"
+
+
+# Terminated singleton（与 GreedyBytes / Pass 同模式）。
+Terminated = TerminatedDescriptor()
+
+
+class ProbeDescriptor:
+    """``Probe(into=None, lookahead=None)`` 描述符。
+
+    调试探针：parse/build/sizeof 时打印 path + 可选 stream peek + 可选 context dump。
+    对应 Python construct 的 ``Probe``（debug.py L6）。
+
+    ``_expr_params`` 协议返回空 dict：Probe 无表达式参数
+    （into 是字段名引用而非 FieldRef/ExprRef 表达式，[设计质疑] 详见 probe.rs）。
+
+    :param into: 可选字段名（任意类型字段），None 表示打印整个 context。
+    :param lookahead: 可选 peek 字节数（int），None 表示不 peek。
+    """
+
+    __slots__ = ("into", "lookahead")
+
+    _expr_params = {}
+
+    def __init__(self, into=None, lookahead=None):
+        """初始化 Probe 描述符。
+
+        :param into: 可选字段名（str）。
+        :param lookahead: 可选 peek 字节数（int）。
+        """
+        self.into = into
+        self.lookahead = lookahead
+
+    def __repr__(self):
+        return "Probe(into={!r}, lookahead={!r})".format(self.into, self.lookahead)
+
+
+def Probe(into=None, lookahead=None):
+    """创建一个 Probe 描述符。
+
+    调试探针。对应 Python construct 的 ``Probe``（debug.py L6）。
+
+    使用方式（无参数，打印整个 context）::
+
+        @dataclass
+        class P(StructMixin):
+            a: int = field(Byte)
+            _probe: None = rfield(Probe())     # parse 时打印 {a: ...}
+            b: int = field(Byte)
+
+    使用方式（指定字段名，打印该字段值）::
+
+        Probe(into="a")    # parse 时打印 P.a 的值
+
+    使用方式（peek stream）::
+
+        Probe(lookahead=4)    # parse 时额外 hex 打印下 4 字节
+
+    [设计质疑] 与 Python construct 的差异：
+
+    - Python ``Probe(lambda ctx: expr)`` 支持任意 callable。construct-rs 仅支持
+      字段名（``Probe(into="field_name")``），不支持 callable（与 ADR-014 一致）。
+    - 用户需要打印复杂表达式结果时，应先用 ``Computed(expr)`` 字段，再 ``Probe(into=...)``。
+
+    :param into: 可选字段名（str），None 表示打印整个 context。
+    :param lookahead: 可选 peek 字节数（int），None 表示不 peek。
+    :return: ``ProbeDescriptor`` 实例。
+    """
+    return ProbeDescriptor(into=into, lookahead=lookahead)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P0: Aligned 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §4。
+#
+# AlignedDescriptor：modulus（int 或 FieldRef/ExprRef）+ subcon + pattern（1-byte bytes）。
+# modulus 表达式路径走 ExprProgram（与 SeekDescriptor at 同模式）。
+# pattern 编译期校验 len == 1（AL-11/AL-12）。
+# ---------------------------------------------------------------------------
+
+
+class AlignedDescriptor:
+    """``Aligned(modulus, subcon, pattern=b"\\x00")`` 描述符。
+
+    对齐包装节点：inner 解析/构建后，填充字节到 modulus 的整数倍。
+    对应 Python construct 的 ``Aligned``（core.py L4261）。
+
+    - parse：inner.parse 后，``pad = -(tell_after - tell_before) % modulus``，
+    - build：inner.build 后写 ``pattern * pad`` 字节
+    - sizeof：modulus 表达式时返回 Err（D-P0-3，对齐 Python SizeofError）
+
+    ``_expr_params`` 协议：当 ``modulus`` 是 int 时返回 ``{}``（跳过编译）；
+    当 modulus 是 FieldRef/ExprRef 时返回 ``{"modulus": self.modulus}``。
+
+    :param modulus: 对齐模数（int >= 2 或 FieldRef/ExprRef 表达式）。
+    :param subcon: 子构造器。
+    :param pattern: 填充字节模式（1-byte bytes，默认 ``b"\\x00"``）。
+    """
+
+    __slots__ = ("modulus", "subcon", "pattern")
+
+    def __init__(self, modulus, subcon, pattern=b"\x00"):
+        """初始化 Aligned 描述符。
+
+        :param modulus: 对齐模数。
+        :param subcon: 子构造器。
+        :param pattern: 1-byte bytes（默认 b"\\x00"）。
+        """
+        self.modulus = modulus
+        self.subcon = subcon
+        self.pattern = pattern
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议（与 BytesDescriptor._expr_params 同模式）。
+
+        返回 ``{"modulus": self.modulus}``。当 modulus 是 int 时跳过编译；
+        当 modulus 是 FieldRef/ExprRef 时编译为 ExprOp 列表。
+        """
+        if isinstance(self.modulus, int) and not isinstance(self.modulus, bool):
+            return {}
+        return {"modulus": self.modulus}
+
+    def __repr__(self):
+        return "Aligned(modulus={!r}, subcon={!r}, pattern={!r})".format(
+            self.modulus, self.subcon, self.pattern
+        )
+
+
+def Aligned(modulus, subcon, pattern=b"\x00"):
+    """创建一个 Aligned 描述符。
+
+    对齐包装节点。对应 Python construct 的 ``Aligned``（core.py L4261）。
+
+    使用方式（基本）::
+
+        from construct import Aligned, Int16ub
+
+        d = Aligned(4, Int16ub)
+        d.parse(b"\\x00\\x01\\x00\\x00")   # → 1（消费 4 字节，2 数据 + 2 填充）
+        d.build(1)                          # → b"\\x00\\x01\\x00\\x00"
+
+    使用方式（pattern）::
+
+        Aligned(4, Int16ub, pattern=b"\\xff").build(1)  # → b"\\x00\\x01\\xff\\xff"
+
+    使用方式（字段引用 modulus）::
+
+        @dataclass
+        class P(StructMixin):
+            width: int = field(Byte)
+            data: int = field(Aligned(width, Byte))   # modulus = width 字段值
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：Aligned(this.width, Byte)
+        # construct-rs：Aligned(width, Byte)
+
+    限制：
+
+    - **modulus 必须 >= 2**（AL-6/AL-7/AL-8）。编译期或运行期 PaddingError。
+    - **pattern 必须是 1-byte bytes**（AL-11/AL-12）。编译期 PaddingError。
+    - **sizeof 不支持 modulus 表达式**（D-P0-3，对齐 Python SizeofError）。
+
+    :param modulus: 对齐模数（int >= 2 或 FieldRef/ExprRef 表达式）。
+    :param subcon: 子构造器。
+    :param pattern: 填充字节模式（1-byte bytes，默认 ``b"\\x00"``）。
+    :return: ``AlignedDescriptor`` 实例。
+    """
+    return AlignedDescriptor(modulus, subcon, pattern=pattern)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P0: Hex / HexDump 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §2。
+#
+# Hex/HexDump 是 construct 核心库内置 Adapter（非用户自定义），在 construct-rs 中
+# 实现为 Rust Node（非 AdapterCallbackNode，§0.2 判据 2，详见设计 §2.2 + ADR-022）。
+# ---------------------------------------------------------------------------
+
+
+class HexDescriptor:
+    """``Hex(subcon)`` 描述符。
+
+    Hex 显示包装节点：根据 inner.parse 结果类型分派到对应 Python 显示类。
+
+    对应 Python construct 的 ``Hex``（core.py L3523）。
+
+    - parse：
+        - int → ``HexDisplayedInteger.new(obj, fmtstr)``
+        - bytes → ``HexDisplayedBytes(obj)``
+        - dict → ``HexDisplayedDict(obj)``
+        - else → 透传
+    - build：透传 inner.build
+    - sizeof：转发 inner.sizeof
+
+    ``_expr_params`` 协议返回空 dict（Hex 自身无表达式参数；subcon 由递归处理）。
+
+    :param subcon: 子构造器（描述符）。
+    """
+
+    __slots__ = ("subcon",)
+
+    _expr_params = {}
+
+    def __init__(self, subcon):
+        """初始化 Hex 描述符。
+
+        :param subcon: 子构造器。
+        """
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "Hex({!r})".format(self.subcon)
+
+
+def Hex(subcon):
+    """创建一个 Hex 描述符。
+
+    Hex 显示包装节点。对应 Python construct 的 ``Hex``（core.py L3523）。
+
+    使用方式（int 字段）::
+
+        from construct import Hex, Int32ub
+
+        d = Hex(Int32ub)
+        result = d.parse(b"\\x00\\x00\\x01\\x02")   # → HexDisplayedInteger(258)
+        print(result)                                # 输出 "0x00000102"
+        int(result)                                  # → 258（int 子类）
+
+    使用方式（bytes 字段）::
+
+        from construct import Hex, Bytes
+
+        d = Hex(Bytes(4))
+        result = d.parse(b"\\x00\\x00\\x01\\x02")
+        print(result)   # 输出 "unhexlify('00000102')"
+
+    使用方式（Struct 内）::
+
+        @dataclass
+        class P(StructMixin):
+            magic: int = field(Hex(Int32ub))
+
+    :param subcon: 子构造器。
+    :return: ``HexDescriptor`` 实例。
+    """
+    return HexDescriptor(subcon)
+
+
+class HexDumpDescriptor:
+    """``HexDump(subcon)`` 描述符。
+
+    HexDump 显示包装节点：与 ``Hex`` 同模式，仅显示类不同（仅 bytes/dict 两种）。
+    int 类型不包装（透传 PyLong）。
+
+    对应 Python construct 的 ``HexDump``（core.py L3583）。
+
+    - parse：
+        - bytes → ``HexDumpDisplayedBytes(obj)``
+        - dict → ``HexDumpDisplayedDict(obj)``
+        - else → 透传
+    - build：透传 inner.build
+    - sizeof：转发 inner.sizeof
+
+    ``_expr_params`` 协议返回空 dict。
+
+    :param subcon: 子构造器。
+    """
+
+    __slots__ = ("subcon",)
+
+    _expr_params = {}
+
+    def __init__(self, subcon):
+        """初始化 HexDump 描述符。
+
+        :param subcon: 子构造器。
+        """
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "HexDump({!r})".format(self.subcon)
+
+
+def HexDump(subcon):
+    """创建一个 HexDump 描述符。
+
+    HexDump 显示包装节点。对应 Python construct 的 ``HexDump``（core.py L3583）。
+
+    使用方式（bytes 字段）::
+
+        from construct import HexDump, Bytes
+
+        d = HexDump(Bytes(16))
+        result = d.parse(b"\\x00" * 16)
+        print(result)   # 输出 hexdump 格式（hexundump('''...''')）
+
+    使用方式（Struct 内）::
+
+        @dataclass
+        class P(StructMixin):
+            payload: bytes = field(HexDump(Bytes(16)))
+
+    :param subcon: 子构造器。
+    :return: ``HexDumpDescriptor`` 实例。
+    """
+    return HexDumpDescriptor(subcon)
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P0: Checksum 描述符
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §3。
+#
+# ChecksumDescriptor 双轨方案（PM 决策 D-1 接受）：
+#
+# - hashfunc：``HashAlgo`` enum（B1/B2 零拷贝）或 Python callable（A1/A2 兼容）
+# - bytes_source：start/end 表达式（StreamRange）或 bytesfunc_name 字段引用（ContextBytes）
+#
+# compile.rs 通过 ``type(hashfunc).__name__ == "HashAlgo"`` 识别 enum 类型，
+# 按 ``.name`` 取算法名编译为 ``BuiltinHash`` 变体。
+# ---------------------------------------------------------------------------
+
+
+class ChecksumDescriptor:
+    """``Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None)`` 描述符。
+
+    校验和节点：parse 校验 hash，build 计算 hash。
+    对应 Python construct 的 ``Checksum``（core.py L5532）。
+
+    construct-rs 扩展双轨方案（设计 §3.5）：
+
+    - **路径 B1**（推荐零拷贝）：``HashAlgo`` enum + ``start/end`` 表达式
+    - **路径 A2**（Python 原版兼容）：Python callable + ``bytesfunc`` 字段引用
+
+    parse 行为：
+
+    1. ``checksumfield.parse(stream)`` 得到 ``hash1``
+    2. 根据 bytes_source 取数据：
+       - StreamRange：``stream.slice(start, end)`` 零拷贝切片
+       - ContextBytes：``context[bytesfunc]`` 取 bytes 字段
+    3. 根据 hashfunc 计算：
+       - BuiltinHash：Rust crate 计算（零拷贝）
+       - Python callable：FFI 回调计算
+    4. ``hash1 == hash2``？等则返回 ``hash1``，不等抛 ``ChecksumError``
+
+    build 行为：计算 ``hash2`` → ``checksumfield.build(hash2)``。
+
+    ``_expr_params`` 协议：StreamRange 模式返回 ``{"start": ..., "end": ...}``；
+    ContextBytes 模式返回 ``{}``（bytesfunc 是字段名引用，不需要表达式编译）。
+
+    :param checksumfield: 校验字段（描述符，通常 ``Bytes(32)`` / ``Bytes(64)``）。
+    :param hashfunc: ``HashAlgo`` enum（推荐）或 Python callable（兼容）。
+    :param bytesfunc: ContextBytes 模式的字段名（str）。
+    :param start: StreamRange 模式的起始偏移（int 或 FieldRef/ExprRef）。
+    :param end: StreamRange 模式的结束偏移（int 或 FieldRef/ExprRef）。
+    """
+
+    __slots__ = ("checksumfield", "hashfunc", "bytesfunc", "start", "end")
+
+    def __init__(self, checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
+        """初始化 Checksum 描述符。
+
+        :param checksumfield: 校验字段描述符。
+        :param hashfunc: HashAlgo enum 或 callable。
+        :param bytesfunc: ContextBytes 字段名（str）。
+        :param start: StreamRange 起始偏移。
+        :param end: StreamRange 结束偏移。
+        """
+        self.checksumfield = checksumfield
+        self.hashfunc = hashfunc
+        self.bytesfunc = bytesfunc
+        self.start = start
+        self.end = end
+
+        # 校验：bytesfunc 与 start/end 必须二选一
+        if bytesfunc is None and (start is None or end is None):
+            raise CompilationError(
+                "Checksum requires either bytesfunc (ContextBytes mode) "
+                "or both start and end (StreamRange mode)"
+            )
+        if bytesfunc is not None and (start is not None or end is not None):
+            raise CompilationError(
+                "Checksum bytesfunc and start/end are mutually exclusive"
+            )
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议。
+
+        StreamRange 模式：返回 ``{"start": ..., "end": ...}`` 编译为 ExprOp 列表。
+        ContextBytes 模式：返回 ``{}``（bytesfunc 是字段名引用，不编译）。
+        """
+        if self.start is not None and self.end is not None:
+            return {"start": self.start, "end": self.end}
+        return {}
+
+    @property
+    def bytesfunc_name(self):
+        """ContextBytes 模式：返回字段名（供 compile.rs 读取）。"""
+        return self.bytesfunc
+
+    @property
+    def start_expr(self):
+        """StreamRange 模式：返回 start 表达式（供 compile.rs hasattr 检测）。"""
+        return self.start
+
+    @property
+    def end_expr(self):
+        """StreamRange 模式：返回 end 表达式（供 compile.rs hasattr 检测）。"""
+        return self.end
+
+    def __repr__(self):
+        return "Checksum(checksumfield={!r}, hashfunc={!r})".format(
+            self.checksumfield, self.hashfunc
+        )
+
+
+def Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
+    """创建一个 Checksum 描述符。
+
+    校验和节点。对应 Python construct 的 ``Checksum``（core.py L5532）。
+
+    使用方式（路径 B1：HashAlgo + StreamRange 零拷贝推荐）::
+
+        from construct import (
+            StructMixin, Bytes, Tell, Checksum, HashAlgo, rfield, field
+        )
+        from dataclasses import dataclass
+
+        @dataclass
+        class Packet(StructMixin):
+            start: int = rfield(Tell())                       # 标记起始
+            data: bytes = field(Bytes(16))                    # 被校验数据
+            end: int = rfield(Tell())                         # 标记结束
+            checksum: bytes = rfield(Checksum(Bytes(32), HashAlgo.SHA256, start, end))
+
+    使用方式（路径 A2：Python callable + ContextBytes 兼容）::
+
+        import hashlib
+        from construct import RawCopy
+
+        @dataclass
+        class Packet(StructMixin):
+            fields: dict = field(RawCopy(Bytes(16)))
+            checksum: bytes = field(Checksum(
+                Bytes(32),
+                lambda d: hashlib.sha256(d).digest(),
+                bytesfunc="fields",   # 引用 RawCopy dict 的 "data" 字段
+            ))
+
+    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
+
+        # 原版：Checksum(Bytes(32), lambda d: hashlib.sha256(d).digest(), this.fields.data)
+        # construct-rs：bytesfunc="fields"（字段名直接引用）
+
+    限制（设计 §3.8）：
+
+    - **bytesfunc 不支持 lambda**（ADR-014，与 Rebuild 同脉络）。
+    - **HashAlgo 未知值编译期拒绝**（CS-10）。
+    - **CRC32/Adler32 返回 big-endian 4 字节**（对齐 ``to_bytes(4, 'big')`` 习惯）。
+
+    :param checksumfield: 校验字段描述符。
+    :param hashfunc: ``HashAlgo`` enum（推荐）或 Python callable（兼容）。
+    :param bytesfunc: ContextBytes 模式的字段名（str）。
+    :param start: StreamRange 模式的起始偏移（int 或 FieldRef/ExprRef）。
+    :param end: StreamRange 模式的结束偏移（int 或 FieldRef/ExprRef）。
+    :return: ``ChecksumDescriptor`` 实例。
+    """
+    return ChecksumDescriptor(
+        checksumfield, hashfunc, bytesfunc=bytesfunc, start=start, end=end
+    )
+
+
 __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
@@ -2286,4 +3058,27 @@ __all__ = [
     "Pointer",
     "PrefixedDescriptor",
     "Prefixed",
+    # Phase 8 P0: Const / Default / Check
+    "ConstDescriptor",
+    "Const",
+    "DefaultDescriptor",
+    "Default",
+    "CheckDescriptor",
+    "Check",
+    # Phase 8 P0: Terminated / Probe
+    "TerminatedDescriptor",
+    "Terminated",
+    "ProbeDescriptor",
+    "Probe",
+    # Phase 8 P0: Aligned
+    "AlignedDescriptor",
+    "Aligned",
+    # Phase 8 P0: Hex / HexDump
+    "HexDescriptor",
+    "Hex",
+    "HexDumpDescriptor",
+    "HexDump",
+    # Phase 8 P0: Checksum
+    "ChecksumDescriptor",
+    "Checksum",
 ]

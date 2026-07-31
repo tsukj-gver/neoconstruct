@@ -72,7 +72,8 @@ last_updated: 2026-07-29
 | 5 Struct + FFI 入口优化 | ✅ 完成（2026-07-29 ACCEPTED，目标自然达成，tag phase-5-complete） | `phase-5-complete` | `plans/phase5-struct-ffi/总纲.md` |
 | 6 Primitives 收尾 + Strings + Adapter 核心 | ✅ 完成（2026-07-30 ACCEPTED，tag phase-6-complete） | `phase-6-complete` | `plans/phase6-primitives-strings-adapter/总纲.md` |
 | 7 Conditional + Streams | ✅ 完成（2026-07-30 ACCEPTED，tag phase-7-complete） | `phase-7-complete` | `plans/phase7-conditional-streams/总纲.md` |
-| 8+ | ⚪ | — | 待用户指定 |
+| 8 Adapter核心+Struct收尾+Streams常用+Other常用 | 🔵 已立项（22 个正常常用构造器） | — | `plans/phase8-adapters-struct-streams/总纲.md` |
+| 9+ | ⚪ | — | 待用户指定 |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
 > **iter9 结构变更**：phase4 过程记录.md（11837 行）拆分为 12 个 phase4 traces + 7 个 META traces；META 类 cross-phase 资产抽到 `plans/meta/`；`docs/design/` 子目录化（模块设计/ + 基础设施/）。详见 `plans/phase4-array/索引.md` 和 `harness/metadata-convention.md §5.1/§9`。
