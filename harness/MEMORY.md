@@ -7,6 +7,12 @@ last_updated: 2026-07-29
 
 # MEMORY.md — Project Long-Term Memory Index
 
+> **Phase 8/9/10 完成（2026-08-07）**：
+> - Phase 8 部分通过：22 构造器实现 + 8.ENV（Python 3.13 非 abi3，放弃 abi3）+ 8.OPT-SHARED 共享税优化（ADR-023，GenericGetDict+KnownHash+ob_sval），42/48 PASS，6 项已知 LOW 边界（Hex/HexDump/NamedTuple/FlagsEnum 显示对象构造固有税）
+> - Phase 9 系统测试：4 真实协议（Modbus RTU/CAN/IEC104/IPv4）91 测试全 PASS，round-trip + parity 通过，发现 4 个 API gap
+> - Phase 10 用法 SKILL：`.opencode/skills/construct-rs-usage/SKILL.md`（1701 行，100% API 覆盖），验证 agent 仅看 SKILL 单轮实现 SCTP 协议（53 round-trip + 8 parity 测试 PASS）
+> - L-14 教训第 2/3 次触发（Hex parse 归因错误 + managed dict UB），已沉淀
+> - 构造器总进度：~78→~100/134（~58%→~75%），剩余 ~30 wont_implement
 > **Phase 7 完成（2026-07-30 ACCEPTED）**：
 > - 7.1 Conditional（5 个：IfThenElse/Switch/Select/FocusedSeq + ExplicitError + If macro）
 > - 7.2 Streams（3 个：Seek/Pointer/Prefixed + Stream 扩展：BuildStream.seek + ParseStream.seek_whence）
@@ -72,8 +78,10 @@ last_updated: 2026-07-29
 | 5 Struct + FFI 入口优化 | ✅ 完成（2026-07-29 ACCEPTED，目标自然达成，tag phase-5-complete） | `phase-5-complete` | `plans/phase5-struct-ffi/总纲.md` |
 | 6 Primitives 收尾 + Strings + Adapter 核心 | ✅ 完成（2026-07-30 ACCEPTED，tag phase-6-complete） | `phase-6-complete` | `plans/phase6-primitives-strings-adapter/总纲.md` |
 | 7 Conditional + Streams | ✅ 完成（2026-07-30 ACCEPTED，tag phase-7-complete） | `phase-7-complete` | `plans/phase7-conditional-streams/总纲.md` |
-| 8 Adapter核心+Struct收尾+Streams常用+Other常用 | 🔵 已立项（22 个正常常用构造器） | — | `plans/phase8-adapters-struct-streams/总纲.md` |
-| 9+ | ⚪ | — | 待用户指定 |
+| 8 Adapter核心+Struct收尾+Streams常用+Other常用 | ✅ 部分通过（2026-08-07，42/48 PASS，6 项已知 LOW，tag phase-8-complete） | `phase-8-complete` | `plans/phase8-adapters-struct-streams/总纲.md` |
+| 9 系统测试 | ✅ 完成（2026-08-07，4 协议 91 测试 PASS，tag phase-9-complete） | `phase-9-complete` | `plans/phase9-system-test/总纲.md` |
+| 10 用法 SKILL | ✅ 完成（2026-08-07，SKILL v2 + SCTP 验证通过，tag phase-10-complete） | `phase-10-complete` | `plans/phase10-skill/总纲.md` |
+| 11+ | ⚪ | — | 待用户指定 |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
 > **iter9 结构变更**：phase4 过程记录.md（11837 行）拆分为 12 个 phase4 traces + 7 个 META traces；META 类 cross-phase 资产抽到 `plans/meta/`；`docs/design/` 子目录化（模块设计/ + 基础设施/）。详见 `plans/phase4-array/索引.md` 和 `harness/metadata-convention.md §5.1/§9`。

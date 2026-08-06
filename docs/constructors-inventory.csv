@@ -58,8 +58,8 @@ ByteBit,BitsSwapped,BitsSwapped,implemented,3,nodes/transform.rs:1,,,,,plans/pha
 ByteBit,ByteSwapped,ByteSwapped,implemented,3,nodes/transform.rs:1,,,,,plans/phase3-bitstream/总纲.md:75,-,字节序翻转; 同 BitsSwapped; Transform 部分实现
 ByteBit,Padding,Padding,implemented,3,nodes/bit_padding.rs:1,,,,,plans/phase3-bitstream/总纲.md:75,-,字节级 + 位级填充; Phase 3 实现; 未单独 benchmark
 Struct,Struct,Struct,implemented,1,nodes/struct_node.rs:1,7.63,13.66,11.71,17.40,plans/00-项目进度.md:60-63,B1(3f) parse 7.63x,Phase 1 B1-B4 数据; StructMixin 用户面; Phase 2 加入表达式系统后 E1 parse 7.11x (小 struct 固定开销)
-Struct,Sequence,Sequence,not_implemented,-,-,,,,,-,-,顺序字段无名字; Phase 5+
-Struct,AlignedStruct,AlignedStruct,not_implemented,-,-,,,,,-,-,对齐 Struct; Phase 5+
+Struct,Sequence,Sequence,implemented,8,nodes/sequence.rs:1,15.21,15.21,22.21,22.21,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; SequenceNode; SQ1 parse 15.21x build 22.21x; design 模块设计-Phase8-P1P2
+Struct,AlignedStruct,AlignedStruct,implemented,8,nodes/aligned.rs:1,10.10,10.70,13.42,15.06,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; AlignedStructNode; AL1/AL2 全场景 ≥10x; design 模块设计-Phase8-P1P2
 Struct,StructRef,StructRef,implemented,1,nodes/struct_ref.rs:1,,,,,plans/00-项目进度.md:60,-,嵌套引用节点 (互相引用); 在 Phase 1 B1-B4 嵌套场景隐含使用; 用户面通过 StructMixin 自动生成
 Array,Array,Array,implemented,4,nodes/array.rs:1,11.37,15.22,19.25,26.28,plans/phase4-array/traces/4.6-集成测试.md;plans/phase4-array/traces/4.2-GreedyRangeNode.md,Array(10 Int8ub) parse 6.38x build 9.46x (Phase 4.7 优化后 13.56x); Array(100 Bytes(8)) parse 8.37x,4.6 v4 apples-to-apples 数据 (11.37-23.57x); 4.7 优化 lazy path + Vec + Path enum 后 i01-i04 parse 提升
 Array,GreedyRange,GreedyRange,implemented,4,nodes/greedy_range.rs:1,11.78,24.04,22.53,34.72,plans/phase4-array/traces/4.6-集成测试.md;plans/phase4-array/traces/4.7-per-iter优化.md,GreedyRange(Int8ub) N=10 parse 9.21x (4.6 v4); 4.7 优化后 11.78x,4.6 v4 数据; 4.7 修复后 N=10 parse 达 11.78x
@@ -77,25 +77,25 @@ Adapter,Subconstruct,Subconstruct,implemented,6.3,nodes/subconstruct.rs:1,8.28,2
 Adapter,SymmetricAdapter,SymmetricAdapter,implemented,6.3,python/construct/_adapters.py:266,,,,,-,-,"Phase 6.3 用户面对称适配器基类 (_adapters.py:266); 继承 Adapter, _decode==_encode; 无独立 Rust Node; 未单独 benchmark"
 Adapter,ExprAdapter,ExprAdapter,not_implemented,-,-,,,,,-,-,表达式适配器; Phase 5+
 Adapter,ExprSymmetricAdapter,ExprSymmetricAdapter,not_implemented,-,-,,,,,-,-,表达式对称适配器; Phase 5+
-Adapter,Enum,Enum,not_implemented,-,-,,,,,-,-,枚举映射 (Adapter 子类); Phase 5+
-Adapter,FlagsEnum,FlagsEnum,not_implemented,-,-,,,,,-,-,位标志枚举; Phase 5+
-Adapter,Mapping,Mapping,not_implemented,-,-,,,,,-,-,通用映射; Phase 5+
+Adapter,Enum,Enum,implemented,8,nodes/enum_node.rs:1,10.09,10.40,16.03,16.56,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; EnumNode Rust 内置; EN1/EN2 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Adapter,FlagsEnum,FlagsEnum,implemented,8,nodes/flags_enum.rs:1,9.99,9.99,5.94,5.94,construct-rs/bench/results/bench_phase8_313.json,"FE1 parse 9.59x (<10x); FE1 build 5.92x (<10x)","Phase 8; FlagsEnumNode; Container 构造 + dict→int 转换固有税; OPT-SHARED retest 5轮 mean; design 模块设计-Phase8-P1P2"
+Adapter,Mapping,Mapping,implemented,8,nodes/mapping.rs:1,10.88,10.88,16.31,16.31,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; MappingNode; MP1 全场景 ≥10x; design 模块设计-Phase8-P1P2
 Adapter,Flag,Flag,not_implemented,-,-,,,,,-,-,单 bit 标志; Phase 5+
-Adapter,Validator,Validator,not_implemented,-,-,,,,,-,-,验证器基类; Phase 5+
+Adapter,Validator,Validator,implemented,8,python/construct/_adapters.py:314,,,,,-,-,Phase 8; Python 层用户面验证器基类 (Validator(SymmetricAdapter)); 用户继承写 _validate; 无独立 Rust Node; design 模块设计-Phase8-P1P2
 Adapter,ExprValidator,ExprValidator,not_implemented,-,-,,,,,-,-,表达式验证器; Phase 5+
-Adapter,Check,Check,not_implemented,-,-,,,,,-,-,断言检查; Phase 5+
-Adapter,OneOf,OneOf,not_implemented,-,-,,,,,-,-,值域检查 (OneOf); Phase 5+
-Adapter,NoneOf,NoneOf,not_implemented,-,-,,,,,-,-,值域检查 (NoneOf); Phase 5+
-Adapter,Const,Const,not_implemented,-,-,,,,,-,-,常量字段; Phase 2-3 设计计划 6 Node 变体之一 (Const/Switch/IfThenElse/ContextParam 4 个未实现)
-Adapter,Default,Default,not_implemented,-,-,,,,,-,-,默认值字段; Phase 5+
-Adapter,Checksum,Checksum,not_implemented,-,-,,,,,-,-,校验和; Phase 5+
+Adapter,Check,Check,implemented,8,nodes/check_node.rs:1,16.14,16.14,15.25,15.25,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; CheckNode; CK1 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Adapter,OneOf,OneOf,implemented,8,nodes/one_of.rs:1,11.29,11.29,16.14,16.14,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; OneOfNode; OO1 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Adapter,NoneOf,NoneOf,implemented,8,nodes/one_of.rs:1,10.29,10.29,18.54,18.54,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; NoneOfNode (与 OneOfNode 同文件 one_of.rs); NO1 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Adapter,Const,Const,implemented,8,nodes/const_node.rs:1,9.71,10.35,15.07,15.12,construct-rs/bench/results/bench_phase8_313.json,CN1 parse 9.71x (3.13 单轮 <10x; OPT-SHARED 5轮 mean 10.42x),"Phase 8; ConstNode; CN1(bytes)/CN2(int); OPT-SHARED retest CN1 parse mean 10.42x ≥10x; design 模块设计-Phase8-P1P2"
+Adapter,Default,Default,implemented,8,nodes/default_node.rs:1,10.91,11.79,12.95,13.37,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; DefaultNode; DF1/DF2 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Adapter,Checksum,Checksum,implemented,8,nodes/checksum.rs:1,6.32,9.76,5.24,9.13,construct-rs/bench/results/bench_phase8_313.json,"CS1 parse 9.76x; CS1 build 9.13x; CS2 parse 6.32x; CS2 build 5.24x (全 <10x)","Phase 8; ChecksumNode; checksum 函数调用开销大; 全 4 场景 <10x [PM 关注: 未在 6 项 LOW 清单 疑似遗漏]; design 模块设计-Phase8-P1P2"
 Adapter,Rebuild,Rebuild,implemented,6.3,nodes/rebuild.rs:1,9.7,10.34,10.01,10.72,plans/phase6-primitives-strings-adapter/traces/6.6-集成测试与性能验证.md;construct-rs/bench/results/bench_phase6_csv.json,-,"Phase 6.3; 后序字段引用重建 Node (parse 透传, build 求值表达式); design 模块设计-Adapter核心.md"
 Adapter,RawCopy,RawCopy,implemented,6.3,nodes/raw_copy.rs:1,3.47,6.12,5.19,9.63,plans/phase6-primitives-strings-adapter/traces/6.6-集成测试与性能验证.md;construct-rs/bench/results/bench_phase6_csv.json,全场景 <10x; slow-path(大 N) parse 3.47x build 5.19x (<4x),"Phase 6.3; 原始字节副本 Node; parse 额外 bytes copy 开销导致 standalone 5-6x; design 模块设计-Adapter核心.md; 性能未达 4x/10x (L4 C9 已知问题, bytes copy 设计权衡)"
 Adapter,Peek,Peek,implemented,6.3,nodes/peek.rs:1,9.79,11.4,12.39,14.18,plans/phase6-primitives-strings-adapter/traces/6.6-集成测试与性能验证.md;construct-rs/bench/results/bench_phase6_csv.json,-,Phase 6.3; 预读不消费流 Node (seek 保存/恢复); design 模块设计-Adapter核心.md
-Adapter,Union,Union,not_implemented,-,-,,,,,-,-,联合体 (多字段同偏移); Phase 5+
+Adapter,Union,Union,implemented,8,nodes/union.rs:1,12.98,12.98,19.92,19.92,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; UnionNode; UN1 全场景 ≥10x; design 模块设计-Phase8-P1P2
 Adapter,Transformed,Transformed,not_implemented,-,-,,,,,-,-,Transform 通用基类; Phase 3 仅 BitsSwapped/ByteSwapped 特化实现; 通用变长 subcon 非对称 (3.3 VET O2/O3)
-Adapter,Hex,Hex,not_implemented,-,-,,,,,-,-,十六进制表示; Phase 5+
-Adapter,HexDump,HexDump,not_implemented,-,-,,,,,-,-,十六进制 dump; Phase 5+
+Adapter,Hex,Hex,implemented,8,nodes/hex.rs:1,7.19,8.08,16.90,18.96,construct-rs/bench/results/bench_phase8_313.json,"HX1 parse 7.77x (<10x); HX2 parse 8.67x (<10x)","Phase 8; HexNode; CPython int/bytes 子类实例化固有税; OPT-SHARED retest parse mean HX1 7.69x / HX2 8.27x; design 模块设计-Phase8-P1P2"
+Adapter,HexDump,HexDump,implemented,8,nodes/hex_dump.rs:1,7.72,7.72,16.37,16.37,construct-rs/bench/results/bench_phase8_313.json,HD1 parse 8.33x (<10x),Phase 8; HexDumpNode; CPython bytes 子类实例化固有税 (同 HX2); build 16.37x 达标; design 模块设计-Phase8-P1P2
 Adapter,Tunnel,Tunnel,not_implemented,-,-,,,,,-,-,隧道 (子流穿透); Phase 5+
 Adapter,Renamed,Renamed,implemented,7,construct-rs/python/construct/_conditional.py:260,,,,,plans/phase7-conditional-streams/traces/7.1-DEV实施.md,-,"Phase 7.1; Renamed(name, subcon) Python 用户面包装器; FocusedSeq 字段命名"
 Streams,Pointer,Pointer,implemented,7,construct-rs/src/nodes/pointer.rs:1,9.18,10.13,10.13,13.15,construct-rs/bench/results/bench_phase7_csv.json;plans/phase7-conditional-streams/traces/7.3-集成测试与性能验证.md,parse 4/5 <10x (PT1/2/3 <10x;PT4/5 >=10x);build 全部 >=10x,Phase 7.2; Pointer 接近达标; save/restore 模式
@@ -113,23 +113,23 @@ Streams,Seek,Seek,implemented,7,construct-rs/src/nodes/seek.rs:1,8.80,9.17,12.55
 Streams,Tell,Tell,implemented,2,nodes/computed.rs:1,8.18,11.90,7.90,10.70,plans/00-项目进度.md:72;plans/phase2.5-context-vec/总纲.md:88-95,E3 build 7.90x (Phase 2.5 验收基线),RO 字段; Phase 2 实现; Phase 2.5 优化后 ≥10x; E3 Tell+Computed(6字段) 数据
 Streams,Computed,Computed,implemented,2,nodes/computed.rs:1,8.18,11.90,7.90,10.70,plans/00-项目进度.md:72;plans/phase2.5-context-vec/总纲.md:88-95,E3 build 7.90x,RO 字段; 求值 ExprProgram; Phase 2 实现; Phase 2.5 优化后 Expr 路径 ≥10x
 Streams,Pass,Pass,implemented,6.3,nodes/pass.rs:1,8.34,10.55,13.4,16.43,plans/phase6-primitives-strings-adapter/traces/6.6-集成测试与性能验证.md;construct-rs/bench/results/bench_phase6_csv.json,-,Phase 6.3 (任务归 6.3 Adapter 核心收尾); 空操作 Node; design 模块设计-Adapter核心.md
-Streams,Terminated,Terminated,not_implemented,-,-,,,,,-,-,流结束断言; Phase 5+
-Streams,Probe,Probe,not_implemented,-,-,,,,,-,-,调试探针; Phase 5+
+Streams,Terminated,Terminated,implemented,8,nodes/terminated.rs:1,10.28,10.28,17.26,17.26,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; TerminatedNode; TM1 全场景 ≥10x; OPT-SHARED shared-tax probe (rs ~189ns); design 模块设计-Phase8-P1P2
+Streams,Probe,Probe,implemented,8,nodes/probe.rs:1,,,,,-,-,Phase 8; ProbeNode; 调试探针 (printout + lookahead); 未单独 benchmark; design 模块设计-Phase8-P1P2
 Streams,Debugger,Debugger,not_implemented,-,-,,,,,-,-,调试器包装; Phase 5+
-Control,CancelParsing,CancelParsing,not_implemented,-,-,,,,,-,-,取消解析; Phase 5+
+Control,CancelParsing,CancelParsing,implemented,8,python/construct/_errors.py:282;construct-rs/src/schema.rs:189,,,,,-,-,Phase 8; CancelParsing 异常 + schema.rs 顶层 catch (对齐 Python except CancelParsing: pass); 仅 Python 层用户代码可触发; 无独立 Rust Node; design 模块设计-Phase8-P1P2
 Control,Element,Element,implemented,4.5,nodes/element.rs:1,,,,,plans/phase4-array/traces/4.5-RepeatUntil.md,-,RepeatUntil Expr 谓词专用 (4.5 v5 新增); 用户面为 lambda 的形参 x; 非 Python 原版
 Other,Numpy,Numpy,not_implemented,-,-,,,,,-,-,Numpy 数组; Phase 5+
 Other,Pickled,Pickled,not_implemented,-,-,,,,,-,-,Pickle 序列化; Phase 5+
-Other,NamedTuple,NamedTuple,not_implemented,-,-,,,,,-,-,命名元组; Phase 5+
-Other,Timestamp,Timestamp,not_implemented,-,-,,,,,-,-,时间戳; Phase 5+
+Other,NamedTuple,NamedTuple,implemented,8,nodes/named_tuple.rs:1,7.69,7.69,22.10,22.10,construct-rs/bench/results/bench_phase8_313.json,NT1 parse 8.12x (<10x),Phase 8; NamedTupleNode; namedtuple factory 固有税 (CPython PyStructSequence); build 22.10x 达标; design 模块设计-Phase8-P1P2
+Other,Timestamp,Timestamp,implemented,8,python/construct/_macros.py:53,,,,,-,-,Phase 8; Timestamp macro (Python 函数 依赖 arrow 库); 返回 Adapter 子类; 无独立 Rust Node; design 模块设计-Phase8-P1P2 §6.2
 Other,TimestampAdapter,TimestampAdapter,not_implemented,-,-,,,,,-,-,时间戳适配器; Phase 5+
 Other,Compressed,Compressed,not_implemented,-,-,,,,,-,-,压缩 (zlib/gzip); Phase 5+
 Other,CompressedLZ4,CompressedLZ4,not_implemented,-,-,,,,,-,-,LZ4 压缩; Phase 5+
 Other,Compiled,Compiled,not_implemented,-,-,,,,,-,-,预编译缓存; Phase 5+
 Other,EncryptedSym,EncryptedSym,not_implemented,-,-,,,,,-,-,对称加密; Phase 5+
 Other,EncryptedSymAead,EncryptedSymAead,not_implemented,-,-,,,,,-,-,AEAD 加密; Phase 5+
-Other,ProcessRotateLeft,ProcessRotateLeft,not_implemented,-,-,,,,,-,-,循环左移; Phase 5+
-Other,ProcessXor,ProcessXor,not_implemented,-,-,,,,,-,-,XOR 处理; Phase 5+
+Other,ProcessRotateLeft,ProcessRotateLeft,implemented,8,nodes/process_rotate_left.rs:1,12.44,12.44,12.71,12.71,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; ProcessRotateLeftNode; PR1 全场景 ≥10x; design 模块设计-Phase8-P1P2
+Other,ProcessXor,ProcessXor,implemented,8,nodes/process_xor.rs:1,12.89,12.89,15.91,15.91,construct-rs/bench/results/bench_phase8_313.json,-,Phase 8; ProcessXorNode; PX1 全场景 ≥10x; design 模块设计-Phase8-P1P2
 Other,Slicing,Slicing,not_implemented,-,-,,,,,-,-,切片; Phase 5+
 Other,Indexing,Indexing,not_implemented,-,-,,,,,-,-,索引; Phase 5+
 Other,Filter,Filter,not_implemented,-,-,,,,,-,-,过滤; Phase 5+
