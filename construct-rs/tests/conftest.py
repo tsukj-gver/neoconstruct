@@ -41,13 +41,15 @@ _PROJECT_ROOT = _TESTS_DIR.parent                  # construct-rs/
 _CRS_PYTHON_DIR = _PROJECT_ROOT / "python"         # construct-rs/python/
 
 # 子进程隔离用的 venv 解析。
-# **环境适配（偏离设计文档 §2.1）**：设计文档沿用旧 test_phase4_parity.py 的路径
-# `crs_venv` / `crs_venv_py`，但实际环境这两个 venv 已废弃（Scripts 为空），
-# 当前活跃 venv 是 `crs_venv_new` / `crs_venv_py_new`（与 testing/ci/lib_smoke.ps1
-# 的 Resolve-ProjectPaths 一致）。此处采用实际路径。
+# **环境适配（偏离设计文档 §2.1，8.ENV 切换）**：设计文档沿用旧 test_phase4_parity.py
+# 的路径 `crs_venv` / `crs_venv_py`，但实际环境这两个 venv 已废弃（Scripts 为空）。
+# 此前活跃 venv 是 `crs_venv_new` / `crs_venv_py_new`（Python 3.14 + abi3）。
+# 8.ENV 任务（2026-08-06）切换至 Python 3.13 非 abi3 模式（pyo3 0.22 原生支持 3.13，
+# 无需 PYO3_USE_ABI3_FORWARD_COMPATIBILITY），新活跃 venv 是 `crs_venv_313` /
+# `crs_venv_py_313`。旧 3.14 venv 保留为 legacy 基线对照。
 _VENV_ROOT = Path(r"<opencode-temp>")
-_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_new" / "Scripts" / "python.exe"
-_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_new" / "Scripts" / "python.exe"
+_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_313" / "Scripts" / "python.exe"
+_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
 
 
 # ===== session 级 venv / 路径 fixtures =====

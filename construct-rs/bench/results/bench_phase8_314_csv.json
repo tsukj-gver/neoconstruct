@@ -1,0 +1,80 @@
+[
+  {
+    "case_id": "DF1",
+    "constructor": "Default",
+    "group": "p0",
+    "desc": "Default(Byte, count) obj provided (pass-through)",
+    "direction": "parse",
+    "path_type": "nested_in_struct",
+    "scale": "N=2",
+    "py_ns": 2090.7899946905673,
+    "rs_ns": 230.16000050120056,
+    "speedup": 9.084071907097782,
+    "gate": 10.0
+  },
+  {
+    "case_id": "DF1",
+    "constructor": "Default",
+    "group": "p0",
+    "desc": "Default(Byte, count) obj provided (pass-through)",
+    "direction": "build",
+    "path_type": "nested_in_struct",
+    "scale": "N=2",
+    "py_ns": 2020.4900007229298,
+    "rs_ns": 207.1900002192706,
+    "speedup": 9.751870257177622,
+    "gate": 10.0
+  },
+  {
+    "case_id": "DF2",
+    "constructor": "Default",
+    "group": "p0",
+    "desc": "Default(Byte, count) 表达式默认值",
+    "direction": "parse",
+    "path_type": "nested_in_struct",
+    "scale": "N=2",
+    "py_ns": 2645.429997937754,
+    "rs_ns": 255.91000448912382,
+    "speedup": 10.337344971013763,
+    "gate": 10.0
+  },
+  {
+    "case_id": "DF2",
+    "constructor": "Default",
+    "group": "p0",
+    "desc": "Default(Byte, count) 表达式默认值",
+    "direction": "build",
+    "path_type": "nested_in_struct",
+    "scale": "N=2",
+    "py_ns": 2725.3099950030446,
+    "rs_ns": 258.9999989140779,
+    "speedup": 10.522432457257091,
+    "gate": 10.0
+  },
+  {
+    "case_id": "TM1",
+    "constructor": "Terminated",
+    "group": "p0",
+    "desc": "Terminated EOF 断言",
+    "direction": "parse",
+    "path_type": "nested_in_struct",
+    "scale": "N=1",
+    "py_ns": 2350.0200011767447,
+    "rs_ns": 254.70000109635293,
+    "speedup": 9.22661951731886,
+    "gate": 10.0
+  },
+  {
+    "case_id": "TM1",
+    "constructor": "Terminated",
+    "group": "p0",
+    "desc": "Terminated EOF 断言",
+    "direction": "build",
+    "path_type": "nested_in_struct",
+    "scale": "N=1",
+    "py_ns": 2169.7200019843876,
+    "rs_ns": 164.96999887749553,
+    "speedup": 13.15220959415531,
+    "gate": 10.0
+  }
+]

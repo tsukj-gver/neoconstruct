@@ -4232,7 +4232,7 @@ class {name}:
 
             // _parse_raw 现在返回用户类实例（方案 B'）
             let data = PyBytes::new_bound(py, &[0x42u8]);
-            let instance = schema._parse_raw(py, &data).expect("parse");
+            let instance = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             // 验证是 cls 的实例
             assert!(
                 instance.is_instance(&cls).expect("is_instance"),
@@ -4278,7 +4278,7 @@ class {name}:
 
             // 数据：a=0x01, b=0x0203
             let data = PyBytes::new_bound(py, &[0x01, 0x02, 0x03]);
-            let instance = schema._parse_raw(py, &data).expect("parse");
+            let instance = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             // 通过 getattr 读字段
             let a: i64 = instance.getattr("a").unwrap().extract().unwrap();
             let b: i64 = instance.getattr("b").unwrap().extract().unwrap();
@@ -4410,7 +4410,7 @@ class {name}:
 
             // parse 回来（方案 B'：返回实例）
             let data = PyBytes::new_bound(py, &built_bytes);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
             let b: i64 = parsed.getattr("b").unwrap().extract().unwrap();
             let c_binding = parsed.getattr("c").unwrap();
@@ -4433,7 +4433,7 @@ class {name}:
                 compile_schema(py, &cls, vec![], vec![], None, None, false).expect("compile");
 
             let data = PyBytes::new_bound(py, b"");
-            let result = schema._parse_raw(py, &data).expect("parse");
+            let result = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             // 方案 B'：返回 cls 的空实例
             assert!(
                 result.is_instance(&cls).expect("is_instance"),
@@ -4499,7 +4499,7 @@ class {name}:
 
             // parse: tag=0xAA, len_bytes=b'\x01\x02', rest=b'\x03\x04\x05'
             let data = PyBytes::new_bound(py, &[0xAA, 0x01, 0x02, 0x03, 0x04, 0x05]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let tag: i64 = parsed.getattr("tag").unwrap().extract().unwrap();
             let lb_binding = parsed.getattr("len_bytes").unwrap();
             let len_bytes: &[u8] = lb_binding.extract().unwrap();
@@ -4583,7 +4583,10 @@ class {name}:
             // parse b'\xAA\x05' → Outer 实例（tag=0xAA, inner=Inner(x=5)）
             // 方案 B'：parse 返回 Outer 类实例（不是 dict）
             let data = PyBytes::new_bound(py, &[0xAA, 0x05]);
-            let parsed = outer_schema._parse_raw(py, &data).expect("parse");
+            let parsed = outer_schema
+                ._parse_raw(py, &data)
+                .expect("parse")
+                .into_bound(py);
             // 验证是 Outer 实例
             assert!(
                 parsed.is_instance(&outer_cls).expect("is_instance"),
@@ -5472,7 +5475,10 @@ class {name}:
             // count=3 → data=Bytes(3*2=6) → "ABCDEF"
             let parse_data = b"\x03ABCDEF";
             let data_binding = PyBytes::new_bound(py, parse_data);
-            let parsed = schema._parse_raw(py, &data_binding).expect("parse");
+            let parsed = schema
+                ._parse_raw(py, &data_binding)
+                .expect("parse")
+                .into_bound(py);
             let count_val: i64 = parsed
                 .getattr("count")
                 .expect("getattr count")
@@ -5731,7 +5737,7 @@ class {name}:
             // parse: b'\x05' → start=0, count=5, end=1, size=1
             let parse_data = b"\x05";
             let data = PyBytes::new_bound(py, parse_data);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let start: i64 = parsed.getattr("start").unwrap().extract().unwrap();
             let count: i64 = parsed.getattr("count").unwrap().extract().unwrap();
             let end: i64 = parsed.getattr("end").unwrap().extract().unwrap();
@@ -6297,7 +6303,7 @@ class {name}:
 
             // parse b'\xA5'
             let data = pyo3::types::PyBytes::new_bound(py, &[0xA5]);
-            let instance = schema._parse_raw(py, &data).expect("parse");
+            let instance = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let a: i64 = instance.getattr("a").unwrap().extract().unwrap();
             let b: i64 = instance.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 0xA);
@@ -6568,7 +6574,7 @@ class {name}:
 
             // parse b'\xAA\x00\x00\x00\x00' → tag=0xAA
             let data = pyo3::types::PyBytes::new_bound(py, &[0xAA, 0, 0, 0, 0]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let tag: i64 = parsed.getattr("tag").unwrap().extract().unwrap();
             assert_eq!(tag, 0xAA);
 
@@ -6605,7 +6611,7 @@ class {name}:
 
             // parse b'\xA5' → a=0xA
             let data = pyo3::types::PyBytes::new_bound(py, &[0xA5]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
             assert_eq!(a, 0xA);
 
@@ -6689,7 +6695,7 @@ class {name}:
 
             // parse [0xA5, 0xF0] → a=0xA, b=0x5F, c=0x0
             let data = pyo3::types::PyBytes::new_bound(py, &[0xA5, 0xF0]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
             let b: i64 = parsed.getattr("b").unwrap().extract().unwrap();
             let c: i64 = parsed.getattr("c").unwrap().extract().unwrap();
@@ -6804,7 +6810,7 @@ class {name}:
 
             // parse [0x78, 0x56, 0x34, 0x12] → ByteSwap → 0x12345678
             let data = pyo3::types::PyBytes::new_bound(py, &[0x78, 0x56, 0x34, 0x12]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let v: i64 = parsed.getattr("v").unwrap().extract().unwrap();
             assert_eq!(v, 0x12345678);
 
@@ -6840,7 +6846,7 @@ class {name}:
 
             // parse [0xF0, 0x0F] → BitSwap → [0x0F, 0xF0] → Bytes(2) → b"\x0F\xF0"
             let data = pyo3::types::PyBytes::new_bound(py, &[0xF0, 0x0F]);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let v_binding = parsed.getattr("v").unwrap();
             let v: &[u8] = v_binding
                 .downcast::<pyo3::types::PyBytes>()
@@ -7028,7 +7034,7 @@ class {name}:
             // parse 5 字节 → items = [1, 2, 3, 4, 5]
             let parse_data = &[0x01, 0x02, 0x03, 0x04, 0x05];
             let data = pyo3::types::PyBytes::new_bound(py, parse_data);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let items_binding = parsed.getattr("items").unwrap();
             let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
             assert_eq!(items.len(), 5);
@@ -7071,7 +7077,7 @@ class {name}:
             // 5 字节：0x0102, 0x0304, 0x05（残留）
             let parse_data = &[0x01, 0x02, 0x03, 0x04, 0x05];
             let data = pyo3::types::PyBytes::new_bound(py, parse_data);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let items_binding = parsed.getattr("items").unwrap();
             let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
             // 应得到 2 个元素（前 4 字节），第 5 字节回退
@@ -7104,7 +7110,7 @@ class {name}:
 
             let parse_data = &[0x01, 0x02, 0x03];
             let data = pyo3::types::PyBytes::new_bound(py, parse_data);
-            let parsed = schema._parse_raw(py, &data).expect("parse");
+            let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let items_binding = parsed.getattr("items").unwrap();
             let items = items_binding.downcast::<pyo3::types::PyList>().unwrap();
             // discard=True：返回空 list

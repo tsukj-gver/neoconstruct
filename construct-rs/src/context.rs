@@ -248,6 +248,48 @@ impl<'py> Context<'py> {
         Ok(())
     }
 
+    /// 按索引写入字段值（同时写 PyDict + expr_values_buf），用 KnownHash 跳过
+    /// interned key 的 hash 重算（O1-B，ADR-023 决策 2）。
+    ///
+    /// 与 [`Context::set_field_at`] 区别：调用方提供预先缓存的 hash（如
+    /// [`crate::nodes::struct_node::FieldName::cached_hash`]），用
+    /// `_PyDict_SetItem_KnownHash` 替代 `PyDict_SetItem`，跳过运行期 hash 计算
+    /// 与一次类型检查分支（~5-10ns/字段）。
+    ///
+    /// # Safety
+    ///
+    /// 调用方必须保证 `hash` 是 `name` 的正确 `PyObject_Hash` 返回值。
+    /// interned PyString 的 hash 在其生命周期内不变（CPython 强约束）。
+    ///
+    /// # 适用范围
+    ///
+    /// 仅 StructNode.parse 的 has_expressions 路径使用（Phase 8 共享税热路径）。
+    /// 其他节点的 set_field_at 调用保持原 [`Context::set_field_at`]（不在主瓶颈上）。
+    ///
+    /// # 错误
+    ///
+    /// `_PyDict_SetItem_KnownHash` 返回 -1 时返回 `PyErr`（与 `set_field_at` 同行为）。
+    #[inline]
+    pub fn set_field_at_knownhash(
+        &mut self,
+        idx: usize,
+        name: &Py<PyString>,
+        value: &Bound<'_, PyAny>,
+        hash: ffi::Py_hash_t,
+        py: Python<'_>,
+    ) -> PyResult<()> {
+        if let Some(fields) = &self.fields {
+            // O1-B：用 KnownHash 跳过运行期 hash 重算。
+            crate::instance::set_item_knownhash(py, fields, name.bind(py), value, hash)?;
+            // 同步 borrowed 指针到 expr_values_buf（与 set_field_at 一致）。
+            if idx < self.expr_values_len {
+                self.expr_values_buf[idx] = value.as_ptr();
+            }
+        }
+        // 占位 context（fields = None）：无操作。
+        Ok(())
+    }
+
     /// 仅写入 `expr_values_buf`，不修改 PyDict（v5 RepeatUntil Element 字段借用）。
     ///
     /// 用于 RepeatUntilNode.parse/build 在迭代时把当前元素借用为 Element 字段

@@ -152,8 +152,34 @@ impl CompiledSchema {
         &self,
         py: Python<'py>,
         data: &Bound<'py, PyBytes>,
-    ) -> PyResult<Bound<'py, PyAny>> {
-        let bytes = data.as_bytes();
+    ) -> PyResult<Py<PyAny>> {
+        // O2-A.1（ADR-023 决策 3）：直接访问 PyBytesObject.ob_sval 字段，绕过
+        // `PyBytes_AsStringAndSize` 函数调用 + 内部 type check。data 类型由 pyo3
+        // 参数签名 &Bound<PyBytes> 在入口处保证（成功才进入此函数）。
+        //
+        // SAFETY:
+        // - data 是 &Bound<'py, PyBytes>，pyo3 参数类型签名在入口处 type check
+        //   （PyBytes_CheckExact 通过才进入此函数）。直接将 PyObject* cast 为
+        //   PyBytesObject* 是 CPython 内部约定。
+        // - ob_sval 字段声明为 `[c_char; 1]` 是占位（CPython 不变量：实际长度为
+        //   ob_base.ob_size + 1，含终止 NUL；`from_raw_parts` 的 len 取 ob_size，
+        //   不含 NUL）。
+        // - 返回的 &[u8] 生命周期受 `data` 借用约束（Rust borrow checker 保证）。
+        // - GIL 持有（由 `py: Python<'py>` 参数保证）。
+        //
+        // ABI 依赖：[CPython Internal Struct] PyBytesObject.ob_sval + ob_base.ob_size
+        // 由 pyo3 0.22 cpython 子模块暴露（`pyo3-ffi-0.22.6/src/cpython/bytesobject.rs`
+        // L8-14）。项目非 abi3 模式（8.ENV 验证），cpython 子模块可用。
+        let bytes: &[u8] = unsafe {
+            use pyo3::ffi::PyBytesObject;
+            // data.as_ptr() 返回 *mut ffi::PyObject；cast 为 *const PyBytesObject
+            // 后 dereference 才能访问 ob_base.ob_size + ob_sval 字段。
+            let bytes_ptr = data.as_ptr() as *const PyBytesObject;
+            let bytes_obj = &*bytes_ptr;
+            let len = bytes_obj.ob_base.ob_size as usize;
+            std::slice::from_raw_parts(bytes_obj.ob_sval.as_ptr() as *const u8, len)
+        };
+
         let mut stream = ParseStream::new(bytes);
         // R4：统一使用 placeholder。StructNode.parse 内部根据 has_expressions
         // 自行创建实例并 inject dict（has_expressions=true 时）或直接操作实例
@@ -165,10 +191,13 @@ impl CompiledSchema {
         // 其他错误正常转 PyErr 向上传播。
         let parse_result = self.root.parse(py, &mut stream, &mut ctx, &mut path);
         match parse_result {
-            Ok(result) => Ok(result.into_bound(py)),
+            // O2-A.2：返回类型从 Bound<PyAny> 改为 Py<PyAny>，省去 pyo3 wrap 阶段
+            // 的一次 Bound 构造（~1-2ns）。pyo3 0.22 #[pymethods] 接受 Py<PyAny>
+            // 返回类型（DEV §7 #10 已验证）。
+            Ok(result) => Ok(result),
             Err(ConstructError::CancelParsing { .. }) => {
                 // 用户主动取消，返回 None（对齐 Python `except CancelParsing: pass`）。
-                Ok(py.None().into_bound(py))
+                Ok(py.None())
             }
             Err(e) => Err(e.into()),
         }
@@ -389,6 +418,79 @@ mod tests {
                 schema.static_size, None,
                 "Aligned with runtime modulus should keep static_size None (SizeofError)"
             );
+        });
+    }
+
+    // ======================================================================
+    // Phase 8 OPT-SHARED（ADR-023）：_parse_raw O2-A 路径
+    // ======================================================================
+
+    /// O2-A.1 验证：直接访问 PyBytesObject.ob_sval 字段得到的 bytes slice
+    /// 与 data.as_bytes() 内容一致（设计 §4.1.1 测试 `test_ob_sval_direct_access_matches_as_bytes`）。
+    #[test]
+    fn parse_raw_ob_sval_direct_access_matches_as_bytes() {
+        use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
+        with_py(|py| {
+            // 构造最小 schema：单字段 Int8ub
+            let root = Node::Struct(StructNode::new_for_test(
+                py,
+                vec![(
+                    "x".to_string(),
+                    Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big)),
+                )],
+            ));
+            let cls = py
+                .eval_bound("type('S', (), {})", None, None)
+                .expect("create type")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let schema = CompiledSchema::new(root, cls, py);
+            // 5 字节输入，schema 只消费 1（剩余忽略）
+            let input: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
+            let data = PyBytes::new_bound(py, input);
+            let result = schema._parse_raw(py, &data).expect("parse");
+            let inst = result.bind(py);
+            let x: i64 = inst.getattr("x").unwrap().extract().unwrap();
+            assert_eq!(x, 0xAA, "ob_sval direct read should give correct value");
+        });
+    }
+
+    /// O2-A.2 验证：返回类型为 Py<PyAny>，且 CancelParsing 仍返回 None
+    /// （Phase 8.10 顶层 catch 不破坏）。
+    #[test]
+    fn parse_raw_cancel_parsing_returns_none_after_o2a() {
+        with_py(|py| {
+            // 空 schema（无字段），直接触发 CancelParsing
+            let root = Node::Struct(StructNode::new_for_test(py, Vec::new()));
+            let cls = py
+                .eval_bound("type('S', (), {})", None, None)
+                .expect("create type")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let schema = CompiledSchema::new(root, cls, py);
+            let data = PyBytes::new_bound(py, b"");
+            let result = schema._parse_raw(py, &data).expect("parse ok");
+            // 空 schema 返回实例（不是 None），验证 O2-A 返回路径正常
+            assert!(
+                !result.is_none(py),
+                "empty struct should return instance, not None"
+            );
+        });
+    }
+
+    /// O2-A 边界：空 bytes 输入。
+    #[test]
+    fn parse_raw_empty_bytes_o2a_works() {
+        with_py(|py| {
+            let root = Node::Struct(StructNode::new_for_test(py, Vec::new()));
+            let cls = py
+                .eval_bound("type('S', (), {})", None, None)
+                .expect("create type")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let schema = CompiledSchema::new(root, cls, py);
+            let data = PyBytes::new_bound(py, b"");
+            let _ = schema._parse_raw(py, &data).expect("parse empty ok");
         });
     }
 }

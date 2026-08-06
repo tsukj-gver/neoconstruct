@@ -1,0 +1,173 @@
+{
+  "python_version": "3.14.2",
+  "construct_path": "C:\\Others\\Projects\\<legacy-project>\\construct_rust\\construct\\construct\\__init__.py",
+  "number": 50000,
+  "repeat": 7,
+  "results": [
+    {
+      "case_id": "CN1",
+      "desc": "Const b'IHDR' bytes",
+      "full_ns": 2385.460000950843,
+      "subcon_ns": 627.8200005181134,
+      "core_ns": 34.16400053538382,
+      "framework_tax_ns": 2351.2960004154593,
+      "adapter_tax_ns": 1757.6400004327297,
+      "core_ratio": 0.014321766251274836,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "CN2",
+      "desc": "Const(255, Int32ul) int",
+      "full_ns": 2439.455999992788,
+      "subcon_ns": 668.0140004027635,
+      "core_ns": 69.5920002181083,
+      "framework_tax_ns": 2369.8639997746795,
+      "adapter_tax_ns": 1771.4419995900244,
+      "core_ratio": 0.028527671832701242,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "HX1",
+      "desc": "Hex(Int32ub) int 显示",
+      "full_ns": 2849.1899999789894,
+      "subcon_ns": 992.5100009422749,
+      "core_ns": 135.7119996100664,
+      "framework_tax_ns": 2713.478000368923,
+      "adapter_tax_ns": 1856.6799990367144,
+      "core_ratio": 0.0476317829316638,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "HX2",
+      "desc": "Hex(Bytes(4)) bytes 显示",
+      "full_ns": 2541.0140003077686,
+      "subcon_ns": 764.6760006900877,
+      "core_ns": 89.09199968911707,
+      "framework_tax_ns": 2451.9220006186515,
+      "adapter_tax_ns": 1776.337999617681,
+      "core_ratio": 0.03506159339473384,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "HD1",
+      "desc": "HexDump(Bytes(4)) bytes 显示",
+      "full_ns": 2518.5380002949387,
+      "subcon_ns": 736.5259993821383,
+      "core_ns": 87.13599992915988,
+      "framework_tax_ns": 2431.402000365779,
+      "adapter_tax_ns": 1782.0120009128004,
+      "core_ratio": 0.03459784999033393,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "AL2",
+      "desc": "Aligned(8, Bytes(3))",
+      "full_ns": 2611.4019996020943,
+      "subcon_ns": 824.4619995821267,
+      "core_ns": 41.10799985937774,
+      "framework_tax_ns": 2570.2939997427166,
+      "adapter_tax_ns": 1786.9400000199676,
+      "core_ratio": 0.01574173561391217,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "TM1",
+      "desc": "Terminated at EOF（嵌 Struct）",
+      "full_ns": 2504.847999662161,
+      "subcon_ns": 463.8200008776039,
+      "core_ns": 29.56800046376884,
+      "framework_tax_ns": 2475.279999198392,
+      "adapter_tax_ns": 2041.027998784557,
+      "core_ratio": 0.01180430927056524,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "EN1",
+      "desc": "Enum(Byte, 3 mappings)",
+      "full_ns": 2468.210000079125,
+      "subcon_ns": 720.3979999758303,
+      "core_ns": 38.936000782996416,
+      "framework_tax_ns": 2429.2739992961287,
+      "adapter_tax_ns": 1747.8120001032948,
+      "core_ratio": 0.01577499515103991,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "EN2",
+      "desc": "Enum(Byte, 8 mappings)",
+      "full_ns": 2473.175999475643,
+      "subcon_ns": 714.0459993388504,
+      "core_ns": 40.23800021968782,
+      "framework_tax_ns": 2432.937999255955,
+      "adapter_tax_ns": 1759.1300001367927,
+      "core_ratio": 0.016269768196124735,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "FE1-parse",
+      "desc": "FlagsEnum(Byte, 4 flags) parse",
+      "full_ns": 3412.2519998345524,
+      "subcon_ns": 1627.2560006473213,
+      "core_ns": 364.91199978627264,
+      "framework_tax_ns": 3047.3400000482798,
+      "adapter_tax_ns": 1784.995999187231,
+      "core_ratio": 0.10694169123615896,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "FE1-build",
+      "desc": "FlagsEnum(Byte, 4 flags) build dict→int",
+      "full_ns": 2388.6180005501956,
+      "subcon_ns": 1023.886000039056,
+      "core_ns": 292.67200035974383,
+      "framework_tax_ns": 2095.9460001904517,
+      "adapter_tax_ns": 1364.7320005111396,
+      "core_ratio": 0.12252775466496929,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "MP1",
+      "desc": "Mapping(Byte, 3 pairs)",
+      "full_ns": 2435.7680010143667,
+      "subcon_ns": 692.3639995511621,
+      "core_ns": 38.63399964757264,
+      "framework_tax_ns": 2397.134001366794,
+      "adapter_tax_ns": 1743.4040014632046,
+      "core_ratio": 0.015861116342559572,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "OO1",
+      "desc": "OneOf(Byte, [1,2,3])",
+      "full_ns": 2498.7480009440333,
+      "subcon_ns": 727.9080001171678,
+      "core_ns": 36.6120005492121,
+      "framework_tax_ns": 2462.136000394821,
+      "adapter_tax_ns": 1770.8400008268654,
+      "core_ratio": 0.014652138004864833,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "NO1",
+      "desc": "NoneOf(Byte, [1,2,3])",
+      "full_ns": 2520.0259999837726,
+      "subcon_ns": 755.563999991864,
+      "core_ns": 48.50200028158724,
+      "framework_tax_ns": 2471.5239997021854,
+      "adapter_tax_ns": 1764.4619999919087,
+      "core_ratio": 0.019246626932380682,
+      "verdict": "原始差(应10x+)"
+    },
+    {
+      "case_id": "NT1",
+      "desc": "NamedTuple over Struct{2}",
+      "full_ns": 5021.584000205621,
+      "subcon_ns": 3206.9980003871024,
+      "core_ns": 238.4619996882975,
+      "framework_tax_ns": 4783.122000517324,
+      "adapter_tax_ns": 1814.5859998185188,
+      "core_ratio": 0.04748740630018996,
+      "verdict": "原始差(应10x+)"
+    }
+  ]
+}

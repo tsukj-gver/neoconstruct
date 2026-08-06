@@ -41,40 +41,77 @@
 
 use crate::context::Context;
 use crate::error::ConstructError;
-use crate::instance::{create_class, intern_pystring};
+use crate::instance::{
+    create_class, dict_via_generic_getdict, intern_pystring, set_item_knownhash,
+};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
+use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyType};
 
 use super::{Construct, Node};
 
-/// 编译期缓存的字段名：包含 interned PyString（C API 快速比较）和 Rust 侧 String。
+/// 编译期缓存的字段名：包含 interned PyString（C API 快速比较）、Rust 侧 String、
+/// 以及 interned key 的 PyObject_Hash 缓存值。
 ///
-/// 设计依据：设计修订 §3.2。
+/// 设计依据：设计修订 §3.2 + ADR-023 决策 2（O1-B KnownHash 优化）。
 ///
 /// - `py_name`：interned `Py<PyString>`，parse 时作为 dict key（避免每次创建 str
 ///   + 计算 hash）、build 时作为 `getattr` 参数（interned 可命中 method cache）。
 /// - `rust_name`：Rust 侧字符串副本，用于 path 追踪与错误信息。
+/// - `cached_hash`：编译期一次性 `PyObject_Hash` 计算并缓存的 hash 值。interned
+///   PyString 的 hash 在其生命周期内不变（CPython 强约束），用于 O1-B
+///   `_PyDict_SetItem_KnownHash` 跳过运行期 hash 重算。
 #[derive(Debug)]
 pub struct FieldName {
     /// 缓存的 interned Python 字符串引用。
     py_name: Py<PyString>,
     /// Rust 侧字段名（用于 path、错误信息）。
     rust_name: String,
+    /// 编译期缓存的 PyObject_Hash 结果。
+    ///
+    /// interned PyString 的 hash 在其生命周期内不变（CPython 强约束：
+    /// interned 字符串不可变 + hash 字段 once-cached）。`FieldName::new` 构造时
+    /// 一次性 `PyObject_Hash` 计算并缓存，供 [`set_item_knownhash`] 使用。
+    cached_hash: ffi::Py_hash_t,
 }
 
 impl FieldName {
-    /// 创建字段名。`py` 用于创建 interned PyString。
+    /// 创建字段名。`py` 用于创建 interned PyString + 一次性计算 hash。
     ///
     /// # 参数
     ///
     /// - `py`：GIL token。
     /// - `name`：字段名字符串。
+    ///
+    /// # Panic（NB-4 修复）
+    ///
+    /// `PyObject_Hash` 返回 -1 时 panic（构造期错误，比运行期退化更明确——
+    /// 避免缓存 -1 hash 传给 `_PyDict_SetItem_KnownHash` 触发 dict 内部
+    /// hash 冲突路径性能退化）。interned PyString 理论上 hash 不会失败
+    /// （CPython 内部 hash 算法对任意 Unicode 字符串均有效），此 panic
+    /// 仅在 OOM 等极端场景触发。
     pub fn new(py: Python<'_>, name: impl Into<String>) -> Self {
         let rust_name = name.into();
         let py_name = intern_pystring(py, &rust_name);
-        Self { py_name, rust_name }
+        // SAFETY: py_name 是有效的 PyString 指针，PyObject_Hash 是 CPython Stable ABI。
+        // interned PyString hash 在其生命周期内不变（CPython 强约束）。
+        let cached_hash = unsafe { ffi::PyObject_Hash(py_name.as_ptr()) };
+        // NB-4 修复（REV 检视建议 + ADR-023 决策 2）：PyObject_Hash 返回 -1 表示失败
+        // （异常已挂起）。interned PyString 理论不会失败，但若发生则 panic（构造期错误）。
+        if cached_hash == -1 {
+            let err = PyErr::fetch(py);
+            panic!(
+                "FieldName::new: PyObject_Hash failed for interned string {:?}: {:?}",
+                rust_name, err
+            );
+        }
+        Self {
+            py_name,
+            rust_name,
+            cached_hash,
+        }
     }
 
     /// 返回 interned Python 字符串引用（`Py<PyString>`，拥有所有权）。
@@ -85,6 +122,13 @@ impl FieldName {
     /// 返回 Rust 侧字段名（用于 path 追踪与错误信息）。
     pub fn rust_name(&self) -> &str {
         &self.rust_name
+    }
+
+    /// 返回编译期缓存的 PyObject_Hash 值（供 [`set_item_knownhash`] 使用）。
+    ///
+    /// interned PyString hash 在其生命周期内不变，多次调用返回相同值。
+    pub fn cached_hash(&self) -> ffi::Py_hash_t {
+        self.cached_hash
     }
 }
 
@@ -179,10 +223,10 @@ pub struct StructNode {
     /// - `false` → `placeholder`（Phase 1 性能优化保留）
     /// - `true` → `new_root`（恢复 context 使用）
     has_expressions: bool,
-    /// R4 新增：interned `"__dict__"`（getattr 实例 dict 复用，避免每次 parse 创建 str）。
+    /// R4 新增：interned `"__dict__"`（getattr fallback 路径复用）。
     ///
-    /// 在 [`StructNode::new`] 中通过 [`crate::instance::intern_pystring`] 创建一次，
-    /// 后续 parse 直接 `instance.getattr(self.dict_attr_name.bind(py))` 复用。
+    /// O1-A 后主路径改用 `dict_via_generic_getdict`，此字段仅供 GenericGetDict
+    /// 失败时的 fallback getattr 路径使用（设计 §1.1.5 退化路径）。
     /// 由于 `"__dict__"` 是 CPython 内部高频使用的字符串，实际开销接近零
     /// （命中 interned 池，仅一次指针比较）。
     dict_attr_name: Py<PyString>,
@@ -286,24 +330,37 @@ impl Construct for StructNode {
         })?;
 
         // R4 步骤 2：获取实例的 __dict__（借用实例自带的空 dict，非新建）。
-        // 使用缓存的 interned "__dict__"，避免每次 parse 创建临时 str。
-        // slots 类（无 __dict__）此处 getattr 失败 → 返回明确错误（设计修订 §8.1）。
-        let dict_bound = instance
-            .getattr(self.dict_attr_name.bind(py))
-            .map_err(|e| ConstructError::Generic {
-                message: format!(
-                    "failed to get __dict__ from instance: {}. \
-                     该类可能使用了 __slots__ 或 @dataclass(slots=True)，\
-                     不支持 slots dataclass。",
-                    e
-                ),
-                path: path.to_string(),
-            })?
-            .downcast_into::<PyDict>()
-            .map_err(|_| ConstructError::Generic {
-                message: "instance __dict__ is not a dict (possible __slots__ class)".into(),
-                path: path.to_string(),
-            })?;
+        // O1-A 优化（ADR-023 决策 1）：直接调 PyObject_GenericGetDict，绕过 pyo3
+        // getattr 包装（MRO + 描述符 dispatch + Bound 构造 + downcast）。
+        // GenericGetDict 是 CPython Stable ABI（since 3.10），正确处理 Python 3.13
+        // managed dict + lazy materialize。
+        //
+        // 退化路径（设计 §1.1.5）：GenericGetDict 失败（NULL / 非 PyDict / slots class）
+        // 时 fallback 到原 R4 getattr 路径，保留明确错误信息。
+        let dict_bound = match dict_via_generic_getdict(py, &instance) {
+            Ok(d) => d,
+            Err(_) => {
+                // Fallback：保留 R4 getattr 路径（slots class / __dict__ override /
+                // GenericGetDict 抛 Python 异常等异常场景）。
+                instance
+                    .getattr(self.dict_attr_name.bind(py))
+                    .map_err(|e| ConstructError::Generic {
+                        message: format!(
+                            "failed to get __dict__ from instance: {}. \
+                             该类可能使用了 __slots__ 或 @dataclass(slots=True)，\
+                             不支持 slots dataclass。",
+                            e
+                        ),
+                        path: path.to_string(),
+                    })?
+                    .downcast_into::<PyDict>()
+                    .map_err(|_| ConstructError::Generic {
+                        message: "instance __dict__ is not a dict (possible __slots__ class)"
+                            .into(),
+                        path: path.to_string(),
+                    })?
+            }
+        };
 
         // R4 步骤 3：根据 has_expressions 选择填充路径。
         if self.has_expressions {
@@ -327,7 +384,14 @@ impl Construct for StructNode {
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
                         // 写入 ctx 的 fields（即实例 dict）+ expr_values_buf。
-                        ctx.set_field_at(idx, field.name.py_name(), value.bind(py), py)?;
+                        // O1-B 优化（ADR-023 决策 2）：用 KnownHash 跳过 hash 重算。
+                        ctx.set_field_at_knownhash(
+                            idx,
+                            field.name.py_name(),
+                            value.bind(py),
+                            field.name.cached_hash(),
+                            py,
+                        )?;
                     }
                     FieldMode::Wo => {
                         // WO：仅消费字节，不写入 dict/context。
@@ -340,6 +404,8 @@ impl Construct for StructNode {
         } else {
             // Phase 1 无表达式路径：直接操作 dict（不经过 ctx）。
             // PyDict_SetItem 不触发 __setattr__，天然绕过 frozen dataclass 拦截。
+            // O1-B 优化（ADR-023 决策 2）：用 _PyDict_SetItem_KnownHash 跳过
+            // interned key 的运行期 hash 重算。FieldName::new 已缓存 PyObject_Hash。
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
@@ -352,7 +418,13 @@ impl Construct for StructNode {
                 };
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
-                        dict_bound.set_item(field.name.py_name().bind(py), value.bind(py))?;
+                        set_item_knownhash(
+                            py,
+                            &dict_bound,
+                            field.name.py_name().bind(py),
+                            value.bind(py),
+                            field.name.cached_hash(),
+                        )?;
                     }
                     FieldMode::Wo => {
                         drop(value);
@@ -2052,6 +2124,158 @@ mod tests {
             match err {
                 ConstructError::Stream { .. } => {}
                 other => panic!("expected Stream error, got {:?}", other),
+            }
+        });
+    }
+
+    // ======================================================================
+    // Phase 8 OPT-SHARED（ADR-023）：FieldName cached_hash + O1-A/O1-B 路径
+    // ======================================================================
+
+    #[test]
+    fn fieldname_cached_hash_is_correct() {
+        // FieldName::new 缓存的 hash 应等于 Python PyObject_Hash 的返回值。
+        with_py(|py| {
+            let name = FieldName::new(py, "my_field");
+            // 直接调 PyObject_Hash 重新计算（独立验证）。
+            let expected = unsafe { pyo3::ffi::PyObject_Hash(name.py_name().as_ptr()) };
+            assert_ne!(expected, -1, "PyObject_Hash should not fail");
+            assert_eq!(
+                name.cached_hash(),
+                expected,
+                "cached_hash should equal fresh hash"
+            );
+        });
+    }
+
+    #[test]
+    fn fieldname_cached_hash_stable_across_instances() {
+        // 同名 FieldName 的 cached_hash 应相同（interned string 共享 hash）。
+        with_py(|py| {
+            let a = FieldName::new(py, "alpha");
+            let b = FieldName::new(py, "alpha");
+            assert_eq!(a.cached_hash(), b.cached_hash());
+        });
+    }
+
+    #[test]
+    fn fieldname_cached_hash_distinct_for_distinct_names() {
+        with_py(|py| {
+            let a = FieldName::new(py, "alpha");
+            let b = FieldName::new(py, "beta");
+            assert_ne!(a.cached_hash(), b.cached_hash());
+        });
+    }
+
+    #[test]
+    fn fieldname_cached_hash_unicode_works() {
+        // Unicode 字段名（含中日韩字符 + emoji）也能正确计算 hash。
+        with_py(|py| {
+            let name = FieldName::new(py, "字段αβγ✨");
+            let expected = unsafe { pyo3::ffi::PyObject_Hash(name.py_name().as_ptr()) };
+            assert_ne!(expected, -1, "Unicode hash should not fail");
+            assert_eq!(name.cached_hash(), expected);
+        });
+    }
+
+    /// O1-B KnownHash 路径验证：parse 后实例 dict 中的 (key, value) 通过
+    /// Python attribute access 正常读取（写入正确性）。
+    #[test]
+    fn parse_o1b_knownhash_writes_dict_correctly_no_expr_path() {
+        with_py(|py| {
+            let fields = vec![rw_field(py, "x", u8_node()), rw_field(py, "y", u8_node())];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0xAA, 0xBB]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            let x: i64 = inst.getattr("x").unwrap().extract().unwrap();
+            let y: i64 = inst.getattr("y").unwrap().extract().unwrap();
+            assert_eq!(x, 0xAA);
+            assert_eq!(y, 0xBB);
+        });
+    }
+
+    /// O1-B KnownHash 路径验证：has_expressions 路径（set_field_at_knownhash）。
+    #[test]
+    fn parse_o1b_knownhash_writes_dict_correctly_expr_path() {
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let mut stream = ParseStream::new(&[0x11, 0x22]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            let a: i64 = inst.getattr("a").unwrap().extract().unwrap();
+            let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
+            assert_eq!(a, 0x11);
+            assert_eq!(b, 0x22);
+        });
+    }
+
+    /// O1-A GenericGetDict 路径验证：parse 后通过 getattr("__dict__") 得到的 dict
+    /// 与 GenericGetDict 路径返回的是同一对象（identity）。
+    #[test]
+    fn parse_o1a_generic_getdict_dict_is_instance_dict() {
+        with_py(|py| {
+            let fields = vec![rw_field(py, "x", u8_node())];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let mut stream = ParseStream::new(&[0x42]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let result = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let inst = result.bind(py);
+            // 验证 x 字段已写入
+            let x: i64 = inst.getattr("x").unwrap().extract().unwrap();
+            assert_eq!(x, 0x42);
+            // 验证 dict 是 instance 的 __dict__（identity 比较）
+            let dict_via_getattr = inst.getattr("__dict__").unwrap();
+            let dict_via_ggd = crate::instance::dict_via_generic_getdict(py, &inst).expect("ggd");
+            assert!(
+                dict_via_ggd.as_ptr() == dict_via_getattr.as_ptr(),
+                "GenericGetDict and getattr should return the same dict object"
+            );
+        });
+    }
+
+    /// O1-A + O1-B 联合验证：slots class 仍走 fallback getattr 路径并返回明确错误。
+    #[test]
+    fn parse_o1a_slots_class_falls_back_to_getattr_error() {
+        with_py(|py| {
+            let code = "class WithSlots:\n    __slots__ = ('x',)\n";
+            let globals = pyo3::types::PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None).expect("define");
+            let cls = globals
+                .get_item("WithSlots")
+                .expect("get_item ok")
+                .expect("class exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let fields = vec![rw_field(py, "x", u8_node())];
+            let node = StructNode::new(py, fields, cls, false, false);
+            let mut stream = ParseStream::new(&[0x42]);
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("slots class should fail");
+            match err {
+                ConstructError::Generic { message, .. } => {
+                    assert!(
+                        message.contains("__dict__") || message.contains("slots"),
+                        "error should mention __dict__/slots: {}",
+                        message
+                    );
+                }
+                other => panic!("expected Generic error for slots class, got {:?}", other),
             }
         });
     }

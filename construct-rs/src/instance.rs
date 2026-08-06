@@ -21,15 +21,21 @@
 //! - [`force_setattr`] 对应 `pydantic_core::validators::model::force_setattr`
 //!   （model.rs:381-394）：直接调 `PyObject_GenericSetAttr` 绕过自定义 `__setattr__`。
 //!
-//! ## ABI3 / 有限 API 兼容性
+//! ## ABI 模式
 //!
-//! 本项目通过 `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` 编译（详见 conftest.py），
-//! 启用 `Py_LIMITED_API`。此模式下：
+//! **当前状态（8.ENV 后，2026-08-06）**：非 abi3 模式，目标 Python 3.13。
+//! `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` 已弃用（详 8.ENV §2.3 决定性验证）。
+//! 非 abi3 模式下 cpython 子模块可用（`#[cfg(not(Py_LIMITED_API))]`），ADR-023
+//! OPT-SHARED 的 O1-B / O2-A 依赖此子模块。
 //!
-//! - `ffi::PyTypeObject` 为 opaque（不可直接访问 `tp_new` 字段），必须用
-//!   `PyType_GetSlot(type, Py_tp_new)` 间接获取槽位（ABI3 稳定 API）。
-//! - `_PyDict_NewPresized` 不可用（私有 API，仅非 limited API 暴露）。
-//!   改用 `PyDict::new_bound(py)` 创建 dict。
+//! ## Phase 8 OPT-SHARED（ADR-023）新增工具函数
+//!
+//! - [`dict_via_generic_getdict`]：用 `PyObject_GenericGetDict` 直接获取实例
+//!   `__dict__`，绕过 pyo3 getattr 包装链（O1-A，stable ABI）。
+//! - [`set_item_knownhash`]：用 `_PyDict_SetItem_KnownHash` 跳过 interned key
+//!   的 hash 重算（O1-B，cpython 子模块）。
+//!
+//! 设计依据：`docs/design/模块设计/模块设计-Phase8-OPT-SHARED.md` §1。
 //!
 //! pyo3 0.22 API 约束（项目锁定 0.22，详见 `Cargo.toml`）：
 //! - `IntoPy<Py<PyAny>>` trait bound（非 0.23+ 的 `IntoPyObject`）。
@@ -38,7 +44,7 @@
 
 use pyo3::ffi;
 use pyo3::prelude::*;
-use pyo3::types::{PyAny, PyString, PyTuple, PyType};
+use pyo3::types::{PyAny, PyDict, PyString, PyTuple, PyType};
 
 /// 创建用户类的空实例（等价 `cls.__new__(cls)`，绕过 Python 层方法查找）。
 ///
@@ -162,6 +168,135 @@ where
 /// `PyUnicode_FromStringAndSize` + `PyUnicode_InternInPlace`。
 pub fn intern_pystring(py: Python<'_>, name: &str) -> Py<PyString> {
     PyString::intern_bound(py, name).into()
+}
+
+/// O1-A：通过 `PyObject_GenericGetDict` 直接获取实例 `__dict__`，绕过 pyo3 getattr
+/// 包装（MRO + 描述符 dispatch + Bound 包装 + downcast）。
+///
+/// 设计依据：ADR-023 决策 1 + 设计文档 §1.1。
+///
+/// # ABI 依赖
+///
+/// `[CPython Public Stable ABI]`：`PyObject_GenericGetDict` 自 Python 3.3 起存在，
+/// **Stable ABI since version 3.10**（CPython 3.14.7 官方文档 `object.html#c.PyObject_GenericGetDict`）。
+/// pyo3 0.22 在 `pyo3-ffi-0.22.6/src/object.rs` L373 暴露（在 Python ≥ 3.10 下，
+/// abi3 / 非 abi3 均可用）。
+///
+/// # Python 3.13 managed dict 行为
+///
+/// Python 3.12 引入 `Py_TPFLAGS_MANAGED_DICT` flag，3.13 默认对所有 heaptype 启用
+/// （CPython typeobj.html：`tp_dictoffset` 设为 -1，表示 "unsafe to use this field"，
+/// 官方推荐改调 `PyObject_GenericGetDict()`）。本函数内部由 CPython 正确处理：
+/// - managed dict 模式：从 pre-header `dict_or_values` 槽读 dict
+/// - lazy materialize：若 dict 未物化，触发 materialize 创建 PyDictObject
+/// - 非 managed dict 模式（C 类型）：从 tp_dictoffset 偏移读 dict（C 类型无
+///   `__dict__` 时返回 NULL + AttributeError）
+///
+/// # 参数
+///
+/// - `py`：GIL token。
+/// - `instance`：heaptype 类的实例（如 [`create_class`] 返回的用户类实例）。
+///
+/// # 返回
+///
+/// 成功返回 `Bound<PyDict>`（owned 引用，由 pyo3 Bound drop 自动 decref）。
+/// 失败（GenericGetDict 返回 NULL / 返回非 PyDict）返回 `PyErr`——调用方应
+/// fallback 到原 getattr 路径（设计 §1.1.5）。
+///
+/// # 退化路径（详设计 §1.1.5）
+///
+/// | 触发条件 | 行为 |
+/// |---------|------|
+/// | GenericGetDict 返回 NULL（理论不发生，heaptype 实例必有 dict）| 返回 `PyErr`，调用方 fallback 到 getattr |
+/// | 返回非 PyDictObject（用户 override `__dict__` 描述符）| downcast 失败，返回 `PyTypeError` |
+/// | slots class（dict 始终 NULL）| 返回 `PyErr`，调用方 fallback 到 getattr 报错 |
+pub fn dict_via_generic_getdict<'py>(
+    py: Python<'py>,
+    instance: &Bound<'py, PyAny>,
+) -> PyResult<Bound<'py, PyDict>> {
+    // SAFETY:
+    // - instance.as_ptr() 是有效的 PyObject 指针（pyo3 Bound 守护）
+    // - PyObject_GenericGetDict 是 CPython 公开 Stable ABI（自 3.10 起），签名稳定：
+    //   `PyObject *PyObject_GenericGetDict(PyObject *obj, void *context)`
+    // - GIL 持有（由 py: Python<'py> 参数保证）
+    // - context 参数 NULL（CPython 文档：__dict__ getset descriptor 调用时传 NULL）
+    // 返回值是 owned reference（new reference），由调用方负责 decref。
+    let dict_ptr = unsafe { ffi::PyObject_GenericGetDict(instance.as_ptr(), std::ptr::null_mut()) };
+    if dict_ptr.is_null() {
+        // 理论不发生（heaptype 实例必有 dict）。CPython 在异常时返回 NULL + 设置异常。
+        // PyErr::take 返回 Option<PyErr>（fetch 在无异常时行为未定义，用 take 更安全）。
+        let err = PyErr::take(py).unwrap_or_else(|| {
+            pyo3::exceptions::PyAttributeError::new_err(
+                "PyObject_GenericGetDict returned NULL without setting exception",
+            )
+        });
+        return Err(err);
+    }
+    // SAFETY: dict_ptr 是 owned reference（PyObject_GenericGetDict 返回 new ref）。
+    // 由 Bound::from_owned_ptr 接管 ownership，pyo3 在 Bound drop 时自动 decref。
+    // downcast_into::<PyDict> 做运行期 type check（理论总是成功——GenericGetDict
+    // 返回 PyDictObject，除非用户 override __dict__ 描述符，此时 fallback 到 getattr）。
+    unsafe { Bound::from_owned_ptr(py, dict_ptr) }
+        .downcast_into::<PyDict>()
+        .map_err(|_| {
+            pyo3::exceptions::PyTypeError::new_err(
+                "instance __dict__ is not a dict (possible __dict__ override or __slots__ class)",
+            )
+        })
+}
+
+/// O1-B：用 `_PyDict_SetItem_KnownHash` 写入 dict（跳过 hash 重算）。
+///
+/// 设计依据：ADR-023 决策 2 + 设计文档 §1.2。
+///
+/// # ABI 依赖
+///
+/// `[CPython Internal Function]`：`_PyDict_SetItem_KnownHash` 是 CPython 私有 API
+/// （非 stable ABI），签名自 Python 3.5 起未变：
+/// `int _PyDict_SetItem_KnownHash(PyObject *mp, PyObject *key, PyObject *value, Py_hash_t hash)`。
+/// pyo3 0.22 cpython 子模块已暴露（`pyo3::ffi::_PyDict_SetItem_KnownHash`，
+/// 经 `pyo3-ffi-0.22.6/src/cpython/dictobject.rs` L29 + lib.rs L459 re-export）。
+/// 该子模块由 `#[cfg(not(Py_LIMITED_API))]` 守护——项目非 abi3（8.ENV 验证），可用。
+///
+/// # Safety
+///
+/// 调用方必须保证：
+/// 1. `hash` 是 `key` 的正确 hash（CPython `PyObject_Hash` 返回值）——本项目由
+///    [`crate::nodes::struct_node::FieldName::cached_hash`] 编译期一次性计算并缓存。
+/// 2. `key` 是 hashable（interned PyString 自动满足）。
+/// 3. GIL 持有（由 `py: Python<'_>` 保证）。
+/// 4. `dict` 是 `PyDictObject`（pyo3 `Bound<PyDict>` 类型签名守护）。
+///
+/// 返回 `Ok(())` 表示成功（C API 返回 0），`Err(PyErr)` 表示失败（C API 返回 -1，
+/// 异常已挂起）。
+///
+/// # 退化路径（详设计 §1.2.5）
+///
+/// - `_PyDict_SetItem_KnownHash` 返回 -1（dict 操作失败）→ 取出挂起异常，返回 `Err`
+///   （与 `PyDict_SetItem` 同行为，调用方可 fallback）
+/// - 未来 CPython 删除符号 → pyo3 cpython 子模块升级时编译失败（编译期发现）
+/// - 项目切 abi3 → O1-B 整体不可编译（cpython 子模块缺失）
+pub fn set_item_knownhash(
+    py: Python<'_>,
+    dict: &Bound<'_, PyDict>,
+    key: &Bound<'_, PyAny>,
+    value: &Bound<'_, PyAny>,
+    hash: ffi::Py_hash_t,
+) -> PyResult<()> {
+    // SAFETY:
+    // - dict / key / value 由 pyo3 Bound 守护，均为有效 PyObject 指针
+    // - dict 是 Bound<PyDict>，保证是 PyDictObject（_PyDict_SetItem_KnownHash 要求）
+    // - GIL 持有保证单线程访问
+    // - hash 由 FieldName 编译期一次性 PyObject_Hash 计算并缓存（interned PyString
+    //   hash 在其生命周期内不变，CPython 强约束）
+    let result = unsafe {
+        ffi::_PyDict_SetItem_KnownHash(dict.as_ptr(), key.as_ptr(), value.as_ptr(), hash)
+    };
+    if result == -1 {
+        Err(PyErr::fetch(py))
+    } else {
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -369,6 +504,208 @@ mod tests {
             let a = intern_pystring(py, "alpha");
             let b = intern_pystring(py, "beta");
             assert!(!a.is(&b), "distinct names should produce distinct objects");
+        });
+    }
+
+    // ======================================================================
+    // Phase 8 OPT-SHARED：dict_via_generic_getdict（O1-A）
+    // ======================================================================
+    //
+    // 设计文档 §4.1.1 测试场景：
+    // - 普通 class（有 __dict__）
+    // - dataclass（非 frozen）
+    // - frozen dataclass
+    // - slots class（fallback 到 getattr 路径）
+    // - managed dict materialize
+
+    /// 通过 GenericGetDict 获取实例 __dict__，验证返回的 dict 与 instance 是
+    /// instance 的真实 __dict__（identity 比较）。
+    #[test]
+    fn dict_via_generic_getdict_returns_correct_dict() {
+        with_py(|py| {
+            let cls = make_simple_class(py, "User");
+            let instance = create_class(&cls).expect("create_class");
+            let dict_via_ggd = dict_via_generic_getdict(py, &instance).expect("generic getdict");
+            // instance.getattr("__dict__") 是同对象引用——GenericGetDict 返回的应是
+            // 同一个 PyDictObject（materialize 后）。
+            let dict_via_getattr = instance.getattr("__dict__").expect("getattr __dict__");
+            assert!(
+                dict_via_ggd.as_ptr() == dict_via_getattr.as_ptr(),
+                "GenericGetDict and getattr should return the same dict object (identity)"
+            );
+        });
+    }
+
+    #[test]
+    fn dict_via_generic_getdict_works_with_dataclass() {
+        // dataclass（非 frozen）启用 managed dict，GenericGetDict 应正常工作。
+        with_py(|py| {
+            let code = concat!(
+                "from dataclasses import dataclass\n",
+                "@dataclass\n",
+                "class Point:\n",
+                "    x: int = 0\n",
+                "    y: int = 0\n",
+            );
+            let globals = PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None).expect("define");
+            let cls = globals
+                .get_item("Point")
+                .expect("get_item ok")
+                .expect("exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let instance = create_class(cls.bind(py)).expect("create_class");
+            let dict = dict_via_generic_getdict(py, &instance).expect("generic getdict");
+            assert_eq!(
+                dict.len(),
+                0,
+                "fresh dataclass instance __dict__ should be empty"
+            );
+        });
+    }
+
+    #[test]
+    fn dict_via_generic_getdict_works_with_frozen_dataclass() {
+        // frozen dataclass 同样启用 managed dict。frozen 只影响 setattr（tp_setattro），
+        // 不影响 dict 读取（GenericGetDict 不经 __setattr__）。
+        with_py(|py| {
+            let code = concat!(
+                "from dataclasses import dataclass\n",
+                "@dataclass(frozen=True)\n",
+                "class Frozen:\n",
+                "    x: int = 0\n",
+            );
+            let globals = PyDict::new_bound(py);
+            py.run_bound(code, Some(&globals), None).expect("define");
+            let cls = globals
+                .get_item("Frozen")
+                .expect("get_item ok")
+                .expect("exists")
+                .extract::<Py<PyType>>()
+                .expect("extract");
+            let instance = create_class(cls.bind(py)).expect("create_class");
+            let dict = dict_via_generic_getdict(py, &instance).expect("generic getdict");
+            assert_eq!(
+                dict.len(),
+                0,
+                "fresh frozen dataclass __dict__ should be empty"
+            );
+        });
+    }
+
+    #[test]
+    fn dict_via_generic_getdict_handles_managed_dict_materialize() {
+        // Python 3.13 lazy materialize：create_class 创建后 dict_or_values 槽为 NULL，
+        // GenericGetDict 应触发 materialize 创建 PyDictObject 并返回。
+        with_py(|py| {
+            let cls = make_simple_class(py, "Managed");
+            let instance = create_class(&cls).expect("create_class");
+            // 首次访问触发 materialize——GenericGetDict 内部处理。
+            let dict = dict_via_generic_getdict(py, &instance).expect("materialize");
+            // dict 应为有效 PyDictObject，可写入。
+            assert_eq!(dict.len(), 0, "dict should be empty after materialize");
+            // 写入后再次通过 GenericGetDict 获取，应是同一对象（已 materialize）。
+            dict.set_item("k", 1i64).expect("set k");
+            let dict2 = dict_via_generic_getdict(py, &instance).expect("second call");
+            assert_eq!(
+                dict2.len(),
+                1,
+                "second access should return the materialized dict"
+            );
+            assert!(
+                dict2.contains("k").expect("contains"),
+                "k should be in dict"
+            );
+        });
+    }
+
+    // ======================================================================
+    // Phase 8 OPT-SHARED：set_item_knownhash（O1-B）
+    // ======================================================================
+
+    #[test]
+    fn set_item_knownhash_writes_correctly_and_readable() {
+        // KnownHash 写入的 (key, value) 可通过 dict.get_item 正常读取。
+        with_py(|py| {
+            let dict = PyDict::new_bound(py);
+            let key = intern_pystring(py, "alpha");
+            let value = 42i64.into_py(py);
+            // 计算正确的 hash（PyObject_Hash 返回值）。
+            let hash = unsafe { ffi::PyObject_Hash(key.as_ptr()) };
+            assert_ne!(
+                hash, -1,
+                "PyObject_Hash should not fail for interned string"
+            );
+            set_item_knownhash(py, &dict, key.bind(py), value.bind(py), hash)
+                .expect("set_item_knownhash");
+            let v: i64 = dict
+                .get_item("alpha")
+                .expect("get_item ok")
+                .expect("alpha exists")
+                .extract()
+                .expect("extract");
+            assert_eq!(v, 42);
+        });
+    }
+
+    #[test]
+    fn set_item_knownhash_multiple_fields_no_collision() {
+        // 多字段写入：所有字段 hash 不冲突，写入顺序正确。
+        with_py(|py| {
+            let dict = PyDict::new_bound(py);
+            for (name, val) in [("a", 1i64), ("b", 2i64), ("c", 3i64)] {
+                let key = intern_pystring(py, name);
+                let value = val.into_py(py);
+                let hash = unsafe { ffi::PyObject_Hash(key.as_ptr()) };
+                assert_ne!(hash, -1);
+                set_item_knownhash(py, &dict, key.bind(py), value.bind(py), hash).expect("set");
+            }
+            assert_eq!(dict.len(), 3);
+            for (name, expected) in [("a", 1i64), ("b", 2i64), ("c", 3i64)] {
+                let v: i64 = dict
+                    .get_item(name)
+                    .expect("get")
+                    .expect("exists")
+                    .extract()
+                    .expect("extract");
+                assert_eq!(v, expected);
+            }
+        });
+    }
+
+    #[test]
+    fn set_item_knownhash_unicode_field_name() {
+        // Unicode 字段名：cached_hash = PyObject_Hash(unicode) 应正确。
+        with_py(|py| {
+            let dict = PyDict::new_bound(py);
+            // 包含 Unicode 字符的字段名（中日韩字符 + emoji）
+            let key = intern_pystring(py, "字段αβγ✨");
+            let value = 0xDEAD_i64.into_py(py);
+            let hash = unsafe { ffi::PyObject_Hash(key.as_ptr()) };
+            assert_ne!(hash, -1, "PyObject_Hash should succeed for Unicode string");
+            set_item_knownhash(py, &dict, key.bind(py), value.bind(py), hash).expect("set");
+            let v: i64 = dict
+                .get_item("字段αβγ✨")
+                .expect("get")
+                .expect("exists")
+                .extract()
+                .expect("extract");
+            assert_eq!(v, 0xDEAD);
+        });
+    }
+
+    #[test]
+    fn set_item_knownhash_none_value() {
+        // 字段值为 None：KnownHash 应正常写入（PyDict_SetItem 支持 None value）。
+        with_py(|py| {
+            let dict = PyDict::new_bound(py);
+            let key = intern_pystring(py, "x");
+            let none = py.None();
+            let hash = unsafe { ffi::PyObject_Hash(key.as_ptr()) };
+            set_item_knownhash(py, &dict, key.bind(py), none.bind(py), hash).expect("set None");
+            assert!(dict.contains("x").expect("contains"));
+            assert!(dict.get_item("x").expect("get").expect("exists").is_none());
         });
     }
 }

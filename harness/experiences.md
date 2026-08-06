@@ -30,7 +30,7 @@
 | L-11 | PM 对用户指令的语义误判 | 1（iter10） | iter10 一度误标 DEFERRED（用户指令"关闭"被理解为"取消"，实际是"完成"） | §L-11 |
 | L-12 | PM 角色越界深入技术/代码细节 | 1（Phase 6 立项） | PM 自己 grep Python 源码查构造器依赖（应分派 ARCH），违背 pm.md base §PM 不做的事 | §L-12 |
 | L-13 | docstring 未跟随语法演进 | 1（Phase 7 审查） | Phase 2 废弃 `this` 但 15+ 处 docstring 示例残留 `this.xxx`，用户审阅时发现 | §L-13 |
-| L-14 | 设计硬约束认知需交叉验证 | 1（RawCopy 质疑） | ARCH 把"CPython bytes 不可变→必须拷贝"当硬约束，漏了 Rust 内置 hashfunc 零拷贝路径 | §L-14 |
+| L-14 | 设计硬约束认知需交叉验证 | 3（RawCopy + Hex parse + managed dict） | ARCH 把"必须拷贝"/"显示对象固有税"/"tp_dictoffset 直读"当硬约束/默认前提，漏了零拷贝路径 / 共享税替代路径 / Python 3.13 managed dict | §L-14 |
 
 ---
 
@@ -460,6 +460,8 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 | # | 时间 | 事件 | 证据 |
 |---|------|------|------|
 | 1 | 2026-07-30 | **RawCopy/Checksum "必须拷贝"硬约束被推翻**：ARCH 第一轮回应说"CPython bytes 不可变 → 跨 FFI 必须拷贝"是硬约束，RawCopy 拷贝不可优化。用户追问"为什么要在 Python 层面拷贝"——ARCH 补充评估发现：如果 hashfunc 在 Rust 层面实现（sha2 crate），整个流程零拷贝（FFI 入口 `PyBytes::as_bytes()` 借用 buffer 不拷贝 + Rust 内置哈希操作 `&[u8]`）。ARCH 承认"把单一路径当硬约束"是盲点。 | `docs/design/queries/质疑-能否不用RawCopy.md §7-§10`（ARCH 修正 6 处原结论） |
+| 2 | 2026-08-06 | **Phase 8 HEX parse "显示对象固有税 275-300ns"硬约束被推翻**：ARCH 上一轮（`docs/analysis/phase8-hex-parse-perf-investigation.md §6.4`）把"显示对象构造固有税 ~275-300ns 不可优化"当硬约束，称 Hex 族 parse 合理目标 6-7x，并主张其余 13 项 parse 不达标是"parse 方向 PyObject 构造结构性边界"。PM 验收时用户质疑"这些肯定都要优化的，除非 python 原版的原始性能就非常好（当然要给出证据）"，PM 按 L-14 转发 ARCH 重新评估。重新评估（`docs/analysis/phase8-parse-perf-reassessment.md`）自检发现：上一轮把"Int32ub inner.parse"和"call1 FFI 边界"高估约 90ns，且把**共享框架税**（StructMixin.parse 入口 + StructNode 调度 + per-field PyDict_SetItem，占 Rust 侧 50-75%）错误归入"显示对象固有税"。实测 Python 原版 14 项 parse case 87-98% 是 Adapter/Struct 调度框架税，核心操作占比 ≤12.3%。真正瓶颈是共享税且不是硬约束——每项有 ≥2 条 §0/ADR 允许的替代路径（dict 偏移直读 / KnownHash / FFI 静态绑定）。预测 10 项可达 10x+，4 项接近 10x。 | `docs/analysis/phase8-parse-perf-reassessment.md`（§7.1 自检 + §3 逐项 L-14 交叉验证 + §5 优化方案） |
+| 3 | 2026-08-06 | **Phase 8 OPT-SHARED O1-A "tp_dictoffset 直读"在 Python 3.13 managed dict 下失效（UB 风险）**：ARCH v1 设计（`docs/design/模块设计/模块设计-Phase8-OPT-SHARED.md` v1）把"tp_dictoffset 直读"作为 dict 获取优化的默认前提（O1-A 核心），未交叉验证目标运行环境。REV 驳回 abi3 问题后，PM 分派 ARCH 更新设计并要求确认 Python 3.13 managed dict 影响。ARCH 实测发现：Python 3.13 下所有 heaptype 用户类（含 dataclass / StructMixin 基类）启用 `Py_TPFLAGS_MANAGED_DICT`，`tp_dictoffset = -1`（CPython 不变量），v1 的 `*(instance_ptr + tp_dictoffset)` 直读会读到负偏移越界 → **运行期 UB**。ARCH 通过 4 条路径交叉验证（tp_dictoffset 直读[失效] / `PyObject_GenericGetDict`[采用，stable ABI] / `_PyObject_GetDictPtr`[不 materialize，不适用] / pre-header 直读[unsafe 复杂，不采用]），改用 `PyObject_GenericGetDict`。**教训**：单一路径推断（tp_dictoffset 直读）+ 标签惰性（当默认前提）+ 未验证目标 Python 版本特性（3.13 managed dict），是 L-14 的典型三连。 | `docs/design/模块设计/模块设计-Phase8-OPT-SHARED.md` v2 §Python 3.13 managed dict 调研 |
 
 **根因**：
 

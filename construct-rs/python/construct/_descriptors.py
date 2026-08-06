@@ -3081,4 +3081,610 @@ __all__ = [
     # Phase 8 P0: Checksum
     "ChecksumDescriptor",
     "Checksum",
+    # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+    # / ProcessXor / ProcessRotateLeft / NamedTuple
+    "EnumDescriptor",
+    "Enum",
+    "FlagsEnumDescriptor",
+    "FlagsEnum",
+    "MappingDescriptor",
+    "Mapping",
+    "OneOfDescriptor",
+    "OneOf",
+    "NoneOfDescriptor",
+    "NoneOf",
+    "UnionDescriptor",
+    "Union",
+    "SequenceDescriptor",
+    "Sequence",
+    "ProcessXorDescriptor",
+    "ProcessXor",
+    "ProcessRotateLeftDescriptor",
+    "ProcessRotateLeft",
+    "NamedTupleDescriptor",
+    "NamedTuple",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 P1+P2 描述符（10 个构造器 + EnumInteger/EnumIntegerString 内部类）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P1P2.md``。
+#
+# 这些描述符是纯 Python 类（通过 type name 识别），与 compile.rs 中的分支对应。
+# 编译期把 mapping/flags/valids 等 Python 对象物化为 Rust 端 Py<PyDict>/Py<PyFrozenSet>。
+#
+# 共通特性：
+# - 嵌入 Struct 时作为字段描述符
+# - 单独使用时通过 `.parse()`/`.build()` 调用（部分支持，详见各描述符文档）
+# ---------------------------------------------------------------------------
+
+
+class EnumInteger(int):
+    """Enum 无映射 fallback 的 int 子类（对应 Python core.py L1899）。
+
+    parse 时若 subcon 返回值不在 decmapping 中，构造 EnumInteger(value) 返回。
+    纯类型标记，无额外方法。**仅用于 EnumNode 的 fallback 路径**。
+    """
+
+    pass
+
+
+class EnumIntegerString(str):
+    """Enum decmapping 的值类型（对应 Python core.py L1904）。
+
+    str 子类，带 ``.intvalue`` 属性（原始 int 值）。``__int__`` 返回 intvalue。
+    EnumDescriptor 在编译期把 decmapping 的值预构造为 EnumIntegerString 实例，
+    parse 时直接返回（不调 factory）。
+
+    :param intvalue: 原始 int 值。
+    :param stringvalue: label 字符串。
+    """
+
+    @staticmethod
+    def new(intvalue, stringvalue):
+        """构造 EnumIntegerString 实例（对应 Python core.py L1914 staticmethod）。"""
+        obj = EnumIntegerString(stringvalue)
+        obj.intvalue = intvalue
+        return obj
+
+    def __int__(self):
+        return getattr(self, "intvalue", 0)
+
+
+class EnumDescriptor:
+    """``Enum(subcon, *merge, **mapping)`` 描述符。
+
+    枚举映射：subcon 整数 ↔ label 字符串（int-convertible）。对应 Python construct
+    ``Enum``（core.py L1920）。在 construct-rs 中实现为 Rust Node（非 AdapterCallback，
+    详见设计 §1.2 §0.2 判据）。
+
+    - parse：inner.parse → decmapping 查 label；命中返回 label（EnumIntegerString），
+      未命中返回 EnumInteger(obj)（int 子类，**不报错**）
+    - build：obj is int → 直接用；否则查 encmapping；命中 inner.build(raw)，
+      未命中 MappingError
+
+    ``_expr_params`` 协议返回空 dict：Enum 自身无表达式参数
+    （inner subcon 的表达式由递归处理）。
+
+    :param subcon: 子构造器（描述符，通常是 Int*）。
+    :param merge: 合并的 enum.IntEnum 实例（展开为 keyword mapping）。
+    :param mapping: label=value 关键字参数（如 one=1, two=2）。
+    """
+
+    __slots__ = ("subcon", "decmapping", "encmapping")
+
+    _expr_params = {}
+
+    def __init__(self, subcon, *merge, **mapping):
+        """初始化 Enum 描述符。
+
+        :param subcon: 子构造器。
+        :param merge: 合并的 enum.IntEnum（展开为 name=value 对）。
+        :param mapping: label=value 关键字。
+        """
+        self.subcon = subcon
+        # 展开 merge（enum.IntEnum）到 mapping
+        for m in merge:
+            if isinstance(m, type) and issubclass(m, int) and hasattr(m, "_member_map_"):
+                # enum.IntEnum 类
+                for name, val in m._member_map_.items():
+                    mapping[name] = int(val)
+            elif isinstance(m, dict):
+                mapping.update(m)
+        # 构造 decmapping（int → EnumIntegerString）+ encmapping（str → int）
+        # 预构造 EnumIntegerString 避免 parse 时调 factory
+        self.decmapping = {v: EnumIntegerString.new(v, k) for k, v in mapping.items()}
+        self.encmapping = {k: v for k, v in mapping.items()}
+
+    def __repr__(self):
+        return "Enum(subcon={!r}, mapping={!r})".format(
+            self.subcon, self.encmapping
+        )
+
+
+def Enum(subcon, *merge, **mapping):
+    """创建一个 Enum 描述符。
+
+    枚举映射。对应 Python construct 的 ``Enum``（core.py L1920）。
+
+    使用方式::
+
+        from construct import Enum, Byte
+
+        e = Enum(Byte, one=1, two=2)
+        e.parse(b"\\x01")   # → 'one'（EnumIntegerString，int(obj)==1）
+        e.parse(b"\\xff")   # → 255（EnumInteger fallback，不报错）
+        e.build("one")     # → b"\\x01"
+        e.build(99)        # → b"\\x63"（int 直接用）
+
+    :param subcon: 子构造器（如 ``Byte``、``Int32ub``）。
+    :param merge: 合并的 enum.IntEnum 类。
+    :param mapping: label=value 关键字参数。
+    :return: ``EnumDescriptor`` 实例。
+    """
+    return EnumDescriptor(subcon, *merge, **mapping)
+
+
+class FlagsEnumDescriptor:
+    """``FlagsEnum(subcon, *merge, **flags)`` 描述符。
+
+    标志位枚举：subcon 整数 → dict（每 flag 一 bool）。对应 Python construct
+    ``FlagsEnum``（core.py L2018）。
+
+    ``_expr_params`` 协议返回空 dict。
+
+    :param subcon: 子构造器。
+    :param merge: 合并的 enum.IntEnum（展开）。
+    :param flags: name=value 关键字参数（如 one=1, two=2, four=4）。
+    """
+
+    __slots__ = ("subcon", "flags", "encmapping")
+
+    _expr_params = {}
+
+    def __init__(self, subcon, *merge, **flags):
+        """初始化 FlagsEnum 描述符。"""
+        self.subcon = subcon
+        for m in merge:
+            if isinstance(m, dict):
+                flags.update(m)
+        self.flags = flags
+        self.encmapping = {k: v for k, v in flags.items()}
+
+    def __repr__(self):
+        return "FlagsEnum(subcon={!r}, flags={!r})".format(self.subcon, self.flags)
+
+
+def FlagsEnum(subcon, *merge, **flags):
+    """创建一个 FlagsEnum 描述符。
+
+    使用方式::
+
+        from construct import FlagsEnum, Byte
+
+        fe = FlagsEnum(Byte, one=1, two=2, four=4, eight=8)
+        fe.parse(b"\\x03")
+        # → dict(_flagsenum=True, one=True, two=True, four=False, eight=False)
+        fe.build(dict(one=True, two=True))   # → b"\\x03"
+        fe.build("one|two")                  # → b"\\x03"
+        fe.build(3)                          # → b"\\x03"
+
+    :param subcon: 子构造器。
+    :param merge: 合并的 enum.IntEnum。
+    :param flags: name=value 关键字。
+    :return: ``FlagsEnumDescriptor`` 实例。
+    """
+    return FlagsEnumDescriptor(subcon, *merge, **flags)
+
+
+class MappingDescriptor:
+    """``Mapping(subcon, mapping)`` 描述符。
+
+    通用对象映射：subcon 对象 ↔ 任意对象（key/value 任意 hashable）。对应 Python
+    construct ``Mapping``（core.py L2112）。与 EnumDescriptor 结构同，但 key/value
+    任意，且**无映射时报错**（与 Enum 的"返回 EnumInteger"不同）。
+
+    :param subcon: 子构造器。
+    :param mapping: dict（key→value 双向；decmapping 用正向，encmapping 用反向）。
+    """
+
+    __slots__ = ("subcon", "decmapping", "encmapping")
+
+    _expr_params = {}
+
+    def __init__(self, subcon, mapping):
+        """初始化 Mapping 描述符。
+
+        :param subcon: 子构造器。
+        :param mapping: dict（key 是 raw value，value 是 mapped object）。
+        """
+        self.subcon = subcon
+        self.decmapping = dict(mapping)
+        # encmapping 反向（mapped object → raw value）
+        self.encmapping = {v: k for k, v in mapping.items()}
+
+    def __repr__(self):
+        return "Mapping(subcon={!r}, decmapping={!r})".format(
+            self.subcon, self.decmapping
+        )
+
+
+def Mapping(subcon, mapping):
+    """创建一个 Mapping 描述符。
+
+    使用方式::
+
+        from construct import Mapping, Byte
+
+        x = object()
+        m = Mapping(Byte, {0: x})
+        m.parse(b"\\x00")     # → x
+        m.parse(b"\\xff")     # → MappingError（无映射，与 Enum 不同）
+        m.build(x)           # → b"\\x00"
+
+    :param subcon: 子构造器。
+    :param mapping: dict（key=raw value，value=mapped object，任意 hashable）。
+    :return: ``MappingDescriptor`` 实例。
+    """
+    return MappingDescriptor(subcon, mapping)
+
+
+class OneOfDescriptor:
+    """``OneOf(subcon, valids)`` 描述符。
+
+    单值校验：parse/build 校验 inner 结果 ∈ valids。对应 Python construct
+    ``OneOf``（core.py L6320）。
+
+    ``_expr_params`` 协议返回空 dict。
+
+    :param subcon: 子构造器。
+    :param valids: 合法值集合（list/set/frozenset）。编译期统一转 frozenset 物化。
+    """
+
+    __slots__ = ("subcon", "valids")
+
+    _expr_params = {}
+
+    def __init__(self, subcon, valids):
+        """初始化 OneOf 描述符。"""
+        self.subcon = subcon
+        # 编译期 compile.rs 会再转一次 frozenset；这里保留原值便于调试。
+        self.valids = valids
+
+    def __repr__(self):
+        return "OneOf(subcon={!r}, valids={!r})".format(self.subcon, self.valids)
+
+
+def OneOf(subcon, valids):
+    """创建一个 OneOf 描述符。
+
+    使用方式::
+
+        from construct import OneOf, Byte
+
+        v = OneOf(Byte, [1, 2, 3])
+        v.parse(b"\\x01")   # → 1
+        v.parse(b"\\xff")   # → ValidationError
+
+    :param subcon: 子构造器。
+    :param valids: 合法值集合（推荐 set/frozenset 以获得最佳性能）。
+    :return: ``OneOfDescriptor`` 实例。
+    """
+    return OneOfDescriptor(subcon, valids)
+
+
+class NoneOfDescriptor:
+    """``NoneOf(subcon, invalids)`` 描述符。
+
+    排除值校验：parse/build 校验 inner 结果 ∉ invalids。对应 Python construct
+    ``NoneOf``（core.py L6342）。
+
+    :param subcon: 子构造器。
+    :param invalids: 非法值集合。
+    """
+
+    __slots__ = ("subcon", "invalids")
+
+    _expr_params = {}
+
+    def __init__(self, subcon, invalids):
+        """初始化 NoneOf 描述符。"""
+        self.subcon = subcon
+        self.invalids = invalids
+
+    def __repr__(self):
+        return "NoneOf(subcon={!r}, invalids={!r})".format(self.subcon, self.invalids)
+
+
+def NoneOf(subcon, invalids):
+    """创建一个 NoneOf 描述符。
+
+    使用方式::
+
+        from construct import NoneOf, Byte
+
+        v = NoneOf(Byte, [1, 2, 3])
+        v.parse(b"\\xff")   # → 255（不在 invalids）
+        v.parse(b"\\x01")   # → ValidationError
+
+    :param subcon: 子构造器。
+    :param invalids: 非法值集合。
+    :return: ``NoneOfDescriptor`` 实例。
+    """
+    return NoneOfDescriptor(subcon, invalids)
+
+
+class UnionDescriptor:
+    """``Union(parsefrom, *subcons, **subconskw)`` 描述符。
+
+    联合体：多视角 parse（每 subcon 独立 parse 后回退到 fallback）。对应 Python
+    construct ``Union``（core.py L3641）。
+
+    :param parsefrom: None / int / str / 表达式（不支持 callable，ADR-014）。
+    :param subcons: 位置 subcons（匿名，按顺序）。
+    :param subconskw: 关键字 subcons（命名，写入 obj dict）。
+    """
+
+    __slots__ = ("parsefrom", "subcons")
+
+    _expr_params = {}
+
+    def __init__(self, parsefrom, *subcons, **subconskw):
+        """初始化 Union 描述符。"""
+        self.parsefrom = parsefrom
+        # 合并位置 + 关键字（关键字 subcon 用 Renamed 包装标记）
+        from ._conditional import Renamed  # 局部 import 避免循环
+
+        merged = list(subcons)
+        for name, sc in subconskw.items():
+            merged.append(Renamed(name, sc))
+        self.subcons = merged
+
+    def __repr__(self):
+        return "Union(parsefrom={!r}, subcons={!r})".format(self.parsefrom, self.subcons)
+
+
+def Union(parsefrom, *subcons, **subconskw):
+    """创建一个 Union 描述符。
+
+    使用方式::
+
+        from construct import Union, Bytes, Int32ub
+
+        d = Union(None, raw=Bytes(8), ints=Int32ub[2])
+        d.parse(b"12345678")
+        # → dict(raw=b"12345678", ints=[825373492, 892745528])
+        # stream 留在 fallback（位置 0）
+
+        d2 = Union(0, raw=Bytes(8))
+        d2.parse(b"12345678")  # stream seek 到 forwards[0]=8
+
+    :param parsefrom: None / int / str / 表达式（不支持 callable）。
+    :param subcons: 位置 subcons。
+    :param subconskw: 命名 subcons（关键字）。
+    :return: ``UnionDescriptor`` 实例。
+    """
+    return UnionDescriptor(parsefrom, *subcons, **subconskw)
+
+
+class SequenceDescriptor:
+    """``Sequence(*subcons, **subconskw)`` 描述符。
+
+    位置序字段序列：parse 产出 list（按 subcons 顺序）。对应 Python construct
+    ``Sequence``（core.py L2329）。
+
+    :param subcons: 位置 subcons。
+    :param subconskw: 命名 subcons（写入 child_ctx，供后续字段引用）。
+    """
+
+    __slots__ = ("subcons",)
+
+    _expr_params = {}
+
+    def __init__(self, *subcons, **subconskw):
+        """初始化 Sequence 描述符。"""
+        from ._conditional import Renamed
+
+        merged = list(subcons)
+        for name, sc in subconskw.items():
+            merged.append(Renamed(name, sc))
+        self.subcons = merged
+
+    def __repr__(self):
+        return "Sequence(subcons={!r})".format(self.subcons)
+
+
+def Sequence(*subcons, **subconskw):
+    """创建一个 Sequence 描述符。
+
+    使用方式::
+
+        from construct import Sequence, Byte, Bytes
+
+        d = Sequence(Byte, Bytes(2))
+        d.parse(b"\\x01AB")   # → [1, b"AB"]
+        d.build([1, b"AB"])   # → b"\\x01AB"
+
+        # 命名字段（写入 context，供后续字段引用）
+        d2 = Sequence("count"/Byte, "data"/Bytes(lambda this: this.count))
+        d2.parse(b"\\x03ABC")   # → [3, b"ABC"]
+
+    **已知 parity 差异（C-1）**：含 RO 字段（Check/Computed/Tell 等）的 build，
+    construct-rs RO 字段不从 list 取值（走 compute_ro_value），list 不含 RO 字段占位。
+    Python 原版 list 需含 RO 字段占位 None。用户迁移需调整 build 输入。
+
+    :param subcons: 位置 subcons。
+    :param subconskw: 命名 subcons。
+    :return: ``SequenceDescriptor`` 实例。
+    """
+    return SequenceDescriptor(*subcons, **subconskw)
+
+
+class ProcessXorDescriptor:
+    """``ProcessXor(padfunc, subcon)`` 描述符。
+
+    XOR 字节变换：parse 读至 EOF → XOR pad → 子流 → inner.parse。对应 Python
+    construct ``ProcessXor``（core.py L5357）。
+
+    ``_expr_params`` 协议：当 padfunc 是 int/bytes 时返回 ``{}``（编译期物化）；
+    是 FieldRef/ExprRef 时返回 ``{"pad": padfunc}``。
+
+    :param padfunc: XOR pad（int/bytes/FieldRef/ExprRef 表达式）。
+                    **不接受 callable**（ADR-014，PX-7 parity 差异）。
+    :param subcon: 子构造器。
+    """
+
+    __slots__ = ("padfunc", "subcon")
+
+    def __init__(self, padfunc, subcon):
+        """初始化 ProcessXor 描述符。"""
+        self.padfunc = padfunc
+        self.subcon = subcon
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议。
+
+        padfunc 是 int/bytes → 空 dict（编译期物化为 XorPad::Int/Bytes）。
+        是 FieldRef/ExprRef → ``{"pad": padfunc}``（编译为 ExprProgram，运行期求值）。
+        """
+        if isinstance(self.padfunc, (int, bytes, bytearray)):
+            return {}
+        return {"pad": self.padfunc}
+
+    def __repr__(self):
+        return "ProcessXor(padfunc={!r}, subcon={!r})".format(
+            self.padfunc, self.subcon
+        )
+
+
+def ProcessXor(padfunc, subcon):
+    """创建一个 ProcessXor 描述符。
+
+    使用方式::
+
+        from construct import ProcessXor, Int16ub
+
+        d = ProcessXor(0xf0, Int16ub)
+        d.parse(b"\\x00\\xff")   # XOR 后 0xf00f
+        d.build(0xf00f)         # → b"\\x00\\xff"（XOR 对合）
+
+        # bytes pad
+        ProcessXor(b"\\xf0\\xf1", Int16ub).parse(b"\\x00\\xff")   # → 0xf00e
+
+        # 表达式 pad（引用字段）
+        ProcessXor(this.pad, Int16ub)   # pad 来自 this.pad 字段
+
+    :param padfunc: XOR pad（int/bytes/FieldRef/ExprRef）。
+    :param subcon: 子构造器。
+    :return: ``ProcessXorDescriptor`` 实例。
+    """
+    return ProcessXorDescriptor(padfunc, subcon)
+
+
+class ProcessRotateLeftDescriptor:
+    """``ProcessRotateLeft(amount, group, subcon)`` 描述符。
+
+    位旋转左移：parse 读至 EOF → 按 amount/group 位旋转 → 子流 → inner.parse。
+    对应 Python construct ``ProcessRotateLeft``（core.py L5424）。
+
+    :param amount: 旋转位数（int 或表达式，不接受 callable）。
+    :param group: 字节组大小（int 或表达式，>=1）。
+    :param subcon: 子构造器。
+    """
+
+    __slots__ = ("amount", "group", "subcon")
+
+    def __init__(self, amount, group, subcon):
+        """初始化 ProcessRotateLeft 描述符。"""
+        self.amount = amount
+        self.group = group
+        self.subcon = subcon
+
+    @property
+    def _expr_params(self):
+        """表达式参数协议：amount/group 都可能是 int 或表达式。"""
+        params = {}
+        if not isinstance(self.amount, int):
+            params["amount"] = self.amount
+        if not isinstance(self.group, int):
+            params["group"] = self.group
+        return params
+
+    def __repr__(self):
+        return "ProcessRotateLeft(amount={!r}, group={!r}, subcon={!r})".format(
+            self.amount, self.group, self.subcon
+        )
+
+
+def ProcessRotateLeft(amount, group, subcon):
+    """创建一个 ProcessRotateLeft 描述符。
+
+    使用方式::
+
+        from construct import ProcessRotateLeft, Int16ub
+
+        d = ProcessRotateLeft(4, 1, Int16ub)
+        d.parse(b"\\x0f\\xf0")   # → 0xf00f（每字节旋转 4 位）
+        d.build(0xf00f)         # → b"\\x0f\\xf0"（取负 4 位）
+
+        # group=2 走分支 4（通用 bit rotate）
+        ProcessRotateLeft(4, 2, Int16ub).parse(b"\\x0f\\xf0")   # → 0xff00
+
+    :param amount: 旋转位数。
+    :param group: 字节组大小（>=1）。
+    :param subcon: 子构造器。
+    :return: ``ProcessRotateLeftDescriptor`` 实例。
+    """
+    return ProcessRotateLeftDescriptor(amount, group, subcon)
+
+
+class NamedTupleDescriptor:
+    """``NamedTuple(tuplename, tuplefields, subcon)`` 描述符。
+
+    NamedTuple 包装：把 inner（Struct/Sequence/Array/GreedyRange）结果转为
+    collections.namedtuple 实例。对应 Python construct ``NamedTuple``（core.py L3381）。
+
+    :param tuplename: namedtuple 名称（str）。
+    :param tuplefields: 字段名（str 空格分隔 或 list）。
+    :param subcon: 子构造器（必须是 Struct/Sequence/Array/GreedyRange）。
+    """
+
+    __slots__ = ("tuplename", "tuplefields", "subcon")
+
+    _expr_params = {}
+
+    def __init__(self, tuplename, tuplefields, subcon):
+        """初始化 NamedTuple 描述符。"""
+        self.tuplename = tuplename
+        self.tuplefields = tuplefields
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "NamedTuple(tuplename={!r}, tuplefields={!r}, subcon={!r})".format(
+            self.tuplename, self.tuplefields, self.subcon
+        )
+
+
+def NamedTuple(tuplename, tuplefields, subcon):
+    """创建一个 NamedTuple 描述符。
+
+    使用方式::
+
+        from construct import NamedTuple, Struct, Int8ub
+
+        coord = NamedTuple("coord", "x y", Struct(x=Int8ub, y=Int8ub))
+        coord.parse(b"\\x01\\x02")   # → coord(x=1, y=2)
+        coord.build(coord_nt)       # → b"\\x01\\x02"
+
+    **已知 parity 差异（C-2）**：NamedTuple over Struct 时，construct-rs 只传
+    tuplefields 命名的字段（忽略实例 __dict__ 中其他字段）；Python ``factory(**obj)``
+    传 Container 所有字段，多余字段报 TypeError。construct-rs 更宽松。
+
+    :param tuplename: namedtuple 名称。
+    :param tuplefields: 字段名（str 空格分隔或 list）。
+    :param subcon: 子构造器（Struct/Sequence/Array/GreedyRange）。
+    :return: ``NamedTupleDescriptor`` 实例。
+    """
+    return NamedTupleDescriptor(tuplename, tuplefields, subcon)

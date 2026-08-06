@@ -35,9 +35,12 @@ from ._errors import (
     GenericConstructError,
     IndexFieldError,
     IntegerError,
+    MappingError,
+    NamedTupleError,
     PaddingError,
     RangeError,
     RepeatError,
+    RotationError,
     SelectError,
     SizeofError,
     StopFieldError,
@@ -45,7 +48,10 @@ from ._errors import (
     StringError,
     StringEncoded,
     TerminatedError,
+    TimestampError,
+    UnionError,
     UnresolvedReferenceError,
+    ValidationError,
 )
 from ._mixin import StructMixin, BitStructMixin, field, rfield, wfield, Tell, Computed
 
@@ -199,13 +205,35 @@ try:
         # Phase 8 P0: Checksum
         Checksum,
         ChecksumDescriptor,
+        # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+        # / ProcessXor / ProcessRotateLeft / NamedTuple
+        Enum,
+        EnumDescriptor,
+        FlagsEnum,
+        FlagsEnumDescriptor,
+        Mapping,
+        MappingDescriptor,
+        OneOf,
+        OneOfDescriptor,
+        NoneOf,
+        NoneOfDescriptor,
+        Union,
+        UnionDescriptor,
+        Sequence,
+        SequenceDescriptor,
+        ProcessXor,
+        ProcessXorDescriptor,
+        ProcessRotateLeft,
+        ProcessRotateLeftDescriptor,
+        NamedTuple,
+        NamedTupleDescriptor,
     )
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
 
 # Phase 8.8: AlignedStruct 宏（不依赖 Rust 扩展）。
 try:
-    from ._macros import AlignedStruct
+    from ._macros import AlignedStruct, Timestamp
 except ImportError:  # pragma: no cover
     pass
 
@@ -217,7 +245,7 @@ except ImportError:  # pragma: no cover
 
 # Phase 6.3: 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
 try:
-    from ._adapters import Adapter, AdapterDescriptor, SymmetricAdapter
+    from ._adapters import Adapter, AdapterDescriptor, SymmetricAdapter, Validator
 except ImportError:  # pragma: no cover
     pass
 
@@ -385,6 +413,7 @@ __all__ = [
     "Aligned",
     "AlignedDescriptor",
     "AlignedStruct",
+    "Timestamp",
     # Phase 8 P0: Hex / HexDump
     "Hex",
     "HexDescriptor",
@@ -394,10 +423,33 @@ __all__ = [
     "Checksum",
     "ChecksumDescriptor",
     "HashAlgo",
+    # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+    # / ProcessXor / ProcessRotateLeft / NamedTuple
+    "Enum",
+    "EnumDescriptor",
+    "FlagsEnum",
+    "FlagsEnumDescriptor",
+    "Mapping",
+    "MappingDescriptor",
+    "OneOf",
+    "OneOfDescriptor",
+    "NoneOf",
+    "NoneOfDescriptor",
+    "Union",
+    "UnionDescriptor",
+    "Sequence",
+    "SequenceDescriptor",
+    "ProcessXor",
+    "ProcessXorDescriptor",
+    "ProcessRotateLeft",
+    "ProcessRotateLeftDescriptor",
+    "NamedTuple",
+    "NamedTupleDescriptor",
     # Phase 6.3: 用户面 Adapter 基类
     "Adapter",
     "AdapterDescriptor",
     "SymmetricAdapter",
+    "Validator",
     # Phase 7.1: Conditional 构造器
     "If",
     "IfThenElse",
@@ -436,4 +488,11 @@ __all__ = [
     "ChecksumError",
     "TerminatedError",
     "CancelParsing",
+    # Phase 8 P1+P2 新增异常。
+    "MappingError",
+    "ValidationError",
+    "UnionError",
+    "RotationError",
+    "NamedTupleError",
+    "TimestampError",
 ]

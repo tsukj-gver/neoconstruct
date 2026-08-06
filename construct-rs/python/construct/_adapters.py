@@ -60,7 +60,7 @@ from __future__ import annotations
 
 from ._errors import ConstructError
 
-__all__ = ["Adapter", "SymmetricAdapter", "AdapterDescriptor"]
+__all__ = ["Adapter", "SymmetricAdapter", "Validator", "AdapterDescriptor"]
 
 
 # ---------------------------------------------------------------------------
@@ -288,6 +288,80 @@ class SymmetricAdapter(Adapter):
         用户实现 ``_decode`` 时应保证其对反向输入也有效（对称函数）。
         """
         return self._decode(obj, context, path)
+
+
+# ---------------------------------------------------------------------------
+# Validator：用户面校验基类（Phase 8.3）
+#
+# 设计依据：``docs/design/模块设计/模块设计-Phase8-P1P2.md`` §2.3。
+# Python 参考：construct core.py:849 的 Validator / ExprValidator。
+#
+# Validator 是 SymmetricAdapter 的子类（``_encode = _decode = _validate``）。
+# construct-rs 用户继承此类并实现 ``_validate(self, obj, context, path) -> bool``，
+# 校验失败（返回 False）时由 ``_decode`` 抛出 ``ValidationError``。
+#
+# 嵌入 Struct 字段时复用 AdapterCallbackNode（Phase 6.3 已实现，2 次 FFI，
+# 用户主动选择继承 Validator = 接受性能折衷，ADR-022）。
+#
+# PM 决策 D-4：construct-rs **不导出 ExprValidator**（不接 lambda/callable，ADR-014）。
+# 用户要表达式版校验，使用 Check（Phase 8.1）。
+# ---------------------------------------------------------------------------
+
+
+from ._errors import ValidationError  # noqa: E402  在 SymmetricAdapter 之后导入避免循环
+
+
+class Validator(SymmetricAdapter):
+    """Abstract class that validates a condition on the encoded/decoded object.
+
+    对应 Python construct core.py:849 的 Validator。
+
+    construct-rs 用户继承此类实现 ``_validate(self, obj, context, path) -> bool``。
+    返回 False 时由 ``_decode`` 抛出 :class:`ValidationError`。
+
+    # 嵌入 Struct 字段
+
+    嵌入 Struct 字段时走 AdapterCallbackNode（Phase 6.3），2 次 FFI（parse 入口 +
+    ``_validate`` 回调）。用户主动选择继承 Validator = 接受性能折衷（ADR-022）。
+
+    若需表达式版校验（无 Python 回调），使用 ``Check`` (Phase 8.1)。
+
+    # 使用方式
+
+    ::
+
+        class MyV(Validator):
+            def _validate(self, obj, context, path):
+                return obj > 0
+
+        @dataclass
+        class P(StructMixin):
+            val: int = field(MyV(Int8ub))
+
+        P.parse(b'\\x05')      # → P(val=5)
+        P.parse(b'\\xff')      # → ValidationError（-1 不 > 0）
+
+    # 与 Python construct 的差异
+
+    - **不导出 ExprValidator**：construct-rs 不接收 lambda/callable（ADR-014）。
+      用户要表达式版校验用 ``Check``，要 Python 逻辑校验继承 ``Validator``。
+    """
+
+    def _decode(self, obj, context, path):
+        """parse 后处理：调用 ``_validate`` 校验，失败抛 ValidationError。"""
+        if not self._validate(obj, context, path):
+            raise ValidationError(
+                "object failed validation: {}".format(obj), path=path
+            )
+        return obj
+
+    def _validate(self, obj, context, path):
+        """校验条件——用户必须重写。返回 bool。"""
+        raise NotImplementedError(
+            "{}._validate must be overridden in subclass".format(
+                type(self).__name__
+            )
+        )
 
 
 # ---------------------------------------------------------------------------

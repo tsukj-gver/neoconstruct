@@ -13,7 +13,7 @@ depends_on:
   - PLAN-phase8
 supersedes: []
 superseded_by: []
-last_updated: 2026-07-30
+last_updated: 2026-07-31
 ---
 
 # 模块设计：Phase 8 P0 批次（基础设施 + 高优先级构造器）
@@ -22,6 +22,21 @@ last_updated: 2026-07-30
 > **任务**：`8.0 [P0 批次详细设计]`
 > **状态**：DESIGNING
 > **创建时间**：2026-07-30
+>
+> **2026-07-31 修订（语义重新设计，两轮 + REV followup 修正）**：
+> - **第一轮**：§2（Hex / HexDump）经用户决策推翻原"display 装饰器"语义，改为"hex 字符串
+>   编解码器"语义（采用 `Hex(length)` API）。本次修订仅替换 §2 全部内容 + §0.1 表格 Hex 行。
+> - **第二轮（本节）**：用户指出 `Hex(length)` 无法包装变长子构造器（GreedyBytes 等），
+>   要求改回 `Hex(subcon)` 包装器 API。Hex 的角色是**格式转换器**——包装任意 subcon，
+>   把 subcon 输出转 hex 字符串（parse），反向把 hex 字符串还原后交给 subcon（build）。
+>   详见 §2.0 第二轮修正说明。
+> - **REV followup 修正（2026-07-31，§2.2/§2.3.2/§2.4/§2.6.1/§2.7）**：REV 检视
+>   PASS-WITH-FOLLOWUPS 后，ARCH 修订 3 个完备性 gap：
+>   - **F-1**：`infer_hex_inner_kind` 对 FormatField 细分——Float 格式归 Unknown（非 Int）
+>   - **F-2**：Int kind 提取从 `i64` 扩展到 `i128` + 任意精度 Python fallback（覆盖 u64::MAX / 大整数）
+>   - **F-3**：`infer_hex_inner_kind` 递归穿透透明包装器（方案 A，消除 HX-25 矛盾）
+>   详见 §2.2 表格注释 + §2.3.2 重写后的 `infer_hex_inner_kind`。
+> §1 / §3+ 不受影响。
 
 ---
 
@@ -34,7 +49,7 @@ PM 决策 1-7 全部接受（详见 `plans/phase8-adapters-struct-streams/总纲
 | 子任务 | 构造器 | 性质 | 新增 Node 变体 | 关键基础设施贡献 |
 |--------|--------|------|---------------|-----------------|
 | **8.1** | Const / Default / Check | 内置 Rust Node | 3（ConstNode / DefaultNode / CheckNode） | 跑通 Subconstruct 包装 + Construct 非包装两类模式 |
-| **8.4** | Hex / HexDump | 内置 Rust Node（非 AdapterCallbackNode） | 2（HexNode / HexDumpNode） | 类型分派 + Python 显示类 factory（`lib/hex.py` port） |
+| **8.4** | Hex / HexDump | 内置 Rust Node（subcon 包装器，hex 格式转换器） | 1（HexNode 重写；HexDump 视用户决策） | **语义重新设计（两轮）**：Hex 从 display 装饰器改为 subcon 包装器 hex 格式转换器（parse 返回 hex str，build 接收 hex str）。保留 `Hex(subcon)` API 支持 GreedyBytes 等变长子构造器。需 `hex` crate + `HexInnerKind` 编译期分类 |
 | **8.5** ⭐ | Checksum + Rust hashfunc + ParseStream::slice | 内置 Rust Node + 基础设施 | 1（ChecksumNode） | ParseStream::slice（零拷贝切片）+ 5 个 Rust crate + HashAlgo enum |
 | **8.8** | Aligned + AlignedStruct（宏） | Rust Node + Python 宏 | 1（AlignedNode） | padding 算法（modulus + subcon size + pattern） |
 | **8.9** | Terminated / Probe | 内置 Rust Node | 2（TerminatedNode / ProbeNode） | 流位置查询 / context dump |
@@ -50,7 +65,7 @@ PM 决策 1-7 全部接受（详见 `plans/phase8-adapters-struct-streams/总纲
 8.1 (Const/Default/Check)                      ← 跑通模式，参考 RebuildNode
 8.9 (Terminated/Probe)                         ← 最简单
 8.8 (Aligned + AlignedStruct)                  ← padding 算法
-8.4 (Hex/HexDump)                              ← 依赖 lib/hex port
+8.4 (Hex/HexDump)                              ← hex 字符串编解码器（语义重新设计）
 8.5 (Checksum + Rust hashfunc)                 ← 依赖 ParseStream::slice + 5 crate
 ```
 
@@ -72,7 +87,7 @@ P0 批次构造器复用 Phase 6.3 Adapter 核心已沉淀的两类模式，不�
 
 | 模式 | 适用 | 已有先例（参考实现位置） |
 |------|------|------------------------|
-| **Subconstruct 包装模式** | Const / Default / Hex / HexDump / Aligned | `SubconstructNode` / `PeekNode` / `RawCopyNode` / `RebuildNode`（`nodes/subconstruct.rs` 等） |
+| **Subconstruct 包装模式** | Const / Default / Aligned | `SubconstructNode` / `PeekNode` / `RawCopyNode` / `RebuildNode`（`nodes/subconstruct.rs` 等） |
 | **Construct 非包装模式** | Check / Checksum / Terminated / Probe | `PassNode` / `ArrayNode` / `FocusedSeqNode`（`nodes/pass.rs` 等） |
 | **Error 变体 + 顶层 catch 模式** | CancelParsing | `StopField` 哨兵（`error.rs`）+ `schema.rs` 入口 |
 
@@ -418,259 +433,795 @@ def test_check_in_struct_fail():
 
 ## 2. 子任务 8.4：Hex / HexDump
 
-### 2.1 Python 参考实现摘要
+### 2.0 语义重新设计说明（2026-07-31，两轮用户决策）
 
-| 构造器 | Python 行号 | 核心语义 |
+> **本节记录两轮语义修正。最终采用 `Hex(subcon)` 包装器 API（第二轮）。**
+
+#### 第一轮（display 装饰器 → hex 字符串编解码器）
+
+原设计遵循 Python construct 原版的"display 装饰器"语义（parse 返回 int/bytes/dict **子类**，
+子类仅覆盖 `__str__` 显示 hex 格式，值不变）。实测该语义导致性能瓶颈（HX1 parse 仅 4.36x），
+根因是 CPython display 子类实例化 + setattr 是不可消除的固有税（详见
+`docs/analysis/phase8-hex-parse-perf-investigation.md`）。
+
+第一轮用户决策：消除"值和显示分离"，Hex 改为"hex 字符串编解码器"，**首轮采用 `Hex(length)`
+API**（像 `Bytes(N)` 一样接收字节数）。
+
+#### 第二轮（Hex(length) → Hex(subcon) 包装器，本节最终方案）
+
+**第二轮用户决策（2026-07-31）**：`Hex(length)` 只能读固定字节数，无法包装 `GreedyBytes` 等
+变长子构造器。用户要求改回 `Hex(subcon)` 包装器 API：
+
+> "还是支持 subcon 的 api 比较好，否则无法处理一些变长数据，比如 greedybytes 之类的，
+> 相当于 Hex 变成了一个格式转换器，只是从输出 bytes 或对象，变成了输出 hex。"
+
+**最终语义核心**：Hex 是 **subcon 包装器 hex 格式转换器**——
+- **parse**：`inner.parse(stream)` 得到结果（bytes/int/...）→ 按类型 hex 编码 → `PyString`
+- **build**：接收 hex 字符串 → hex 解码 → 按类型还原 → `inner.build(restored, stream)`
+- **subcon 输出类型**由编译期 `HexInnerKind` 推断（Bytes/Int/Unknown 三类，详见 §2.3）
+
+**前两轮设计失效的结论**（不再适用，记录于此供审计追溯）：
+- display 装饰器路径（HexDisplayClasses / fmtstr / call_method1 / setattr）全部废弃
+- 第一轮 `Hex(length)` 的 `BytesLength` / 无 inner Node / 直接 `stream.read` 路径全部废弃
+- `construct.lib.hex` 的 5 个显示类在新语义下不再被 Rust parse 调用
+
+### 2.1 Python 参考实现摘要（原版语义，仅作 parity 对照基准）
+
+| 构造器 | Python 行号 | 原版语义（construct-rs **不沿用 display 部分**） |
 |--------|-----------|---------|
-| `Hex(subcon)` | core.py L3523-3580 | Adapter。`_decode`：obj is int → `HexDisplayedInteger.new(obj, fmtstr)`；bytes → `HexDisplayedBytes(obj)`；dict → `HexDisplayedDict(obj)`；else 原样。`_encode`：透传 |
-| `HexDump(subcon)` | core.py L3583-3635 | Adapter。`_decode`：obj is bytes → `HexDumpDisplayedBytes(obj)`；dict → `HexDumpDisplayedDict(obj)`；else 原样。`_encode`：透传 |
+| `Hex(subcon)` | core.py L3523-3580 | Adapter。`_decode(obj)` 按 `isinstance(obj, int/bytes/dict)` 分派到显示类 factory；`_encode(obj)` 直接 `return obj`（build 透传）。parse 返回 int/bytes/dict 子类（仅 `__str__` 显示 hex） |
+| `HexDump(subcon)` | core.py L3583-3635 | Adapter，display 装饰器。parse 返回 bytes/dict 子类（`__str__` 输出 xxd 风格 hexdump） |
 
-**显示类位置**：`construct/lib/hex.py`（5 个类，已读取全文）：`HexDisplayedInteger` / `HexDisplayedBytes` / `HexDisplayedDict` / `HexDumpDisplayedBytes` / `HexDumpDisplayedDict`。`__str__` 时延迟构造 `self.render`（懒渲染）。
+> **parity 关键**：construct-rs 新 Hex **保留 `Hex(subcon)` API 与原版一致**（包装任意子构造器），
+> 但 parse/build 的值语义变更（原版返回 display 子类，construct-rs 返回/接收 hex 字符串）。
+> 原版 `_decode` 的 int/bytes/dict 三分支在新设计中映射为 `HexInnerKind`（Bytes/Int/Unknown）。
+> 这是**值语义级 breaking change**（用户明确认可），但**API 形态保持兼容**。
 
-**Hex fmtstr 计算**：`"0%sX" % (2 * self.subcon._sizeof(context, path))`——sizeof 可能 SizeofError（变长 subcon），此时 fallback 为通用格式（设计 §2.4 边界 HX-3）。
+### 2.2 关键设计决策：Hex 为 subcon 包装器 hex 格式转换器
 
-### 2.2 关键设计决策：Hex/HexDump 走 Rust Node（非 AdapterCallbackNode）
+**最终语义定义**：
 
-**ARCH 决策（已确认，详见 `质疑-能否不用RawCopy.md §2.2` + ADR-022 §0.2）**：Hex/HexDump 实现为 **Rust Node 变体**，不走 AdapterCallbackNode 路径。
+| 维度 | construct-rs（subcon 包装器） | 原版（Python construct，仅对照） |
+|------|-------------------------------|-------------------------------|
+| API | `Hex(subcon)` —— 包装子构造器（**与原版 API 一致**） | `Hex(subcon)` —— 包装子构造器 |
+| parse 返回 | `str`（hex 编码字符串），按 `HexInnerKind` 分派编码方式 | int/bytes/dict 子类（display 对象） |
+| build 接收 | `str`（hex 字符串）→ 解码还原 → 交给 `inner.build` | 原始 int/bytes/dict 值（`_encode` 透传） |
+| sizeof | 转发 `inner.sizeof`（与 Subconstruct 同） | 转发 `subcon.sizeof` |
+| 内部实现 | `inner.parse` → 按类型 `hex::encode`/`format!("{:x}")` → `PyString` | subcon.parse → Python 显示类 factory |
 
-**理由**：
-1. Hex/HexDump 是 construct 核心库内置 Adapter（非用户自定义），与 Subconstruct/RawCopy 同档
-2. parse 逻辑简单（按 obj 类型分支 + Python 显示类 factory 调用），Rust 内联判断 + Python 类构造即可
-3. 显示类的 `__call__`（如 `HexDisplayedInteger.new`）是 C 级实现（CPython 内置类型方法），调用走 §0.2 判据 2（不计额外 FFI）
-4. 避免 AdapterCallbackNode 的 Rust→Python 回调开销（~200-300ns/字段，PM 决策 2 不设硬门禁但 Hex 不应背此开销）
+**理由**（用户需求 + 性能 + 语义清晰）：
+1. **支持变长子构造器**（用户核心需求）：`Hex(GreedyBytes)` / `Hex(Prefixed(...))` 等场景
+   在 `Hex(length)` 下无法表达，subcon 包装器模式天然支持
+2. **消除 display 子类固有税**（第一轮已确立）：parse 不再构造 Python display 子类
+3. **inner.parse/build 全在 Rust 内部**（§0 #1 合规）：subcon 包装器模式与 Subconstruct/Const/Peek
+   同构，inner 调用是 Rust 内部函数调用，不构成额外 FFI
+4. **round-trip 对称**：parse → hex str，build(hex str) → 原始字节（经 inner 还原）
 
-**与 ADR-022 关系**：ADR-022 §0.2 已论证 Hex/HexDump/Enum/FlagsEnum/Mapping 可走 Rust Node。本设计是 ADR-022 在 Phase 8 P0 批次的工程化落地（Hex/HexDump 部分）。
+**subcon 输出类型处理（核心设计决策）**：
+
+Hex(subcon) 的 subcon 可能输出不同 Python 类型，hex 编码方式随之不同。ARCH 决策：**编译期
+根据 inner Node 变体推断 `HexInnerKind`**（运行期无需 trial-and-error，避免歧义）：
+
+| HexInnerKind | 覆盖的 inner Node 变体 | parse 编码 | build 解码 |
+|--------------|----------------------|-----------|-----------|
+| **Bytes** | `Bytes` / `GreedyBytes` + **透明包装器递归命中上述叶节点**（见 §2.3.2） | `hex::encode(&bytes)` → 小写连写（`"0000001f"`） | `hex::decode(s)` → `PyBytes` → `inner.build` |
+| **Int** | `FormatField`（**仅 int 格式**，F-1）/ `VarInt` / `ZigZag` / `BytesInteger` / `BitsInteger` / `Tell` / `Computed` / `Index` + 透明包装器递归 | `format!("{:x}", v)`（v 为 i128，F-2）→ 无前导零小写（`"1f"`） | `i128::from_str_radix(s, 16)`（F-2）→ `PyLong` → `inner.build` |
+| **Unknown** | `FormatField`（**Float 格式**，F-1）/ `Struct` / `RawCopy` / `Array` / `Adapter` / `Strings` / 不一致多分支 / 非透明包装器等 | **透传**（obj 原样返回，fail-soft） | **透传**（obj 原样传 inner.build） |
+
+> **F-1/F-2/F-3 修订说明（2026-07-31 REV followup）**：
+> - **F-1**：`FormatField` 不再 blanket 归 Int。`PythonFormat` 的 6 个 Float 变体
+>   （Float16/32/64 × Big/Little）parse 返回 PyFloat，归为 **Unknown**（透传），
+>   对齐 Python 原版 `_decode` 的 `return obj` fallback。仅 16 个 int 格式归 Int。
+> - **F-2**：Int kind 的提取从 `i64` 扩展到 **`i128`**（覆盖 i64 全域 + u64::MAX +
+>   VarInt/BytesInteger ≤ 16 字节）。超过 i128 的任意精度（BytesInteger > 16 字节，
+>   极罕见）走 Python `int.__format__` / `int(s, 16)` fallback（§0.2 判据 2，C API）。
+> - **F-3**：`infer_hex_inner_kind` 不再是扁平 match——对**透明包装器**
+>   （parse 输出 == inner 输出的包装器）递归穿透，详见 §2.3.2。
+
+**Unknown 分支的设计理由**：
+- 对齐 Python 原版 `Hex._decode` 的 `return obj` fallback（core.py L3565）
+- 对齐 Python 原版 `Hex._encode` 的 `return obj`（core.py L3568，build 透传）
+- 用户若需要对 Struct/RawCopy 输出做 hex，应在 Python 层后处理（`binascii.hexlify`），
+  而非依赖 Hex 包装器——Struct/dict 的 hex 编码语义不明确
+- **fail-soft 优于 fail-hard**：Unknown 类型 round-trip 对称（parse 透传 X，build 透传 X 还原）
+
+**字符串格式规范**：
+- **Bytes kind**：纯连写小写（`"0000001f"`），等价 `binascii.hexlify`；build 大小写兼容
+- **Int kind**：无前导零小写（`"1f"`），等价 Python `format(v, 'x')`；build 接受可选 `"0x"` 前缀
+  （对齐 Python `int(s, 16)` 宽容性，Rust `from_str_radix` 不接受前缀故手动 strip）
+- **负数**（Int kind）：`format!("{:x}", -31)` → `"-1f"`；build strip `"-0x"` 后保留负号
+
+**HexDump 处理**：见 §2.10（ARCH 推荐方案 C wont_implement，与新设计兼容）。
 
 ### 2.3 Rust Node 设计
 
-#### 2.3.1 HexNode + HexDumpNode（共享显示类加载逻辑）
+#### 2.3.1 HexNode（subcon 包装器 hex 格式转换器）
 
 ```rust
-/// Hex 显示包装节点：根据 inner.parse 结果类型分派到对应 Python 显示类。
+/// Hex 格式转换器节点：包装任意 subcon，parse 输出 hex 字符串，build 从 hex 字符串还原。
 ///
-/// 对应 Python construct `Hex(subcon)`（core.py L3523）。在 construct-rs 中
-/// 实现为 Rust Node（非 AdapterCallbackNode，详见设计 §2.2 + ADR-022）。
+/// **语义（2026-07-31 第二轮修正，最终方案）**：保留 `Hex(subcon)` 包装器 API
+/// （与 Python 原版一致），支持 GreedyBytes 等变长子构造器。Hex 的角色是"格式转换器"
+/// ——把 subcon 输出转 hex 字符串（parse），反向把 hex 字符串还原后交给 subcon（build）。
+///
+/// 对应 Python construct `Hex(subcon)`（core.py L3523）。值语义为 breaking change
+/// （原版返回 display 子类，construct-rs 返回 hex 字符串），详见设计 §2.0。
+///
+/// # subcon 输出类型处理（HexInnerKind）
+///
+/// 编译期根据 inner Node 变体推断输出类型（运行期无需 trial-and-error）：
+/// - **Bytes**（Bytes/GreedyBytes）：parse `hex::encode(&bytes)`，build `hex::decode` → bytes
+/// - **Int**（FormatField int 格式/VarInt/ZigZag/BytesInteger/BitsInteger/Tell/Computed/Index）：
+///   parse `format!("{:x}", v)`（i128 提取），build `i128::from_str_radix(s, 16)` → int
+/// - **Unknown**（FormatField Float 格式/Struct/Sequence/RawCopy/dict/list/Strings/非透明包装器等）：
+///   parse/build 透传
+///
+/// **透明包装器穿透**（F-3）：Subconstruct/Peek/Const/Default/Rebuild/Aligned/Prefixed/
+/// Pointer/Transform/Bitwise/Bytewise/ProcessXor/ProcessRotateLeft/NullTerminated/
+/// NullStripped/OneOf/NoneOf 等包装器的 parse 输出 == inner 输出，`infer_hex_inner_kind`
+/// 递归穿透它们（IfThenElse/Switch/Select 检查所有分支一致）。详见 §2.3.2。
 ///
 /// # 三方法行为
 ///
-/// - parse：inner.parse → 按 obj 类型分派 → 调用对应 Python 显示类 factory
-///   - int → `HexDisplayedInteger.new(obj, fmtstr)`
-///   - bytes → `HexDisplayedBytes(obj)`
-///   - dict → `HexDisplayedDict(obj)`
-///   - else → 透传
-/// - build：透传 inner.build（obj 是显示对象，但有对应原始类型 __base__，
-///   pyo3 提取时自动转 int/bytes/dict）
-/// - sizeof：转发 inner.sizeof
+/// - parse：`inner.parse(stream)` → 按 `inner_kind` 分派 hex 编码 → `PyString`（或透传）
+/// - build：按 `inner_kind` 分派 hex 解码 → `inner.build(restored, stream)`（或透传）
+/// - sizeof：转发 `inner.sizeof(ctx)`（与 Subconstruct 同）
+///
+/// # 与其他包装器的同构性
+///
+/// HexNode 与 SubconstructNode / ConstNode / PeekNode 同属 `inner: Box<Node>` 包装器模式，
+/// 唯一差异是 parse/build 对 inner 结果做 hex 编解码转换（而非纯转发）。
 #[derive(Debug)]
 pub struct HexNode {
+    /// 被包装的子树根。
     inner: Box<Node>,
-    /// 编译期加载的 Python 显示类引用（避免每次 parse 调 import）。
-    display_classes: HexDisplayClasses,
+    /// 编译期推断的 inner 输出类型（决定 parse/build 的 hex 编解码方式）。
+    inner_kind: HexInnerKind,
 }
 
-/// HexDump 显示包装节点：与 HexNode 同模式，仅显示类不同。
-#[derive(Debug)]
-pub struct HexDumpNode {
-    inner: Box<Node>,
-    display_classes: HexDumpDisplayClasses,
+/// inner Node 的输出类型分类（编译期推断，决定 hex 编解码方式）。
+///
+/// 这是"哪些 Node 变体输出 bytes/int"的**单一事实源**（L-04 对策）。
+/// 新增 Node 变体若输出 bytes/int，需同步更新 `infer_hex_inner_kind`（compile.rs）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HexInnerKind {
+    /// inner.parse 输出 PyBytes（Bytes/GreedyBytes 等）。
+    /// parse: `hex::encode`；build: `hex::decode` → PyBytes。
+    Bytes,
+    /// inner.parse 输出 PyLong（FormatField int 格式/VarInt 等）。
+    /// parse: `extract::<i128>` + `format!("{:x}")`（任意精度走 __format__ fallback）；
+    /// build: `i128::from_str_radix(s, 16)`（任意精度走 int(s,16) fallback）→ PyLong。
+    Int,
+    /// inner.parse 输出其他类型（Struct/RawCopy/Array/Strings/包装器等）。
+    /// parse/build 透传（fail-soft，对齐 Python 原版 _decode/_encode fallback）。
+    Unknown,
 }
 
-/// Hex 三类显示类的引用（编译期物化）。
-#[derive(Debug)]
-pub struct HexDisplayClasses {
-    pub integer: Py<PyType>,  // HexDisplayedInteger
-    pub bytes_cls: Py<PyType>, // HexDisplayedBytes
-    pub dict: Py<PyType>,     // HexDisplayedDict
-}
-
-/// HexDump 两类显示类的引用（编译期物化）。
-#[derive(Debug)]
-pub struct HexDumpDisplayClasses {
-    pub bytes_cls: Py<PyType>,  // HexDumpDisplayedBytes
-    pub dict: Py<PyType>,       // HexDumpDisplayedDict
+impl HexNode {
+    /// 创建 `HexNode`，包裹给定的子树根节点 + 编译期推断的输出类型。
+    pub fn new(inner: Node, inner_kind: HexInnerKind) -> Self {
+        Self { inner: Box::new(inner), inner_kind }
+    }
+    /// 返回内部子树根节点的引用。
+    pub fn inner(&self) -> &Node { &self.inner }
+    /// 返回编译期推断的 inner 输出类型分类。
+    pub fn inner_kind(&self) -> HexInnerKind { self.inner_kind }
 }
 ```
 
-**编译期类加载**：`compile.rs` 在识别 `HexDescriptor` 时，从 `construct.lib.hex` 模块 `getattr` 5 个类（仅 Hex 用 3 个，HexDump 用 2 个），物化为 `Py<PyType>` 存入 Node。模块加载失败（理论不应发生，`construct.lib.hex` 是核心库）→ CompilationError。
+**关键设计点**：
+1. **subcon 包装器模式**——`inner: Box<Node>`，与 Subconstruct/Const/Peek 同构（L-04 模式复用）
+2. **编译期 HexInnerKind 分类**——避免运行期 trial-and-error，parse/build 走确定的 fast-path
+3. **`hex` crate**——新增依赖（`hex = "0.4"`，纯 Rust 编解码库，§0 #4 合规，与 `half`/`sha2` 同先例）
+4. **删除全部显示类相关结构**——`HexDisplayClasses` / `HexDumpDisplayClasses` /
+   `load_hex_display_classes` / `load_hexdump_display_classes` / `fmtstr` 字段全部废弃
 
-#### 2.3.2 Hex fmtstr 计算（编译期 vs 运行期）
+**`has_expressions` 集成**：`Node::Hex(h) => h.inner().has_expressions()`
+（与 Subconstruct/Const 同模式：递归检查 inner 是否含表达式）。
 
-Python 在每次 `_decode` 时调 `self.subcon._sizeof(context, path)` 计算 fmtstr。construct-rs 的优化策略：
+#### 2.3.2 build_hex_node 编译逻辑（compile.rs）
 
-- **静态 sizeof 可计算**（inner 无表达式）：编译期预算 `fmtstr = "0{n}X"`，存入 `HexNode` 字段（消除运行期 sizeof 调用）
-- **静态 sizeof 不可计算**（inner 有表达式，如 `Hex(Bytes(width))`）：运行期 fallback 用 inner 的 `sizeof(ctx)`（若失败用通用 `"0X"` 格式）
+新 `build_hex_node` 恢复 subcon 包装器模式：递归编译 subcon → 推断 HexInnerKind。
 
 ```rust
-#[derive(Debug)]
-pub struct HexNode {
-    inner: Box<Node>,
-    display_classes: HexDisplayClasses,
-    /// 编译期预算的 fmtstr（None 表示需运行期计算）。
-    fmtstr: Option<Py<PyString>>,
+fn build_hex_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<HexNode, ConstructError> {
+    // 1. 递归编译 subcon（与 Subconstruct/Rebuild/Const 同模式）。
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "HexDescriptor missing 'subcon' attribute: {} (field index {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py, &subcon_desc, field_index, expr_programs, field_names, false,
+    )?;
+
+    // 2. 编译期推断 inner 输出类型（单一事实源，L-04 对策）。
+    let inner_kind = infer_hex_inner_kind(&inner_node);
+
+    Ok(HexNode::new(inner_node, inner_kind))
+}
+
+/// 根据 inner Node 变体推断其 parse 输出的 Python 类型分类。
+///
+/// **单一事实源**：新增 Node 变体若输出 bytes/int，必须在此 match 分支补全。
+/// 未覆盖的变体归为 Unknown（parse/build 透传，fail-soft）。
+///
+/// **F-1 修订**：FormatField 细分——int 格式归 Int，6 个 Float 格式归 Unknown。
+/// **F-3 修订**：透明包装器递归穿透——包装器 parse 输出 == inner 输出时，
+/// 递归检查 inner 的输出类型（含多分支一致性检查）。
+fn infer_hex_inner_kind(inner: &Node) -> HexInnerKind {
+    use Node::*;
+    match inner {
+        // ---- 叶节点：输出 PyBytes ----
+        Bytes(_) | GreedyBytes(_) => HexInnerKind::Bytes,
+
+        // ---- 叶节点：输出 PyLong（int）----
+        // F-1：FormatField 细分——仅 int 格式归 Int，Float 格式归 Unknown
+        FormatField(ff) => {
+            if ff.format().is_float() {
+                HexInnerKind::Unknown   // Float16/32/64 → PyFloat → 透传
+            } else {
+                HexInnerKind::Int
+            }
+        }
+        VarInt(_) | ZigZag(_) | BytesInteger(_) | BitsInteger(_)
+        | Tell(_) | Computed(_) | Index(_) => HexInnerKind::Int,
+
+        // ---- 透明单子包装器：parse 输出 == inner().parse 输出 → 递归（F-3）----
+        // 注：各包装器是不同 Rust 类型，须分开 match arm（无法用 `|` 合并不同类型绑定）。
+        // 已确认 accessor：这些 Node 均有 `pub fn inner(&self) -> &Node`。
+        Subconstruct(s) => infer_hex_inner_kind(s.inner()),
+        Peek(s) => infer_hex_inner_kind(s.inner()),
+        Const(s) => infer_hex_inner_kind(s.inner()),
+        Default(s) => infer_hex_inner_kind(s.inner()),
+        Rebuild(s) => infer_hex_inner_kind(s.inner()),
+        Aligned(s) => infer_hex_inner_kind(s.inner()),
+        Transform(s) => infer_hex_inner_kind(s.inner()),
+        Bitwise(s) => infer_hex_inner_kind(s.inner()),
+        Bytewise(s) => infer_hex_inner_kind(s.inner()),
+        ProcessXor(s) => infer_hex_inner_kind(s.inner()),
+        ProcessRotateLeft(s) => infer_hex_inner_kind(s.inner()),
+        NullTerminated(s) => infer_hex_inner_kind(s.inner()),
+        NullStripped(s) => infer_hex_inner_kind(s.inner()),
+        OneOf(s) => infer_hex_inner_kind(s.inner()),
+        NoneOf(s) => infer_hex_inner_kind(s.inner()),
+
+        // ---- 透明双字段包装器：parse 输出 == subcon().parse 输出 → 递归 subcon（F-3）----
+        // Prefixed：lengthfield 仅消费定长，不进入输出；Pointer：offset 仅定位。
+        // 已确认 accessor：`pub fn subcon(&self) -> &Node`（两者不同类型，分开 arm）
+        Prefixed(p) => infer_hex_inner_kind(p.subcon()),
+        Pointer(p) => infer_hex_inner_kind(p.subcon()),
+
+        // ---- 多分支条件包装器：所有分支输出类型一致时归该类，否则 Unknown（F-3）----
+        IfThenElse(ite) => {
+            let t = infer_hex_inner_kind(ite.then_sub());
+            let e = infer_hex_inner_kind(ite.else_sub());
+            if t == e { t } else { HexInnerKind::Unknown }
+        }
+        Switch(sw) => {
+            // 遍历所有 case + default，全一致则归该类
+            let mut acc: Option<HexInnerKind> = None;
+            for case in sw.cases() {
+                let k = infer_hex_inner_kind(case.subcon());
+                acc = Some(match acc { None => k, Some(prev) => if prev == k { prev } else { return HexInnerKind::Unknown } });
+            }
+            let d = infer_hex_inner_kind(sw.default());
+            match acc { None => d, Some(prev) => if prev == d { prev } else { HexInnerKind::Unknown } }
+        }
+        Select(sel) => {
+            // 遍历所有 subcons，全一致则归该类
+            let mut acc: Option<HexInnerKind> = None;
+            for sub in sel.subcons() {
+                let k = infer_hex_inner_kind(sub);
+                acc = Some(match acc { None => k, Some(prev) => if prev == k { prev } else { return HexInnerKind::Unknown } });
+            }
+            acc.unwrap_or(HexInnerKind::Unknown)
+        }
+
+        // ---- 非透明 / 复合输出 → Unknown 透传 ----
+        // RawCopy（dict）/ Struct（dict）/ Sequence（list）/ Array/GreedyRange/PrefixedArray/
+        // RepeatUntil（list）/ Union（dict/multi）/ NamedTuple（tuple）/ Enum/FlagsEnum/Mapping
+        // （映射值类型不定）/ AdapterCallback（用户 _decode 输出未知）/ Hex/HexDump（str）/
+        // Strings（str）/ Padding/BitPadding/Pass/Check/Terminated/Probe/Seek/StopIf/Element
+        // （None/元数据）/ FocusedSeq（context nesting，聚焦字段类型不定）/ Checksum（特殊）
+        _ => HexInnerKind::Unknown,
+    }
 }
 ```
 
-### 2.4 Construct impl（关键路径摘要）
+**descriptor `_expr_params` 协议**（Python 侧）：HexDescriptor 不持有自身表达式（length 已废弃），
+表达式来源全部来自 inner subcon 的递归编译。HexDescriptor 的 `_expr_params` 返回 inner 的
+表达式参数（与 SubconstructDescriptor / PeekDescriptor 同模式，由 `build_node_from_descriptor`
+递归处理）。
+
+**关于 HexInnerKind 推断的维护性**（L-04 对策 + F-1/F-3 修订）：
+- `infer_hex_inner_kind` 是"Node 变体 → 输出类型"映射的单一事实源
+- **F-1 依赖**：`FormatField(ff).format().is_float()` 需要 `PythonFormat` 新增 `is_float()`
+  方法（`format_field.rs`，匹配 6 个 Float 变体，与已有 `is_big_endian()` 同模式，~6 行）。
+  若 DEV 不新增该方法，可内联 `matches!(ff.format(), PythonFormat::Float16Big | ...)` 替代
+- **F-3 维护契约**：新增包装器 Node 时，若其 `parse 输出 == inner.parse 输出`
+  （透明包装器），DEV/VET 必须在 `infer_hex_inner_kind` 的递归分支补全（否则该包装器
+  被 Hex 包装时归 Unknown 透传，功能退化但不崩溃）。与 `has_expressions()` 递归维护同模式
+- Unknown 分支是 fail-soft（不崩溃），但用户会观察到"Hex 包装后 parse 不是字符串"——
+  这是引导用户使用受支持 subcon 类型的设计意图，非 bug
+
+### 2.4 Construct impl（subcon 包装器 hex 编解码路径）
 
 ```rust
 impl Construct for HexNode {
-    fn parse<'py>(&self, py, stream, ctx, path) -> Result<Py<PyAny>, ConstructError> {
+    fn parse<'py>(
+        &self,
+        py: Python<'py>,
+        stream: &mut ParseStream<'_>,
+        ctx: &mut Context<'py>,
+        path: &mut Path,
+    ) -> Result<Py<PyAny>, ConstructError> {
+        // 1. inner.parse 得到原始对象（Rust 内部调用，不跨 FFI）
         let obj = self.inner.parse(py, stream, ctx, path)?;
         let bound = obj.bind(py);
-        // Rust 内 is_instance_of 判断（pyo3 内部走 PyObject_IsInstance，对内置类型 fast-path）
-        let display_cls: &Py<PyType> = if bound.is_instance_of::<PyLong>(py) {
-            &self.display_classes.integer
-        } else if bound.is_instance_of::<PyBytes>(py) {
-            &self.display_classes.bytes_cls
-        } else if bound.is_instance_of::<PyDict>(py) {
-            &self.display_classes.dict
-        } else {
-            return Ok(obj);  // 未知类型透传
-        };
-        // HexDisplayedInteger.new(obj, fmtstr) vs HexDisplayedBytes(obj) vs HexDisplayedDict(obj)
-        let new_obj = if bound.is_instance_of::<PyLong>(py) {
-            // 编译期 fmtstr 或运行期计算
-            let fmt = match &self.fmtstr {
-                Some(s) => s.bind(py),
-                None => {
-                    let size = self.inner.sizeof(ctx).unwrap_or(0);
-                    let fmt_str = format!("0{}X", 2 * size);
-                    // 注：动态构造 PyString，DEV 注意 pyo3 0.22 临时借用语法
-                    PyString::new_bound(py, &fmt_str)
+        // 2. 按 inner_kind 分派 hex 编码
+        match self.inner_kind {
+            HexInnerKind::Bytes => {
+                // 借用 PyBytes buffer（不拷贝）
+                let bytes: &[u8] = bound.extract().map_err(|e| ConstructError::Generic {
+                    message: format!(
+                        "Hex parse (Bytes kind): inner returned non-bytes value: {}",
+                        e
+                    ),
+                    path: path.to_string(),
+                })?;
+                let hex_str = hex::encode(bytes);  // 纯 Rust，SIMD 优化
+                Ok(PyString::new_bound(py, &hex_str).into_any().unbind())
+            }
+            HexInnerKind::Int => {
+                // F-2：i128 fast-path 覆盖 i64 全域 + u64::MAX + VarInt/BytesInteger ≤ 16 字节。
+                // 超 i128 的任意精度（BytesInteger > 16 字节，极罕见）走 Python __format__ fallback。
+                if let Ok(v) = bound.extract::<i128>() {
+                    // 无前导零小写，对齐 Python format(v, 'x')；负数自动加 "-"
+                    // u64::MAX (正 i128) → "ffffffffffffffff"；i64::MIN → "-8000000000000000"
+                    let hex_str = format!("{:x}", v);
+                    Ok(PyString::new_bound(py, &hex_str).into_any().unbind())
+                } else {
+                    // 任意精度 fallback（> 128 bits）：调 int.__format__(self, "x")（C API，
+                    // §0.2 判据 2，C 级 builtin，无用户字节码）。仅 BytesInteger > 16 字节触发。
+                    let hex_obj = bound
+                        .call_method1("__format__", (PyString::new_bound(py, "x"),))
+                        .map_err(|e| ConstructError::Generic {
+                            message: format!("Hex parse (Int kind): __format__ failed: {}", e),
+                            path: path.to_string(),
+                        })?;
+                    Ok(hex_obj.unbind())
                 }
-            };
-            // HexDisplayedInteger 是 int 子类，类方法 new(intvalue, fmtstr)
-            // 调用方式：cls.new(obj, fmt) → bound method 调用（C API）
-            let cls_bound = self.display_classes.integer.bind(py);
-            cls_bound.call_method1("new", (bound, fmt))?
-        } else {
-            // HexDisplayedBytes(obj) / HexDisplayedDict(obj) → __init__(self, obj)
-            let cls_bound = display_cls.bind(py);
-            cls_bound.call1((bound,))?
-        };
-        Ok(new_obj.into_any().unbind())
+            }
+            HexInnerKind::Unknown => {
+                // 透传（fail-soft，对齐 Python 原版 _decode else 分支 return obj）
+                Ok(obj)
+            }
+        }
     }
-    fn build(&self, py, obj, stream, ctx, path) -> Result<(), ConstructError> {
-        // obj 可能是 HexDisplayedInteger（int 子类）/ HexDisplayedBytes（bytes 子类）等
-        // 直接转发 inner.build——inner 自己 extract（pyo3 子类转基类自动）
-        self.inner.build(py, obj, stream, ctx, path)
-    }
-    fn sizeof(&self, ctx) -> Result<usize, ConstructError> { self.inner.sizeof(ctx) }
-}
 
-impl Construct for HexDumpNode {
-    // 与 HexNode 同模式，仅显示类不同（bytes/dict 两种）
-    // ...
+    fn build(
+        &self,
+        py: Python<'_>,
+        obj: &Bound<'_, PyAny>,
+        stream: &mut BuildStream,
+        ctx: &mut Context<'_>,
+        path: &mut Path,
+    ) -> Result<(), ConstructError> {
+        match self.inner_kind {
+            HexInnerKind::Bytes => {
+                // obj 应为 hex 字符串
+                let s: String = obj.extract().map_err(|_| ConstructError::Generic {
+                    message: format!(
+                        "Hex build (Bytes kind) expected hex string, got type {}",
+                        obj.get_type()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "<unknown>".to_string())
+                    ),
+                    path: path.to_string(),
+                })?;
+                // Rust 内 hex::decode（纯 Rust，大小写兼容）
+                let bytes: Vec<u8> = hex::decode(&s).map_err(|e| ConstructError::Generic {
+                    message: format!("Hex build (Bytes kind): failed to decode hex string '{}': {}", s, e),
+                    path: path.to_string(),
+                })?;
+                let bytes_obj = PyBytes::new_bound(py, &bytes);
+                self.inner.build(py, &bytes_obj, stream, ctx, path)
+            }
+            HexInnerKind::Int => {
+                let s: String = obj.extract().map_err(|_| ConstructError::Generic {
+                    message: format!(
+                        "Hex build (Int kind) expected hex string, got type {}",
+                        obj.get_type()
+                            .name()
+                            .map(|n| n.to_string())
+                            .unwrap_or_else(|_| "<unknown>".to_string())
+                    ),
+                    path: path.to_string(),
+                })?;
+                // 剥可选 "0x"/"-0x" 前缀（对齐 Python int(s, 16) 宽容性）
+                let negative = s.starts_with('-');
+                let stripped = s
+                    .trim_start_matches('-')
+                    .trim_start_matches("0x");
+                let radix_str = if negative { format!("-{}", stripped) } else { stripped.to_string() };
+                // F-2：i128 fast-path 覆盖 u64::MAX 等；超 i128 的 hex 字符串走 Python int(s,16) fallback
+                if let Ok(v) = i128::from_str_radix(&radix_str, 16) {
+                    let int_obj = v.into_py(py);
+                    self.inner.build(py, int_obj.bind(py), stream, ctx, path)
+                } else {
+                    // 任意精度 fallback：调 builtins.int(s, 16)（C API，§0.2 判据 2）
+                    let builtins = py.import_bound("builtins").map_err(|e| ConstructError::Generic {
+                        message: format!("Hex build (Int kind): import builtins failed: {}", e),
+                        path: path.to_string(),
+                    })?;
+                    let int_obj = builtins
+                        .call_method1("int", (&radix_str, 16))
+                        .map_err(|e| ConstructError::Generic {
+                            message: format!("Hex build (Int kind): int('{}', 16) failed: {}", s, e),
+                            path: path.to_string(),
+                        })?;
+                    // int_obj 是 Bound<PyAny>（PyLong），转交 inner.build
+                    self.inner.build(py, &int_obj, stream, ctx, path)
+                }
+            }
+            HexInnerKind::Unknown => {
+                // 透传（obj 原样传给 inner.build，对齐 Python 原版 _encode return obj）
+                self.inner.build(py, obj, stream, ctx, path)
+            }
+        }
+    }
+
+    fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
+        // 转发 inner.sizeof（与 Subconstruct/Const/Peek 同模式）
+        self.inner.sizeof(ctx)
+    }
 }
 ```
 
-**`has_expressions` 集成**：`Node::Hex(h) => h.inner().has_expressions()`（Hex/HexDump 不引入新表达式）。
+**关键实现说明**：
+1. **inner.parse/build 是 Rust 内部函数调用**（§0 #1 合规）——subcon 包装器模式与 Subconstruct 同构，
+   hex 编解码在 inner 结果之上叠加，不构成额外 FFI
+2. **Bytes kind 的 `extract::<&[u8]>` 借用不拷贝**——pyo3 直接引用 PyBytes 内部 buffer
+3. **Int kind 的 `extract::<i128>` + fallback**（F-2）——`i128` 覆盖 i64/u64 全域 +
+   VarInt/BytesInteger ≤ 16 字节；超 i128 的任意精度走 Python `int.__format__`（C API，
+   仅 BytesInteger > 16 字节触发，极罕见）。负数 `format!("{:x}", -31i128)` → `"-1f"`
+4. **Unknown kind 透传**——不尝试 hex 编解码，obj 原样传递（round-trip 对称）
+5. **build Int kind 的前缀 strip**——手动处理 `0x`/`-0x` 前缀（Rust `from_str_radix` 不接受前缀），
+   保持与 Python `int(s, 16)` 一致的宽容性；任意精度走 Python `int(s, 16)` fallback
+6. **F-3 透明包装器递归是编译期操作**——`infer_hex_inner_kind` 在 `build_hex_node`（编译期）
+   执行，递归穿透不影响运行期 parse/build 性能（0 额外运行时开销）
 
-### 2.5 §0 原则对照表
+### 2.5 §0 原则对照表（L-01 对策）
 
-| §0 原则 | HexNode / HexDumpNode |
+| §0 原则 | HexNode（subcon 包装器 hex 格式转换器） |
 |---------|----------------------|
-| #1 一次 FFI | ✅ 严格 1 次。inner.parse/build 在 Rust 内；`is_instance_of` / `call_method1` / `call1` 是 pyo3 C API（§0.2 判据 2）。显示类 `__call__` / `__init__` 是 CPython 内置子类构造（int/bytes/dict 的 C 级实现） |
-| #2 无中间表示层 | ✅ `Py<PyType>` 持有类引用本身；解析结果是 Python 显示对象（非 Rust 中间类型） |
-| #3 输入输出无 trait 抽象 | ✅ 仅 `Box<Node>` |
-| #4 pyo3 核心依赖 | ✅ 全程 pyo3 API |
-| #5 mashumaro API | ✅ Hex 是字段描述符 |
-| #6 enum_dispatch | ✅ 2 个新 Node 加入 enum |
-| #7 Result + path | ✅ 错误带 path |
-| #8 Stream 纯 Rust | ✅ Hex 不直接操作 stream（透传 inner） |
+| #1 一次 FFI | ✅ **严格 1 次**。`inner.parse`/`inner.build` 是 Rust 内部函数调用（与 Subconstruct 同构，subcon 包装器模式不构成额外 FFI）；`hex::encode`/`hex::decode` 全在 Rust 内（纯 Rust crate）；`extract`/`PyString::new_bound`/`PyBytes::new_bound`/`into_py` 是 C API（§0.2 判据 2）。**F-2 fallback**（`int.__format__`/`int(s,16)`，仅任意精度 > 128bit 触发）是 C 级 builtin 方法调用（§0.2 判据 2，无用户字节码）。**无 Python 字节码进入、无 Rust→Python 回调** |
+| #2 无中间表示层 | ✅ inner.parse 返回的 `Py<PyAny>` 直接处理（按 HexInnerKind 分派），不引入 Rust 中间数据类型。`hex::encode` 产出 Rust `String`（原生类型，非跨 FFI 中间层），随即构造 `PyString`（Python 对象本身） |
+| #3 输入输出无 trait 抽象 | ✅ 仅 `Box<Node>`（与 Subconstruct/Const 同模式）+ `HexInnerKind` enum（编译期分类，非运行期 trait dispatch） |
+| #4 pyo3 核心依赖 | ✅ `hex = "0.4"` 是纯 Rust 编解码库（无 Python 跨界），与 `half`/`sha2` 同先例。pyo3 仍是 FFI 唯一桥梁 |
+| #5 mashumaro API | ✅ `Hex(subcon)` 是字段描述符（与 Subconstruct/Peek 同层，包装任意 subcon） |
+| #6 enum_dispatch | ✅ HexNode 重写（变体数不变，HexDump 视用户决策） |
+| #7 Result + path | ✅ ConstructError::Generic（hex decode/parse 失败、类型不匹配）携带 path |
+| #8 Stream 纯 Rust | ✅ inner.parse/build 操作 stream（Rust 内部），Hex 不直接操作 stream（与 Subconstruct 同） |
 
-### 2.6 性能假设
+### 2.6 性能假设（L-02/L-05 对策）
 
-#### 2.6.1 瓶颈识别
+#### 2.6.1 瓶颈识别（量化数据 + 来源）
 
-| Node | 主要瓶颈 | 量化来源 |
-|------|---------|---------|
-| Hex | inner.parse + 1 次 `is_instance_of`（~10ns）+ 1 次 `call_method1`（显示类构造，~80-150ns） | pyo3 benchmark：PyObject_IsInstance ~10ns；CPython 类型子类构造 ~80-150ns（含 alloc + `__init__`） |
-| HexDump | 同 Hex，显示类构造略贵（`hexdump` 调用延迟到 `__str__`，parse 阶段不计算） | 同上 |
+数据源：`phase8-hex-parse-perf-investigation.md`（HX1 当前 581ns）+ BytesNode/FormatField 性能基准。
 
-#### 2.6.2 可证伪预测
+subcon 包装器模式比第一轮 `Hex(length)` 多一层 `inner.parse` 调用（Rust 内部，~60-80ns）。
 
-**嵌入 Struct 字段，与 Python construct 2.10.70 对比**：
+**Bytes kind（用户核心场景：Hex(GreedyBytes)）**：
 
-- **Hex(Int32ub)**：加速比 ≥6x（vs Python：Adapter._decode 调度 + isinstance 3 次 + HexDisplayedInteger.new Python 调用）。**风险**：若实测 <3x，说明 CPython 显示类构造开销与 Python 路径差距小（CPython 类型实例化是固定开销）
-- **HexDump(Bytes(N))**：加速比 ≥6x（同上）
-- **Hex(RawCopy(Int32ub))**：加速比 ≥4x（dict 路径多 1 次 PyDict 子类构造）
+| 操作 | 估算（Rust 侧） | 类别 | 来源 |
+|------|----------------|------|------|
+| `inner.parse`（GreedyBytes） | ~60-80ns | Rust 内部调用 | GreedyBytes 基准 |
+| `extract::<&[u8]>()` | ~10ns | C API（借用，不拷贝） | pyo3 基准 |
+| `hex::encode(&[u8])` | ~5-10ns | 纯 Rust，SIMD | hex crate |
+| `PyString::new_bound` | ~45-50ns | C API（§0.2 判据 2） | pyo3 基准 |
+| **parse 合计（Bytes kind）** | **~120-150ns** | | |
 
-**FFI 来源清单**（L-05 对策）：
-- StructMixin.parse 入口（1 次，共享）
-- inner.parse（Rust 内）
-- is_instance_of（C API，不计 FFI）
-- 显示类 `__call__`（C API，§0.2 判据 2，不计 FFI）
+**Int kind（兼容场景：Hex(Int32ub) / Hex(Int64ub)，F-2 i128 路径）**：
+
+| 操作 | 估算（Rust 侧） | 类别 | 来源 |
+|------|----------------|------|------|
+| `inner.parse`（FormatField Int32ub） | ~60-80ns | Rust 内部调用 | FormatField 基准 |
+| `extract::<i128>()`（F-2，替代 i64） | ~12-15ns | C API | pyo3 基准（i128 比i64 略慢，仍在 ns 级） |
+| `format!("{:x}", v)`（i128） | ~20ns | Rust 原生格式化 | Rust std |
+| `PyString::new_bound` | ~45-50ns | C API | pyo3 基准 |
+| **parse 合计（Int kind，fast-path）** | **~140-165ns** | | |
+| （fallback：`__format__` C API） | ~80-120ns | 仅 BytesInteger > 16B 触发 | 极罕见，不进 hot path |
+
+| build 操作 | 估算 | 类别 | 来源 |
+|------|------|------|------|
+| `obj.extract::<String>()` | ~30ns | C API | pyo3 基准 |
+| `hex::decode` / `from_str_radix` | ~10-15ns | 纯 Rust | hex crate / std |
+| `PyBytes::new_bound` / `into_py` | ~40-50ns | C API | pyo3 基准 |
+| `inner.build` | ~60-80ns | Rust 内部调用 | 各 Node 基准 |
+| **build 合计** | **~140-175ns** | | |
+
+#### 2.6.2 可证伪预测（覆盖所有 FFI/拷贝来源）
+
+**嵌入 Struct 字段，与 Python construct 2.10.70（Hex(Int32ub) display 装饰器）对比**：
+
+- **Hex(Int32ub) parse（Int kind）**：加速比 **≥15x**（预测 rs ~150ns vs py 2519ns）。
+  - **对比当前实现**：原 HX1 parse 581ns（4.36x）→ 新设计 ~150ns（~17x）。**提升来源**：
+    (1) 消除 is_instance_of ~15ns（改编译期 HexInnerKind）；(2) 消除 call_method1 + 字节码
+    dispatch ~150ns；(3) 消除 int 子类实例化 + setattr ~105ns；(4) 消除 fmtstr 构造 ~60ns。
+    保留 inner.parse ~70ns（必要开销），新增 hex 编码 + PyString ~70ns。
+  - **与第一轮 Hex(length) 对比**：第一轮 ~100ns（~25x）更快（无 inner.parse），但第二轮
+    保留 subcon 包装器能力（用户需求），多 ~50ns 仍远超 10x 门禁
+  - **可证伪条件**：若实测 >250ns（加速比 <10x），说明 inner.parse 或 extract 开销被低估——
+    需进一步调查
+- **Hex(GreedyBytes) parse（Bytes kind，用户核心场景）**：加速比 **≥15x**（预测 rs ~130ns
+  vs py ~2500ns 量级）。GreedyBytes 内部已优化，hex::encode 仅 ~10ns 额外
+- **build**：加速比 **≥12x**（预测 rs ~150ns vs py ~2053ns 量级）
+
+**FFI/拷贝来源清单**（L-05 对策，新设计后剩余）：
+- StructMixin.parse/build 入口（1 次 FFI，共享，不可消除）
+- inner.parse/inner.build（Rust 内部函数调用，0 FFI）
+- hex::encode/decode / `format!` / `i128::from_str_radix`（Rust 内，0 FFI）
+- extract(i128) / PyString::new_bound / PyBytes::new_bound / into_py（C API，§0.2 判据 2，不计额外 FFI）
+- **F-2 fallback**（`int.__format__` / `int(s,16)`，仅任意精度 > 128bit 触发）：C 级 builtin 方法调用（§0.2 判据 2），不进 hot path
+- **无 Rust→Python 回调**（严格 1 次 FFI）
+
+#### 2.6.3 与 Subconstruct/Bytes 的对照（验证合理性）
+
+新 HexNode 的 parse 路径 = Subconstruct.parse（inner.parse 转发）+ hex 编码层。Subconstruct
+parse 实测加速比 ~10x+（Phase 6.3 基准），HexNode 预期同量级或略低（hex 编码 + PyString 构造
+额外 ~70ns），仍远超 10x 门禁。Bytes kind 的 hex::encode 与 BytesNode 的 PyBytes 构造同量级。
+
+**量级参考声明**（L-09）：以上 ns 估算为量级参考，绝对值需 DEV 实施后 Controlled A/B Test
+复测验证。
 
 ### 2.7 边界条件清单
 
 | 编号 | 场景 | 预期行为 |
 |------|------|---------|
-| HX-1 | `Hex(Int32ub).parse(b'\x00\x00\x01\x02')` | 返回 `HexDisplayedInteger(258)`（int 子类，`print` 显示 `0x00000102`） |
-| HX-2 | `Hex(Bytes(4)).parse(b'\x00\x00\x01\x02')` | 返回 `HexDisplayedBytes(b'\x00\x00\x01\x02')`（bytes 子类） |
-| HX-3 | `Hex(RawCopy(Int32ub)).parse(...)` | 返回 `HexDisplayedDict({...})`（dict 子类，`__str__` 取 `data` 字段 hexlify） |
-| HX-4 | `Hex(SomeCustomAdapter).parse(...)` 返回自定义类型 | 透传（未知类型，对齐 Python `return obj`） |
-| HX-5 | `Hex(Bytes(width)).parse(...)` 其中 width 是表达式 | fmtstr 运行期计算；sizeof 失败时 fallback 用 `"0X"` 通用格式 |
-| HX-6 | `Hex(Int32ub).build(HexDisplayedInteger(258))` | 输出 b'\x00\x00\x01\x02'（int 子类，inner.build 提取基类 int） |
-| HX-7 | `Hex(Int32ub).sizeof()` | 返回 4（转发 inner.sizeof） |
-| HX-8 | `HexDisplayedInteger.new(intvalue, fmtstr)` 调用失败 | ConstructError::Generic（跨 FFI 异常转 Generic） |
-| HD-1 | `HexDump(Bytes(4)).parse(b'\x00\x00\x01\x02')` | 返回 `HexDumpDisplayedBytes`（bytes 子类，`__str__` 输出 `hexundump('''...''')`） |
-| HD-2 | `HexDump(RawCopy(Int32ub)).parse(...)` | 返回 `HexDumpDisplayedDict` |
-| HD-3 | `HexDump(Int32ub).parse(...)` | 透传 PyLong（int 类型，HexDump 不包装） |
-| HD-4 | `HexDump(Bytes(4)).build(b'\x00\x00\x01\x02')` | 输出原字节（HexDumpDisplayedBytes 是 bytes 子类，自动转基类） |
+| HX-1 | `Hex(Bytes(4)).parse(b'\x00\x00\x01\x02')`（Bytes kind） | 返回 `"00000102"`（小写 hex 字符串） |
+| HX-2 | `Hex(Bytes(4)).build("0000001f")`（Bytes kind） | 输出 `b'\x00\x00\x00\x1f'` |
+| HX-3 | `Hex(Bytes(4)).build("0000001F")` | 输出 `b'\x00\x00\x00\x1f'`（大小写兼容，hex::decode 接受大写） |
+| HX-4 | `Hex(Bytes(4)).build("0000001")` | ConstructError::Generic（hex 字符串长度必须偶数，7 chars 非法） |
+| HX-5 | `Hex(Bytes(4)).build("0000001g")` | ConstructError::Generic（'g' 非合法 hex 字符） |
+| HX-6 | `Hex(Bytes(4)).build("00")` | inner.build(bytes(1 byte)) → inner 自身校验长度（Bytes(4) 期望 4 字节，报 FieldLength）。Hex 不做长度校验（转交 inner） |
+| HX-7 | `Hex(Bytes(4)).build(258)` | ConstructError::Generic（期望 str，收到 int） |
+| HX-8 | `Hex(Bytes(4)).parse(b'\x00\x00\x01')` | ConstructError::Stream（inner.parse Bytes(4) 仅 3 字节，不足 4） |
+| HX-9 | `Hex(Bytes(4)).sizeof()` | 返回 4（转发 inner.sizeof） |
+| HX-10 | `Hex(Bytes(0)).parse(b'')` | 返回 `""`（空 hex 字符串） |
+| HX-11 | `Hex(Bytes(0)).build("")` | 输出 `b''`（空字节） |
+| HX-12 | round-trip（Bytes kind）：`Hex(Bytes(4)).build(Hex(Bytes(4)).parse(data)) == data` | 恒成立（parse 输出小写，build 大小写兼容） |
+| HX-13 | `Hex(GreedyBytes).parse(b'\xde\xad\xbe\xef')`（用户核心场景） | 返回 `"deadbeef"`（变长 bytes → hex） |
+| HX-14 | `Hex(GreedyBytes).build("deadbeef")` | 输出 `b'\xde\xad\xbe\xef'`（GreedyBytes build 接收任意长度 bytes） |
+| HX-15 | `Hex(Int32ub).parse(b'\x00\x00\x01\x02')`（Int kind） | 返回 `"102"`（无前导零小写，format!("{:x}", 258)） |
+| HX-16 | `Hex(Int32ub).build("102")`（Int kind） | 输出 `b'\x00\x00\x01\x02'`（from_str_radix → 258 → inner.build） |
+| HX-17 | `Hex(Int32ub).build("0x102")` | 输出 `b'\x00\x00\x01\x02'`（build 接受 "0x" 前缀，strip 后解析） |
+| HX-18 | `Hex(Int32sb).build("-1f")`（负数） | 输出对应负数字节（format 时 `"-1f"`，strip 后保留负号 → -31） |
+| HX-19 | round-trip（Int kind）：`Hex(Int32ub).build(Hex(Int32ub).parse(data)) == data` | 恒成立（无前导零，from_str_radix 解析后 inner.build 写 4 字节） |
+| HX-20 | `Hex(Int32ub).build("1g")` | ConstructError::Generic（'g' 非合法 hex 字符） |
+| HX-21 | `Hex(Struct(...)).parse(...)`（Unknown kind） | **透传**：返回 inner.parse 结果（dict/dataclass），不做 hex 编码（fail-soft） |
+| HX-22 | `Hex(Struct(...)).build(obj)`（Unknown kind） | **透传**：obj 原样传 inner.build（fail-soft） |
+| HX-23 | `Hex(RawCopy(Int32ub)).parse(...)`（Unknown kind） | **透传**：返回 RawCopy dict（含 data/value/offset1/offset2/length） |
+| HX-24 | `Hex(Bytes(4)).build(None)` | ConstructError::Generic（期望 str，收到 None） |
+| HX-25 | `Hex(Prefixed(Byte, GreedyBytes)).parse(...)`（变长前缀 bytes，Bytes kind） | 正确：Prefixed inner parse 得 bytes → hex 编码 |
+| HX-26 | `Hex(Float32b).parse(b'\x42\x28')`（F-1：Float 格式 → Unknown） | **透传**：返回原始 PyFloat（不做 hex 编码，对齐 Python 原版 `_decode` fallback） |
+| HX-27 | `Hex(Int64ub).parse(b'\xff\xff\xff\xff\xff\xff\xff\xff')`（F-2：u64::MAX） | 返回 `"ffffffffffffffff"`（i128 fast-path，16 个 f，无前导零） |
+| HX-28 | `Hex(Int64ub).build("ffffffffffffffff")`（F-2：u64::MAX build） | 输出 `b'\xff' * 8`（i128::from_str_radix → u64 PyLong → inner.build） |
+| HX-29 | `Hex(BytesInteger(20)).parse(<20 bytes>)`（F-2：任意精度 > i128） | 返回 hex 字符串（Python `__format__` fallback，无前导零）；合法数据不报错 |
+| HX-30 | `Hex(Subconstruct(Bytes(4))).parse(...)`（F-3：透明包装器递归） | 返回 hex 字符串（Subconstruct 透明 → 递归命中 Bytes → Bytes kind） |
+| HX-31 | `Hex(IfThenElse(cond, Bytes(4), Bytes(8))).parse(...)`（F-3：多分支一致） | 返回 hex 字符串（两分支均 Bytes → Bytes kind） |
+| HX-32 | `Hex(IfThenElse(cond, Bytes(4), Int32ub)).parse(...)`（F-3：多分支不一致） | **透传**（分支类型不一致 → Unknown，fail-soft） |
+| HX-33 | `Hex(Const(255, Int32ul)).parse(...)`（F-3：Const 透明递归） | 返回 hex 字符串（Const 透传 inner Int32ul → Int kind，format 常量值） |
+
+> **边界条件说明**：
+> - HX-6 关键差异：subcon 包装器模式不做 Hex 自身的长度校验（第一轮 `Hex(length)` 会校验），
+>   长度校验转交 inner（Bytes(4) 自身会校验）。这符合"Hex 是格式转换器"的定位
+> - HX-21/22/23 Unknown 透传是 fail-soft 设计：用户若需 hex 字符串，应使用 Bytes/GreedyBytes/
+>   Int 类 subcon，而非 Struct/RawCopy。文档需明确标注受支持的 subcon 类型
+> - **F-1（HX-26）**：Float 格式（Float16/32/64）parse 返回 PyFloat，归 Unknown 透传——
+>   hex 编码浮点数无语义，透传是对齐 Python 原版 `return obj` 的 graceful fail
+> - **F-2（HX-27~29）**：i128 fast-path 覆盖所有 FormatField + u64::MAX + VarInt/BytesInteger
+>   ≤ 16 字节；任意精度 fallback 确保"合法数据不报错"（Int64ub 是常用格式，必须正确）
+> - **F-3（HX-25/30~33）**：透明包装器递归使 `Hex(Prefixed(...))` / `Hex(Subconstruct(...))`
+>   等组合正确输出 hex（符合用户"格式转换器"心智模型）；多分支不一致时 fail-soft 透传
 
 ### 2.8 DEV 实施清单
 
 | 文件 | 内容 | 行数估 |
 |------|------|-------|
-| `nodes/hex.rs` | HexNode + impl + 共享辅助（display_classes 加载） + 单元测试 | ~280 |
-| `nodes/hex_dump.rs` | HexDumpNode + impl + 单元测试（可与 hex.rs 合并，建议独立） | ~200 |
-| `nodes/mod.rs` | 新增 2 个 mod/enum 变体 + has_expressions 分支 | ~20 增量 |
-| `compile.rs` | 新增 2 个 build_*_node 分支 + display_classes 物化 | ~80 增量 |
-| `python/construct/lib/hex.py` | **port 原版 5 个显示类**（直接复制 `construct/lib/hex.py` 内容） | ~94 行（已存在源文件） |
-| `python/construct/_descriptors.py` | HexDescriptor / HexDumpDescriptor + 工厂函数 | ~30 增量 |
-| `__init__.py` | 导出 Hex / HexDump | ~10 增量 |
+| `nodes/hex.rs` | **完全重写**：HexNode（subcon 包装器）+ `HexInnerKind` enum + `Construct` impl（F-2 i128 + fallback 路径）+ 单元测试。删除 HexDisplayClasses / load_hex_display_classes / fmtstr / call_method1/setattr 全部旧逻辑 | ~280 |
+| `nodes/hex_dump.rs` | **视用户决策**（§2.10）：方案 C 删除此文件；方案 A 重写为 hexdump 字符串编解码器 | 0 或 ~250 |
+| `nodes/mod.rs` | 更新 `Hex(HexNode)` 注释（subcon 包装器语义）；HexDump 变体视决策保留/移除；has_expressions 分支改为 `h.inner().has_expressions()`（递归 inner） | ~10 增量 |
+| `nodes/format_field.rs` | **F-1 依赖**：新增 `PythonFormat::is_float()` 方法（匹配 6 个 Float 变体，~6 行，与 `is_big_endian()` 同模式） | ~6 增量 |
+| `compile.rs` | **重写** `build_hex_node` + `infer_hex_inner_kind`（F-1 FormatField 细分 + F-3 透明包装器递归 + 多分支一致性，~50 行）；`build_hexdump_node` 视决策删除/重写；删除 display_classes 物化逻辑 | ~50 增量 |
+| `Cargo.toml` | 新增 `hex = "0.4"` | 1 行 |
+| `python/construct/lib/hex.py` | **视用户决策**：方案 C 删除显示类（仅保留 `hexdump`/`hexundump` 函数供用户可选调用）；方案 A 保留/精简 | — |
+| `python/construct/_descriptors.py` | **恢复** HexDescriptor（接收 `subcon`，与 SubconstructDescriptor 同模式）+ `Hex()` 工厂（签名恢复 `Hex(subcon)`）；HexDumpDescriptor 视决策删除/重写 | ~20 增量 |
+| `python/construct/__init__.py` | 更新导出（Hex 文档化 subcon 包装器语义 + 受支持 subcon 类型） | ~5 增量 |
+| `bench/bench_phase8.py` | 更新 HX1/HX2 case（保持 `Hex(Int32ub)` + 新增 `Hex(GreedyBytes)` case；期望值 str）；HD1 视决策删除 | ~15 增量 |
+| `bench/bench_phase8_ab_retest.py` | 同上 | ~15 增量 |
+| `bench/bench_hex_opt_ab_retest.py` | **删除**（方案 A+B 优化测试不再适用） | -106 |
+| `bench/hex_parity_check.py` | **重写**（验证新语义：Bytes/Int kind parse 返回 str，build 接收 str；Unknown 透传） | ~100 |
+| `docs/perf-scenarios.csv` | 更新 HX1/HX2/HD1 行 + 新增 Hex(GreedyBytes) 场景（PM 职责，ARCH 提供数据） | — |
 
-**lib/hex.py port 说明**：原版 `construct/lib/hex.py` 已是纯 Python 实现（无 Rust 等价物需求——hexlify/hexdump 算法用于 `__str__` 显示，是用户域后处理）。construct-rs 复制此文件到 `python/construct/lib/hex.py`，编译期 Rust 端通过 `py.import_bound("construct.lib.hex")` 加载 5 个显示类。
+**净代码变化**：删除 ~400 行旧代码（display 类 + 调用逻辑 + 优化测试），新增 ~250 行新代码。
+总体代码量减少，复杂度大幅降低。相比第一轮 `Hex(length)` 方案，第二轮 subcon 包装器多
+`HexInnerKind` enum + `infer_hex_inner_kind` 函数（~30 行），但恢复了 subcon 包装能力。
 
-**Cargo.toml 不需新增依赖**。
-
-### 2.9 Parity 测试模板
+### 2.9 Parity 测试模板（subcon 包装器新语义）
 
 ```python
-def test_hex_int_parse_returns_displayed_integer():
-    # Hex(Int32ub).parse(b'\x00\x00\x01\x02')
-    # → repr 是 258（int 子类），str 是 '0x00000102'
-    assert_parity_case("""
-    from construct import Hex, Int32ub
-    obj = Hex(Int32ub).parse(b'\\x00\\x00\\x01\\x02')
-    str_repr = str(obj)  # '0x00000102'
-    int_value = int(obj)  # 258
-    """, check_only=["str_repr", "int_value"])
+# 新语义 parity：construct-rs Hex(subcon)
+# 值语义 breaking change（parse 返回 str），API 形态保持 Hex(subcon)
 
-def test_hex_bytes_parse_returns_displayed_bytes():
-    # Hex(Bytes(4)).parse(b'\x00\x00\x01\x02')
-    # str 是 "unhexlify('00000102')"
-    ...
+# === Bytes kind（用户核心场景）===
 
-def test_hex_dict_via_rawcopy():
-    # Hex(RawCopy(Int32ub)).parse(b'\x00\x00\x01\x02')
-    # 返回 dict 子类，str 是 "unhexlify('00000102')"
-    ...
+def test_hex_bytes_parse_returns_lowercase_string():
+    # Hex(Bytes(4)).parse → hex 字符串
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Bytes(4)))
+    result = P.parse(b'\x00\x00\x01\x02')
+    assert result.v == "00000102"
+    assert isinstance(result.v, str)  # 不是 bytes 子类
 
-def test_hex_build_from_displayed_integer():
-    # Hex(Int32ub).build(HexDisplayedInteger(258, "08X")) → b'\x00\x00\x01\x02'
-    ...
+def test_hex_greedybytes_parse():  # 用户核心场景（变长）
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(GreedyBytes))
+    result = P.parse(b'\xde\xad\xbe\xef')
+    assert result.v == "deadbeef"
 
-def test_hexdump_bytes_parse():
-    # HexDump(Bytes(4)).parse(b'\x00\x00\x01\x02')
-    # str 包含 "hexundump" 前缀
-    ...
+def test_hex_bytes_build_from_string():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Bytes(4)))
+    assert P(v="0000001f").build() == b'\x00\x00\x00\x1f'
+
+def test_hex_bytes_build_accepts_uppercase():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Bytes(4)))
+    assert P(v="0000001F").build() == b'\x00\x00\x00\x1f'
+
+def test_hex_bytes_round_trip():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Bytes(4)))
+    data = b'\x00\x00\x01\x02'
+    parsed = P.parse(data)
+    rebuilt = parsed.build()
+    assert rebuilt == data
+
+def test_hex_bytes_build_odd_length_rejected():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Bytes(4)))
+    with pytest.raises(ConstructError):
+        P(v="0000001").build()  # 7 hex chars（奇数）
+
+# === Int kind（兼容场景）===
+
+def test_hex_int_parse_no_leading_zeros():
+    # Hex(Int32ub).parse → format!("{:x}", v)，无前导零
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Int32ub))
+    result = P.parse(b'\x00\x00\x01\x02')  # 258
+    assert result.v == "102"  # 非 "00000102"
+
+def test_hex_int_build():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Int32ub))
+    assert P(v="102").build() == b'\x00\x00\x01\x02'
+
+def test_hex_int_build_accepts_0x_prefix():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Int32ub))
+    assert P(v="0x102").build() == b'\x00\x00\x01\x02'
+
+def test_hex_int_round_trip():
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Int32ub))
+    data = b'\x00\x00\x01\x02'
+    assert P.build(P.parse(data)) == data
+
+# === Unknown kind（fail-soft 透传）===
+
+def test_hex_struct_passthrough():
+    # Hex(Struct(...)) inner_kind=Unknown → parse 透传
+    @dataclass
+    class Inner(StructMixin):
+        a: int = rfield(Byte)
+    @dataclass
+    class P(StructMixin):
+        v: Inner = field(Hex(Inner))
+    result = P.parse(b'\x42')
+    # Unknown 透传：返回 Inner 实例（不是 hex 字符串）
+    assert isinstance(result.v, Inner)
+    assert result.v.a == 0x42
+
+# === F-1/F-2/F-3 修订场景（REV followup）===
+
+def test_hex_float_passthrough():  # F-1：Float 格式 → Unknown 透传
+    @dataclass
+    class P(StructMixin):
+        v: float = field(Hex(Float32b))
+    result = P.parse(b'\x42\x28\x00\x00')  # 65.0
+    assert isinstance(result.v, float)      # 不是 str，透传原始 float
+    assert result.v == 65.0
+
+def test_hex_int64ub_max():  # F-2：u64::MAX 不报错
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Int64ub))
+    result = P.parse(b'\xff\xff\xff\xff\xff\xff\xff\xff')
+    assert result.v == "ffffffffffffffff"   # 16 个 f，无前导零
+    # round-trip
+    assert P(v="ffffffffffffffff").build() == b'\xff' * 8
+
+def test_hex_prefixed_greedybytes():  # F-3：透明包装器递归（用户核心变长场景）
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Prefixed(Byte, GreedyBytes)))
+    result = P.parse(b'\x04\xde\xad\xbe\xef')
+    assert result.v == "deadbeef"           # Prefixed 透传 → GreedyBytes → Bytes kind
+
+def test_hex_subconstruct_passthrough_to_bytes():  # F-3：Subconstruct 透明
+    @dataclass
+    class P(StructMixin):
+        v: str = field(Hex(Subconstruct(Bytes(4))))
+    result = P.parse(b'\x00\x00\x01\x02')
+    assert result.v == "00000102"
+
+def test_hex_mixed_branches_passthrough():  # F-3：多分支不一致 → Unknown
+    @dataclass
+    class P(StructMixin):
+        flag: int = rfield(Byte)
+        v: object = field(Hex(IfThenElse(flag > 0, Bytes(4), Int32ub)))
+    result = P.parse(b'\x01\x00\x00\x01\x02')
+    # 分支类型不一致 → Unknown → 透传（返回 bytes 或 int，非 hex str）
+    assert not isinstance(result.v, str)
 ```
 
 **Parity 重点**：
-- HX-1/2/3 三种类型分支的 `__str__` 输出对齐
-- HX-5 运行期 sizeof 失败的 fallback（不报错，用通用格式）
+- HX-1/2/3/12 Bytes kind：parse 返回 str（小写连写），build 接收 str
+- HX-13/14 GreedyBytes（用户核心场景）：变长 bytes → hex 字符串
+- HX-15/16/19 Int kind：parse 返回无前导零 hex（`"102"`），build 接受纯 hex + "0x" 前缀
+- HX-21/22/23 Unknown kind：透传（fail-soft），round-trip 对称
+- **F-1（HX-26）**：Float 格式透传（Hex(Float32b) parse 返回 float，非 str）
+- **F-2（HX-27/28）**：u64::MAX（`Hex(Int64ub)` parse/build round-trip，合法数据不报错）
+- **F-3（HX-25/30/31/32）**：透明包装器递归（Hex(Prefixed/Subconstruct/IfThenElse) 正确分派；
+  多分支不一致时 fail-soft 透传）
+- 不再测试 `Hex(Int32ub)` int 显示子类、`Hex(RawCopy(...))` dict 显示子类（原版独有 display 语义）
+
+### 2.10 HexDump 处理方案（需用户决策）
+
+> ARCH 推荐见 `docs/design/queries/决策-HexDump处理方案.md`。本节摘要三个方案。
+
+| 方案 | 描述 | ARCH 评估 |
+|------|------|----------|
+| **A** | 同样改为"返回 hexdump 格式字符串"，build 逆向解析 | parse 可行（Rust 内构造多行格式），但 build 逆向解析 hexdump 格式（剥地址/ASCII 冗余）复杂、易错、工程量大 |
+| B | 与 Hex 合并 | 不推荐——hexdump 多行带 ASCII 格式与纯 hex 字符串本质不同，合并丢失可读性优势 |
+| **C** ⭐ | 标 wont_implement（hexdump 是纯显示功能，build 逆向不值得实现） | **推荐**：用户可用 `construct.lib.hex.hexdump()` 函数对 parse 出的 bytes 做后处理（纯显示，不进入执行树）。详见决策文档 |
+
+**ARCH 推荐 C**，理由：(1) hexdump 的核心价值是"人类可读调试显示"，在数据编解码场景无实际用途；
+(2) build 逆向解析 hexdump 格式价值低且易错；(3) 删除 HexDump 可减少 ~250 行代码 + 1 个 Node 变体。
+若用户坚持保留，方案 A 作为备选（parse 仅，build 暂不支持或简化）。
 
 ---
 

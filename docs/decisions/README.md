@@ -2,7 +2,7 @@
 id: ADR-INDEX
 status: active
 phase: meta
-last_updated: 2026-07-30
+last_updated: 2026-08-06
 ---
 
 # ADR Index — 设计决策索引
@@ -65,6 +65,12 @@ last_updated: 2026-07-30
 | [ADR-021](ADR-021-Strings-UTF16-32-raw-FFI.md) | accepted | Strings UTF-16/32 编解码 unsafe raw FFI（**首次正常路径 unsafe**） | 6.2 Strings 验证；扩展 ADR-019（错误路径）unsafe raw FFI 规范到正常路径；utf8/ascii 保持安全路径 |
 | [ADR-022](ADR-022-用户面Adapter-Python层化.md) | accepted | 用户面 Adapter Python 层化 + 最小 Rust 钩子（AdapterCallbackNode） | 6.3 Adapter 验证；PM 决策 2 双层分离（约束 1 类型层面 + 约束 2 Python 层）落地；§0 #1 合规论证（用户域后处理非执行树） |
 
+### Phase 8：Adapter 核心 + Struct 收尾 + Streams 常用
+
+| ADR | 状态 | 决策 | 备注 |
+|-----|------|------|------|
+| [ADR-023](ADR-023-共享税优化-unsafe-CPython内部API.md) | accepted | 共享税优化（GenericGetDict + KnownHash + pyo3 FFI 入口精简，Python 3.13 非 abi3） | L-14 第 2/3 次触发；O1-A v1 tp_dictoffset 直读在 3.13 managed dict 下 UB，v2 改 stable ABI GenericGetDict；非 abi3 是项目约束（用户决策 + 8.ENV） |
+
 ## 状态图例
 
 - `proposed` — 已提出，待讨论
@@ -74,7 +80,7 @@ last_updated: 2026-07-30
 
 ## 维护规则
 
-- 新增 ADR：编号自增（下一号 23）
+- 新增 ADR：编号自增（下一号 24）
 - 修订决策：**不修改原 ADR**，新建 ADR 并在原 ADR 加 `superseded_by`，新 ADR 加 `supersedes`
 - 模式采用：新设计文档必须在 frontmatter `depends_on` 列出相关 ADR
 - 教训关联：若决策源于失败教训，在 ADR 的 Relations 段引用 `harness/experiences.md#L-XX`
