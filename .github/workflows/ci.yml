@@ -67,10 +67,19 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       # CRS venv：安装 neoconstruct 扩展（maturin develop）
-      - name: Set up CRS venv
+      - name: Set up CRS venv (Windows)
+        if: matrix.os == 'windows-latest'
         run: |
           python -m venv .venv
-          pip install maturin pytest
+          .venv/Scripts/python -m pip install maturin pytest
+        working-directory: neoconstruct
+        shell: pwsh
+
+      - name: Set up CRS venv (POSIX)
+        if: matrix.os != 'windows-latest'
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install maturin pytest
         working-directory: neoconstruct
         shell: pwsh
 
