@@ -131,7 +131,7 @@ def run_bench(
         print(f"\n--- {name} (number={number}, role={role}) ---", flush=True)
 
         crs_ns = measure(crs_python, sc["crs_setup"], sc["crs_stmt"], number, repeat)
-        print(f"  construct-rs: {crs_ns:.1f} ns/call", flush=True)
+        print(f"  neoconstruct: {crs_ns:.1f} ns/call", flush=True)
         pc_ns = measure(pc_python, sc["pc_setup"], sc["pc_stmt"], number, repeat)
         print(f"  python-construct: {pc_ns:.1f} ns/call", flush=True)
         speedup = pc_ns / crs_ns if crs_ns > 0 else float("inf")

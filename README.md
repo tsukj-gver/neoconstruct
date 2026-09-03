@@ -1,14 +1,14 @@
-# construct-rs
+# neoconstruct
 
 > 高性能二进制解析/构建库 —— **Rust 内核 + Python `@dataclass` API**。
 >
 > 性能目标：**≥4x vs Python [construct](https://github.com/construct/construct) 2.10.70**（10x 为理想）。实测 555 个测量点平均 **11.98x**（parse 10.16x / build 13.99x），96.6% 达到 ≥4x 目标。
 
-`construct-rs` 用 Rust 重写了 Python `construct` 库的内核：通过 [pyo3](https://pyo3.rs) 直接操作 CPython C API，parse/build 各只有**一次 FFI 边界穿越**，不在 Rust 侧引入中间表示层。用户面是声明式的 `@dataclass` 语法（mashumaro 风格），适合表达二进制协议、文件格式、网络报文。
+neoconstruct 用 Rust 重写了 Python `construct` 库的内核：通过 [pyo3](https://pyo3.rs) 直接操作 CPython C API，parse/build 各只有**一次 FFI 边界穿越**，不在 Rust 侧引入中间表示层。用户面是声明式的 `@dataclass` 语法（mashumaro 风格），适合表达二进制协议、文件格式、网络报文。
 
 ```python
 from dataclasses import dataclass
-from construct import StructMixin, field, Int16ub, Int8ub, Bytes
+from neoconstruct import StructMixin, field, Int16ub, Int8ub, Bytes
 
 @dataclass
 class Header(StructMixin):
@@ -37,12 +37,12 @@ assert Header.parse(b"\xCA\xFE\x01ABCD") == h
 需要 Rust 工具链（stable）与 Python ≥ 3.8。
 
 ```bash
-cd construct-rs
+cd neoconstruct
 maturin build --release
 pip install dist/*.whl
 ```
 
-编译产物安装为 `construct._construct_rust`，用户统一 `import construct`。
+编译产物安装为 `neoconstruct._neoconstruct_core`，用户统一 `import neoconstruct`。
 
 ## 性能
 
@@ -86,16 +86,16 @@ pip install dist/*.whl
 
 ## 已知限制
 
-- **跨层引用**：嵌套 `StructMixin` 子类的类体在 Python 类体作用域求值，无法引用外层字段名（报 `NameError`）——construct-rs 不支持跨层字段引用，与原版 construct 的嵌套 `this` 语义同样隔离。变通：把所需字段提升到同一层，或在外层用 `Computed(...)` 预计算，或 parse 后在 Python 层做属性运算。注意：`field(..., context=...)` 参数当前未实现（保留位），请勿依赖。
+- **跨层引用**：嵌套 `StructMixin` 子类的类体在 Python 类体作用域求值，无法引用外层字段名（报 `NameError`）——neoconstruct 不支持跨层字段引用，与原版 construct 的嵌套 `this` 语义同样隔离。变通：把所需字段提升到同一层，或在外层用 `Computed(...)` 预计算，或 parse 后在 Python 层做属性运算。注意：`field(..., context=...)` 参数当前未实现（保留位），请勿依赖。
 - v0.1.1 起 `Switch` / `If` / `IfThenElse` / `Computed` / `Bytes(len)` / `Array(count)` 等表达式消费者**可嵌套于包装器内**（`Prefixed` / `PrefixedArray` / `Bitwise` / `Hex` / `Select` 等），表达式引用同 Struct 前序字段。例外：`Union` 内的表达式引用外层字段暂不可用（Union 解析使用隔离 context，属已知边界）。
 - `Select` 的 `default=Pass` 分支命中时提前返回 `None`（与原版行为一致，非缺陷）。
 - 值提供型构造器（`Const` / `Default` / `Rebuild` / `Computed` / `Padding`）作为 `field()`/`wfield()` 时，v0.1.1 起自动获得隐式 `default=None` + `kw_only=True`（实例化不再强制实参；build 由节点层补值）。mypy/pyright strict 下与 `int` 注解会有告警，可显式传 `default=` 或注解写 `int | None`。
 
 ## 文档
 
-### 用户面（用 construct-rs 实现协议）
+### 用户面（用 neoconstruct 实现协议）
 
-- **用法 SKILL（自包含）**：`.opencode/skills/construct-rs-usage/SKILL.md` —— 读完即可从零实现含条件分支 + bitfield + CRC 的复杂协议，所有示例可直接复制运行
+- **用法 SKILL（自包含）**：`.opencode/skills/neoconstruct-usage/SKILL.md` —— 读完即可从零实现含条件分支 + bitfield + CRC 的复杂协议，所有示例可直接复制运行
 - **最小示例**：本 README §核心示例
 - **系统测试参考实现**：`testing/system/` 下 4 个真实协议（Modbus RTU / CAN / IEC104 / IPv4）
 - **SKILL 验证实现**：`experiments/skill-validation/sctp_crs.py`（完整 SCTP 协议，53 round-trip + 8 parity 测试）
@@ -117,9 +117,9 @@ pip install dist/*.whl
 ## 目录结构
 
 ```
-construct-rs/     # Rust 内核 + Python 包源码（交付物）
+neoconstruct/     # Rust 内核 + Python 包源码（交付物）
   ├── src/        # Rust 业务代码（nodes / descriptors / ...）
-  ├── python/     # Python 用户面包（import construct 入口）
+  ├── python/     # Python 用户面包（import neoconstruct 入口）
   ├── tests/      # Rust 单元测试 + Python 集成测试
   └── bench/      # 性能基准
 docs/             # 设计 / 决策 / 审查 / 规范 / CSV 清单
@@ -148,8 +148,8 @@ parity / system 测试需要两个 Python 解释器，通过环境变量指定�
 
 | 变量 | 指向 | 用途 |
 |------|------|------|
-| `PC_PYTHON` | 安装了 `construct==2.10.70` 的 venv 的 python.exe | parity 测试的原版参考实现（推荐 `construct-rs/.venv-pc`） |
-| `CRS_PYTHON` | 安装了 construct-rs 扩展的 venv 的 python.exe | system 测试的 construct-rs 实现（推荐 `construct-rs/.venv`） |
+| `PC_PYTHON` | 安装了 `construct==2.10.70` 的 venv 的 python.exe | parity 测试的原版参考实现（推荐 `neoconstruct/.venv-pc`） |
+| `CRS_PYTHON` | 安装了 neoconstruct 扩展的 venv 的 python.exe | system 测试的 neoconstruct 实现（推荐 `neoconstruct/.venv`） |
 
 未设置时回退 `sys.executable`（仅当该解释器已装对应包时可用）。换机运行测试前必须设置，否则 system parity 会因找不到原版 construct 而失败。
 

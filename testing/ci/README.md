@@ -7,7 +7,7 @@
 
 ## 1. 系统介绍
 
-construct-rs 的 CI 冒烟门禁由 **4 层** + **Controlled A/B Test 升级路径**组成：
+neoconstruct 的 CI 冒烟门禁由 **4 层** + **Controlled A/B Test 升级路径**组成：
 
 | 层次 | 名称 | 范围 | 耗时 | 脚本 |
 |------|------|------|------|------|
@@ -289,9 +289,9 @@ deprecated 脚本仍跑（保留作历史证据），FAIL 仅报告不阻断 L2�
 ### 7.3 known_broken 脚本（Python 3.14 兼容性）
 
 `vet_phase3_bits_integer.py` 标 `known_broken`：
-- 不依赖 construct-rs，仅用 Python 原版 construct
+- 不依赖 neoconstruct，仅用 Python 原版 construct
 - `Bitwise(Bit).parse(b"\x80")` 在 Python 3.14 + construct 2.10.70 触发 `RestreamedBytesIO` 兼容性问题（上游 bug）
-- 与 construct-rs 无关，FAIL 仅报告不阻断 L2
+- 与 neoconstruct 无关，FAIL 仅报告不阻断 L2
 
 **长期**：上游修复后可重测此脚本是否恢复 PASS。
 
@@ -347,7 +347,7 @@ PowerShell 5.1 native comma 是数组操作符。`-Level L1,L4`（未加引号�
   "environment": {
     "python_version": "3.14.2",
     "construct_py_version": "2.10.70",
-    "construct_rs_commit": "<short hash>",
+    "neoconstruct_commit": "<short hash>",
     "l_09_disclaimer": "跨时段性能对比在边界场景（Rust<300ns）失效..."
   },
   "summary": { "total": 154, "pass": N, "warn": N, "fail": N, "new": N, "improved": N, "skipped": N },

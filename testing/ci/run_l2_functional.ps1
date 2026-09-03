@@ -24,8 +24,8 @@
 #   综合      v4_smoke_test.py                        (CRS venv, deprecated v4 PyCallable + Container)
 #
 # venv 选择规则：
-#   - target=CRS：脚本依赖 construct-rs 用户面 API（StructMixin/field/Int8ub...）
-#                 → crs_venv_new 跑（含 construct-rs wheel）
+#   - target=CRS：脚本依赖 neoconstruct 用户面 API（StructMixin/field/Int8ub...）
+#                 → crs_venv_new 跑（含 neoconstruct wheel）
 #   - target=PC ：脚本依赖 Python construct 2.10.70 原版（Bitwise/Bit/BitsInteger
 #                 是 Adapter 而非 Descriptor）
 #                 → crs_venv_py_new 跑

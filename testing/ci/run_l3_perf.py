@@ -325,12 +325,12 @@ def classify(
 # 每个 SCENARIO_DEFS 条目：scenario_key -> ScenarioDef 字典
 #
 # 字段：
-#   crs_setup / crs_stmt : construct-rs 测量代码（在 crs_venv_new 跑）
+#   crs_setup / crs_stmt : neoconstruct 测量代码（在 crs_venv_new 跑）
 #   pc_setup / pc_stmt   : Python construct 测量代码（在 crs_venv_py_new 跑）
 #   number               : timeit number（每次测量迭代数）
 #   quick                : 是否在 --quick 模式下跑
 #
-# apples-to-apples 原则（§5.3）：双端都包 Struct（construct-rs StructMixin
+# apples-to-apples 原则（§5.3）：双端都包 Struct（neoconstruct StructMixin
 # vs Python construct.Struct）。
 #
 # 初始覆盖：phase4_47_perf_verify.py 验证过的 5 场景 + 几个边界场景。
@@ -462,7 +462,7 @@ def measure_point(
     env = dict(os.environ)
     env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"] = "1"
 
-    # 测 construct-rs
+    # 测 neoconstruct
     try:
         crs_script = _build_timeit_script(
             scenario_def["crs_setup"], scenario_def["crs_stmt"], number
@@ -571,7 +571,7 @@ def collect_environment(
         "python_exe": sys.executable,
         "crs_venv_python": str(crs_python),
         "pc_venv_python": str(pc_python),
-        "construct_rs_commit": _git_short_commit(),
+        "neoconstruct_commit": _git_short_commit(),
         # OBS-2 修复：补充 construct_py_version 字段（与 python_version 并列）
         # 从 crs_venv_py_new 子进程查询；查询失败时填 "unknown"
         "construct_py_version": _query_construct_py_version(pc_python),
@@ -654,7 +654,7 @@ def build_report_markdown(report: Dict[str, Any]) -> str:
     lines.append(f"- python: {env['python_version']}")
     lines.append(f"- crs_venv: {env['crs_venv_python']}")
     lines.append(f"- pc_venv: {env['pc_venv_python']}")
-    lines.append(f"- commit: {env['construct_rs_commit']}")
+    lines.append(f"- commit: {env['neoconstruct_commit']}")
     # TD-META-CI-5 修复（OBS-1d-VET-2）：Markdown 报告补 construct_py_version，与 JSON schema 对齐
     lines.append(f"- construct_py_version: {env['construct_py_version']}")
     lines.append(f"- os: {env['os']}")
@@ -888,7 +888,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     # 3. 环境采集
     environment = collect_environment(crs_python, pc_python, baseline_path)
-    print(f"[L3] env: commit={environment['construct_rs_commit']}")
+    print(f"[L3] env: commit={environment['neoconstruct_commit']}")
 
     # 4. 选择要跑的场景
     if args["quick"]:
@@ -957,7 +957,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     run_id = f"l3_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
     report_json = build_report_json(
         run_id, environment,
-        f"{baseline_path.relative_to(PROJECT_ROOT)}@{environment['construct_rs_commit']}",
+        f"{baseline_path.relative_to(PROJECT_ROOT)}@{environment['neoconstruct_commit']}",
         verdicts, ab_triggered, ab_reports, args["quick"],
     )
 

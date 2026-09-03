@@ -84,16 +84,16 @@ function Write-CiLog {
 function Resolve-ProjectPaths {
     <#
         .SYNOPSIS
-        返回项目根、construct-rs 子目录、venv python.exe 等路径。
+        返回项目根、neoconstruct 子目录、venv python.exe 等路径。
 
         .DESCRIPTION
         venv 路径来自 docs/design/基础设施/CI冒烟门禁设计.md §4.1 / §5.3 约定：
-          crs_venv_new   -> construct-rs maturin develop 目标 venv
+          crs_venv_new   -> neoconstruct maturin develop 目标 venv
           crs_venv_py_new -> Python construct 对比 venv（L3 用，L1 不需要）
         位于 %TEMP%/opencode/ 下。
     #>
     $root = Get-ProjectRoot
-    $crsDir = Join-Path $root "construct-rs"
+    $crsDir = Join-Path $root "neoconstruct"
     $tempBase = Join-Path $env:LOCALAPPDATA "Temp\opencode"
 
     # 兼容回退：如果 LOCALAPPDATA\Temp\opencode 不存在，尝试 C:\Users\<u>\AppData\Local\Temp\opencode

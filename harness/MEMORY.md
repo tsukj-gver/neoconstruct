@@ -10,7 +10,7 @@ last_updated: 2026-07-29
 > **Phase 8/9/10 完成（2026-08-07）**：
 > - Phase 8 部分通过：22 构造器实现 + 8.ENV（Python 3.13 非 abi3，放弃 abi3）+ 8.OPT-SHARED 共享税优化（ADR-023，GenericGetDict+KnownHash+ob_sval），42/48 PASS，6 项已知 LOW 边界（Hex/HexDump/NamedTuple/FlagsEnum 显示对象构造固有税）
 > - Phase 9 系统测试：4 真实协议（Modbus RTU/CAN/IEC104/IPv4）91 测试全 PASS，round-trip + parity 通过，发现 4 个 API gap
-> - Phase 10 用法 SKILL：`.opencode/skills/construct-rs-usage/SKILL.md`（1701 行，100% API 覆盖），验证 agent 仅看 SKILL 单轮实现 SCTP 协议（53 round-trip + 8 parity 测试 PASS）
+> - Phase 10 用法 SKILL：`.opencode/skills/neoconstruct-usage/SKILL.md`（1701 行，100% API 覆盖），验证 agent 仅看 SKILL 单轮实现 SCTP 协议（53 round-trip + 8 parity 测试 PASS）
 > - L-14 教训第 2/3 次触发（Hex parse 归因错误 + managed dict UB），已沉淀
 > - 构造器总进度：~78→~100/134（~58%→~75%），剩余 ~30 wont_implement
 > **Phase 7 完成（2026-07-30 ACCEPTED）**：
@@ -42,7 +42,7 @@ last_updated: 2026-07-29
 
 ## 项目定位（一句话）
 
-用 Rust 重写 Python `construct` 库的内核（pyo3 直接操作 CPython C API，无中间表示层），交付 Python 包，性能目标 ≥4x vs construct 2.10.70（10x 为理想）。详见 `AGENTS.md §0`。
+**正式名称：neoconstruct**（2026-09-03 起原名 construct-rs 停用；Python 导入 import neoconstruct，PyPI 包名 neoconstruct，Rust crate neoconstruct-core）。用 Rust 重写 Python `construct` 库的内核（pyo3 直接操作 CPython C API，无中间表示层），交付 Python 包，性能目标 ≥4x vs construct 2.10.70（10x 为理想）。详见 `AGENTS.md §0`。
 
 ---
 
@@ -100,7 +100,7 @@ last_updated: 2026-07-29
 | Tool Descriptions | opencode.json（声明 permission） | 项目自定义（opencode 框架约定） |
 | Tool Implementations | opencode 内置（bash/edit/glob/grep/read/write 等） | 项目自定义（opencode 框架约定） |
 | Middleware | （未启用） | HARNESS.md §7 定义，项目未启用 |
-| Skills | `.opencode/skills/{agentic-harness-engineering, construct-rs-ahe-practices, performance-gate, pm-performance-validation}/SKILL.md` | `agentic-harness-engineering` = HARNESS.md 通用；`construct-rs-ahe-practices` = 项目级补充；`performance-gate` / `pm-performance-validation` = 项目自定义 |
+| Skills | `.opencode/skills/{agentic-harness-engineering, neoconstruct-ahe-practices, performance-gate, pm-performance-validation}/SKILL.md` | `agentic-harness-engineering` = HARNESS.md 通用；`neoconstruct-ahe-practices` = 项目级补充；`performance-gate` / `pm-performance-validation` = 项目自定义 |
 | Sub-Agents | `.opencode/agents/{pm,architect,developer,reviewer,vetter,auditor}.md` | **全部项目自定义**（HARNESS.md / 通用 AHE skill 未定义具体角色；AUDITOR 是项目业务流程审计员，不审计 AHE iteration） |
 | Long-Term Memory | `MEMORY.md`（本文件）+ `experiences.md` + `docs/decisions/` | HARNESS.md §7 定义结构，内容由项目填充 |
 
@@ -113,7 +113,7 @@ last_updated: 2026-07-29
 | 1 | 2026-07-27 | `harness/manifests/change_2026-07-27.json` | 建立 LTM（harness/experiences.md）/ 规范 skill 目录 / AUDITOR 注册对齐 / 建立 manifests 基础设施 | **verified**（iteration 3 收尾时补做） |
 | 2 | 2026-07-27 | `harness/manifests/change_2026-07-27-websearch.json` | 启用 websearch | partial（配置层就位，运行时未生效，用户主动 skip） |
 | 3 | 2026-07-27 | `harness/manifests/change_2026-07-27-docs-restructure.json` | 记录/设计文档 AHE 化（T1 结构正交 + T2 frontmatter + T3 ADR） | partial（predicted_impact 漏报 42 broken refs + 9 frontmatter 缺失，已当场修复） |
-| 4 | 2026-07-27 | `harness/manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `construct-rs-ahe-practices`（不动通用 AHE skill） | **partial**（iter5 dogfood 验证：construct-rs-ahe-practices skill 被 PM 主动加载 ✓；但"文件重组时主动执行 §A1 cross-ref check" + "通用 skill 同步不冲突" 两个预测未触发——等待下次文件重组 iteration） |
+| 4 | 2026-07-27 | `harness/manifests/change_2026-07-27-skill-iteration-lessons.json` | 沉淀 L-07 教训；新建项目级 skill `neoconstruct-ahe-practices`（不动通用 AHE skill） | **partial**（iter5 dogfood 验证：neoconstruct-ahe-practices skill 被 PM 主动加载 ✓；但"文件重组时主动执行 §A1 cross-ref check" + "通用 skill 同步不冲突" 两个预测未触发——等待下次文件重组 iteration） |
 | 5 | 2026-07-27 | `harness/manifests/change_2026-07-27-iter5-evaluate-step.json` | 补 AHE §演化循环缺失的 Evaluate 步骤（项目级 §C 协议）；沉淀 L-08（AHE 规范解读层错误）；MEMORY.md Harness 组件清单加规范来源列；项目级 skill 加 §D AHE 规范解读检查清单 | **verified_with_followups**（iter6 dogfood 4/4 预测全部触发验证场景且通过；followup: §D 长期生效需 iter7+ 持续观察） |
 | 6 | 2026-07-27 | `harness/manifests/change_2026-07-27-iter6-workflow-integration.json` | AHE §演化循环融入项目工作流（AGENTS.md §1 + pm.md / auditor.md 同步）；AUDITOR 加第 6 类审计项 + L-08 范畴提示 | **partial**（iter7 dogfood 1/4 预测触发验证；3 个预测需 phase 子任务场景——等待 Phase 5+ 启动） |
 | 7 | 2026-07-27 | `harness/manifests/change_2026-07-27-iter7-agents-slim.json` | AGENTS.md 瘦身重构（457→66 行，缩减 85.6%）；内容按四维度分类迁移到 agent 文件；§5 内容准入标准建立；38 个活跃文件 cross-reference 修复 | **partial**（iter8 dogfood 1/4 预测触发——§5 自我应用；1 个结构变更——启动入口重定义为 base+extension；2 个未触发） |

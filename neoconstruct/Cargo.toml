@@ -1,0 +1,58 @@
+[package]
+name = "neoconstruct-core"
+version = "0.1.1"
+edition = "2021"
+description = "High-performance binary parsing/building for Python, powered by Rust"
+license = "MIT"
+
+[lib]
+# Python 扩展模块名：编译后由 maturin 安装为 neoconstruct._neoconstruct_core
+name = "neoconstruct_core"
+# cdylib: 供 Python 加载的 cpython 扩展（.pyd/.so）
+# rlib:   供 Rust 单元测试与未来可能的 Rust 调用方使用
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# pyo3 是核心依赖（非 optional feature），Rust 内部直接操作 Python 对象。
+# 见 AGENTS.md §0 核心原则与 docs/架构设计.md §D.1。
+#
+# extension-module 不放在默认依赖中：
+# - cargo test 时需要嵌入 Python 解释器（链接 libpython），extension-module 会让符号未定义。
+# - maturin 打包时通过 pyproject.toml 的 features = ["pyo3/extension-module"] 显式启用。
+# 这是 pyo3 官方推荐做法：https://pyo3.rs/v0.22/testing.html
+pyo3 = "0.22"
+# 统一错误处理，见 docs/架构设计.md §B.8。
+thiserror = "1.0"
+# 执行树节点静态分派，见 docs/架构设计.md §C.2。
+enum_dispatch = "0.3"
+# Phase 6.1：Float16 IEEE 754 半精度支持（D-1 决策接受 half crate）。
+# 纯 Rust 计算库（不跨 FFI），提供 f16 类型的位运算（from_be_bytes / to_f64 / from_f64）。
+half = "2.4"
+# Phase 8.5：Checksum Rust 内置 hashfunc（L-14 教训触发，零拷贝路径）。
+# 纯 Rust 计算库（不跨 FFI），与 §0 #4（pyo3 核心依赖）不冲突——`half` 已有先例。
+sha2 = "0.10"
+sha1 = "0.10"
+md-5 = "0.10"
+crc32fast = "1.4"
+adler = "1.0"
+
+[features]
+# 默认不启用 extension-module，使 cargo test 能初始化 Python 解释器（嵌入模式）。
+# maturin 在 pyproject.toml 中显式启用 pyo3/extension-module。
+default = []
+
+# Phase 6.0：bench_context_ops.rs 迁移到 tests/rust/ 子目录。
+# cargo 默认只收集 tests/*.rs 顶层文件，不递归子目录，需显式 [[test]] 段声明。
+# 见 docs/design/基础设施/测试框架设计.md §0.2 交付物 + 附录 A 步骤 6（改进-4）。
+[[test]]
+name = "bench_context_ops"
+path = "tests/rust/bench_context_ops.rs"
+
+# Release 构建优化（P0-1，参照 pydantic-core Cargo.toml）：
+# - lto = "fat"：跨 crate 全量内联，使 pyo3 小函数（set_item、bind 等）内联进 validator。
+# - codegen-units = 1：单编译单元，最大化优化空间。
+# - strip = true：剥离符号，减小二进制体积。
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = true

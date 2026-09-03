@@ -192,7 +192,7 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 ## L-07: AHE predicted_impact 重结构轻交叉引用
 
-> **核心约束**（`.opencode/skills/construct-rs-ahe-practices/SKILL.md` §A1）：涉及文件移动/重命名/重组的 harness 修改，
+> **核心约束**（`.opencode/skills/neoconstruct-ahe-practices/SKILL.md` §A1）：涉及文件移动/重命名/重组的 harness 修改，
 > 必须在 `predicted_impact` 中列出所有可能 broken 的交叉引用。
 
 **模式描述**：AHE Change Manifest 的 `predicted_impact` 字段在结构改造类修改中，
@@ -214,10 +214,10 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 **对策**（agent 必须执行）：
 
-- **PM（AHE iteration 执行者）**：每次 commit 前必须执行 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §B1 自动扫描：
+- **PM（AHE iteration 执行者）**：每次 commit 前必须执行 `.opencode/skills/neoconstruct-ahe-practices/SKILL.md` §B1 自动扫描：
   - Broken refs 扫描：`grep -r "\.md" --include="*.md" . | 验证目标存在`
   - Frontmatter 完整性扫描：所有规范要求 frontmatter 的文件必须有 `id` / `status` / `phase` / `last_updated`
-- **PM**：涉及文件移动/重命名/重组时，在 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §A1（Cross-Reference Migration Check）中**强制**用 grep 列出所有引用，作为 `at_risk_regressions` 的具体条目
+- **PM**：涉及文件移动/重命名/重组时，在 `.opencode/skills/neoconstruct-ahe-practices/SKILL.md` §A1（Cross-Reference Migration Check）中**强制**用 grep 列出所有引用，作为 `at_risk_regressions` 的具体条目
 - **AUDITOR（审计 AHE iteration 时）**：检查 manifest 的 `predicted_impact.at_risk_regressions` 是否覆盖了"路径 broken"类别。若修改涉及文件重组但 at_risk_regressions 为空或仅含功能项 → 驳回（§B3）
 - **任何角色**：发现 manifest predicted_impact 漏报回归时，必须在 verification 的 `false_predictions` 字段如实记录（§B2），**不可静默修复**
 
@@ -250,11 +250,11 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 
 **对策**（agent 必须执行）：
 
-- **PM（AHE iteration 执行者）**：每次 AHE iteration 开始前，执行 `.opencode/skills/construct-rs-ahe-practices/SKILL.md` §D "AHE 规范解读检查清单"，明确"本 iteration 涉及的角色/流程，哪些是 AHE 规范要求、哪些是项目自定义"
+- **PM（AHE iteration 执行者）**：每次 AHE iteration 开始前，执行 `.opencode/skills/neoconstruct-ahe-practices/SKILL.md` §D "AHE 规范解读检查清单"，明确"本 iteration 涉及的角色/流程，哪些是 AHE 规范要求、哪些是项目自定义"
 - **PM**：任何"X 角色未执行 Y 流程"的判断，必须先查 HARNESS.md / 通用 AHE skill 确认 Y 是否 AHE 规范要求；若仅在项目 AGENTS.md / `auditor.md` 等中出现 → 是项目自定义，不适用于 AHE iteration
 - **PM**：harness/MEMORY.md Harness 组件清单已新增"规范来源"列，启动时必读
-- **PM**：AHE iteration 引用规范条款时，必须显式标注来源（`HARNESS.md §X` / `AHE skill 工作流 Y` / `AGENTS.md §Z` / `construct-rs-ahe-practices §W` / `auditor.md` 等）
-- **PM**：每次 AHE iteration 必须先做 Evaluate（即使是最小 dogfood —— iteration 自身执行轨迹），不允许跳过。详见 `construct-rs-ahe-practices §D`
+- **PM**：AHE iteration 引用规范条款时，必须显式标注来源（`HARNESS.md §X` / `AHE skill 工作流 Y` / `AGENTS.md §Z` / `neoconstruct-ahe-practices §W` / `auditor.md` 等）
+- **PM**：每次 AHE iteration 必须先做 Evaluate（即使是最小 dogfood —— iteration 自身执行轨迹），不允许跳过。详见 `neoconstruct-ahe-practices §D`
 
 ---
 

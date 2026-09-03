@@ -15,7 +15,7 @@
 #   - 返回 L1Result 对象（含每步 PASS/FAIL + 输出摘要），由 run_smoke.ps1 汇总写报告
 
 param(
-    # construct-rs venv 路径（用于 maturin develop）
+    # neoconstruct venv 路径（用于 maturin develop）
     [string]$VenvPath
 
     ,
@@ -37,7 +37,7 @@ if (-not $VenvPath) {
 # --------------------------------------------------------------------
 # L1 命令序列定义
 # --------------------------------------------------------------------
-# 每项：Label / Script（在 construct-rs 目录执行的脚本块）
+# 每项：Label / Script（在 neoconstruct 目录执行的脚本块）
 function Invoke-L1Quality {
     param(
         [Parameter(Mandatory = $true)]
@@ -119,7 +119,7 @@ $paths = Resolve-ProjectPaths
 $crsDir = $paths.CrsDir
 
 if (-not (Test-Path -LiteralPath $crsDir)) {
-    Write-CiLog "construct-rs directory not found: $crsDir" -Level ERROR
+    Write-CiLog "neoconstruct directory not found: $crsDir" -Level ERROR
     exit 2
 }
 

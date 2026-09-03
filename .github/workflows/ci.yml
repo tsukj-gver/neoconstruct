@@ -29,19 +29,19 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: construct-rs
+          workspaces: neoconstruct
 
       - name: rustfmt
         run: cargo fmt --all -- --check
-        working-directory: construct-rs
+        working-directory: neoconstruct
 
       - name: clippy
         run: cargo clippy --release -- -D warnings
-        working-directory: construct-rs
+        working-directory: neoconstruct
 
       - name: cargo test
         run: cargo test
-        working-directory: construct-rs
+        working-directory: neoconstruct
         env:
           PYO3_PYTHON: ${{ matrix.os == 'windows-latest' && 'python' || '/usr/bin/python3' }}
 
@@ -60,32 +60,32 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: construct-rs
+          workspaces: neoconstruct
 
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
 
-      # CRS venv：安装 construct-rs 扩展（maturin develop）
+      # CRS venv：安装 neoconstruct 扩展（maturin develop）
       - name: Set up CRS venv
         run: |
           python -m venv .venv
           pip install maturin pytest
-        working-directory: construct-rs
+        working-directory: neoconstruct
         shell: pwsh
 
-      - name: Build and install construct-rs
+      - name: Build and install neoconstruct
         run: |
           .venv/Scripts/python -m maturin develop --release
         if: matrix.os == 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         shell: pwsh
 
-      - name: Build and install construct-rs (POSIX)
+      - name: Build and install neoconstruct (POSIX)
         run: |
           .venv/bin/python -m maturin develop --release
         if: matrix.os != 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         shell: pwsh
 
       # PC venv：安装原版 construct 2.10.70（parity 基线）
@@ -94,7 +94,7 @@ jobs:
           python -m venv .venv-pc
           .venv-pc/Scripts/python -m pip install "construct==2.10.70"
         if: matrix.os == 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         shell: pwsh
 
       - name: Set up PC venv (POSIX)
@@ -102,21 +102,21 @@ jobs:
           python -m venv .venv-pc
           .venv-pc/bin/python -m pip install "construct==2.10.70"
         if: matrix.os != 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         shell: pwsh
 
       - name: Run tests (Windows)
         if: matrix.os == 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         env:
-          CRS_PYTHON: ${{ github.workspace }}\construct-rs\.venv\Scripts\python.exe
-          PC_PYTHON: ${{ github.workspace }}\construct-rs\.venv-pc\Scripts\python.exe
+          CRS_PYTHON: ${{ github.workspace }}\neoconstruct\.venv\Scripts\python.exe
+          PC_PYTHON: ${{ github.workspace }}\neoconstruct\.venv-pc\Scripts\python.exe
         run: .venv/Scripts/python -m pytest tests/ -q
 
       - name: Run tests (POSIX)
         if: matrix.os != 'windows-latest'
-        working-directory: construct-rs
+        working-directory: neoconstruct
         env:
-          CRS_PYTHON: ${{ github.workspace }}/construct-rs/.venv/bin/python
-          PC_PYTHON: ${{ github.workspace }}/construct-rs/.venv-pc/bin/python
+          CRS_PYTHON: ${{ github.workspace }}/neoconstruct/.venv/bin/python
+          PC_PYTHON: ${{ github.workspace }}/neoconstruct/.venv-pc/bin/python
         run: .venv/bin/python -m pytest tests/ -q

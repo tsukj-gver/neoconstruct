@@ -44,15 +44,15 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 INVENTORY_CSV = PROJECT_ROOT / "docs" / "constructors-inventory.csv"
 PERF_SCENARIOS_CSV = PROJECT_ROOT / "docs" / "perf-scenarios.csv"
-NODES_MOD_RS = PROJECT_ROOT / "construct-rs" / "src" / "nodes" / "mod.rs"
+NODES_MOD_RS = PROJECT_ROOT / "neoconstruct" / "src" / "nodes" / "mod.rs"
 DESCRIPTORS_PY = (
-    PROJECT_ROOT / "construct-rs" / "python" / "construct" / "_descriptors.py"
+    PROJECT_ROOT / "neoconstruct" / "python" / "neoconstruct" / "_descriptors.py"
 )
-# Phase 7+ 用户面分散到多个模块（_conditional.py / _adapters.py），
-# 仅查 _descriptors.py 会漏报。统一扫描 construct-rs/python/construct/ 下
+# 用户面分散到多个模块（_conditional.py / _adapters.py），
+# 仅查 _descriptors.py 会漏报。统一扫描 neoconstruct/python/neoconstruct/ 下
 # 所有 __all__ 定义。
 PYTHON_PKG_DIR = (
-    PROJECT_ROOT / "construct-rs" / "python" / "construct"
+    PROJECT_ROOT / "neoconstruct" / "python" / "neoconstruct"
 )
 
 INVENTORY_EXPECTED_COLUMNS = 13
@@ -161,7 +161,7 @@ def _parse_pointer(pointer: str) -> List[Tuple[str, List[int]]]:
         return results
     parts = [p.strip() for p in pointer.split(";") if p.strip()]
     for part in parts:
-        # 兼容 "harness/MEMORY.md:109" / "plans/xxx.md:60-63" / "construct-rs/src/.../x.rs:1"
+        # 兼容 "harness/MEMORY.md:109" / "plans/xxx.md:60-63" / "neoconstruct/src/.../x.rs:1"
         m = re.match(r"^(.+):(\d+)(?:-(\d+))?$", part)
         if not m:
             # iter9+: 纯文件路径格式（无 :line）—— 作为文件级指针返回空行号列表
@@ -184,15 +184,15 @@ def _resolve_impl_module_path(file_part: str) -> Optional[Path]:
     """把 impl_module 字段的文件部分解析到实际路径。
 
     impl_module 可能指向：
-      - ``nodes/xxx.rs`` / ``descriptors/xxx.rs`` -> ``construct-rs/src/<part>``
-      - ``python/construct/xxx.py``                -> ``construct-rs/<part>``
+      - ``nodes/xxx.rs`` / ``descriptors/xxx.rs`` -> ``neoconstruct/src/<part>``
+      - ``python/neoconstruct/xxx.py``             -> ``neoconstruct/<part>``
       - 其他相对路径                                -> 依次尝试多个候选根
 
     返回首个存在的候选路径；都不存在则返回 None。
     """
     candidates = [
-        PROJECT_ROOT / "construct-rs" / "src" / file_part,
-        PROJECT_ROOT / "construct-rs" / file_part,
+        PROJECT_ROOT / "neoconstruct" / "src" / file_part,
+        PROJECT_ROOT / "neoconstruct" / file_part,
         PROJECT_ROOT / file_part,
     ]
     for c in candidates:
@@ -320,7 +320,7 @@ def check_c4_impl_module_exists() -> CheckResult:
             if resolved is None:
                 evidence.append(
                     f"{name}: impl_module file not found: {file_part} "
-                    f"(tried construct-rs/src/, construct-rs/, project root)"
+                    f"(tried neoconstruct/src/, neoconstruct/, project root)"
                 )
     return CheckResult(
         check_id="C4",

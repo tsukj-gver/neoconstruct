@@ -1,11 +1,11 @@
 ---
 id: EXT-pm
-project: construct-rs
+project: neoconstruct
 phase: meta
 last_updated: 2026-07-27
 ---
 
-# PM 项目特定拓展（construct-rs）
+# PM 项目特定拓展（neoconstruct）
 
 > 配合 `.opencode/agents/pm.md`（跨工程 base）使用。
 > 工作流状态机与子任务标识格式见 `AGENTS.md §1`（不在本文件重复）。
@@ -42,7 +42,7 @@ PM 是 git 主操作者（DEV 可做 checkpoint 提交，REV/VET/AUDITOR 禁止�
 ```
 任务 ACCEPTED → PM 执行 git add + git commit
     ↓
-版本验收通过 → PM 执行 git tag v<N>.<M>.<P>-complete + 版本号升级
+版本验收通过 → PM 执行 git tag v<N>.<M>.<P>（semver tag 即发布触发 tag，release.yml 由 v* 触发构建发布；不再使用 -complete 后缀——避免误触发重复发布）
 ```
 
 DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint。
@@ -51,7 +51,7 @@ DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint
 示例：`fix(v0.1.1): v0.1.1-3 修复 Switch ctx 透传` / `test(v0.1.1): v0.1.1-2 补全 BUG 回归用例` / `docs(v0.1.1): 更新总纲`
 （历史 phase 制 commit 格式 `feat(phaseN): X.Y 描述` 对既有提交保持不变）
 
-**tag 格式**：`v<N>.<M>.<P>-complete`（如 `v0.1.1-complete`；历史 `phase-N-complete` 保持不变）
+**tag 格式**：`v<N>.<M>.<P>`（如 `v0.1.1`；阶段完成与发布合并为一个 tag——release.yml 触发条件 `v*`，-complete 后缀会误触发，已废弃；历史 `phase-N-complete` 保持不变）
 
 **禁止事项**（全员）：所有角色禁止 `git push`（本地仓库）；REV/VET/AUDITOR 禁止 `git add` / `git commit` / `git tag` / `git checkout` / `git revert` 等任何写操作；禁止提交 `construct/` 目录下的任何变更（Python 原版仓库有独立 git）。
 
@@ -85,7 +85,7 @@ prompt: "包含子任务信息、必读文件、输出要求的完整指令"
 - 角色专属操作流程 → `.opencode/agents/<role>.md`（base）+ `harness/extensions/<role>-extension.md`（项目特定）
 - 详细规范模板（如 frontmatter / 过程记录格式）→ `docs/`
 - 跨阶段教训 → `experiences.md` / `docs/decisions/ADR-*.md`
-- AHE 工作流补充 → `.opencode/skills/construct-rs-ahe-practices/SKILL.md`
+- AHE 工作流补充 → `.opencode/skills/neoconstruct-ahe-practices/SKILL.md`
 - 性能门禁 → `.opencode/skills/performance-gate/SKILL.md`
 
 ## 流程恢复（项目特定路径）

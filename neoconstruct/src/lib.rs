@@ -1,0 +1,193 @@
+//! neoconstruct crate 入口与 pyo3 模块注册。
+//!
+//! 本 crate 是 Python 包 `neoconstruct` 的高性能 Rust 内核。
+//! 编译后由 maturin 安装为 `neoconstruct._neoconstruct_core` 扩展模块，
+//! Python 侧通过 `from ._neoconstruct_core import *` 导入。
+
+pub mod compile;
+pub mod context;
+pub mod descriptors;
+pub mod error;
+pub mod expr;
+pub mod instance;
+pub mod nodes;
+pub mod path;
+pub mod schema;
+pub mod stream;
+
+use descriptors::{
+    BytesDescriptor, BytesIntegerDescriptor, FormatFieldDescriptor, GreedyBytesDescriptor,
+};
+use nodes::format_field::PythonFormat;
+use pyo3::prelude::*;
+use schema::CompiledSchema;
+
+// 表达式系统核心类型，re-export 供 crate 内其他模块直接使用。
+pub use expr::{eval_expr_any, eval_expr_bool, eval_expr_int, ExprOp, ExprProgram};
+
+/// 返回 neoconstruct Rust 内核的版本号字符串。
+///
+/// 用于验证 Python↔Rust FFI 链路是否可用：
+///
+/// ```python
+/// from neoconstruct._neoconstruct_core import version
+/// print(version())  # "0.1.0"
+/// ```
+#[pyfunction]
+fn version() -> &'static str {
+    "0.1.0"
+}
+
+/// 注册 Python 扩展模块 `neoconstruct._neoconstruct_core`。
+///
+/// 注册项：
+/// - `version` 函数 + `__version__` 常量
+/// - [`compile::compile_schema`]：编译入口 FFI 函数
+/// - [`schema::CompiledSchema`]：编译产物 pyclass，含 `_parse_raw` / `_build_raw`
+/// - 类型描述符 pyclass：
+///   - 16 个 `FormatFieldDescriptor` 单例（`Int8ub` 等）
+///   - `BytesDescriptor`（可实例化）
+///   - `GreedyBytesDescriptor` 单例（`GreedyBytes`）
+///
+/// 模块初始化时还会调用 [`error::init_exception_classes`]，从 `neoconstruct._errors`
+/// 缓存 Python 异常类引用，使 `From<ConstructError> for PyErr` 能按变体映射到
+/// `StreamError` 等。
+#[pymodule]
+fn _neoconstruct_core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    let py = m.py();
+
+    m.add_function(wrap_pyfunction!(version, m)?)?;
+    m.add("__version__", version())?;
+
+    // FFI 入口
+    m.add_function(wrap_pyfunction!(compile::compile_schema, m)?)?;
+
+    // pyclass 注册
+    m.add_class::<CompiledSchema>()?;
+    m.add_class::<FormatFieldDescriptor>()?;
+    m.add_class::<BytesDescriptor>()?;
+    m.add_class::<GreedyBytesDescriptor>()?;
+    m.add_class::<BytesIntegerDescriptor>()?;
+
+    // 16 个 FormatFieldDescriptor 预定义单例
+    register_format_singletons(py, m)?;
+
+    // 6 个 Float FormatFieldDescriptor 预定义单例
+    register_float_singletons(py, m)?;
+
+    // 4 个 Int24 BytesIntegerDescriptor 预定义单例
+    register_int24_singletons(py, m)?;
+
+    // GreedyBytes 预定义单例
+    m.add("GreedyBytes", Py::new(py, GreedyBytesDescriptor)?)?;
+
+    // 缓存 Python 异常类引用。
+    // 失败不致命：未初始化时 From<ConstructError> 回退到 PyValueError。
+    // 但记录到 stderr 帮助调试。
+    if let Err(e) = error::init_exception_classes(py) {
+        // 使用 Python 的 print 输出（确保 GIL 持有），不阻塞模块加载。
+        let _ = py
+            .import_bound("sys")
+            .and_then(|sys| sys.getattr("stderr"))
+            .and_then(|stderr| {
+                stderr.call_method1(
+                    "write",
+                    (format!(
+                        "neoconstruct: 警告——无法初始化 Python 异常类缓存，\
+                         错误将回退到 ValueError：{}\n",
+                        e
+                    ),),
+                )
+            });
+    }
+
+    Ok(())
+}
+
+/// 注册 16 个整数格式预定义单例到模块。
+///
+/// 对应 Python construct 的 `Int8ub`、`Int16sb` 等原子格式常量。
+/// 每个单例为 `FormatFieldDescriptor` pyclass 实例（frozen，模块级常量）。
+fn register_format_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    /// 16 种整数格式：`(Python 标识符, 预编译格式)`。
+    ///
+    /// 使用常量数组避免硬编码散落的 `m.add` 调用，集中管理单例定义。
+    const SINGLETONS: &[(&str, PythonFormat)] = &[
+        ("Int8ub", PythonFormat::UnsignedInt8Big),
+        ("Int8ul", PythonFormat::UnsignedInt8Little),
+        ("Int8sb", PythonFormat::SignedInt8Big),
+        ("Int8sl", PythonFormat::SignedInt8Little),
+        ("Int16ub", PythonFormat::UnsignedInt16Big),
+        ("Int16ul", PythonFormat::UnsignedInt16Little),
+        ("Int16sb", PythonFormat::SignedInt16Big),
+        ("Int16sl", PythonFormat::SignedInt16Little),
+        ("Int32ub", PythonFormat::UnsignedInt32Big),
+        ("Int32ul", PythonFormat::UnsignedInt32Little),
+        ("Int32sb", PythonFormat::SignedInt32Big),
+        ("Int32sl", PythonFormat::SignedInt32Little),
+        ("Int64ub", PythonFormat::UnsignedInt64Big),
+        ("Int64ul", PythonFormat::UnsignedInt64Little),
+        ("Int64sb", PythonFormat::SignedInt64Big),
+        ("Int64sl", PythonFormat::SignedInt64Little),
+    ];
+
+    for (name, format) in SINGLETONS {
+        let desc = Py::new(py, FormatFieldDescriptor::new(name, *format))?;
+        m.add(*name, desc)?;
+    }
+    Ok(())
+}
+
+/// 注册 6 个 Float 格式预定义单例到模块。
+///
+/// 对应 Python construct 的 `Float16b` / `Float16l` / `Float32b` / `Float32l` /
+/// `Float64b` / `Float64l`。每个单例为 `FormatFieldDescriptor` pyclass 实例。
+fn register_float_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    const FLOAT_SINGLETONS: &[(&str, PythonFormat)] = &[
+        ("Float16b", PythonFormat::Float16Big),
+        ("Float16l", PythonFormat::Float16Little),
+        ("Float32b", PythonFormat::Float32Big),
+        ("Float32l", PythonFormat::Float32Little),
+        ("Float64b", PythonFormat::Float64Big),
+        ("Float64l", PythonFormat::Float64Little),
+    ];
+    for (name, format) in FLOAT_SINGLETONS {
+        let desc = Py::new(py, FormatFieldDescriptor::new(name, *format))?;
+        m.add(*name, desc)?;
+    }
+    Ok(())
+}
+
+/// 注册 4 个 Int24 BytesIntegerDescriptor 预定义单例到模块。
+///
+/// 对应 Python construct 的 `Int24ub` / `Int24ul` / `Int24sb` / `Int24sl`。
+/// 每个单例为 `BytesIntegerDescriptor { length: 3, ... }` 实例。
+fn register_int24_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
+    const INT24_SINGLETONS: &[(&str, bool, bool)] = &[
+        // (name, signed, swapped)
+        ("Int24ub", false, false),
+        ("Int24ul", false, true),
+        ("Int24sb", true, false),
+        ("Int24sl", true, true),
+    ];
+    for (name, signed, swapped) in INT24_SINGLETONS {
+        let desc = Py::new(py, BytesIntegerDescriptor::new(3, *signed, *swapped))?;
+        m.add(*name, desc)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_returns_expected_string() {
+        assert_eq!(version(), "0.1.0");
+    }
+
+    #[test]
+    fn version_is_non_empty() {
+        assert!(!version().is_empty());
+    }
+}

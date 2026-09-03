@@ -18,7 +18,7 @@
 
 param(
     # 质疑改动文件（toggle off 时 git checkout 到 BaseCommit 版本）
-    # 例如 "construct-rs/src/nodes/stop_if.rs"
+    # 例如 "neoconstruct/src/nodes/stop_if.rs"
     [Parameter(Mandatory = $true)]
     [ValidateNotNullOrEmpty()]
     [string]$ToggleFile

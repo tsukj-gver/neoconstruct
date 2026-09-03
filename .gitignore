@@ -1,8 +1,8 @@
 ﻿# Rust
-construct-rs/target/
-construct-rs/Cargo.lock
+neoconstruct/target/
+neoconstruct/Cargo.lock
 
-# Python 原版仓库（有独立 git，锚定根目录避免误伤 construct-rs/python/construct/）
+# Python 原版仓库（有独立 git，锚定根目录避免误伤 neoconstruct/python/ 内包目录）
 /construct/
 
 # opencode

@@ -34,18 +34,18 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 - **驳回规则**：REV→DESIGNING / VET→CODING / AUDITOR→PM（PM 补充缺失的管理工作），必须附具体原因
 - **角色隔离**：DEV 不兼任 REV/VET（避免确认偏误）
 - **设计质疑**：任何角色可标记 `[设计质疑]`，PM 转发 ARCH 必须回应
-- 详见 `pm.md §工作流管道`（状态细节）+ `construct-rs-ahe-practices §C`（Evaluate 协议）
+- 详见 `pm.md §工作流管道`（状态细节）+ `neoconstruct-ahe-practices §C`（Evaluate 协议）
 
 ## 2. 文件读写权限
 
 | 角色 | 可写 | 只读/禁止 |
 |------|------|----------|
-| PM | 除业务代码外的全部（`harness/`、`plans/`、`docs/`、`.opencode/`、`testing/`、`experiments/`） | `construct-rs/src/`、`construct/` |
+| PM | 除业务代码外的全部（`harness/`、`plans/`、`docs/`、`.opencode/`、`testing/`、`experiments/`） | `neoconstruct/src/`、`construct/` |
 | ARCH | `docs/`（设计文档）、`experiments/`、`harness/extensions/`（自己角色）、`testing/`（设计调整） | `plans/`、`construct/` |
-| DEV | `construct-rs/src/**`、`plans/**/traces/**`、`plans/meta/**`、`testing/`（CI runner 实施）、`harness/`（自身轨迹记录） | `docs/`、`plans/phaseN/总纲.md` |
+| DEV | `neoconstruct/**`（Rust src / Python 包 / tests / bench）、`.github/workflows/**`、`plans/**/traces/**`、`plans/meta/**`、`testing/`（CI runner 实施）、`harness/`（自身轨迹记录） | `docs/`、`plans/*/总纲.md` |
 | REV / VET / AUDITOR | `plans/**/traces/**`、`plans/meta/**`、`testing/`、`harness/` | 全部 |
 
-**禁止**（全员）：`construct/`（Python 原版只读参考）/ `construct-rs/src/` 业务代码（仅 DEV）/ 已验收阶段总纲（除非 PM 授权）/ `.opencode/skills/agentic-harness-engineering/`（通用 AHE skill，L-08 防护，不可项目化修改）
+**禁止**（全员）：`construct/`（Python 原版只读参考，如存在）/ `neoconstruct/src/` 业务代码（仅 DEV）/ 已验收阶段总纲（除非 PM 授权）/ `.opencode/skills/agentic-harness-engineering/`（通用 AHE skill，L-08 防护，不可项目化修改）
 
 ## 3. 全员红线
 
@@ -69,7 +69,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 4. `.opencode/agents/<role>.md`（**通用 base**：跨工程身份/职责/返回格式框架）
 5. `harness/extensions/<role>-extension.md`（**项目特定 extension**：工作流状态/检查清单/文件路径，由 base 强制约定加载）
 6. `plans/phaseN/总纲.md`（当前 phase 单一事实源）
-7. 涉及 AHE iteration 时：`.opencode/skills/construct-rs-ahe-practices/SKILL.md`
+7. 涉及 AHE iteration 时：`.opencode/skills/neoconstruct-ahe-practices/SKILL.md`
 8. 涉及性能子任务时：`.opencode/skills/performance-gate/SKILL.md`
 9. 涉及过程记录填写时：`harness/metadata-convention.md`
 

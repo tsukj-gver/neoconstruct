@@ -4,7 +4,7 @@ mode: primary
 permission:
   edit:
     "*": "allow"
-    "construct-rs/src/**": "deny"
+    "neoconstruct/src/**": "deny"
     "construct/**": "deny"
     "refs/**": "deny"
   bash:

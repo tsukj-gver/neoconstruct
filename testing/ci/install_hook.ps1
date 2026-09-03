@@ -89,7 +89,7 @@ if (Test-Path -LiteralPath $targetPath) {
     if (-not $Force) {
         # 检查是否已是本仓库的 hook（通过文件头标识识别）
         $existingContent = Get-Content -LiteralPath $targetPath -Raw -ErrorAction SilentlyContinue
-        if ($existingContent -and ($existingContent -match "construct-rs CI smoke gate \(META-CI-1d\)")) {
+        if ($existingContent -and ($existingContent -match "neoconstruct CI smoke gate \(META-CI-1d\)")) {
             Write-HookLog "pre-commit hook already installed (matches this project's template)" -Level OK
             Write-HookLog "To reinstall: install_hook.ps1 -Force" -Level INFO
             exit 0
@@ -134,7 +134,7 @@ if ($size -lt 200) {
 $headContent = Get-Content -LiteralPath $targetPath -TotalCount 3 -ErrorAction SilentlyContinue
 $foundMarker = $false
 foreach ($line in $headContent) {
-    if ($line -match "construct-rs CI smoke gate") {
+    if ($line -match "neoconstruct CI smoke gate") {
         $foundMarker = $true
         break
     }

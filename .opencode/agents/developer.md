@@ -4,7 +4,8 @@ mode: subagent
 permission:
   edit:
     "*": "deny"
-    "construct-rs/**": "allow"
+    "neoconstruct/**": "allow"
+    ".github/workflows/**": "allow"
     "plans/**/过程记录.md": "allow"
     "plans/**/traces/**": "allow"
     "plans/meta/**": "allow"
