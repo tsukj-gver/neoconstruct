@@ -40,17 +40,18 @@ PM 是 git 主操作者（DEV 可做 checkpoint 提交，REV/VET/AUDITOR 禁止�
 
 **提交时机**：
 ```
-子任务 ACCEPTED → PM 执行 git add + git commit
+任务 ACCEPTED → PM 执行 git add + git commit
     ↓
-阶段验收通过 → PM 执行 git tag phase-N-complete
+版本验收通过 → PM 执行 git tag v<N>.<M>.<P>-complete + 版本号升级
 ```
 
 DEV 在开发过程中可随时执行 `git add` + `git commit` 作为 checkpoint。
 
-**commit message 格式**：`feat(phaseN): X.Y 子任务描述`
-示例：`feat(phase1): 1.1 项目初始化` / `feat(phase2): 2.3 FormatField 实现` / `docs(phase1): 更新总设计文档`
+**commit message 格式**（2026-09-03 半正式发布状态起，版本制）：`<type>(v<version>): 任务号 描述`
+示例：`fix(v0.1.1): v0.1.1-3 修复 Switch ctx 透传` / `test(v0.1.1): v0.1.1-2 补全 BUG 回归用例` / `docs(v0.1.1): 更新总纲`
+（历史 phase 制 commit 格式 `feat(phaseN): X.Y 描述` 对既有提交保持不变）
 
-**tag 格式**：`phase-N-complete`
+**tag 格式**：`v<N>.<M>.<P>-complete`（如 `v0.1.1-complete`；历史 `phase-N-complete` 保持不变）
 
 **禁止事项**（全员）：所有角色禁止 `git push`（本地仓库）；REV/VET/AUDITOR 禁止 `git add` / `git commit` / `git tag` / `git checkout` / `git revert` 等任何写操作；禁止提交 `construct/` 目录下的任何变更（Python 原版仓库有独立 git）。
 

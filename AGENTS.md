@@ -28,8 +28,8 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
  (PM)      (ARCH)        (REV)         (DEV)      (VET)       (PM)     (AUDITOR)
 ```
 
-- **状态流转**：每个子任务严格按管道推进，不可跳步。`trivial` 子任务 PM 标注后可跳 DESIGNING + DESIGN_REVIEW；关联紧密的子任务 PM 可合并为一次 ARCH 分派
-- **子任务标识格式**：`<phase>.<子任务编号> [任务名]`（如 `4.7 [GreedyRange 实现]`）—— 全角色统一
+- **状态流转**：每个任务严格按管道推进，不可跳步。`trivial` 任务 PM 标注后可跳 DESIGNING + DESIGN_REVIEW；关联紧密的任务 PM 可合并为一次 ARCH 分派
+- **任务标识格式**：`v<version>-<任务号> [任务名]`（如 `v0.1.1-1 [BUG 复现与遗漏调查]`）—— 全角色统一。**2026-09-03 起项目进入半正式发布状态，以版本号+任务号管理**（此前 phase 制的历史标识保持不变）
 - **ACCEPTED 时 PM 必须产出 Evaluate 摘录**（AHE §演化循环）；**AUDITED 时 AUDITOR 检查摘录产出**
 - **驳回规则**：REV→DESIGNING / VET→CODING / AUDITOR→PM（PM 补充缺失的管理工作），必须附具体原因
 - **角色隔离**：DEV 不兼任 REV/VET（避免确认偏误）
