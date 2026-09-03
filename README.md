@@ -34,14 +34,15 @@ assert Header.parse(b"\xCA\xFE\x01ABCD") == h
 
 ## 安装
 
-需要 Rust 工具链（stable）与 Python ≥ 3.7。
+需要 Rust 工具链（stable）与 Python ≥ 3.8。
 
 ```bash
 cd construct-rs
-maturin develop --release
+maturin build --release
+pip install dist/*.whl
 ```
 
-编译产物安装为 `construct._construct_rust`，用户统一 `import construct`。开发模式（不含 release 优化）可去掉 `--release`，但性能测量必须用 release。
+编译产物安装为 `construct._construct_rust`，用户统一 `import construct`。
 
 ## 性能
 

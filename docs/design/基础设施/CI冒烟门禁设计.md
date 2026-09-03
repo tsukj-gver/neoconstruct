@@ -445,8 +445,8 @@ maturin develop --release
   "environment": {
     "timestamp": "2026-07-28T14:30:00+08:00",
     "python_version": "3.14.0",
-    "crs_venv": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_new",
-    "pc_venv": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_py_new",
+    "crs_venv": "<opencode-temp>\\crs_venv_new",
+    "pc_venv": "<opencode-temp>\\crs_venv_py_new",
     "construct_rs_commit": "abc1234",
     "construct_py_version": "2.10.70",
     "os": "Windows 10.0.19045",

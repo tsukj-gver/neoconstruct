@@ -1,0 +1,122 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-checks:
+    name: Rust checks (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: construct-rs
+
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+        working-directory: construct-rs
+
+      - name: clippy
+        run: cargo clippy --release -- -D warnings
+        working-directory: construct-rs
+
+      - name: cargo test
+        run: cargo test
+        working-directory: construct-rs
+        env:
+          PYO3_PYTHON: ${{ matrix.os == 'windows-latest' && 'python' || '/usr/bin/python3' }}
+
+  python-tests:
+    name: Python tests (${{ matrix.python-version }}, ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python-version: ["3.10", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: construct-rs
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      # CRS venv：安装 construct-rs 扩展（maturin develop）
+      - name: Set up CRS venv
+        run: |
+          python -m venv .venv
+          pip install maturin pytest
+        working-directory: construct-rs
+        shell: pwsh
+
+      - name: Build and install construct-rs
+        run: |
+          .venv/Scripts/python -m maturin develop --release
+        if: matrix.os == 'windows-latest'
+        working-directory: construct-rs
+        shell: pwsh
+
+      - name: Build and install construct-rs (POSIX)
+        run: |
+          .venv/bin/python -m maturin develop --release
+        if: matrix.os != 'windows-latest'
+        working-directory: construct-rs
+        shell: pwsh
+
+      # PC venv：安装原版 construct 2.10.70（parity 基线）
+      - name: Set up PC venv (parity reference)
+        run: |
+          python -m venv .venv-pc
+          .venv-pc/Scripts/python -m pip install "construct==2.10.70"
+        if: matrix.os == 'windows-latest'
+        working-directory: construct-rs
+        shell: pwsh
+
+      - name: Set up PC venv (POSIX)
+        run: |
+          python -m venv .venv-pc
+          .venv-pc/bin/python -m pip install "construct==2.10.70"
+        if: matrix.os != 'windows-latest'
+        working-directory: construct-rs
+        shell: pwsh
+
+      - name: Run tests (Windows)
+        if: matrix.os == 'windows-latest'
+        working-directory: construct-rs
+        env:
+          CRS_PYTHON: ${{ github.workspace }}\construct-rs\.venv\Scripts\python.exe
+          PC_PYTHON: ${{ github.workspace }}\construct-rs\.venv-pc\Scripts\python.exe
+        run: .venv/Scripts/python -m pytest tests/ -q
+
+      - name: Run tests (POSIX)
+        if: matrix.os != 'windows-latest'
+        working-directory: construct-rs
+        env:
+          CRS_PYTHON: ${{ github.workspace }}/construct-rs/.venv/bin/python
+          PC_PYTHON: ${{ github.workspace }}/construct-rs/.venv-pc/bin/python
+        run: .venv/bin/python -m pytest tests/ -q

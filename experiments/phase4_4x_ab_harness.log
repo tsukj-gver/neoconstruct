@@ -1,4 +1,4 @@
-﻿[19:41:25] ==== 4.x O1-O4 Controlled A/B Test start ====
+[19:41:25] ==== 4.x O1-O4 Controlled A/B Test start ====
 [19:41:25] Snapshot ON  (working tree) -> <legacy-repo>\experiments\_snapshot_4x\error_rs_on.rs
 [19:41:25] Snapshot OFF (HEAD)        -> <legacy-repo>\experiments\_snapshot_4x\error_rs_off.rs (via cmd /c redirect, no BOM)
 [19:41:25] 

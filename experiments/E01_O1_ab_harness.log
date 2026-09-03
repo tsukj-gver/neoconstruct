@@ -1,4 +1,4 @@
-﻿[01:24:11] ==== E01 O1 Controlled A/B Test start ====
+[01:24:11] ==== E01 O1 Controlled A/B Test start ====
 [01:24:11] O1 commit parent = c77c0ea~1 (O1 off) ; B = HEAD (O1 on)
 [01:24:11] Sequence: A1 B1 A2 B2 A3 B3
 [01:24:11] Initial stop_if.rs git status: '' (empty = clean)

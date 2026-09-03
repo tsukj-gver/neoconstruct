@@ -1,1 +1,1 @@
-{"timestamp":"20260728_101056","levels":"L2","overall":true,"details":[{"Level":"L2","Passed":true,"ExitCode":0,"ReportPath":"C:\\Others\\Projects\\<legacy-project>\\construct_rust\\testing\\ci\\reports\\20260728_101056_L2_report.json"}]}
+﻿﻿{"timestamp":"20260728_101056","levels":"L2","overall":true,"details":[{"Level":"L2","Passed":true,"ExitCode":0,"ReportPath":"<legacy-repo>\\testing\\ci\\reports\\20260728_101056_L2_report.json"}]}

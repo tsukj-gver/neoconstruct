@@ -42,20 +42,28 @@ from _helpers.runner import BenchConfig, BenchRunner
 
 # ---------------------------------------------------------------------------
 # venv 解析（三级，与 conftest.py 一致 —— REV 新-改进-5）
+# 现行约定（详见 README「测试环境变量」）：
+#   环境变量 CRS_PYTHON / PC_PYTHON > 项目内 .venv / .venv-pc > sys.executable
 # ---------------------------------------------------------------------------
-_VENV_ROOT = Path(r"<opencode-temp>")
-_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_new" / "Scripts" / "python.exe"
-_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_new" / "Scripts" / "python.exe"
+_PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
+_DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
+_DEFAULT_PY_PYTHON = _PROJECT_ROOT / ".venv-pc"  # 原版参考 venv（construct==2.10.70）
 _CRS_PYTHON_DIR = str(_BENCH_DIR.parent / "python")
 
 
-def _resolve_venv(env_var, default_path):
-    """三级解析：env var → 默认 venv → sys.executable（与 conftest.py 一致）。"""
+def _resolve_venv(env_var, venv_dir):
+    """三级解析：环境变量 → 项目内 venv → sys.executable（与 conftest.py 一致）。
+
+    venv_dir 为 venv 根目录，内部按 Windows（Scripts/python.exe）与
+    POSIX（bin/python）两种布局探测。
+    """
     env = os.environ.get(env_var)
     if env and Path(env).exists():
         return env
-    if Path(default_path).exists():
-        return str(default_path)
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = Path(venv_dir) / rel
+        if candidate.exists():
+            return str(candidate)
     return sys.executable
 
 

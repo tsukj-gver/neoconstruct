@@ -5,9 +5,9 @@
   "environment": {
     "timestamp": "2026-07-28T20:16:31+08:00",
     "python_version": "3.14.2",
-    "python_exe": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_new\\Scripts\\python.exe",
-    "crs_venv_python": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_new\\Scripts\\python.exe",
-    "pc_venv_python": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_py_new\\Scripts\\python.exe",
+    "python_exe": "<opencode-temp>\\crs_venv_new\\Scripts\\python.exe",
+    "crs_venv_python": "<opencode-temp>\\crs_venv_new\\Scripts\\python.exe",
+    "pc_venv_python": "<opencode-temp>\\crs_venv_py_new\\Scripts\\python.exe",
     "construct_rs_commit": "bd90ea5",
     "baseline_source": "docs\\perf-scenarios.csv@bd90ea5",
     "os": "Windows-11-10.0.26200-SP0",

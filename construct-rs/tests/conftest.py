@@ -40,16 +40,25 @@ _TESTS_DIR = Path(__file__).resolve().parent
 _PROJECT_ROOT = _TESTS_DIR.parent                  # construct-rs/
 _CRS_PYTHON_DIR = _PROJECT_ROOT / "python"         # construct-rs/python/
 
-# 子进程隔离用的 venv 解析。
-# **环境适配（偏离设计文档 §2.1，8.ENV 切换）**：设计文档沿用旧 test_phase4_parity.py
-# 的路径 `crs_venv` / `crs_venv_py`，但实际环境这两个 venv 已废弃（Scripts 为空）。
-# 此前活跃 venv 是 `crs_venv_new` / `crs_venv_py_new`（Python 3.14 + abi3）。
-# 8.ENV 任务（2026-08-06）切换至 Python 3.13 非 abi3 模式（pyo3 0.22 原生支持 3.13，
-# 无需 PYO3_USE_ABI3_FORWARD_COMPATIBILITY），新活跃 venv 是 `crs_venv_313` /
-# `crs_venv_py_313`。旧 3.14 venv 保留为 legacy 基线对照。
-_VENV_ROOT = Path(r"<opencode-temp>")
-_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_313" / "Scripts" / "python.exe"
-_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
+# 子进程隔离用的 venv 解析（现行约定，详见仓库 README「测试环境变量」小节）：
+#   1. 环境变量 CRS_PYTHON / PC_PYTHON（CI 与换机覆盖用）
+#   2. 项目内 venv：construct-rs/.venv（construct-rs 扩展）与
+#      construct-rs/.venv-pc（原版参考 construct==2.10.70）
+#   3. sys.executable（最后手段，仅当该解释器已装对应包时可用）
+
+
+def _venv_python(venv_name: str) -> Path | None:
+    """返回项目内 venv 的 python 可执行文件路径（兼容 Windows / POSIX 布局）。
+
+    venv_name 为 construct-rs/ 下的 venv 目录名（如 ``.venv``）；目录不存在
+    或未找到 python 可执行文件时返回 None（由调用方走后续 fallback）。
+    """
+    venv_dir = _PROJECT_ROOT / venv_name
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = venv_dir / rel
+        if candidate.exists():
+            return candidate
+    return None
 
 
 # ===== session 级 venv / 路径 fixtures =====
@@ -66,14 +75,15 @@ def rs_python() -> str:
 
     解析顺序：
       1. 环境变量 CRS_PYTHON（CI 覆盖用）
-      2. 默认 venv 路径 _DEFAULT_RS_PYTHON
+      2. 项目内 venv construct-rs/.venv
       3. fallback sys.executable（最后手段，可能两个 construct 冲突）
     """
     env = os.environ.get("CRS_PYTHON")
     if env and Path(env).exists():
         return env
-    if _DEFAULT_RS_PYTHON.exists():
-        return str(_DEFAULT_RS_PYTHON)
+    default = _venv_python(".venv")
+    if default is not None:
+        return str(default)
     return sys.executable
 
 
@@ -81,13 +91,14 @@ def rs_python() -> str:
 def py_python() -> str:
     """PC venv 的 python.exe（含 Python construct 2.10.70）。
 
-    解析顺序同 rs_python，环境变量名 PC_PYTHON。
+    解析顺序同 rs_python，环境变量名 PC_PYTHON，项目内 venv 为 .venv-pc。
     """
     env = os.environ.get("PC_PYTHON")
     if env and Path(env).exists():
         return env
-    if _DEFAULT_PY_PYTHON.exists():
-        return str(_DEFAULT_PY_PYTHON)
+    default = _venv_python(".venv-pc")
+    if default is not None:
+        return str(default)
     return sys.executable
 
 

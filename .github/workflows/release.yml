@@ -1,0 +1,202 @@
+name: Release to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  # 纯 Python/Rust 源码分发包（一条即可）
+  sdist:
+    name: Build sdist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: construct-rs
+
+      - name: Build sdist
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: construct-rs
+          command: build
+          args: --release --sdist --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: construct-rs/dist/*.tar.gz
+
+  # 多平台 wheel 矩阵（非 abi3：每个 Python 版本独立 wheel）
+  wheels:
+    name: Wheel ${{ matrix.platform }} / py${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux x86_64 / aarch64：manylinux 容器交叉构建
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.8"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.9"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.10"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.11"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.12"
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            target: x86_64-unknown-linux-gnu
+            python-version: "3.13"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.8"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.9"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.10"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.11"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.12"
+          - os: ubuntu-latest
+            platform: linux-aarch64
+            target: aarch64-unknown-linux-gnu
+            python-version: "3.13"
+          # macOS：x86_64 runner 交叉编译双架构
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.8"
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.9"
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.10"
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.11"
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.12"
+          - os: macos-13
+            platform: macos-x86_64
+            target: x86_64-apple-darwin
+            python-version: "3.13"
+          - os: macos-13
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            python-version: "3.9"
+          - os: macos-13
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            python-version: "3.10"
+          - os: macos-13
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            python-version: "3.11"
+          - os: macos-13
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            python-version: "3.12"
+          - os: macos-13
+            platform: macos-aarch64
+            target: aarch64-apple-darwin
+            python-version: "3.13"
+          # Windows x64
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.8"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.9"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.10"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.11"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.12"
+          - os: windows-latest
+            platform: windows-x86_64
+            target: x86_64-pc-windows-msvc
+            python-version: "3.13"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheel
+        uses: PyO3/maturin-action@v1
+        with:
+          working-directory: construct-rs
+          target: ${{ matrix.target }}
+          args: --release --out dist --interpreter python${{ matrix.python-version }}
+          sccache: true
+          manylinux: auto
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.platform }}-py${{ matrix.python-version }}
+          path: construct-rs/dist/*.whl
+
+  publish:
+    name: Publish to PyPI
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      # PyPI Trusted Publishing（OIDC）——无需任何 API token 入库
+      id-token: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          print-hash: true

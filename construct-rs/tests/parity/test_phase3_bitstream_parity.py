@@ -20,6 +20,7 @@ BitsSwapped+ByteSwapped（P8-P10）/ BitPadding（P11）/ swapped（P12）/ 复�
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -40,13 +41,25 @@ from _helpers.parity import (
 # ---------------------------------------------------------------------------
 # venv 解析（standalone 模式用；pytest 模式下用 conftest.py 的 venv_pair fixture）
 # ---------------------------------------------------------------------------
-_VENV_ROOT = Path(r"<opencode-temp>")
-_RS_PYTHON_EXE = str(_VENV_ROOT / "crs_venv_new" / "Scripts" / "python.exe")
-_PY_PYTHON_EXE = str(_VENV_ROOT / "crs_venv_py_new" / "Scripts" / "python.exe")
-if not Path(_RS_PYTHON_EXE).exists():
-    _RS_PYTHON_EXE = sys.executable
-if not Path(_PY_PYTHON_EXE).exists():
-    _PY_PYTHON_EXE = sys.executable
+# 解析顺序与 conftest.py 一致（详见 README「测试环境变量」）：
+#   环境变量 CRS_PYTHON / PC_PYTHON > 项目内 .venv / .venv-pc > sys.executable
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent  # construct-rs/
+
+
+def _resolve_venv_python(env_var: str, venv_name: str) -> str:
+    """按 fallback 链解析子进程 python.exe（兼容 Windows / POSIX venv 布局）。"""
+    env = os.environ.get(env_var)
+    if env and Path(env).exists():
+        return env
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = _PROJECT_ROOT / venv_name / rel
+        if candidate.exists():
+            return str(candidate)
+    return sys.executable
+
+
+_RS_PYTHON_EXE = _resolve_venv_python("CRS_PYTHON", ".venv")
+_PY_PYTHON_EXE = _resolve_venv_python("PC_PYTHON", ".venv-pc")
 
 _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 

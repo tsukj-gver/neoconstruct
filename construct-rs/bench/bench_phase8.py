@@ -56,23 +56,23 @@ from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
 # ---------------------------------------------------------------------------
-# venv 解析（与 bench_phase6/7.py 一致）
+# venv 解析（与 bench_phase6/7.py 一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
 # ---------------------------------------------------------------------------
-# 8.ENV（2026-08-06）：切换至 Python 3.13 非 abi3 venv（pyo3 0.22 原生支持 3.13，
-# 不再依赖 PYO3_USE_ABI3_FORWARD_COMPATIBILITY）。旧 crs_venv_new / crs_venv_py_new
-# （Python 3.14 + abi3）保留为 legacy 基线对照。
-_VENV_ROOT = Path(r"<opencode-temp>")
-_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_313" / "Scripts" / "python.exe"
-_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
+_PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
+_DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
+_DEFAULT_PY_PYTHON = _PROJECT_ROOT / ".venv-pc"  # 原版参考 venv（construct==2.10.70）
 _CRS_PYTHON_DIR = str(_BENCH_DIR.parent / "python")
 
 
-def _resolve_venv(env_var, default_path):
+def _resolve_venv(env_var, venv_dir):
+    """三级解析：环境变量 → 项目内 venv → sys.executable（与 conftest.py 一致）。"""
     env = os.environ.get(env_var)
     if env and Path(env).exists():
         return env
-    if Path(default_path).exists():
-        return str(default_path)
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = Path(venv_dir) / rel
+        if candidate.exists():
+            return str(candidate)
     return sys.executable
 
 

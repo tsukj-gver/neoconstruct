@@ -11,8 +11,8 @@ Methodology (L-09 + design §4.2):
      (design §3.3 + ADR-023 §预测; theoretical ~165-180ns + margin)
 
 Reuses `bench_phase8_ab_retest.py` infrastructure. Environment variables:
-  - CRS_PYTHON: rs venv (default crs_venv_313)
-  - PC_PYTHON:  py venv (default crs_venv_py_313)
+  - CRS_PYTHON: rs venv (default: project-local .venv)
+  - PC_PYTHON:  py venv (default: project-local .venv-pc)
 
 Usage::
 
@@ -38,20 +38,23 @@ from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
 # ---------------------------------------------------------------------------
-# venv resolution: default to 3.13 venv (8.ENV §1.3)
+# venv resolution (env var > project .venv/.venv-pc > sys.executable, same as conftest.py)
 # ---------------------------------------------------------------------------
-_VENV_ROOT = Path(r"<opencode-temp>")
-_DEFAULT_RS_PYTHON = _VENV_ROOT / "crs_venv_313" / "Scripts" / "python.exe"
-_DEFAULT_PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
+_PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
+_DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
+_DEFAULT_PY_PYTHON = _PROJECT_ROOT / ".venv-pc"  # 原版参考 venv（construct==2.10.70）
 _CRS_PYTHON_DIR = str(_BENCH_DIR.parent / "python")
 
 
-def _resolve_venv(env_var, default_path):
+def _resolve_venv(env_var, venv_dir):
+    """三级解析：环境变量 → 项目内 venv → sys.executable（与 conftest.py 一致）。"""
     env = os.environ.get(env_var)
     if env and Path(env).exists():
         return env
-    if Path(default_path).exists():
-        return str(default_path)
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = Path(venv_dir) / rel
+        if candidate.exists():
+            return str(candidate)
     return sys.executable
 
 

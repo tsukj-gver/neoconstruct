@@ -8,8 +8,8 @@
     "rounds": 5
   },
   "env": {
-    "rs_python": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_313\\Scripts\\python.exe",
-    "py_python": "C:\\Users\\<dev-user>\\AppData\\Local\\Temp\\opencode\\crs_venv_py_313\\Scripts\\python.exe"
+    "rs_python": "<opencode-temp>\\crs_venv_313\\Scripts\\python.exe",
+    "py_python": "<opencode-temp>\\crs_venv_py_313\\Scripts\\python.exe"
   },
   "criteria": {
     "tm1_failure_ns": 200,

@@ -20,13 +20,28 @@ from pathlib import Path
 # 路径常量（与 tests/conftest.py 保持一致）
 # ---------------------------------------------------------------------------
 
-_TEST_DIR = Path(__file__).resolve().parent
-_PROJECT_ROOT = _TEST_DIR.parent  # construct-rs/
-_CRS_PYTHON_DIR = _PROJECT_ROOT / "python"
+_TEST_DIR = Path(__file__).resolve().parent          # construct-rs/tests/system
+_PROJECT_ROOT = _TEST_DIR.parent.parent              # construct-rs/
+_CRS_PYTHON_DIR = _PROJECT_ROOT / "python"           # construct-rs/python/
 
-_VENV_ROOT = Path(r"<opencode-temp>")
-_RS_PYTHON = _VENV_ROOT / "crs_venv_313" / "Scripts" / "python.exe"
-_PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
+
+def _venv_python(venv_name: str) -> Path | None:
+    """返回项目内 venv 的 python 可执行文件路径（兼容 Windows / POSIX 布局）。
+
+    venv_name 为 construct-rs/ 下的 venv 目录名；未找到时返回 None
+    （由调用方走后续 fallback）。
+    """
+    venv_dir = _PROJECT_ROOT / venv_name
+    for rel in ("Scripts/python.exe", "bin/python"):
+        candidate = venv_dir / rel
+        if candidate.exists():
+            return candidate
+    return None
+
+
+# 项目内 venv（与 tests/conftest.py 同一约定，详见 README「测试环境变量」）
+_RS_PYTHON = _venv_python(".venv")     # construct-rs 扩展
+_PY_PYTHON = _venv_python(".venv-pc")  # 原版参考 construct==2.10.70
 
 
 def get_rs_python() -> str:
@@ -34,13 +49,13 @@ def get_rs_python() -> str:
 
     解析顺序（与 tests/conftest.py 的 ``rs_python`` fixture 一致，P8 修复）：
       1. 环境变量 CRS_PYTHON（路径存在时优先）
-      2. 默认 venv 路径 _RS_PYTHON（原开发机硬编码 fallback）
+      2. 项目内 venv construct-rs/.venv
       3. sys.executable（最后手段，可能两个 construct 冲突）
     """
     env = os.environ.get("CRS_PYTHON")
     if env and Path(env).exists():
         return env
-    if _RS_PYTHON.exists():
+    if _RS_PYTHON is not None:
         return str(_RS_PYTHON)
     return sys.executable
 
@@ -48,12 +63,12 @@ def get_rs_python() -> str:
 def get_py_python() -> str:
     """PC venv python.exe（含 Python construct 2.10.70）。
 
-    解析顺序同 ``get_rs_python``，环境变量名 PC_PYTHON（P8 修复）。
+    解析顺序同 ``get_rs_python``，环境变量名 PC_PYTHON，项目内 venv 为 .venv-pc。
     """
     env = os.environ.get("PC_PYTHON")
     if env and Path(env).exists():
         return env
-    if _PY_PYTHON.exists():
+    if _PY_PYTHON is not None:
         return str(_PY_PYTHON)
     return sys.executable
 

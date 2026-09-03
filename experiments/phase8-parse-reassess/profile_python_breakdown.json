@@ -1,6 +1,6 @@
-{
+﻿﻿{
   "python_version": "3.14.2",
-  "construct_path": "C:\\Others\\Projects\\<legacy-project>\\construct_rust\\construct\\construct\\__init__.py",
+  "construct_path": "<legacy-repo>\\construct\\construct\\__init__.py",
   "number": 50000,
   "repeat": 7,
   "results": [

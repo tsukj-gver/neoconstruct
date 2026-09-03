@@ -5,11 +5,14 @@ build-backend = "maturin"
 [project]
 name = "construct-rs"
 description = "High-performance binary parsing/building for Python, powered by Rust"
-requires-python = ">=3.7"
+readme = "README.md"
+requires-python = ">=3.8"
 license = "MIT"
+authors = [{ name = "construct-rs contributors" }]
+maintainers = [{ name = "construct-rs contributors" }]
 # 版本号从 Cargo.toml 的 [package] version 读取（maturin 默认行为）。
 dynamic = ["version"]
-keywords = ["binary", "parsing", "construct", "rust"]
+keywords = ["binary", "parsing", "construct", "rust", "protocol", "dataclass"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -17,6 +20,12 @@ classifiers = [
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Rust",
     "Topic :: Software Development :: Libraries :: Python Modules",
@@ -24,10 +33,8 @@ classifiers = [
 
 [tool.maturin]
 # Rust 扩展模块编译到 construct 包内（用户 import construct 而非 construct_rust）。
-# 见 docs/架构设计.md §D.3。
 module-name = "construct._construct_rust"
 # Python 包源码目录：construct-rs/python/construct/。
-# 这避免与工作区根目录的 construct/（Python 原版参考仓库）冲突。
 python-source = "python"
 # 显式启用 extension-module feature，避免在 cargo build/test 时
 # 因链接 Python 解释器导致测试编译失败。
