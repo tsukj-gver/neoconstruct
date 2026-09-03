@@ -7,9 +7,11 @@ Rust 侧通过 type name 识别 Descriptor，构建对应的 Node。
 
 **If macro**：Python macro（不新增 Rust Node），等价 IfThenElse(cond, sub, Pass)。
 
-PM 决策 1（Switch keyfunc = A+B 混合）：keyfunc 接受 int 常量或单字段引用
-（_FieldDescriptor / _ExprRef），编译为 ExprProgram 运行时零 FFI 求值。
-复杂表达式（x + 1，其中 x 是字段名）编译期拒绝，引导用户用 Computed 预计算。
+PM 决策 1（Switch keyfunc = A+B 混合，v0.1.1 按 P10 实测行为订正）：keyfunc
+接受 int 常量或字段名表达式（``_FieldDescriptor`` / ``_ExprRef``，含 ``x + 1``
+等算术组合），编译为 ExprProgram 运行时零 FFI 求值（复杂 int 表达式按功能
+保留）。v0.1.1 起 Switch/IfThenElse 可嵌套于包装器内（Prefixed 等），
+表达式引用同 Struct 前序字段。
 
 PM 决策 2（引入 ExplicitError 变体）：Select / Peek 不吞 ExplicitError，直接传播。
 """
@@ -34,6 +36,8 @@ class IfThenElseDescriptor:
     双分支条件：求值 condfunc，根据结果选择 then/else 子树委托。
 
     对应 Python construct 的 ``IfThenElse``（core.py L3944）。
+
+    v0.1.1 起可嵌套于包装器内（Prefixed 等），表达式引用同 Struct 前序字段。
 
     :param condfunc: 条件。``True`` / ``False`` 常量，或 FieldRef/ExprRef 表达式
                      （如 ``x > 0``）。
@@ -83,6 +87,8 @@ def IfThenElse(condfunc, thensubcon, elsesubcon):
 
         P.parse(b"\\x01\\xff")        # x=1 > 0, then 分支 → P(x=1, v=0xFF)
         P.parse(b"\\x00\\xff\\x01")   # x=0, else 分支 → P(x=0, v=0xFF01)
+
+    v0.1.1 起可嵌套于包装器内（Prefixed 等），表达式引用同 Struct 前序字段。
 
     Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
 
@@ -142,12 +148,18 @@ class SwitchDescriptor:
 
     对应 Python construct 的 ``Switch``（core.py L4002）。
 
-    PM 决策 1（keyfunc = A+B 混合）：
+    PM 决策 1（keyfunc = A+B 混合，v0.1.1 按 P10 实测行为订正）：
     - int/bool 常量 → ``SwitchKey::ConstInt``
-    - 单字段 int 表达式（字段名 ``n`` 直接引用）→ ``SwitchKey::IntExpr``（零 FFI）
-    - 复杂表达式（如 ``x + 1``，x 是字段名）→ 编译期拒绝（引导用户用 Computed 预计算）
+    - 字段名 int 表达式（``n`` 直接引用，或 ``x + 1`` 等算术组合）→
+      ``SwitchKey::IntExpr``（零 FFI，复杂 int 表达式同样编译为 IntExpr，
+      按功能保留）
+    - Python callable/lambda → 构造期拒绝
 
-    :param keyfunc: key 函数。int/bool 常量或单字段引用（``_FieldDescriptor``）。
+    v0.1.1 起可嵌套于包装器内（Prefixed/PrefixedArray/Bitwise/Hex/Union/
+    Select 等），表达式引用同 Struct 前序字段。
+
+    :param keyfunc: key 函数。int/bool 常量或字段名表达式（``_FieldDescriptor``
+                    / ``_ExprRef``）。
     :param cases: dict，``{key: subcon}``。key 是 int（常量匹配）。
     :param default: 默认 subcon。``None`` 时设为 ``Pass``（对齐 Python L4032）。
 
@@ -171,8 +183,7 @@ class SwitchDescriptor:
                 "Switch keyfunc must be int/bool constant or Phase 2 expression "
                 "(_FieldDescriptor / _ExprRef), not a Python callable. "
                 "Example: Switch(n, {1: Byte, 2: Short}) where 'n' is a field "
-                "in the same Struct. For complex keyfuncs like (x + 1), use "
-                "Computed to pre-compute, then Switch(key, ...)."
+                "in the same Struct; arithmetic like (x + 1) is also supported."
             )
         self.keyfunc = keyfunc
         self.cases = dict(cases) if cases else {}
@@ -218,12 +229,19 @@ def Switch(keyfunc, cases, default=None):
 
         P.parse(b"\\xff\\x01")  # n=255 未命中, default=Byte → P(n=255, v=1)
 
+    v0.1.1 起可嵌套于包装器内（Prefixed 等），表达式引用同 Struct 前序字段::
+
+        @dataclass
+        class P(StructMixin):
+            typ: int = field(Int8ub)
+            br: Any = field(Prefixed(Int8ub, Switch(typ, {1: Int8ub, 2: Bytes(2)})))
+
     Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
 
         # 原版：d = Switch(this.n, {1: Int8ub, 2: Int16ub}); d.parse(data)
         # construct-rs：在 StructMixin 内用 ``field(Switch(n, ...))``
 
-    :param keyfunc: key 函数（int/bool 常量或 FieldRef/ExprRef）。
+    :param keyfunc: key 函数（int/bool 常量或 FieldRef/ExprRef 表达式）。
     :param cases: dict，{key: subcon}。
     :param default: 默认 subcon（None 时设为 Pass）。
     :return: ``SwitchDescriptor`` 实例。

@@ -674,7 +674,7 @@ class PrefixedArrayDescriptor:
     construct-rs 用独立 Node 实现（不依赖 FocusedSeq/Rebuild）。
 
     ``_expr_params`` 协议返回空 dict：PrefixedArray 自身无表达式参数
-    （countfield 与 subcon 由递归处理，P3.1 限制下两者均不支持含表达式的子描述符）。
+    （countfield 与 subcon 内的表达式由编译期递归收集，v0.1.1 起支持）。
 
     :param countfield: 计数字段（描述符），常见 ``Int8ub`` / ``Int16ub`` / ``VarInt``。
                        build 时取 list 长度作为 countfield 的输入值。
@@ -720,10 +720,9 @@ def PrefixedArray(countfield, subcon):
     build 行为：
     - 取 list 长度，先 build ``countfield`` 写入长度
     - 遍历 list build ``subcon``
-
     限制（Phase 4）：
+
     - sizeof 永远返回 ``SizeofError``（元素数量运行时未知，§4.6.4）
-    - countfield 与 subcon 均不支持含表达式的子描述符（与 ``Array`` / ``Bitwise`` 同限制）
     - count 超出 countfield 表示范围时由 countfield 节点自行报错（PA-5）
 
     :param countfield: 计数字段（描述符）。
@@ -1792,8 +1791,10 @@ class RebuildDescriptor:
     - build：忽略传入 obj，求值 func 表达式 → subcon.build(value)
     - sizeof：subcon.sizeof
 
-    必须作为 RO 字段使用（``rfield(Rebuild(...))``）。若用 ``field(...)`` (rw)
-    或 ``wfield(...)`` (wo)，编译期拒绝。
+    v0.1.1 起 RW/WO 字段可用：``field(Rebuild(...))`` 获隐式
+    ``default=None``（+ ``kw_only=True``），实例化不强制实参，build 时传入的
+    实例值被忽略（用表达式值）；``rfield(Rebuild(...))`` 行为不变（RO，
+    ``init=False``，parse 后有值）。
 
     ``_expr_params`` 协议返回 ``{"func": <expr>}``：编译期将 expr 翻译为 ExprOp
     指令列表，存入 expr_programs 的 "func" 键（与 ComputedDescriptor 同模式）。
@@ -1801,9 +1802,6 @@ class RebuildDescriptor:
     限制（设计 §5.3 RB-callable）：func 必须是 Phase 2 表达式
     （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
     （与 ADR-014 RepeatUntil v5 同脉络）。
-
-    ``_field_kind`` 属性返回 "ro"，由 _mixin._apply_dataclass_field_config 识别，
-    决定 dataclass 字段配置（init=False，parse 时由 force_setattr 覆盖）。
     """
 
     __slots__ = ("subcon", "func")
@@ -1826,15 +1824,6 @@ class RebuildDescriptor:
         """
         return {"func": self.func}
 
-    @property
-    def _field_kind(self):
-        """字段种类协议（ADR-004）。
-
-        返回 "ro"：Rebuild 必须作为 RO 字段使用（值不来自用户输入）。
-        与 Computed/Tell 同类。
-        """
-        return "ro"
-
     def __repr__(self):
         return "Rebuild({!r}, {!r})".format(self.subcon, self.func)
 
@@ -1842,7 +1831,7 @@ class RebuildDescriptor:
 def Rebuild(subcon, func):
     """创建一个 Rebuild 描述符。
 
-    使用方式（必须作为 RO 字段，用 ``rfield`` 包装；func 是 Phase 2 表达式）::
+    使用方式（func 是 Phase 2 表达式；RO 用 ``rfield``，v0.1.1 起 RW 也可用）::
 
         @dataclass
         class P(StructMixin):
@@ -1851,6 +1840,10 @@ def Rebuild(subcon, func):
 
         P.parse(b"\\x03\\x04")  # → P(x=3, y=4)        # parse 转发 subcon
         P(x=5).build()          # → b"\\x05\\x06"      # build 时 y 由 x+1 计算
+
+    v0.1.1 起 ``field(Rebuild(...))``（RW）可用：隐式 ``default=None`` +
+    ``kw_only=True``，``PR(n=3)`` 可无参实例化，build 时传入值被忽略
+    （用表达式值）。
 
     Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
 
@@ -1861,7 +1854,6 @@ def Rebuild(subcon, func):
 
     - **不接收 Python callable / lambda**（同 RepeatUntil v5）。如传入 callable，
       编译期无法转换为 ExprOp，会报 CompilationError。
-    - 必须作为 RO 字段使用（``rfield(Rebuild(...))``）。
 
     :param subcon: 被包装的子构造器。
     :param func: build 时求值的表达式（FieldRef/ExprRef/int 组合）。
@@ -2099,8 +2091,7 @@ class PrefixedDescriptor:
     写 data 到主流。
 
     ``_expr_params`` 协议返回空 dict：Prefixed 自身无表达式参数
-    （lengthfield 与 subcon 由递归处理，与 PrefixedArrayDescriptor 同限制：
-    两者均不支持含表达式的子描述符）。
+    （lengthfield 与 subcon 内的表达式由编译期递归收集，v0.1.1 起支持）。
 
     与 ``PrefixedArray`` 的区别：PrefixedArray 的 lengthfield 是**元素计数**，
     parse 循环 N 次 inner.parse；Prefixed 的 lengthfield 是**字节计数**，
@@ -2164,7 +2155,6 @@ def Prefixed(lengthfield, subcon, includelength=False):
     限制：
 
     - sizeof = lengthfield.sizeof + subcon.sizeof（subcon 必须 static size）
-    - lengthfield 与 subcon 均不支持含表达式的子描述符（与 ``Array`` 同限制）
 
     :param lengthfield: 长度字段（描述符）。
     :param subcon: 子构造器。

@@ -7,7 +7,8 @@
 - ``_OP_TO_EXPROP``：operator 函数 → ExprOp 名称映射完整性
 - ``_check_forward_reference``：前向引用检测
 - ``_check_wo_reference``：WO 字段引用检测
-- ``_extract_and_compile_exprs``：``_expr_params`` 协议提取
+- ``_extract_and_compile_exprs``：``_expr_params`` 协议提取（v0.1.1 起：
+  递归嵌套收集 + 槽位遍历 + 同名冲突检测）
 - ``_compile_expressions``：端到端编译
 - ``_expr_programs_to_list``：格式转换
 - 错误路径：float / bool / 未知类型 / 未知 operator
@@ -63,6 +64,39 @@ class _MockExprParamsDescriptor:
 
     def __repr__(self):
         return "_MockExprParamsDescriptor({!r})".format(self._params)
+
+
+class _MockSubconWrapperDescriptor:
+    """模拟仅含 ``subcon`` 槽位的包装器描述符（v0.1.1 P1 递归收集测试）。"""
+
+    def __init__(self, subcon):
+        self.subcon = subcon
+
+    def __repr__(self):
+        return "_MockSubconWrapperDescriptor({!r})".format(self.subcon)
+
+
+class _MockSubconsWrapperDescriptor:
+    """模拟仅含 ``subcons`` 列表槽位的容器描述符（v0.1.1 P1 递归收集测试）。"""
+
+    def __init__(self, subcons):
+        self.subcons = list(subcons)
+
+    def __repr__(self):
+        return "_MockSubconsWrapperDescriptor({!r})".format(self.subcons)
+
+
+class _MockSwitchLikeDescriptor:
+    """模拟 Switch 形态：``cases`` dict + ``default`` 槽位（v0.1.1 P1 测试）。"""
+
+    def __init__(self, cases, default):
+        self.cases = cases
+        self.default = default
+
+    def __repr__(self):
+        return "_MockSwitchLikeDescriptor({!r}, {!r})".format(
+            self.cases, self.default
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -446,13 +480,18 @@ class TestCheckWoReference:
 
 
 class TestExtractAndCompileExprs:
-    """``_extract_and_compile_exprs`` 从描述符提取表达式参数。"""
+    """``_extract_and_compile_exprs`` 从描述符提取表达式参数。
+
+    v0.1.1 起返回 ``(result_dict, repeat_untils)`` 元组（设计 v0.1.1-修复
+    设计.md §1/§2）；无 RepeatUntil 的用例 repeat_untils 恒为 ``[]``。
+    """
 
     def test_descriptor_without_expr_params_returns_empty(self):
         """无 ``_expr_params`` 属性的描述符 → 空 dict。"""
         # Int8ub 是 FormatFieldDescriptor，没有 _expr_params
-        result = _extract_and_compile_exprs(Int8ub, {}, "test")
+        result, repeat_untils = _extract_and_compile_exprs(Int8ub, {}, "test")
         assert result == {}
+        assert repeat_untils == []
 
     def test_descriptor_with_int_constant_param_compiles_as_const(self):
         """``_expr_params`` 含 int 常量 → 编译为单条 Const ExprOp（DF1 修复）。
@@ -461,19 +500,19 @@ class TestExtractAndCompileExprs:
         DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram。
         """
         desc = _MockExprParamsDescriptor({"length": 4})
-        result = _extract_and_compile_exprs(desc, {}, "test")
+        result, _ = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {"length": [("const", 4)]}
 
     def test_descriptor_with_int_constant_zero(self):
         """int 常量 0 编译为 ``[("const", 0)]``（DF1 常见用例 ``Default(Byte, 0)``）。"""
         desc = _MockExprParamsDescriptor({"value": 0})
-        result = _extract_and_compile_exprs(desc, {}, "test")
+        result, _ = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {"value": [("const", 0)]}
 
     def test_descriptor_with_negative_int_constant(self):
         """负 int 常量编译为 ``[("const", N)]``。"""
         desc = _MockExprParamsDescriptor({"value": -1})
-        result = _extract_and_compile_exprs(desc, {}, "test")
+        result, _ = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {"value": [("const", -1)]}
 
     def test_descriptor_with_non_int_constant_returns_empty(self):
@@ -482,7 +521,7 @@ class TestExtractAndCompileExprs:
         与 int 不同，bytes/str 常量由 Rust 侧直接从描述符读取（如 ConstDescriptor.value）。
         """
         desc = _MockExprParamsDescriptor({"value": b"abc"})
-        result = _extract_and_compile_exprs(desc, {}, "test")
+        result, _ = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {}
 
     def test_descriptor_with_field_ref_param(self):
@@ -490,7 +529,7 @@ class TestExtractAndCompileExprs:
         a = field(Int8ub)
         idx_map = {id(a): 0}
         desc = _MockExprParamsDescriptor({"length": a})
-        result = _extract_and_compile_exprs(desc, idx_map, "test")
+        result, _ = _extract_and_compile_exprs(desc, idx_map, "test")
         assert result == {"length": [("getint", 0)]}
 
     def test_descriptor_with_expr_ref_param(self):
@@ -499,7 +538,7 @@ class TestExtractAndCompileExprs:
         b = field(Int8ub)
         idx_map = {id(a): 0, id(b): 1}
         desc = _MockExprParamsDescriptor({"length": a + b})
-        result = _extract_and_compile_exprs(desc, idx_map, "test")
+        result, _ = _extract_and_compile_exprs(desc, idx_map, "test")
         assert result == {"length": [("getint", 0), ("getint", 1), ("add",)]}
 
     def test_descriptor_with_mixed_params(self):
@@ -510,7 +549,7 @@ class TestExtractAndCompileExprs:
             "length": a,
             "padding": 4,  # int 常量 → Const ExprOp
         })
-        result = _extract_and_compile_exprs(desc, idx_map, "test")
+        result, _ = _extract_and_compile_exprs(desc, idx_map, "test")
         assert result == {
             "length": [("getint", 0)],
             "padding": [("const", 4)],
@@ -525,7 +564,7 @@ class TestExtractAndCompileExprs:
             "length": a,
             "condfunc": a > b,
         })
-        result = _extract_and_compile_exprs(desc, idx_map, "test")
+        result, _ = _extract_and_compile_exprs(desc, idx_map, "test")
         assert "length" in result
         assert "condfunc" in result
         assert result["length"] == [("getint", 0)]
@@ -534,7 +573,116 @@ class TestExtractAndCompileExprs:
     def test_empty_expr_params_dict(self):
         """``_expr_params`` 为空 dict → 返回空 dict。"""
         desc = _MockExprParamsDescriptor({})
-        result = _extract_and_compile_exprs(desc, {}, "test")
+        result, _ = _extract_and_compile_exprs(desc, {}, "test")
+        assert result == {}
+
+
+# ---------------------------------------------------------------------------
+# v0.1.1 P1：嵌套表达式递归收集（槽位名协议 + 扁平键合并）
+# ---------------------------------------------------------------------------
+
+
+class TestNestedExprCollection:
+    """v0.1.1 P1：``_extract_and_compile_exprs`` 递归遍历嵌套描述符。
+
+    设计依据：``docs/design/基础设施/v0.1.1-修复设计.md`` §1（方案 C：扁平键 +
+    冲突检测）、§2（槽位名协议：9 槽位 + 值守卫 + 按字段防环）。
+    """
+
+    def test_nested_expr_in_subcon_slot_collected(self):
+        """包装器 ``.subcon`` 内的表达式参数被收集（BUG-1 机制本体）。"""
+        a = field(Int8ub)
+        idx_map = {id(a): 0}
+        inner = _MockExprParamsDescriptor({"key": a})
+        wrapper = _MockSubconWrapperDescriptor(inner)
+        result, repeat_untils = _extract_and_compile_exprs(wrapper, idx_map, "w")
+        assert result == {"key": [("getint", 0)]}
+        assert repeat_untils == []
+
+    def test_nested_expr_in_cases_and_default_slots(self):
+        """Switch 形态：``cases`` dict values 与 ``default`` 槽位均被遍历。"""
+        a = field(Int8ub)
+        idx_map = {id(a): 0}
+        switch_like = _MockSwitchLikeDescriptor(
+            {1: _MockExprParamsDescriptor({"length": a})},
+            _MockExprParamsDescriptor({"func": a}),
+        )
+        result, _ = _extract_and_compile_exprs(switch_like, idx_map, "w")
+        assert result == {
+            "length": [("getint", 0)],
+            "func": [("getint", 0)],
+        }
+
+    def test_deeply_nested_wrapper_chain(self):
+        """多层包装器链（wrapper(wrapper(wrapper(inner)))）逐层穿透。"""
+        a = field(Int8ub)
+        idx_map = {id(a): 0}
+        inner = _MockExprParamsDescriptor({"key": a})
+        wrapper = _MockSubconWrapperDescriptor(
+            _MockSubconWrapperDescriptor(_MockSubconWrapperDescriptor(inner))
+        )
+        result, _ = _extract_and_compile_exprs(wrapper, idx_map, "w")
+        assert result == {"key": [("getint", 0)]}
+
+    def test_same_param_same_ops_deduped(self):
+        """diamond：两个同名**同 ops** 参数 → 去重合并，不报错。"""
+        a = field(Int8ub)
+        idx_map = {id(a): 0}
+        left = _MockExprParamsDescriptor({"key": a})
+        right = _MockExprParamsDescriptor({"key": a})
+        container = _MockSubconsWrapperDescriptor([left, right])
+        result, _ = _extract_and_compile_exprs(container, idx_map, "w")
+        assert result == {"key": [("getint", 0)]}
+
+    def test_same_param_different_ops_raises(self):
+        """冲突：两个同名**不同 ops** 参数 → CompilationError（诚实限制）。"""
+        a = field(Int8ub)
+        b = field(Int8ub)
+        idx_map = {id(a): 0, id(b): 1}
+        left = _MockExprParamsDescriptor({"key": a})
+        right = _MockExprParamsDescriptor({"key": b})
+        container = _MockSubconsWrapperDescriptor([left, right])
+        with pytest.raises(CompilationError) as exc_info:
+            _extract_and_compile_exprs(container, idx_map, "w")
+        assert "同名表达式参数" in str(exc_info.value)
+        assert "'key'" in str(exc_info.value)
+
+    def test_leaf_values_in_slots_skipped(self):
+        """槽位值是常量叶子（int/str/bytes/None/list-of-int）→ 安全跳过。"""
+        desc = _MockSwitchLikeDescriptor(
+            {1: 2, 3: "x"},  # cases 值是常量
+            b"\x00",  # default 是 bytes
+        )
+        result, _ = _extract_and_compile_exprs(desc, {}, "w")
+        assert result == {}
+
+    def test_field_descriptor_in_slot_not_traversed(self):
+        """槽位值是 ``_FieldDescriptor`` → 不作为子描述符遍历（守卫）。"""
+        a = field(Int8ub)
+        # wrapper.default 碰巧是 _FieldDescriptor（防御性场景）：
+        # 不收集、不遍历其 .subcon/.default 槽位、不崩溃。
+        wrapper = _MockSwitchLikeDescriptor({}, a)
+        result, _ = _extract_and_compile_exprs(wrapper, {id(a): 0}, "w")
+        assert result == {}
+
+    def test_class_object_not_traversed(self):
+        """嵌套 StructMixin 子类（类对象）→ 不遍历（P4 域，ctx 隔离语义）。"""
+
+        class Inner:
+            pass
+
+        result, repeat_untils = _extract_and_compile_exprs(Inner, {}, "w")
+        assert result == {}
+        assert repeat_untils == []
+
+    def test_cyclic_descriptor_guard(self):
+        """自引用描述符 → 按字段 seen 集合防环，不无限递归。"""
+
+        class _Cyclic:
+            def __init__(self):
+                self.subcon = self  # 自引用
+
+        result, _ = _extract_and_compile_exprs(_Cyclic(), {}, "w")
         assert result == {}
 
 

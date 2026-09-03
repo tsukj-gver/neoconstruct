@@ -2214,10 +2214,15 @@ fn build_switch_node(
         let field_exprs_dict = field_exprs
             .ok_or_else(|| ConstructError::Compilation {
                 message: format!(
-                    "Switch keyfunc is not a constant but no expression program was \
-                     provided (field index {}). For complex expressions like \
-                     'this.x + 1', use Computed(this.x + 1) to pre-compute, then \
-                     Switch(this.key, ...).",
+                    "Switch keyfunc is not a constant and no expression program was \
+                     collected for this field (field index {}). Nested Switch inside \
+                     wrappers (Prefixed / PrefixedArray / Bitwise / Hex / Union / \
+                     Select / If / ...) is supported since v0.1.1. Supported keyfunc: \
+                     int/bool constant, or an expression over field names declared \
+                     earlier in the same Struct, e.g. Switch(typ, {{...}}) or \
+                     Switch(typ + 1, {{...}}). Python callables/lambdas are not \
+                     supported. If your case matches the supported forms, please \
+                     report this as a bug.",
                     field_index
                 ),
             })?
@@ -2232,14 +2237,15 @@ fn build_switch_node(
             let ops = parse_expr_ops_from_py(&key_ops)?;
             SwitchKey::IntExpr(ExprProgram::new(ops))
         } else {
-            // 都无 → 复杂表达式拒绝
+            // 都无 → keyfunc 类型不受支持
             return Err(ConstructError::Compilation {
                 message: format!(
-                    "Switch keyfunc is a complex expression that cannot be compiled to \
-                     IntExpr or FieldRef (field index {}). construct-rs only supports \
-                     single field references (this.n) or int constants as keyfunc. \
-                     For complex expressions like 'this.x + 1', use Computed(this.x + 1) \
-                     to pre-compute, then Switch(this.key, ...).",
+                    "Switch keyfunc could not be compiled (field index {}): expected \
+                     an int/bool constant or a field-name expression (e.g. \
+                     Switch(typ, {{...}}) where 'typ' is a field declared earlier in \
+                     the same Struct; arithmetic like typ + 1 also works). Note: \
+                     'this.xxx' syntax does not exist in construct-rs — reference \
+                     field names directly.",
                     field_index
                 ),
             });

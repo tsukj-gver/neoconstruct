@@ -15,7 +15,8 @@
    调用 Rust ``compile_schema``
 4. 编译产物存为 ``X._construct_compiled``（类属性，零开销查找）
 5. ``_apply_dataclass_field_config`` 将 ``_FieldDescriptor`` 替换为
-   ``dataclasses.field()`` 配置（RO→init=False，有 default→kw_only=True）
+   ``dataclasses.field()`` 配置（RO→init=False，有 default→kw_only=True，
+   v0.1.1 起值提供型 subcon→隐式 default=None + kw_only=True）
 6. ``@dataclass`` 装饰器随后执行（生成 ``__init__`` 等）
 
 关键约束（§A.5.1）：``__init_subclass__`` 在 ``@dataclass`` **之前**执行，因此不能
@@ -580,75 +581,231 @@ def _check_wo_reference(expr_ops, descriptors, ref_name):
             )
 
 
-def _extract_and_compile_exprs(subcon, field_index_map, field_name):
-    """从 subcon 提取含表达式的参数，编译为 ExprProgram（§3.2 / §3.7.2）。
+# ---------------------------------------------------------------------------
+# v0.1.1 P1：嵌套表达式递归收集（设计 docs/design/基础设施/v0.1.1-修复设计.md
+# §1 方案 C：扁平键 + 冲突检测；§2 槽位名协议）
+# ---------------------------------------------------------------------------
 
-    通过 ``_expr_params`` 协议检测描述符中的表达式参数。每个实现了
-    ``_expr_params`` 的描述符返回 ``{param_name: value}`` 字典，
-    其中 value 可以是 int/常量（不编译）或 FieldRef/ExprRef（编译）。
+# 递归遍历的子描述符槽位名集合（设计 §2.1）。仅这些属性名中的值会被视为
+# 子描述符递归；其余属性（如 Union.parsefrom、Checksum.start/end）是表达式
+# 参数，由 ``_expr_params`` 协议消费，不进槽位集合。
+_EXPR_SLOT_NAMES = (
+    "subcon",
+    "subcons",
+    "cases",
+    "default",
+    "thensubcon",
+    "elsesubcon",
+    "lengthfield",
+    "countfield",
+    "checksumfield",
+)
 
-    :param subcon: 字段的类型描述符（可能含 ``_expr_params`` 属性）。
+# 槽位值守卫：这些类型的值不可能是子描述符（常量叶子），直接跳过。
+_EXPR_SLOT_LEAF_TYPES = (bool, int, float, str, bytes)
+
+
+def _compile_expr_param_value(param_value, field_index_map, field_name):
+    """编译单个 ``_expr_params`` 参数值为 ExprOp 指令列表。
+
+    :param param_value: 参数值（FieldRef/ExprRef、预编译 ops list 或 int 常量）。
     :param field_index_map: ``{id(descriptor): field_index}``。
     :param field_name: 字段名（用于错误信息）。
-    :return: ``{param_name: [expr_ops]}`` 或空 dict（无表达式参数）。
-    :raises CompilationError: 表达式编译失败（前向引用、WO 引用、未知类型等）。
+    :return: ExprOp 指令元组列表；不可编译的常量值（bytes/str 等，留在描述符
+             中供 Rust 侧直接读取）返回 ``None``。
     """
+    if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
+        return _compile_expr_tree(param_value, field_index_map, field_name)
+    if isinstance(param_value, list):
+        # 预编译 ops（v5 RepeatUntilDescriptor 通过 set_compiled_expr_params
+        # 注入已编译的 ExprOp 元组列表）。直接透传，无需再编译。
+        # 注意：元素必须是元组（与 _compile_expr_tree 输出格式一致）。
+        return param_value
+    if isinstance(param_value, int) and not isinstance(param_value, bool):
+        # DF1 修复：int 常量编译为单条 Const ExprOp。
+        # DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram
+        # （与设计文档 §1.2.2 一致："int 常量也包装为单条 Const"）。
+        # BytesDescriptor.length 的常量路径由 Rust 侧直接从描述符读取，
+        # 此处的 ExprProgram 冗余但无害（Rust 优先 extract::<usize>）。
+        return [("const", param_value)]
+    # 其他常量值（bytes/str）不编译（留在描述符中供 Rust 侧读取）
+    return None
+
+
+def _merge_expr_param(out, param_name, ops, field_name):
+    """同名表达式参数合并（v0.1.1 方案 C：扁平键 + 冲突检测，设计 §1.3）。
+
+    - 首次出现 → 写入。
+    - 同名同 ops → 去重（diamond / 同表达式的多个消费者共用一份程序）。
+    - 同名不同 ops → ``CompilationError``（诚实限制：扁平键无法区分同字段内
+      多个同类消费者，如 ``Union(None, Switch(a, ...), Switch(b, ...))``）。
+
+    :param out: 目标 ``{param_name: [expr_ops]}`` dict（原位合并）。
+    :param param_name: 参数名（"key"/"cond"/"func"/"length"/...）。
+    :param ops: 已编译的 ExprOp 指令列表。
+    :param field_name: 字段名（用于错误信息）。
+    :raises CompilationError: 同名不同 ops。
+    """
+    if param_name not in out:
+        out[param_name] = ops
+    elif out[param_name] != ops:
+        raise CompilationError(
+            "字段 '{}' 内有多个同名表达式参数 '{}'（如两个 Switch 的 'key'），"
+            "construct-rs 当前无法区分。请拆分为多个字段，"
+            "或提升其中一个到顶层字段。".format(field_name, param_name)
+        )
+    # 同 ops → 去重（不重复写入）
+
+
+def _collect_exprs_from_value(value, field_index_map, field_name, out,
+                              repeat_untils, seen, ru_cls):
+    """槽位值分派：叶子守卫 → 容器逐项展开 → 子节点递归（设计 §2.1）。
+
+    值守卫：``None``/bool/int/float/str/bytes → 跳过；list/tuple → 逐项；
+    dict → ``.values()`` 逐项；其余 → 视为子节点递归。
+    """
+    if value is None or isinstance(value, _EXPR_SLOT_LEAF_TYPES):
+        return
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            _collect_exprs_from_value(
+                item, field_index_map, field_name, out, repeat_untils, seen, ru_cls
+            )
+        return
+    if isinstance(value, dict):
+        for item in value.values():
+            _collect_exprs_from_value(
+                item, field_index_map, field_name, out, repeat_untils, seen, ru_cls
+            )
+        return
+    _collect_exprs_from_node(
+        value, field_index_map, field_name, out, repeat_untils, seen, ru_cls
+    )
+
+
+def _collect_exprs_from_node(node, field_index_map, field_name, out,
+                             repeat_untils, seen, ru_cls):
+    """单个描述符节点：收集自身 ``_expr_params`` 并递归槽位子节点。
+
+    节点守卫（设计 §2.1/§2.2）：
+
+    - ``_FieldDescriptor`` / ``_ExprRef``：表达式节点不是子描述符（其表达式
+      参数属于宿主字段自身，且 ``_FieldDescriptor`` 的 ``subcon``/``default``
+      槽位不属于子描述符图）。
+    - 类对象（嵌套 ``StructMixin`` 子类）：内部表达式在该类自身编译期处理，
+      不遍历（与原版嵌套 ctx 隔离语义一致，P4 域）。
+    - ``id(node)`` 已见集合防环，**按字段**新建（模块级单例如 Int8ub 跨字段
+      共享，不可全局去重）。
+
+    RepeatUntil 特殊路径（设计 §2.4）：terminator 从原始 ``.terminator``
+    属性读取——``set_compiled_expr_params`` 只替换 ``_expr_params``，不触碰
+    ``.terminator``，保证延迟重编译路径幂等；任意深度的 RU 都记入
+    ``repeat_untils`` 供 ``_finalize_repeat_until`` 注入。
+    """
+    if isinstance(node, (_FieldDescriptor, _ExprRef)) or isinstance(node, type):
+        return
+    node_id = id(node)
+    if node_id in seen:
+        return
+    seen.add(node_id)
+
+    if isinstance(node, ru_cls):
+        ops = _compile_expr_param_value(node.terminator, field_index_map, field_name)
+        if ops is not None:
+            _merge_expr_param(out, "terminator", ops, field_name)
+        repeat_untils.append((node, ops))
+    else:
+        # 通过 _expr_params 协议统一检测（覆盖所有描述符类型）
+        # BytesDescriptor: {"length": <value>}
+        # ComputedDescriptor: {"func": <expr>}
+        # SwitchDescriptor: {"key": <expr>}
+        # IfThenElseDescriptor: {"cond": <expr>}
+        # 无表达式参数的描述符（Const/Tell/FormatField 等）：空 dict 或无属性
+        expr_params = getattr(node, "_expr_params", None)
+        if expr_params:
+            for param_name, param_value in expr_params.items():
+                ops = _compile_expr_param_value(
+                    param_value, field_index_map, field_name
+                )
+                if ops is not None:
+                    _merge_expr_param(out, param_name, ops, field_name)
+
+    # 递归槽位子节点（包装器 .subcon / Switch .cases / IfThenElse
+    # .thensubcon/.elsesubcon / Prefixed .lengthfield 等）
+    for slot in _EXPR_SLOT_NAMES:
+        _collect_exprs_from_value(
+            getattr(node, slot, None),
+            field_index_map, field_name, out, repeat_untils, seen, ru_cls,
+        )
+
+
+def _extract_and_compile_exprs(subcon, field_index_map, field_name):
+    """从 subcon **递归**提取含表达式的参数，编译为 ExprProgram（§3.2 / §3.7.2）。
+
+    v0.1.1 P1 修复（设计 v0.1.1-修复设计.md §1/§2，方案 C）：递归遍历嵌套
+    描述符（包装器内任意深度的表达式消费者，如 ``Prefixed(Int8ub,
+    Switch(typ, ...))``），收集结果**扁平合并**到同一字段的
+    ``{param_name: [expr_ops]}``——Rust 侧消费点按
+    ``expr_programs[field_index][param_name]`` 取程序，递归构建时沿用同一
+    field_index 与同一 dict，扁平合并与消费协议天然兼容（Rust 数据面零改动）。
+
+    合并语义见 ``_merge_expr_param``：同名同 ops 去重；同名不同 ops 报
+    ``CompilationError``（诚实限制）。
+
+    递归范围（槽位名协议 ``_EXPR_SLOT_NAMES``）：``subcon`` / ``subcons`` /
+    ``cases`` / ``default`` / ``thensubcon`` / ``elsesubcon`` / ``lengthfield`` /
+    ``countfield`` / ``checksumfield``。嵌套 StructMixin 子类（类对象）不
+    遍历（其内部表达式在该类自身编译期处理，P4 域）。
+
+    :param subcon: 字段的类型描述符（顶层或含包装器）。
+    :param field_index_map: ``{id(descriptor): field_index}``。
+    :param field_name: 字段名（用于错误信息）。
+    :return: ``(result, repeat_untils)``：result 为 ``{param_name: [expr_ops]}``
+             或空 dict（无表达式参数）；repeat_untils 为遍历中遇到的
+             ``(RepeatUntilDescriptor, terminator_ops)`` 列表（任意深度，供
+             ``_finalize_repeat_until`` 逐个注入编译产物）。
+    :raises CompilationError: 表达式编译失败（同名参数冲突、未知字段引用、
+                              不支持的节点类型等；前向引用/WO 引用由调用方检查）。
+    """
+    # v0.1.1：延迟导入 RepeatUntilDescriptor（避免循环导入，沿用既有模式），
+    # 单次导入后作为参数传递给递归收集器。
+    from ._descriptors import RepeatUntilDescriptor
+
     result = {}
-
-    # 通过 _expr_params 协议统一检测（覆盖所有描述符类型）
-    # BytesDescriptor: {"length": <value>}
-    # ComputedDescriptor: {"func": <expr>}
-    # SwitchDescriptor: {"keyfunc": <expr>}
-    # IfThenElseDescriptor: {"condfunc": <expr>}
-    # ConstDescriptor/TellDescriptor/ContextParam: {} （无表达式参数）
-    # FormatFieldDescriptor: 无此属性（hasattr 返回 False）
-    expr_params = getattr(subcon, "_expr_params", None)
-    if expr_params is None:
-        return result
-
-    for param_name, param_value in expr_params.items():
-        if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
-            ops = _compile_expr_tree(param_value, field_index_map, field_name)
-            result[param_name] = ops
-        elif isinstance(param_value, list):
-            # 预编译 ops（v5 RepeatUntilDescriptor 通过 set_compiled_expr_params
-            # 注入已编译的 ExprOp 元组列表）。直接透传，无需再编译。
-            # 注意：元素必须是元组（与 _compile_expr_tree 输出格式一致）。
-            result[param_name] = param_value
-        elif isinstance(param_value, int) and not isinstance(param_value, bool):
-            # DF1 修复：int 常量编译为单条 Const ExprOp。
-            # DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram
-            # （与设计文档 §1.2.2 一致："int 常量也包装为单条 Const"）。
-            # BytesDescriptor.length 的常量路径由 Rust 侧直接从描述符读取，
-            # 此处的 ExprProgram 冗余但无害（Rust 优先 extract::<usize>）。
-            result[param_name] = [("const", param_value)]
-        # 其他常量值（bytes/str）不编译（留在描述符中供 Rust 侧读取）
-
-    return result
+    repeat_untils = []
+    seen = set()
+    _collect_exprs_from_node(
+        subcon, field_index_map, field_name, result, repeat_untils,
+        seen, RepeatUntilDescriptor,
+    )
+    return result, repeat_untils
 
 
 def _compile_expressions(descriptors, field_index_map):
     """遍历所有字段的 subcon，编译其中的表达式（§3.2）。
 
     对每个字段：
-    1. 从 subcon 提取表达式参数（``_extract_and_compile_exprs``）
-    2. 对每个表达式执行编译期验证（前向引用、WO 引用）
+    1. 从 subcon **递归**提取表达式参数（``_extract_and_compile_exprs``，
+       v0.1.1 P1：含包装器内任意深度的表达式消费者，扁平合并到同一字段）
+    2. 对合并后的每个表达式执行编译期验证（前向引用、WO 引用）——判据对
+       嵌套 ops 语义恰好正确（嵌套消费者在宿主字段 parse/build 期间求值，
+       ctx 仅含 0..idx-1 前序字段，设计 §2.3）
     3. 收集到 ``{field_index: {param_name: [expr_ops]}}`` 结构
-    4. RepeatUntilDescriptor 特殊处理：从 terminator ops 提取 element_field_idx
-       并调 set_compiled_expr_params（v5）
+    4. RepeatUntilDescriptor 特殊处理（v0.1.1 起含任意深度的嵌套 RU）：
+       对遍历中遇到的每个 RU 调 ``_finalize_repeat_until``，从 terminator
+       ops 提取 element_field_idx 并调 set_compiled_expr_params（v5）
 
     :param descriptors: ``[(name, _FieldDescriptor), ...]`` 有序列表。
     :param field_index_map: ``{id(descriptor): field_index}``。
     :return: ``{field_index: {param_name: [expr_ops]}}`` 嵌套字典，空 dict 表示无表达式。
     :raises CompilationError: 任何表达式编译或验证失败。
     """
-    # v5：延迟导入 RepeatUntilDescriptor（避免循环导入）。
-    from ._descriptors import RepeatUntilDescriptor
-
     expr_programs = {}
     for idx, (name, desc) in enumerate(descriptors):
         subcon = desc.subcon
-        field_exprs = _extract_and_compile_exprs(subcon, field_index_map, name)
+        field_exprs, nested_repeat_untils = _extract_and_compile_exprs(
+            subcon, field_index_map, name
+        )
         if field_exprs:
             # 对每个表达式的 expr_ops 执行编译期验证
             for param_name, ops in field_exprs.items():
@@ -656,15 +813,23 @@ def _compile_expressions(descriptors, field_index_map):
                 _check_wo_reference(ops, descriptors, name)
             expr_programs[idx] = field_exprs
 
-        # v5 RepeatUntil 特殊处理：terminator 表达式需提取 element_field_idx。
-        if isinstance(subcon, RepeatUntilDescriptor):
-            _finalize_repeat_until(subcon, field_exprs, idx, name, descriptors)
+        # v5 RepeatUntil 特殊处理（v0.1.1 起含包装器内任意深度的嵌套 RU）：
+        # terminator 表达式需提取 element_field_idx。descriptors/idx/name
+        # 沿用宿主字段（设计 §2.4）。
+        for ru_desc, terminator_ops in nested_repeat_untils:
+            _finalize_repeat_until(
+                ru_desc, terminator_ops, idx, name, descriptors, field_exprs
+            )
 
     return expr_programs
 
 
-def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descriptors):
+def _finalize_repeat_until(desc, terminator_ops, field_index, field_name,
+                           descriptors, field_exprs):
     """v5：完成 RepeatUntilDescriptor 的编译期参数注入。
+
+    v0.1.1 起：对遍历中遇到的**每个** RepeatUntilDescriptor（含包装器内
+    任意深度的嵌套 RU）调用；``descriptors/idx/name`` 参数沿用宿主字段。
 
     从 terminator ops 中提取所有 getint 索引：
     - 第一个 getint 索引作为 element_field_idx（Element 字段）
@@ -672,11 +837,20 @@ def _finalize_repeat_until(desc, field_exprs, field_index, field_name, descripto
     调 ``desc.set_compiled_expr_params(ops, element_field_idx, index_field_indices)``，
     并把编译产物写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
 
-    设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.3.1 DEV 实现要点。
+    设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.3.1 DEV 实现要点；
+    v0.1.1 修复设计 §2.4。
 
+    :param desc: RepeatUntilDescriptor 实例（任意深度）。
+    :param terminator_ops: 已编译的 terminator ExprOp 列表（设计 §2.4：接收
+                           已编译 ops 而非从 field_exprs 取，避免依赖插入顺序；
+                           None 时报缺失错误，与 v0.1.1 前行为一致）。
+    :param field_index: 宿主字段在 descriptors 列表中的索引。
+    :param field_name: 宿主字段名（用于错误信息）。
+    :param descriptors: ``[(name, _FieldDescriptor), ...]`` 宿主完整字段列表。
+    :param field_exprs: 宿主字段的表达式 dict（写入编译产物键）。
     :raises CompilationError: terminator 不引用任何 Element 字段。
     """
-    ops = field_exprs.get("terminator")
+    ops = terminator_ops
     if ops is None:
         raise CompilationError(
             "RepeatUntil field '{}' (index {}) missing 'terminator' expression. "
@@ -788,10 +962,27 @@ def _apply_dataclass_field_config(cls, descriptors):
     处理规则：
     - ``mode="ro"`` → ``dataclasses.field(init=False, default=None)``
       （RO 字段不在 ``__init__`` 中，parse 时由 force_setattr 覆盖）
-    - ``mode="rw"`` 或 ``"wo"`` 且有 ``default`` →
+    - ``mode="rw"`` 或 ``"wo"`` 且有显式 ``default`` →
       ``dataclasses.field(kw_only=True, default=desc.default)``
-    - ``mode="rw"`` 或 ``"wo"`` 无 ``default`` → ``dataclasses.field()``
+    - ``mode="rw"`` 或 ``"wo"`` 无显式 ``default``，但 subcon 是值提供型
+      构造器（Const/Default/Rebuild/Computed/Padding，v0.1.1 P2/P3）→
+      ``dataclasses.field(kw_only=True, default=None)``——节点层 build 已
+      支持 None 补值，实例化不再强制实参
+    - 其余 ``mode="rw"`` 或 ``"wo"`` → ``dataclasses.field()``
       （必填 positional 参数，无默认值）
+
+    v0.1.1 P2/P3 隐式 default 决策（设计 §3.3）：
+
+    - **显式 default 优先**（上述分支顺序保证）。
+    - **kw_only=True 是必需**而非可选：隐式 default 字段在前、必填字段在后
+      时，``@dataclass`` 否则报 "non-default argument follows default
+      argument"。
+    - 统一 ``default=None`` 语义 = "让节点层自动生成值"。行为差异由节点层
+      既有语义决定：Const/Default 传非 None 值会被校验（错值报
+      ConstError）；Padding/Rebuild/Computed 传值被忽略。
+    - **类型注解告警接受 + 文档说明**（``v: int = field(Const(5, Int8ub))``
+      隐式 default=None 与 int 注解在 mypy/pyright strict 下告警，运行时无
+      影响；可显式传 default 或注解写 ``int | None``），不为静态检查器改机制。
 
     [设计质疑] 设计文档 §2.2.1 原文为"RW/WO 无 default → 保持 _FieldDescriptor
     不变（Phase 1 行为）"。但 Phase 2 为 ``_FieldDescriptor`` 添加了 ``__eq__``
@@ -804,17 +995,41 @@ def _apply_dataclass_field_config(cls, descriptors):
     :param cls: StructMixin 子类。
     :param descriptors: ``[(field_name, _FieldDescriptor), ...]`` 有序列表。
     """
+    # v0.1.1：延迟导入值提供型描述符（_mixin 顶部不导入 _descriptors，
+    # 避免循环导入，沿用 _compile_expressions 的延迟导入模式，设计 §3.1）。
+    from ._descriptors import (
+        ConstDescriptor,
+        DefaultDescriptor,
+        PaddingDescriptor,
+        RebuildDescriptor,
+    )
+
+    # 值提供型构造器（设计 §3.1）：build 时节点层可自动获得值的描述符。
+    # ComputedDescriptor 定义于本模块。
+    value_providing = (
+        ConstDescriptor,
+        DefaultDescriptor,
+        RebuildDescriptor,
+        PaddingDescriptor,
+        ComputedDescriptor,
+    )
+
     for name, desc in descriptors:
         if desc.mode == "ro":
             # RO 字段：init=False，用 None 占位（parse 时由 force_setattr 覆盖）
             setattr(cls, name, dataclasses.field(init=False, default=None))
         elif desc.default is not _MISSING:
-            # RW/WO 字段且有 default：kw_only=True + default
+            # RW/WO 字段且有显式 default：kw_only=True + default（显式优先）
             setattr(
                 cls,
                 name,
                 dataclasses.field(kw_only=True, default=desc.default),
             )
+        elif isinstance(desc.subcon, value_providing):
+            # v0.1.1 P2/P3：值提供型 subcon 且无显式 default → 隐式
+            # default=None + kw_only=True。build 由节点层补值（Const/Default
+            # 用常量/表达式值，Rebuild/Computed 求值，Padding 忽略传入值）。
+            setattr(cls, name, dataclasses.field(kw_only=True, default=None))
         else:
             # RW/WO 无 default → dataclasses.field() 无默认值（必填 positional）
             setattr(cls, name, dataclasses.field())

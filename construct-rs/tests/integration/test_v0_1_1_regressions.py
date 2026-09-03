@@ -20,7 +20,8 @@
 
 标记规则（PM 决策）：修复前应失败的用例标 ``xfail(strict=True)``——修复后
 XPASS 会转为 FAILURE 报错，强制清理误留标记；P10/P5 为当前即通过的
-锁定/负例用例，不加标记。
+锁定/负例用例，不加标记。**v0.1.1-3 修复落地后 19 个 xfail 标记已全部
+移除**（2026-09-03，修复真实性由用例转绿证明；标记规则保留备查）。
 
 红灯用例的 dataclass 一律定义在测试函数体内：P1 类用例失败点在类定义
 （``__init_subclass__`` 编译期），模块级定义会使整个文件收集失败。
@@ -67,11 +68,6 @@ class TestBug1PrefixedSwitch:
     - ``P(typ=2, br=b"AB").build()`` → ``b"\\x02\\x02AB"``
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Switch keyfunc 引用根字段经 Prefixed 包装后无表达式程序（BUG-1 本体）",
-    )
     def test_parse_typ1_branch(self):
         """P1: parse typ=1 → Int8ub 分支（期望值：报告 §1.1）。"""
 
@@ -84,11 +80,6 @@ class TestBug1PrefixedSwitch:
         assert parsed.typ == 1
         assert parsed.br == 127
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Switch keyfunc 引用根字段经 Prefixed 包装后无表达式程序（BUG-1 本体）",
-    )
     def test_parse_typ2_branch(self):
         """P1: parse typ=2 → Bytes(2) 分支（期望值：报告 §4.4）。"""
 
@@ -101,11 +92,6 @@ class TestBug1PrefixedSwitch:
         assert parsed.typ == 2
         assert parsed.br == b"AB"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Switch keyfunc 引用根字段经 Prefixed 包装后无表达式程序（BUG-1 本体）",
-    )
     def test_build_typ1_branch(self):
         """P1: build typ=1 → ``b'\\x01\\x01\\x7f'``（期望值：报告 §4.4）。"""
 
@@ -116,11 +102,6 @@ class TestBug1PrefixedSwitch:
 
         assert P(typ=1, br=127).build() == b"\x01\x01\x7f"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Switch keyfunc 引用根字段经 Prefixed 包装后无表达式程序（BUG-1 本体）",
-    )
     def test_build_typ2_branch(self):
         """P1: build typ=2 → ``b'\\x02\\x02AB'``（期望值：报告 §1.1 原版基线）。"""
 
@@ -131,11 +112,6 @@ class TestBug1PrefixedSwitch:
 
         assert P(typ=2, br=b"AB").build() == b"\x02\x02AB"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Switch keyfunc 引用根字段经 Prefixed 包装后无表达式程序（BUG-1 本体）",
-    )
     def test_roundtrip_both_branches(self):
         """P1: parse → build 字节还原，两分支（期望值：报告 §4.4 build 行）。"""
 
@@ -160,11 +136,6 @@ class TestC1WrapperConsumerMatrix:
     每个组合至少 parse 一例（v0.1.1-2 任务要求）；期望值来源见各 docstring。
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: PrefixedArray × Switch 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_array_switch_parse(self):
         """P1: PrefixedArray×Switch parse（期望值：报告 §4.4 PrefixedArray 行）。"""
 
@@ -179,11 +150,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 1
         assert parsed.br == [5, 6]
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: PrefixedArray × Switch 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_array_switch_build(self):
         """P1: PrefixedArray×Switch build → ``b'\\x01\\x02\\x05\\x06'``（报告 §4.4）。"""
 
@@ -196,11 +162,6 @@ class TestC1WrapperConsumerMatrix:
 
         assert P(typ=1, br=[5, 6]).build() == b"\x01\x02\x05\x06"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Bitwise × Switch 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_bitwise_switch_parse(self):
         """P1: Bitwise×Switch parse（typ=1 → Int8ub 分支）。
 
@@ -219,11 +180,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 1
         assert parsed.br == 127
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × If 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_if_parse_true_branch(self):
         """P1: Prefixed×If parse，cond 为真（期望值：报告 §4.4 If 行）。"""
 
@@ -236,11 +192,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 1
         assert parsed.br == 127
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × If 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_if_parse_false_branch(self):
         """P1: Prefixed×If parse，cond 为假 → br=None（期望值：报告 §4.4 If 行）。"""
 
@@ -253,11 +204,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 0
         assert parsed.br is None
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × Computed 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_computed_parse(self):
         """P1: Prefixed×Computed parse → br=typ（期望值：报告 §4.4 Computed 行）。"""
 
@@ -270,11 +216,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 1
         assert parsed.br == 1
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × Computed 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_computed_build(self):
         """P1: Prefixed×Computed build → ``b'\\x01\\x00'``（期望值：报告 §4.4）。
 
@@ -289,11 +230,6 @@ class TestC1WrapperConsumerMatrix:
 
         assert P(typ=1, br=None).build() == b"\x01\x00"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × Bytes(len) 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_bytes_len_parse(self):
         """P1: Prefixed×Bytes(typ) parse（期望值：报告 §4.4 Bytes 行）。"""
 
@@ -306,11 +242,6 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.typ == 2
         assert parsed.br == b"AB"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × Bytes(len) 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_bytes_len_build(self):
         """P1: Prefixed×Bytes(typ) build → ``b'\\x02\\x02XY'``（期望值：报告 §4.4）。"""
 
@@ -321,11 +252,6 @@ class TestC1WrapperConsumerMatrix:
 
         assert P(typ=2, br=b"XY").build() == b"\x02\x02XY"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=CompilationError,
-        reason="P1: Prefixed × Array(count) 嵌套表达式无程序（C1 矩阵）",
-    )
     def test_prefixed_array_count_parse(self):
         """P1: Prefixed×Array(typ) parse。
 
@@ -358,11 +284,6 @@ class TestBug2ValueProviderDefaults:
     （节点层「值提供」语义已支持，见报告 §1.2 关键事实）。
     """
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason="P2: field(Const(5, Int8ub)) 缺隐式 default，无参实例化报 TypeError（BUG-2 本体）",
-    )
     def test_const_field_no_arg_instantiation_and_build(self):
         """P2: ``field(Const(5, Int8ub))`` → ``PC()`` 可实例化，build 用常量 5。
 
@@ -376,11 +297,6 @@ class TestBug2ValueProviderDefaults:
         msg = PC()
         assert msg.build() == b"\x05"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason="P2: field(Default(Int8ub, 9)) 缺隐式 default，无参实例化报 TypeError（BUG-2 本体）",
-    )
     def test_default_field_no_arg_instantiation_and_build(self):
         """P2: ``field(Default(Int8ub, 9))`` → ``PD()`` 可实例化，build 用默认 9。
 
@@ -394,11 +310,6 @@ class TestBug2ValueProviderDefaults:
         msg = PD()
         assert msg.build() == b"\t"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason="P3: wfield(Padding(2)) 缺隐式 default，要求哑值实参",
-    )
     def test_wfield_padding_no_arg_instantiation_and_build(self):
         """P3: ``wfield(Padding(2))`` → ``PW(n=1)`` 可实例化（值被忽略）。
 
@@ -414,11 +325,6 @@ class TestBug2ValueProviderDefaults:
         msg = PW(n=1)
         assert msg.build() == b"\x01\x00\x00"
 
-    @pytest.mark.xfail(
-        strict=True,
-        raises=TypeError,
-        reason="P2: field(Rebuild(Int8ub, n)) 缺隐式 default，强制传被丢弃的哑值（P2 泛化）",
-    )
     def test_rebuild_field_no_arg_instantiation_and_build(self):
         """P2 泛化: ``field(Rebuild(Int8ub, n))`` → ``PR(n=3)`` 可实例化，build 用表达式值。
 
