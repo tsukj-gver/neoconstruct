@@ -1,6 +1,5 @@
 //! FocusedSeqNode：聚焦字段序列节点（context nesting + 返回单聚焦字段值）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §5。
 //! Python 参考：`construct/construct/core.py` `FocusedSeq`（L3176-3267）。
 //!
 //! ## 行为概述
@@ -14,11 +13,10 @@
 //!   其余传 None）
 //! - sizeof：`Context::new_child` 不可用（无 py token），sum 字段 sizeof
 //!
-//! ## ARCH 决策：独立 Node（不复用 StructNode，设计 §5.1）
+//! ## 设计取舍：独立 Node（不复用 StructNode）
 //!
 //! FocusedSeq 独立实现的成本：context nesting 逻辑（`Context::new_child` +
 //! 字段遍历 + set_field_at）~100 行，远小于复用 StructNode 引入的耦合复杂度。
-//! 详见设计 §5.1 四点理由。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -34,7 +32,7 @@ use super::{Construct, Node};
 // ---------------------------------------------------------------------------
 
 /// FocusedSeq 字段（与 StructField 平行但独立，避免 mode 字段——
-/// FocusedSeq 字段无 RW/RO/WO 区分，设计 §5.2）。
+/// FocusedSeq 字段无 RW/RO/WO 区分）。
 #[derive(Debug)]
 pub struct FocusedSeqField {
     /// 字段名（None 表示匿名字段，对应 Python `Renamed` 无名字段或直接 subcon）。
@@ -99,14 +97,14 @@ impl FocusedSeqField {
 /// ## sizeof（对齐 Python L3261-3267）
 ///
 /// 直接在父 ctx 上 sum 字段 sizeof（sizeof 接口无 py token，无法 new_child）。
-/// 字段大小依赖嵌套 ctx 时返回 Err（对齐 Python SizeofError，设计 §5.3 注解）。
+/// 字段大小依赖嵌套 ctx 时返回 Err（对齐 Python SizeofError）。
 ///
-/// # context nesting（设计 §5.3）
+/// # context nesting
 ///
 /// FocusedSeq 主动 new_child（与 StructRefNode 委托 StructNode 的隐式 nesting 不同）。
 /// child ctx 的 `_` 指向外层 ctx（Python L3237：`Container(_ = context, ...)`）。
 ///
-/// # has_expressions（设计 §5.3）
+/// # has_expressions
 ///
 /// 递归检查 fields 子树（与 Bitwise 同模式）。
 #[derive(Debug)]
@@ -227,7 +225,7 @@ impl Construct for FocusedSeqNode {
         // sizeof 接口无 py token，无法 new_child（需创建 PyDict）。
         // 替代：直接在父 ctx 上 sum sizeof（context nesting 仅影响字段间引用，
         // 不影响静态 sizeof——Python L3265 也是 sum(sc._sizeof for sc in subcons)）。
-        // 字段大小依赖嵌套 ctx 时通过 ExprProgram 求值失败抛 Err（设计 §5.3 注解）。
+        // 字段大小依赖嵌套 ctx 时通过 ExprProgram 求值失败抛 Err。
         let mut total: usize = 0;
         for field in &self.fields {
             total = total.checked_add(field.node.sizeof(ctx)?).ok_or_else(|| {
@@ -271,7 +269,7 @@ mod tests {
         Node::FormatField(FormatFieldNode::new(fmt))
     }
 
-    /// 构造 FS-1 测试场景：FocusedSeq("num", Const(b"SIG"), "num"/Byte, Terminated)。
+    /// 构造测试场景：FocusedSeq("num", Const(b"SIG"), "num"/Byte, Terminated)。
     /// 由于 Const/Terminated 在 construct-rs 中可能未直接提供，这里用近似替代：
     /// - 用 Bytes(3)（"SIG"）作为匿名字段
     /// - "num"/Byte 作为 focus 字段
@@ -320,12 +318,12 @@ mod tests {
     }
 
     // ======================================================================
-    // FS-1: parse 基础场景
+    // parse 基础场景
     // ======================================================================
 
     #[test]
     fn parse_returns_focus_field_value() {
-        // FS-1: FocusedSeq("num", Const(b"SIG"), "num"/Byte, Terminated)
+        // FocusedSeq("num", Const(b"SIG"), "num"/Byte, Terminated)
         //       parse(b"SIG\xff") → 255（num 字段值）
         with_py(|py| {
             let node = fs1_node(py);
@@ -366,7 +364,7 @@ mod tests {
 
     #[test]
     fn build_writes_all_fields_with_obj_at_focus() {
-        // FS-1 build: FocusedSeq.build(255) → b"SIG\xff"
+        // build: FocusedSeq.build(255) → b"SIG\xff"
         // 注：非 focus 字段传 None，Bytes(3).build(None) 会失败（None 不是 bytes）
         // 这里改用 Padding(3) 代替 Bytes(3)（Padding.build(None) 忽略 obj）
         with_py(|py| {
@@ -425,7 +423,7 @@ mod tests {
     }
 
     // ======================================================================
-    // context nesting（FS-5）
+    // context nesting
     // ======================================================================
 
     #[test]

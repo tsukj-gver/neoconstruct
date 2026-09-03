@@ -1,9 +1,6 @@
-"""Phase 6.3 Adapter 系列构造器 Python 行为一致性测试。
+"""Adapter 系列构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/模块设计/模块设计-Adapter核心.md §5 边界条件 / §11 parity 模板
-- docs/design/基础设施/测试框架设计.md §5.1（统一模板）
-- _helpers/parity.py（公共组件）
+组件：_helpers/parity.py（公共组件）。
 
 测试策略（子进程隔离）：两个同名包（construct-rs 与 Python construct 2.10.70）
 无法在同一进程中导入，每个用例 × impl 在独立子进程中运行，通过 JSON 输出
@@ -20,13 +17,13 @@
 差异处理：
 - RC-build-1：RawCopy build 不返回带 data 的 Container（construct-rs build 路径
   无返回值）。parity 测试只对比 build 字节输出，跳过 build 返回值对比。
-- AC-FFI：用户面 Adapter 嵌入 Struct 有 2 次 FFI（用户主动接受折衷）。
+- AC-FFI：用户面 Adapter 嵌入 Struct 有 2 次 FFI（已知折衷）。
   parity 仅对比功能，不测性能（不设硬门禁）。
 
 用法::
 
-    pytest tests/parity/test_phase6_adapter_parity.py -v
-    python tests/parity/test_phase6_adapter_parity.py
+    pytest tests/parity/test_adapter_parity.py -v
+    python tests/parity/test_adapter_parity.py
 """
 
 from __future__ import annotations
@@ -80,9 +77,9 @@ _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 # 关键设计点：
 # - Pass / Substruct / Peek / RawCopy 在 rs/py 两侧行为一致，parity 直接对比
 # - Rebuild：Python construct 用 ``len_`` 上下文函数取 items 长度；construct-rs 用
-#   Phase 2 表达式（``items_count`` 字段引用）。两侧需用不同表达式但实现等价语义。
+#   表达式（``items_count`` 字段引用）。两侧需用不同表达式但实现等价语义。
 # - RawCopy build：Python 返回 Container(data=...)，construct-rs 不返回。
-#   parity 跳过 build 返回值对比，仅对比 build 字节输出（设计 §5.3 RC-build-1）。
+#   parity 跳过 build 返回值对比，仅对比 build 字节输出。
 # - AdapterCallback：Python 用 ``Adapter`` 基类 + _decode/_encode；construct-rs 同。
 _CASE_DEFINITIONS = '''
 def _make_case_rs(case_id):
@@ -417,9 +414,9 @@ def test_parity_roundtrip_fidelity(parity_results, case_id: str, desc: str):
 
 
 def _run_standalone():
-    """直接执行（python tests/parity/test_phase6_adapter_parity.py）时的入口。"""
+    """直接执行（python tests/parity/test_adapter_parity.py）时的入口。"""
     print("=" * 78)
-    print("Phase 6.3 Adapter 系列 构造器 Python 行为一致性测试")
+    print("Adapter 系列 构造器 Python 行为一致性测试")
     print("=" * 78)
     print(f"Python (rs): {_RS_PYTHON_EXE}")
     print(f"Python (py): {_PY_PYTHON_EXE}")

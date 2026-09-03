@@ -11,10 +11,10 @@ construct-rs vs Python construct 2.10.70 表达式场景性能测试结果
   repeat (中位数): 5
   测量时间       : 2026-06-24 22:37:38
 
-通过标准（§8.7）：
+通过标准：
   - E1-E3 parse ≥8.0x（硬目标）
-  - E1-E3 build ≥7.0x（CONFIRM-1 决定）
-  - <4.0x 视为设计失败，暂停后续开发
+  - E1-E3 build ≥7.0x
+  - <4.0x 视为设计失败
 
 对比表：
 用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定          

@@ -1,6 +1,5 @@
 //! HexDumpNode：HexDump 显示包装节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §2.3.1。
 //! Python 参考：`construct/construct/core.py` `HexDump`（L3583-3635）。
 //!
 //! ## 行为概述
@@ -61,7 +60,7 @@ impl Construct for HexDumpNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         let obj = self.inner.parse(py, stream, ctx, path)?;
         let bound = obj.bind(py);
-        // HexDump 仅包装 bytes/dict，其他类型透传（HD-3：int 透传）。
+        // HexDump 仅包装 bytes/dict，其他类型透传（int 透传）。
         if bound.is_instance_of::<PyBytes>() {
             let cls_bound = self.display_classes.bytes_cls.bind(py);
             let new_obj = cls_bound
@@ -133,7 +132,7 @@ mod tests {
 
     #[test]
     fn parse_bytes_returns_hexdump_displayed_bytes() {
-        // HD-1: HexDump(Bytes(4)).parse(b'\x00\x00\x01\x02') → HexDumpDisplayedBytes
+        // HexDump(Bytes(4)).parse(b'\x00\x00\x01\x02') → HexDumpDisplayedBytes
         with_py(|py| {
             let classes = match try_load_classes(py) {
                 Some(c) => c,
@@ -157,7 +156,7 @@ mod tests {
 
     #[test]
     fn parse_int_passes_through() {
-        // HD-3: HexDump(Int32ub).parse(...) → 透传 PyLong（int 不包装）
+        // HexDump(Int32ub).parse(...) → 透传 PyLong（int 不包装）
         with_py(|py| {
             let classes = match try_load_classes(py) {
                 Some(c) => c,

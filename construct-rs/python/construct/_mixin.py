@@ -1,12 +1,6 @@
 """StructMixin 基类、``field()``/``rfield()``/``wfield()`` 声明函数、
 表达式类型系统（FieldRef/ExprRef）与 Schema 编译管线（纯 Python 实现）。
 
-设计依据：
-- ``docs/design/基础设施/架构设计.md`` §A.2（StructMixin）、§A.3（field）、§A.6（空类）、
-  §E.1-E.6（编译管线）
-- ``docs/design/模块设计/模块设计-表达式系统.md`` §2.1（三种 field 函数）、§2.2（default 与 kw_only）、
-  §2.3（FieldRef/ExprRef 类型系统）、§2.4（context= 跨层引用）
-
 核心流程：
 
 1. 用户定义 ``@dataclass class X(StructMixin): ...``
@@ -19,7 +13,7 @@
    v0.1.1 起值提供型 subcon→隐式 default=None + kw_only=True）
 6. ``@dataclass`` 装饰器随后执行（生成 ``__init__`` 等）
 
-关键约束（§A.5.1）：``__init_subclass__`` 在 ``@dataclass`` **之前**执行，因此不能
+关键约束：``__init_subclass__`` 在 ``@dataclass`` **之前**执行，因此不能
 依赖 ``__dataclass_fields__``（尚不存在），从类体原始属性提取字段信息。
 """
 
@@ -44,7 +38,7 @@ except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
 
 
 # ---------------------------------------------------------------------------
-# 哨兵值（§2.1.1）
+# 哨兵值
 # ---------------------------------------------------------------------------
 
 _MISSING = object()
@@ -56,12 +50,12 @@ _MISSING = object()
 
 
 # ---------------------------------------------------------------------------
-# 表达式类型系统：_ExprMixin / _FieldDescriptor / _ExprRef（§2.3）
+# 表达式类型系统：_ExprMixin / _FieldDescriptor / _ExprRef
 # ---------------------------------------------------------------------------
 
 
 class _ExprMixin:
-    """FieldRef/ExprRef 共享的算术运算符重载（§2.3.3）。
+    """FieldRef/ExprRef 共享的算术运算符重载。
 
     ``_FieldDescriptor`` 和 ``_ExprRef`` 都继承此类，使字段引用和表达式节点
     都能通过 Python 运算符构建表达式树。每次二元运算返回新的 ``_ExprRef`` 节点。
@@ -195,7 +189,7 @@ class _FieldDescriptor(_ExprMixin):
                         或另一个 ``StructMixin`` 子类）。
         :param mode: 字段模式，``"rw"``（读写，默认）/ ``"ro"``（只读）/ ``"wo"``（只写）。
         :param default: 可选默认值。``_MISSING`` 表示未指定（默认无默认值）。
-        :param context: 可选，跨层引用的 context 注入映射（决策 4 的 ``context=`` 参数）。
+        :param context: 可选，跨层引用的 context 注入映射（``context=`` 参数）。
         """
         self.subcon = subcon
         self.mode = mode
@@ -214,7 +208,7 @@ class _FieldDescriptor(_ExprMixin):
 
 
 class _ExprRef(_ExprMixin):
-    """表达式节点，编译期翻译为 ExprOp 指令序列（§2.3.3）。
+    """表达式节点，编译期翻译为 ExprOp 指令序列。
 
     ``_ExprRef`` 形成一棵二叉表达式树：
 
@@ -244,7 +238,7 @@ class _ExprRef(_ExprMixin):
 
 
 # ---------------------------------------------------------------------------
-# field() / rfield() / wfield() 声明函数（§2.1.2）
+# field() / rfield() / wfield() 声明函数
 # ---------------------------------------------------------------------------
 
 
@@ -262,8 +256,8 @@ def field(subcon, *, default=_MISSING, context=None):
     :param subcon: 类型描述符，决定该字段的二进制格式。必须是框架已知的描述符类型
         （``Int8ub`` 等 16 种单例、``Bytes(n)``、``GreedyBytes``、或另一个
         ``StructMixin`` 子类）。
-    :param default: 可选默认值。指定后自动设为 ``kw_only=True``（决策 6）。
-    :param context: 可选，跨层引用的 context 注入映射（决策 4）。
+    :param default: 可选默认值。指定后自动设为 ``kw_only=True``。
+    :param context: 可选，跨层引用的 context 注入映射。
     :return: ``_FieldDescriptor(mode="rw")`` 对象，作为类属性默认值。
 
     字段顺序由 Python 3.7+ ``__annotations__`` 的插入顺序保证（PEP 526）。
@@ -303,11 +297,11 @@ def wfield(subcon, *, default=_MISSING, context=None):
 
 
 # ---------------------------------------------------------------------------
-# Tell / Computed 描述符（§3.7.4）
+# Tell / Computed 描述符
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
-# 匹配到对应的 Node 变体（详见 §3.7.5）。
+# 匹配到对应的 Node 变体。
 # ---------------------------------------------------------------------------
 
 
@@ -396,7 +390,7 @@ def Computed(expr):
 
 
 # ---------------------------------------------------------------------------
-# 字段信息收集（§E.2）
+# 字段信息收集
 # ---------------------------------------------------------------------------
 
 
@@ -421,10 +415,10 @@ def _collect_field_descriptors(cls):
 
 
 # ---------------------------------------------------------------------------
-# 表达式编译（§3.2-§3.4）
+# 表达式编译
 # ---------------------------------------------------------------------------
 
-# operator 模块函数 → ExprOp 指令名称的映射（§3.3）。
+# operator 模块函数 → ExprOp 指令名称的映射。
 #
 # 编译期将 _ExprRef.op（operator.add 等）翻译为对应的 ExprOp 名称字符串，
 # Rust 侧根据字符串构建 ExprOp 枚举变体。
@@ -453,7 +447,7 @@ _OP_TO_EXPROP = {
 
 
 def _compile_expr_tree(node, field_index_map, referencing_field_name):
-    """将 FieldRef/ExprRef 树翻译为 ExprOp 指令列表（后序遍历，§3.3）。
+    """将 FieldRef/ExprRef 树翻译为 ExprOp 指令列表（后序遍历）。
 
     递归遍历表达式树，按后序（left → right → op）发射指令：
 
@@ -474,7 +468,7 @@ def _compile_expr_tree(node, field_index_map, referencing_field_name):
 
 
 def _emit_expr_ops(node, field_index_map, ref_name, ops):
-    """递归遍历表达式树，后序发射 ExprOp 指令（§3.3）。
+    """递归遍历表达式树，后序发射 ExprOp 指令。
 
     纯整数 VM 栈：只接受 ``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 节点。
     ``float`` 与其他类型直接 CompilationError。
@@ -535,7 +529,7 @@ def _emit_expr_ops(node, field_index_map, ref_name, ops):
 
 
 def _check_forward_reference(expr_ops, current_field_index, ref_name):
-    """检查表达式中是否引用了后序字段（前向引用，§3.4.2）。
+    """检查表达式中是否引用了后序字段（前向引用）。
 
     parse 方向只能引用已解析的前序字段（声明顺序在当前字段之前）。
     引用后序字段（``getint idx >= current_field_index``）是逻辑错误。
@@ -556,9 +550,9 @@ def _check_forward_reference(expr_ops, current_field_index, ref_name):
 
 
 def _check_wo_reference(expr_ops, descriptors, ref_name):
-    """检查表达式中是否引用了 WO 字段（§3.4.4）。
+    """检查表达式中是否引用了 WO 字段。
 
-    WO 字段（padding/reserved）不写入 context（方案 A），表达式运行时无法取到其值。
+    WO 字段（padding/reserved）不写入 context，表达式运行时无法取到其值。
     编译期检测到 ``getint`` 引用 WO 字段时立即抛 ``CompilationError``。
 
     :param expr_ops: 编译后的 ExprOp 指令列表。
@@ -582,11 +576,10 @@ def _check_wo_reference(expr_ops, descriptors, ref_name):
 
 
 # ---------------------------------------------------------------------------
-# v0.1.1 P1：嵌套表达式递归收集（设计 docs/design/基础设施/v0.1.1-修复设计.md
-# §1 方案 C：扁平键 + 冲突检测；§2 槽位名协议）
+# 嵌套表达式递归收集（扁平键 + 冲突检测 + 槽位名协议）
 # ---------------------------------------------------------------------------
 
-# 递归遍历的子描述符槽位名集合（设计 §2.1）。仅这些属性名中的值会被视为
+# 递归遍历的子描述符槽位名集合。仅这些属性名中的值会被视为
 # 子描述符递归；其余属性（如 Union.parsefrom、Checksum.start/end）是表达式
 # 参数，由 ``_expr_params`` 协议消费，不进槽位集合。
 _EXPR_SLOT_NAMES = (
@@ -617,14 +610,14 @@ def _compile_expr_param_value(param_value, field_index_map, field_name):
     if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
         return _compile_expr_tree(param_value, field_index_map, field_name)
     if isinstance(param_value, list):
-        # 预编译 ops（v5 RepeatUntilDescriptor 通过 set_compiled_expr_params
+        # 预编译 ops（RepeatUntilDescriptor 通过 set_compiled_expr_params
         # 注入已编译的 ExprOp 元组列表）。直接透传，无需再编译。
         # 注意：元素必须是元组（与 _compile_expr_tree 输出格式一致）。
         return param_value
     if isinstance(param_value, int) and not isinstance(param_value, bool):
-        # DF1 修复：int 常量编译为单条 Const ExprOp。
+        # int 常量编译为单条 Const ExprOp。
         # DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram
-        # （与设计文档 §1.2.2 一致："int 常量也包装为单条 Const"）。
+        # （int 常量也包装为单条 Const）。
         # BytesDescriptor.length 的常量路径由 Rust 侧直接从描述符读取，
         # 此处的 ExprProgram 冗余但无害（Rust 优先 extract::<usize>）。
         return [("const", param_value)]
@@ -633,7 +626,7 @@ def _compile_expr_param_value(param_value, field_index_map, field_name):
 
 
 def _merge_expr_param(out, param_name, ops, field_name):
-    """同名表达式参数合并（v0.1.1 方案 C：扁平键 + 冲突检测，设计 §1.3）。
+    """同名表达式参数合并（扁平键 + 冲突检测）。
 
     - 首次出现 → 写入。
     - 同名同 ops → 去重（diamond / 同表达式的多个消费者共用一份程序）。
@@ -659,7 +652,7 @@ def _merge_expr_param(out, param_name, ops, field_name):
 
 def _collect_exprs_from_value(value, field_index_map, field_name, out,
                               repeat_untils, seen, ru_cls):
-    """槽位值分派：叶子守卫 → 容器逐项展开 → 子节点递归（设计 §2.1）。
+    """槽位值分派：叶子守卫 → 容器逐项展开 → 子节点递归。
 
     值守卫：``None``/bool/int/float/str/bytes → 跳过；list/tuple → 逐项；
     dict → ``.values()`` 逐项；其余 → 视为子节点递归。
@@ -687,17 +680,17 @@ def _collect_exprs_from_node(node, field_index_map, field_name, out,
                              repeat_untils, seen, ru_cls):
     """单个描述符节点：收集自身 ``_expr_params`` 并递归槽位子节点。
 
-    节点守卫（设计 §2.1/§2.2）：
+    节点守卫：
 
     - ``_FieldDescriptor`` / ``_ExprRef``：表达式节点不是子描述符（其表达式
       参数属于宿主字段自身，且 ``_FieldDescriptor`` 的 ``subcon``/``default``
       槽位不属于子描述符图）。
     - 类对象（嵌套 ``StructMixin`` 子类）：内部表达式在该类自身编译期处理，
-      不遍历（与原版嵌套 ctx 隔离语义一致，P4 域）。
+      不遍历（与原版嵌套 ctx 隔离语义一致）。
     - ``id(node)`` 已见集合防环，**按字段**新建（模块级单例如 Int8ub 跨字段
       共享，不可全局去重）。
 
-    RepeatUntil 特殊路径（设计 §2.4）：terminator 从原始 ``.terminator``
+    RepeatUntil 特殊路径：terminator 从原始 ``.terminator``
     属性读取——``set_compiled_expr_params`` 只替换 ``_expr_params``，不触碰
     ``.terminator``，保证延迟重编译路径幂等；任意深度的 RU 都记入
     ``repeat_untils`` 供 ``_finalize_repeat_until`` 注入。
@@ -740,10 +733,9 @@ def _collect_exprs_from_node(node, field_index_map, field_name, out,
 
 
 def _extract_and_compile_exprs(subcon, field_index_map, field_name):
-    """从 subcon **递归**提取含表达式的参数，编译为 ExprProgram（§3.2 / §3.7.2）。
+    """从 subcon **递归**提取含表达式的参数，编译为 ExprProgram。
 
-    v0.1.1 P1 修复（设计 v0.1.1-修复设计.md §1/§2，方案 C）：递归遍历嵌套
-    描述符（包装器内任意深度的表达式消费者，如 ``Prefixed(Int8ub,
+    递归遍历嵌套描述符（包装器内任意深度的表达式消费者，如 ``Prefixed(Int8ub,
     Switch(typ, ...))``），收集结果**扁平合并**到同一字段的
     ``{param_name: [expr_ops]}``——Rust 侧消费点按
     ``expr_programs[field_index][param_name]`` 取程序，递归构建时沿用同一
@@ -755,7 +747,7 @@ def _extract_and_compile_exprs(subcon, field_index_map, field_name):
     递归范围（槽位名协议 ``_EXPR_SLOT_NAMES``）：``subcon`` / ``subcons`` /
     ``cases`` / ``default`` / ``thensubcon`` / ``elsesubcon`` / ``lengthfield`` /
     ``countfield`` / ``checksumfield``。嵌套 StructMixin 子类（类对象）不
-    遍历（其内部表达式在该类自身编译期处理，P4 域）。
+    遍历（其内部表达式在该类自身编译期处理）。
 
     :param subcon: 字段的类型描述符（顶层或含包装器）。
     :param field_index_map: ``{id(descriptor): field_index}``。
@@ -767,7 +759,7 @@ def _extract_and_compile_exprs(subcon, field_index_map, field_name):
     :raises CompilationError: 表达式编译失败（同名参数冲突、未知字段引用、
                               不支持的节点类型等；前向引用/WO 引用由调用方检查）。
     """
-    # v0.1.1：延迟导入 RepeatUntilDescriptor（避免循环导入，沿用既有模式），
+    # 延迟导入 RepeatUntilDescriptor（避免循环导入），
     # 单次导入后作为参数传递给递归收集器。
     from ._descriptors import RepeatUntilDescriptor
 
@@ -782,18 +774,18 @@ def _extract_and_compile_exprs(subcon, field_index_map, field_name):
 
 
 def _compile_expressions(descriptors, field_index_map):
-    """遍历所有字段的 subcon，编译其中的表达式（§3.2）。
+    """遍历所有字段的 subcon，编译其中的表达式。
 
     对每个字段：
     1. 从 subcon **递归**提取表达式参数（``_extract_and_compile_exprs``，
-       v0.1.1 P1：含包装器内任意深度的表达式消费者，扁平合并到同一字段）
+       含包装器内任意深度的表达式消费者，扁平合并到同一字段）
     2. 对合并后的每个表达式执行编译期验证（前向引用、WO 引用）——判据对
        嵌套 ops 语义恰好正确（嵌套消费者在宿主字段 parse/build 期间求值，
-       ctx 仅含 0..idx-1 前序字段，设计 §2.3）
+       ctx 仅含 0..idx-1 前序字段）
     3. 收集到 ``{field_index: {param_name: [expr_ops]}}`` 结构
     4. RepeatUntilDescriptor 特殊处理（v0.1.1 起含任意深度的嵌套 RU）：
        对遍历中遇到的每个 RU 调 ``_finalize_repeat_until``，从 terminator
-       ops 提取 element_field_idx 并调 set_compiled_expr_params（v5）
+       ops 提取 element_field_idx 并调 set_compiled_expr_params
 
     :param descriptors: ``[(name, _FieldDescriptor), ...]`` 有序列表。
     :param field_index_map: ``{id(descriptor): field_index}``。
@@ -813,9 +805,9 @@ def _compile_expressions(descriptors, field_index_map):
                 _check_wo_reference(ops, descriptors, name)
             expr_programs[idx] = field_exprs
 
-        # v5 RepeatUntil 特殊处理（v0.1.1 起含包装器内任意深度的嵌套 RU）：
+        # RepeatUntil 特殊处理（v0.1.1 起含包装器内任意深度的嵌套 RU）：
         # terminator 表达式需提取 element_field_idx。descriptors/idx/name
-        # 沿用宿主字段（设计 §2.4）。
+        # 沿用宿主字段。
         for ru_desc, terminator_ops in nested_repeat_untils:
             _finalize_repeat_until(
                 ru_desc, terminator_ops, idx, name, descriptors, field_exprs
@@ -826,7 +818,7 @@ def _compile_expressions(descriptors, field_index_map):
 
 def _finalize_repeat_until(desc, terminator_ops, field_index, field_name,
                            descriptors, field_exprs):
-    """v5：完成 RepeatUntilDescriptor 的编译期参数注入。
+    """完成 RepeatUntilDescriptor 的编译期参数注入。
 
     v0.1.1 起：对遍历中遇到的**每个** RepeatUntilDescriptor（含包装器内
     任意深度的嵌套 RU）调用；``descriptors/idx/name`` 参数沿用宿主字段。
@@ -837,13 +829,10 @@ def _finalize_repeat_until(desc, terminator_ops, field_index, field_name,
     调 ``desc.set_compiled_expr_params(ops, element_field_idx, index_field_indices)``，
     并把编译产物写入 field_exprs（供 Rust 侧 build_repeat_until_node 读取）。
 
-    设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.3.1 DEV 实现要点；
-    v0.1.1 修复设计 §2.4。
-
     :param desc: RepeatUntilDescriptor 实例（任意深度）。
-    :param terminator_ops: 已编译的 terminator ExprOp 列表（设计 §2.4：接收
+    :param terminator_ops: 已编译的 terminator ExprOp 列表（接收
                            已编译 ops 而非从 field_exprs 取，避免依赖插入顺序；
-                           None 时报缺失错误，与 v0.1.1 前行为一致）。
+                           None 时报缺失错误）。
     :param field_index: 宿主字段在 descriptors 列表中的索引。
     :param field_name: 宿主字段名（用于错误信息）。
     :param descriptors: ``[(name, _FieldDescriptor), ...]`` 宿主完整字段列表。
@@ -854,7 +843,7 @@ def _finalize_repeat_until(desc, terminator_ops, field_index, field_name,
     if ops is None:
         raise CompilationError(
             "RepeatUntil field '{}' (index {}) missing 'terminator' expression. "
-            "terminator must be a Phase 2 expression (e.g. e > 5).".format(
+            "terminator must be a field expression (e.g. e > 5).".format(
                 field_name, field_index
             )
         )
@@ -881,7 +870,7 @@ def _finalize_repeat_until(desc, terminator_ops, field_index, field_name,
     # 第一个 getint 索引作为 element_field_idx（Element 字段）。
     element_field_idx = all_getint_indices[0]
 
-    # 校验 element_field_idx 引用的字段确实是 Element 字段（设计 §7.3 RU-15）。
+    # 校验 element_field_idx 引用的字段确实是 Element 字段。
     if element_field_idx >= len(descriptors):
         raise CompilationError(
             "RepeatUntil element_field_idx {} out of range (field_count {}) in "
@@ -948,7 +937,7 @@ def _expr_programs_to_list(expr_programs, field_count):
 
 
 # ---------------------------------------------------------------------------
-# dataclass 字段配置注入（§2.2.1）
+# dataclass 字段配置注入
 # ---------------------------------------------------------------------------
 
 
@@ -965,13 +954,13 @@ def _apply_dataclass_field_config(cls, descriptors):
     - ``mode="rw"`` 或 ``"wo"`` 且有显式 ``default`` →
       ``dataclasses.field(kw_only=True, default=desc.default)``
     - ``mode="rw"`` 或 ``"wo"`` 无显式 ``default``，但 subcon 是值提供型
-      构造器（Const/Default/Rebuild/Computed/Padding，v0.1.1 P2/P3）→
+      构造器（Const/Default/Rebuild/Computed/Padding，v0.1.1 起）→
       ``dataclasses.field(kw_only=True, default=None)``——节点层 build 已
       支持 None 补值，实例化不再强制实参
     - 其余 ``mode="rw"`` 或 ``"wo"`` → ``dataclasses.field()``
       （必填 positional 参数，无默认值）
 
-    v0.1.1 P2/P3 隐式 default 决策（设计 §3.3）：
+    隐式 default 设计：
 
     - **显式 default 优先**（上述分支顺序保证）。
     - **kw_only=True 是必需**而非可选：隐式 default 字段在前、必填字段在后
@@ -984,9 +973,8 @@ def _apply_dataclass_field_config(cls, descriptors):
       隐式 default=None 与 int 注解在 mypy/pyright strict 下告警，运行时无
       影响；可显式传 default 或注解写 ``int | None``），不为静态检查器改机制。
 
-    [设计质疑] 设计文档 §2.2.1 原文为"RW/WO 无 default → 保持 _FieldDescriptor
-    不变（Phase 1 行为）"。但 Phase 2 为 ``_FieldDescriptor`` 添加了 ``__eq__``
-    运算符重载（表达式系统），导致 ``__hash__ = None``。Python 3.x 的
+    注意：``_FieldDescriptor`` 带有 ``__eq__`` 运算符重载（表达式系统），
+    导致 ``__hash__ = None``。Python 3.x 的
     ``@dataclass`` 将 ``__hash__ is None`` 的对象视为 mutable default 并拒绝。
     因此所有 ``_FieldDescriptor`` 必须替换为 ``dataclasses.field()``。
     对于无默认值的 RW/WO 字段，使用无参 ``dataclasses.field()`` 使其成为
@@ -995,8 +983,8 @@ def _apply_dataclass_field_config(cls, descriptors):
     :param cls: StructMixin 子类。
     :param descriptors: ``[(field_name, _FieldDescriptor), ...]`` 有序列表。
     """
-    # v0.1.1：延迟导入值提供型描述符（_mixin 顶部不导入 _descriptors，
-    # 避免循环导入，沿用 _compile_expressions 的延迟导入模式，设计 §3.1）。
+    # 延迟导入值提供型描述符（_mixin 顶部不导入 _descriptors，
+    # 避免循环导入）。
     from ._descriptors import (
         ConstDescriptor,
         DefaultDescriptor,
@@ -1004,7 +992,7 @@ def _apply_dataclass_field_config(cls, descriptors):
         RebuildDescriptor,
     )
 
-    # 值提供型构造器（设计 §3.1）：build 时节点层可自动获得值的描述符。
+    # 值提供型构造器：build 时节点层可自动获得值的描述符。
     # ComputedDescriptor 定义于本模块。
     value_providing = (
         ConstDescriptor,
@@ -1026,7 +1014,7 @@ def _apply_dataclass_field_config(cls, descriptors):
                 dataclasses.field(kw_only=True, default=desc.default),
             )
         elif isinstance(desc.subcon, value_providing):
-            # v0.1.1 P2/P3：值提供型 subcon 且无显式 default → 隐式
+            # 值提供型 subcon 且无显式 default → 隐式
             # default=None + kw_only=True。build 由节点层补值（Const/Default
             # 用常量/表达式值，Rebuild/Computed 求值，Padding 忽略传入值）。
             setattr(cls, name, dataclasses.field(kw_only=True, default=None))
@@ -1036,7 +1024,7 @@ def _apply_dataclass_field_config(cls, descriptors):
 
 
 # ---------------------------------------------------------------------------
-# Schema 编译（§E.1, §E.3）
+# Schema 编译
 # ---------------------------------------------------------------------------
 
 
@@ -1045,16 +1033,14 @@ def _compile_schema_for_class(cls):
 
     在 ``__init_subclass__`` 中调用。收集字段 → 编译表达式 → 调用 Rust
     ``compile_schema`` → 注入 dataclass 配置 → 存储编译产物。前向引用未解析时
-    安装延迟桩（§E.6），其他错误 fail fast。
+    安装延迟桩，其他错误 fail fast。
 
-    Phase 2 扩展（§3.1）：
+    流程：
     1. 收集 descriptors（已有）
     2. 构建 field_index_map: ``{id(desc): idx}``
     3. 调用 ``_compile_expressions`` 获取 expr_programs
     4. 提取 modes 列表
     5. 传入 compile_schema（扩展后的签名，含 modes + expr_programs）
-
-    Phase 3.2 扩展：
     6. 读取 ``cls._construct_bitwise`` 标志（由 ``BitStructMixin`` 设置）。
        为 True 时传入 ``bitwise=True``，根 StructNode 被 Rust 侧包入 BitwiseNode。
 
@@ -1066,7 +1052,7 @@ def _compile_schema_for_class(cls):
     modes = [desc.mode for _, desc in descriptors]
 
     # 构建 field_index_map：{id(descriptor): field_index}。
-    # 表达式中的 FieldRef 通过 id() 查找对应字段索引（§3.1 步骤 2）。
+    # 表达式中的 FieldRef 通过 id() 查找对应字段索引。
     field_index_map = {id(desc): idx for idx, (_, desc) in enumerate(descriptors)}
 
     # 编译表达式：遍历每个字段的 subcon，提取 _expr_params 中的表达式参数，
@@ -1077,11 +1063,11 @@ def _compile_schema_for_class(cls):
     # 转换为 Rust 侧期望的 Vec<Option<dict>> 格式。
     expr_programs_list = _expr_programs_to_list(expr_programs, len(descriptors))
 
-    # Phase 3.2：读取 BitStructMixin 设置的 bitwise 标志。
+    # 读取 BitStructMixin 设置的 bitwise 标志。
     # 普通 StructMixin 子类不设置此标志，getattr 默认 False。
     bitwise = getattr(cls, "_construct_bitwise", False)
 
-    # 缓存 descriptors 供延迟桩重试编译使用（SF-1 修复，§3.1 步骤 6）。
+    # 缓存 descriptors 供延迟桩重试编译使用。
     cls._cached_descriptors = descriptors
 
     if _compile_schema is None:
@@ -1104,8 +1090,8 @@ def _compile_schema_for_class(cls):
         # Rust 侧该错误消息含 "unresolved" 或 "未解析"。
         err_str = str(e)
         if "unresolved" in err_str.lower() or "未解析" in err_str:
-            # SF-1 修复：在安装延迟桩前注入 dataclass 字段配置。
-            # Phase 2 的 _FieldDescriptor 有 __hash__=None（表达式系统），
+            # 在安装延迟桩前注入 dataclass 字段配置。
+            # _FieldDescriptor 有 __hash__=None（表达式系统），
             # 若不替换为 dataclasses.field()，@dataclass 会拒绝。
             _apply_dataclass_field_config(cls, descriptors)
             _install_lazy_stubs(cls)
@@ -1117,11 +1103,11 @@ def _compile_schema_for_class(cls):
 
 
 # ---------------------------------------------------------------------------
-# 延迟桩机制（§E.6）
+# 延迟桩机制
 # ---------------------------------------------------------------------------
 
 # 每个延迟桩类对应的编译锁，确保多线程下编译只发生一次。
-# SF-5 修复：使用 WeakKeyDictionary 避免类被删除后锁对象仍被引用（内存泄漏）。
+# 使用 WeakKeyDictionary 避免类被删除后锁对象仍被引用（内存泄漏）。
 # WeakKeyDictionary 在 cls 被 GC 回收时自动移除对应条目。
 _lazy_compile_locks = weakref.WeakKeyDictionary()
 
@@ -1132,14 +1118,14 @@ def _install_lazy_stubs(cls):
     当编译因前向引用失败时，将 ``parse``/``build`` 替换为桩方法。首次调用时
     在锁保护下重试编译，成功后删除桩（回退到 ``StructMixin`` 继承的方法）。
 
-    SF-1 修复（§3.1 步骤 6）：使用 ``cls._cached_descriptors``（由
+    使用 ``cls._cached_descriptors``（由
     ``_compile_schema_for_class`` 缓存），而非重新收集。原因：
     1. ``_apply_dataclass_field_config`` 已将类属性上的 ``_FieldDescriptor``
        替换为 ``dataclasses.field()`` 返回值，``_collect_field_descriptors``
        此刻无法再识别它们（isinstance 检查失败）。
     2. 重新收集会得到空列表，导致延迟桩阶段编译出空 schema，丢失所有字段。
 
-    线程安全（§E.6）：``threading.Lock`` + 双重检查确保编译只发生一次。
+    线程安全：``threading.Lock`` + 双重检查确保编译只发生一次。
 
     :param cls: 需要安装延迟桩的 StructMixin 子类。
     """
@@ -1154,7 +1140,7 @@ def _install_lazy_stubs(cls):
         with lock:
             if cls._construct_compiled is not None:
                 return
-            # SF-1 修复：使用缓存的 descriptors，而非重新收集。
+            # 使用缓存的 descriptors，而非重新收集。
             # _apply_dataclass_field_config 已替换类属性，重新收集会失败。
             descriptors = getattr(cls, "_cached_descriptors", None)
             if descriptors is None:
@@ -1197,7 +1183,7 @@ def _install_lazy_stubs(cls):
             raise ConstructError(
                 "{} 尚未完成编译（延迟编译失败）".format(cls_.__name__)
             )
-        # 方案 B'：Rust 内部直接构造实例（与 StructMixin.parse 一致）
+        # Rust 内部直接构造实例（与 StructMixin.parse 一致）
         return schema._parse_raw(data)
 
     def _lazy_build(self):
@@ -1227,7 +1213,7 @@ def _remove_lazy_stubs(cls):
 
 
 # ---------------------------------------------------------------------------
-# StructMixin 基类（§A.2）
+# StructMixin 基类
 # ---------------------------------------------------------------------------
 
 
@@ -1251,8 +1237,8 @@ class StructMixin:
         built = msg.build()
         parsed = MyMsg.parse(built)
 
-    编译流程在 ``__init_subclass__`` 中完成（§E.1），用户无感。``@dataclass``
-    在 ``__init_subclass__`` 之后执行（§A.5.1），两者通过 ``field()`` 返回值
+    编译流程在 ``__init_subclass__`` 中完成，用户无感。``@dataclass``
+    在 ``__init_subclass__`` 之后执行，两者通过 ``field()`` 返回值
     协调（同时满足 dataclass 默认值协议与 Mixin 编译协议）。
     """
 
@@ -1261,7 +1247,7 @@ class StructMixin:
     _construct_compiled = None
 
     def __init_subclass__(cls, **kwargs):
-        """子类创建时自动编译 schema（§E.1）。
+        """子类创建时自动编译 schema。
 
         此方法在 ``@dataclass`` 装饰器之前执行（Python 类创建顺序）。
         编译流程：收集字段 → 调用 Rust compile_schema → 注入 dataclass 配置 →
@@ -1275,7 +1261,7 @@ class StructMixin:
         """从字节解析为本类的实例。
 
         恰好一次 FFI 穿越：调用 ``CompiledSchema._parse_raw`` 直接返回本类实例
-        （方案 B'：Rust 内部通过 create_class + force_setattr 构造实例，
+        （Rust 内部通过 create_class + force_setattr 构造实例，
         无 Python 侧 ``cls(**dict)`` kwargs unpacking 开销）。
 
         :param data: 待解析的字节数据。
@@ -1288,7 +1274,7 @@ class StructMixin:
                 "{} 尚未完成编译（可能存在未解析的前向引用），"
                 "请确保所有被引用的类型已定义后再调用 parse".format(cls.__name__)
             )
-        # 方案 B'：Rust 内部直接构造实例，不再 cls(**raw_fields)
+        # Rust 内部直接构造实例，不再 cls(**raw_fields)
         return schema._parse_raw(data)
 
     def build(self):
@@ -1314,7 +1300,7 @@ class BitStructMixin(StructMixin):
 
     等价于 Python construct 的 ``BitStruct``，即 ``Bitwise(Struct(...))`` 的语法糖。
     编译时（``__init_subclass__``）整体被 ``BitwiseNode`` 包裹，字段树在 bit 域
-    编译（Phase 3.3 后：Padding → ``BitPaddingNode``）。
+    编译（Padding → ``BitPaddingNode``）。
 
     使用方式::
 

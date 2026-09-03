@@ -1,13 +1,11 @@
 //! BitsIntegerNode：bit 级整数读写。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.1（bit 原子整数）、§5.1（swapbytesinbits）、
-//! §9.1（边界条件 BI-1~BI-9）。
 //! Python 参考：`construct/construct/core.py` `BitsInteger`（L1295-1406）、
 //! `Bit` / `Nibble` / `Octet`（L1410-1420，均为 `BitsInteger` 的语法糖）、
 //! `construct/construct/lib/binary.py` `bits2integer`（L57）、`integer2bits`（L6）、
 //! `swapbytesinbits`（L135）。
 //!
-//! ## Phase 3.1 范围
+//! ## 范围与约束
 //!
 //! - `length` 为编译期常量（`usize`）。表达式 length 由编译管线在
 //!   `build_node_from_descriptor` 中拒绝（返回 `Compilation` 错误）。
@@ -26,7 +24,7 @@
 //!
 //! 对齐 Python `swapbytesinbits`（binary.py L135）：在 read/write 前后对 bit 串
 //! 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则 Python 抛 ValueError，
-//! construct-rs 返回 `Integer` 错误，BI-6）。
+//! construct-rs 返回 `Integer` 错误）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -38,7 +36,7 @@ use pyo3::prelude::*;
 /// BitsInteger 的 length 上限（u64 位宽）。
 ///
 /// Python 无此限制（用大整数），construct-rs 限定为 u64 以覆盖所有实际用例。
-/// 超出在编译期返回 `Compilation` 错误（§9.1 BI-3）。
+/// 超出在编译期返回 `Compilation` 错误。
 pub const MAX_BITS_INTEGER: usize = 64;
 
 // ---------------------------------------------------------------------------
@@ -58,28 +56,28 @@ pub const MAX_BITS_INTEGER: usize = 64;
 ///
 /// 对齐 Python `bits2integer(data, signed)`（`lib/binary.py` L57）：
 /// signed=true 时，最高位为 1 表示负数（二补码）：`result - (1 << length)`。
-/// 边界 length=64 + signed=true 时用 i128 中间值（§9.1 BI-4）。
+/// 边界 length=64 + signed=true 时用 i128 中间值。
 ///
 /// # swapped 语义（字节序）
 ///
 /// 对齐 Python `swapbytesinbits`（`lib/binary.py` L135）：在 read/write 前后对 bit 串
-/// 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则返回 `Integer` 错误，BI-6）。
-/// 对应"Byte-Level Little-Endian"（分析报告 §2 四种组合）。
+/// 按 8 位组反序。**仅 length 为 8 倍数时有定义**（否则返回 `Integer` 错误）。
+/// 对应"Byte-Level Little-Endian"。
 ///
 /// # sizeof
 ///
 /// 返回 `length`（bit 数）。在 bit 域内由 `StructNode` 累加。
 ///
-/// # 错误（§9.1 BI-1~BI-9）
+/// # 错误
 ///
-/// - BI-1 length==0：parse/build 返回 `Integer` 错误
-/// - BI-2 length<0：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
-/// - BI-3 length>64：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
-/// - BI-4 length==64 + signed：用 i128 中间值，正确处理二补码
-/// - BI-6 swapped + length%8!=0：parse/build 返回 `Integer` 错误
-/// - BI-7 build 非 int：返回 `Integer` 错误
-/// - BI-8 build 超范围：返回 `Integer` 错误
-/// - BI-9 流中 bit 不足：parse 返回 `Stream` 错误（由 `read_bits` 传播）
+/// - length==0：parse/build 返回 `Integer` 错误
+/// - length<0：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
+/// - length>64：编译期 `Compilation` 错误（在 `compile.rs` 中检测）
+/// - length==64 + signed：用 i128 中间值，正确处理二补码
+/// - swapped + length%8!=0：parse/build 返回 `Integer` 错误
+/// - build 非 int：返回 `Integer` 错误
+/// - build 超范围：返回 `Integer` 错误
+/// - 流中 bit 不足：parse 返回 `Stream` 错误（由 `read_bits` 传播）
 #[derive(Debug, Clone, Copy)]
 pub struct BitsIntegerNode {
     /// bit 宽度（1..=64）。
@@ -139,14 +137,14 @@ impl super::Construct for BitsIntegerNode {
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // BI-1: length must be positive
+        // length must be positive
         if self.length == 0 {
             return Err(ConstructError::Integer {
                 message: format!("BitsInteger length {} must be positive", self.length),
                 path: path.to_string(),
             });
         }
-        // BI-3 defensive: length <= 64 (编译期已校验，运行时兜底)
+        // defensive: length <= 64 (编译期已校验，运行时兜底)
         if self.length > MAX_BITS_INTEGER {
             return Err(ConstructError::Integer {
                 message: format!(
@@ -156,7 +154,7 @@ impl super::Construct for BitsIntegerNode {
                 path: path.to_string(),
             });
         }
-        // BI-6: swapped requires length % 8 == 0
+        // swapped requires length % 8 == 0
         if self.swapped && !self.length.is_multiple_of(8) {
             return Err(ConstructError::Integer {
                 message: format!(
@@ -179,7 +177,7 @@ impl super::Construct for BitsIntegerNode {
 
         // 应用 signed（二补码）+ 转 PyLong
         //
-        // # OPT-1: PyLong 创建路径选择
+        // # PyLong 创建路径选择
         //
         // pyo3 0.22 的 `i128::IntoPy` 走任意精度路径（~21 ns），不走 CPython
         // 小整数缓存 fast path；而 `i64::IntoPy`/`u64::IntoPy` 走 fast path
@@ -191,11 +189,11 @@ impl super::Construct for BitsIntegerNode {
         // - `unsigned && length == 64`：raw 可能 > i64::MAX（最大 u64::MAX），
         //   用 u64 直接转换
         //
-        // i128 仍作为 length=64+signed 的二补码计算中间值（避免 `1i64 << 64` 溢出，
-        // §9.1 BI-4），但最终值仍在 i64 范围内（i64::MIN..=i64::MAX）。
+        // i128 仍作为 length=64+signed 的二补码计算中间值（避免 `1i64 << 64` 溢出），
+        // 但最终值仍在 i64 范围内（i64::MIN..=i64::MAX）。
         if self.signed || self.length < 64 {
             // signed 二补码计算（仅在最高位为 1 时生效）
-            // i128 中间值正确处理 length=64 + signed 的边界（BI-4）
+            // i128 中间值正确处理 length=64 + signed 的边界
             let value: i128 = if self.signed && (raw >> (self.length - 1)) & 1 == 1 {
                 (raw as i128) - (1i128 << self.length)
             } else {
@@ -217,7 +215,7 @@ impl super::Construct for BitsIntegerNode {
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // BI-1: length must be positive
+        // length must be positive
         if self.length == 0 {
             return Err(ConstructError::Integer {
                 message: format!("BitsInteger length {} must be positive", self.length),
@@ -233,7 +231,7 @@ impl super::Construct for BitsIntegerNode {
                 path: path.to_string(),
             });
         }
-        // BI-6: swapped requires length % 8 == 0
+        // swapped requires length % 8 == 0
         if self.swapped && !self.length.is_multiple_of(8) {
             return Err(ConstructError::Integer {
                 message: format!(
@@ -244,7 +242,7 @@ impl super::Construct for BitsIntegerNode {
             });
         }
 
-        // BI-7: obj must be a Python int
+        // obj must be a Python int
         // 使用 PyAny::is_instance_of::<PyLong>() 检测（注意：bool 是 int 的子类，
         // Python construct 的 isinstance(obj, int) 对 True/False 返回 True，
         // 行为等价）。
@@ -280,7 +278,7 @@ impl super::Construct for BitsIntegerNode {
             }
         };
 
-        // BI-8: 范围校验（对齐 integer2fits L24）
+        // 范围校验（对齐 integer2fits L24）
         let (min, max) = if self.signed {
             // signed: -(2^(length-1)) .. 2^(length-1) - 1
             let m = 1i128 << (self.length - 1);
@@ -331,7 +329,7 @@ impl super::Construct for BitsIntegerNode {
 }
 
 // ---------------------------------------------------------------------------
-// 辅助函数（§5.1 swapbytesinbits）
+// 辅助函数（swapbytesinbits）
 // ---------------------------------------------------------------------------
 
 /// 对 length-bit 的值做 swapbytesinbits（按 8 位组反序）。
@@ -573,7 +571,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — signed（BI-4, BI-5）
+    // parse — signed
     // ======================================================================
 
     #[test]
@@ -642,7 +640,7 @@ mod tests {
 
     #[test]
     fn parse_signed_64_bits_min() {
-        // BI-4: length=64 + signed，最小值 = -2^63 = -9223372036854775808
+        // length=64 + signed，最小值 = -2^63 = -9223372036854775808
         // 0x80 0x00 ... = 0b1000_0000_...0 (64 bit) = 2^63 as unsigned
         with_py(|py| {
             let node = BitsIntegerNode::new(64, true, false);
@@ -661,7 +659,7 @@ mod tests {
 
     #[test]
     fn parse_signed_64_bits_max() {
-        // BI-4: length=64 + signed，最大值 = 2^63 - 1 = 9223372036854775807
+        // length=64 + signed，最大值 = 2^63 - 1 = 9223372036854775807
         // 0x7F 0xFF ... = 0b0111_1111_...1 (64 bit) = 2^63-1 as unsigned
         with_py(|py| {
             let node = BitsIntegerNode::new(64, true, false);
@@ -679,7 +677,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — swapped（BI-6）
+    // parse — swapped
     // ======================================================================
 
     #[test]
@@ -717,7 +715,7 @@ mod tests {
 
     #[test]
     fn parse_swapped_with_non_multiple_of_8_returns_error() {
-        // BI-6: swapped + length=12 (非 8 倍数) → Integer error
+        // swapped + length=12 (非 8 倍数) → Integer error
         with_py(|py| {
             let node = BitsIntegerNode::new(12, false, true);
             let mut stream = ParseStream::new(&[0xAB, 0xC0]);
@@ -737,12 +735,11 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — 错误（BI-1 length=0, BI-9 insufficient）
+    // parse — 错误（length=0 / 流不足）
     // ======================================================================
 
     #[test]
     fn parse_length_zero_returns_format_field_error() {
-        // BI-1
         with_py(|py| {
             let node = BitsIntegerNode::new(0, false, false);
             let mut stream = ParseStream::new(&[0xFF]);
@@ -762,7 +759,7 @@ mod tests {
 
     #[test]
     fn parse_insufficient_bits_returns_stream_error() {
-        // BI-9: 流中 8 bit，请求 12 bit
+        // 流中 8 bit，请求 12 bit
         with_py(|py| {
             let node = BitsIntegerNode::new(12, false, false);
             let mut stream = ParseStream::new(&[0xFF]);
@@ -881,7 +878,7 @@ mod tests {
 
     #[test]
     fn build_signed_64_bits_min() {
-        // BI-4: -2^63 build OK
+        // -2^63 build OK
         with_py(|py| {
             let node = BitsIntegerNode::new(64, true, false);
             let obj = py
@@ -921,12 +918,11 @@ mod tests {
     }
 
     // ======================================================================
-    // build — 错误（BI-1, BI-6, BI-7, BI-8）
+    // build — 错误
     // ======================================================================
 
     #[test]
     fn build_length_zero_returns_format_field_error() {
-        // BI-1
         with_py(|py| {
             let node = BitsIntegerNode::new(0, false, false);
             let obj = py.eval_bound("1", None, None).expect("eval");
@@ -942,7 +938,6 @@ mod tests {
 
     #[test]
     fn build_swapped_non_multiple_of_8_returns_error() {
-        // BI-6
         with_py(|py| {
             let node = BitsIntegerNode::new(12, false, true);
             let obj = py.eval_bound("1", None, None).expect("eval");
@@ -963,7 +958,6 @@ mod tests {
 
     #[test]
     fn build_non_integer_returns_format_field_error() {
-        // BI-7
         with_py(|py| {
             let node = BitsIntegerNode::new(8, false, false);
             let obj = py.eval_bound("'hello'", None, None).expect("eval");
@@ -984,7 +978,7 @@ mod tests {
 
     #[test]
     fn build_out_of_range_unsigned_returns_error() {
-        // BI-8: 8-bit unsigned, value = 256 (> 255)
+        // 8-bit unsigned, value = 256 (> 255)
         with_py(|py| {
             let node = BitsIntegerNode::new(8, false, false);
             let obj = py.eval_bound("256", None, None).expect("eval");
@@ -1005,7 +999,7 @@ mod tests {
 
     #[test]
     fn build_out_of_range_signed_returns_error() {
-        // BI-8: 8-bit signed, value = 128 (> 127)
+        // 8-bit signed, value = 128 (> 127)
         with_py(|py| {
             let node = BitsIntegerNode::new(8, true, false);
             let obj = py.eval_bound("128", None, None).expect("eval");
@@ -1021,7 +1015,7 @@ mod tests {
 
     #[test]
     fn build_negative_for_unsigned_returns_error() {
-        // BI-8: 8-bit unsigned, value = -1 (< 0)
+        // 8-bit unsigned, value = -1 (< 0)
         with_py(|py| {
             let node = BitsIntegerNode::new(8, false, false);
             let obj = py.eval_bound("-1", None, None).expect("eval");

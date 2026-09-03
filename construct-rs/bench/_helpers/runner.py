@@ -1,8 +1,4 @@
-"""bench 统一 runner：场景注册 + 子进程计时 + 统计（设计 §2.5）。
-
-设计依据：
-- docs/design/基础设施/测试框架设计.md §2.5
-- 复用 benchmark.py 的子进程隔离 + timeit 模式
+"""bench 统一 runner：场景注册 + 子进程计时 + 统计。
 
 公开 API：
     - BenchConfig（dataclass）
@@ -13,8 +9,8 @@
 设计原则：
     1. 子进程隔离：与 parity helper 同模式（两个 construct 同名包不能共存）
     2. 多次采样：默认 20 次 iteration 取中位数，降低噪声
-    3. Controlled A/B：复用 E01_O1_ab_stats.py 的 Welch t 检验
-    4. 报告对齐 perf-scenarios.csv：输出 JSON schema 与 PM 维护的 CSV 字段对齐
+    3. Controlled A/B：Welch t 检验判断差异显著性
+    4. 报告对齐 perf-scenarios.csv：输出 JSON schema 与 CSV 字段对齐
 """
 
 from __future__ import annotations
@@ -33,12 +29,11 @@ from .stats import mean, median, speedup_ratio, stdev_sample, welch_t
 class BenchConfig:
     """单次 benchmark 配置。
 
-    设计 §5.3 注意点 3：number 默认 = 30000（与原 benchmark.py 一致），
-    iterations 默认 = 20（比 REPEAT=5 多，统计更稳健），warmup = 5。
+    number 默认 = 30000，iterations 默认 = 20（统计稳健），warmup = 5。
     """
     iterations: int = 20          # 每个场景的测量次数（取中位数）
     warmup: int = 5               # 预热次数（不计入统计）
-    number: int = 30_000          # 每次 iteration 内的 timeit number（与 benchmark.py 一致）
+    number: int = 30_000          # 每次 iteration 内的 timeit number
     timeout_sec: float = 120.0    # 单次子进程超时
 
 
@@ -66,15 +61,15 @@ class BenchResult:
 class ABResult:
     """Controlled A/B Test 结果。
 
-    用途：对比两个优化方案（如 O1 off vs O1 on），用 Welch t 检验判断差异显著性。
+    用途：对比两种配置（如优化关闭 vs 开启），用 Welch t 检验判断差异显著性。
     """
     scenario_a: str
     scenario_b: str
-    results_a: list               # A 组重复测量（如 O1 off × 3 次）
-    results_b: list               # B 组重复测量（如 O1 on × 3 次）
+    results_a: list               # A 组重复测量（如优化关闭 × 3 次）
+    results_b: list               # B 组重复测量（如优化开启 × 3 次）
 
     def welch_t_speedup(self):
-        """对 A/B 两组的 speedup 做 Welch t 检验（参考 E01_O1_ab_stats.py）。
+        """对 A/B 两组的 speedup 做 Welch t 检验。
 
         契约：results_a / results_b 必须按 [rs, py, rs, py, ...] 交替排列
         （由 controlled_ab_test 默认实现保证）。每次 (rs, py) 配对算单次 speedup，
@@ -98,7 +93,7 @@ class ABResult:
 class BenchRunner:
     """统一 benchmark runner：场景注册 + 子进程计时 + 统计。
 
-    用途：替代 tests/ 下 5 个 bench 脚本各自实现的"子进程隔离 + timeit + 统计"逻辑。
+    用途：统一各 bench 脚本的"子进程隔离 + timeit + 统计"逻辑。
     """
 
     def __init__(self, rs_python, py_python, crs_python_dir, config=None):
@@ -121,7 +116,7 @@ class BenchRunner:
         参数：
             impl: "rs" 或 "py"
             scenario_name: 场景名（用于报告标识）
-            measure_script: 子进程脚本字符串（与 benchmark.py _MEASURE_SCRIPT 同模式），
+            measure_script: 子进程脚本字符串（与 _MEASURE_SCRIPT 同模式），
                 必须输出 JSON：{"per_call_ns": [float, ...], ...}
 
         实现要点：
@@ -167,7 +162,7 @@ class BenchRunner:
             )
 
         samples_ns = data["per_call_ns"]
-        # 实现要点 2：丢弃前 config.warmup 个 sample（设计 §2.5 硬要求）
+        # 实现要点 2：丢弃前 config.warmup 个 sample
         # 边界防御：若脚本返回的 sample 数 ≤ warmup（如调用方配置错误），
         # 保留全部 sample 而非切片成空——符合 stats 模块"空序列返回 0.0 不抛异常"契约，
         # 让上层通过 BenchResult.samples_ns 长度异常发现问题。
@@ -206,15 +201,15 @@ class BenchRunner:
         measure_script_b,
         repeats=3,
     ):
-        """Controlled A/B Test（复用 E01_O1_ab_stats.py 经验）。
+        """Controlled A/B Test。
 
-        用途：对比两个优化方案（如 O1 off vs O1 on），用 Welch t 检验判断差异显著性。
+        用途：对比两种配置（如优化关闭 vs 开启），用 Welch t 检验判断差异显著性。
 
         参数：
             scenario_a_name / scenario_b_name: A/B 场景名
             measure_script_a / measure_script_b: A/B 子进程脚本（脚本内 IMPL 变量
                 由 runner 通过 run_scenario 的 impl 参数控制，rs / py 两次复用）
-            repeats: 每组重复测量次数（E01 用 3）
+            repeats: 每组重复测量次数（默认 3）
 
         返回的 ABResult.results_a / results_b 按 [rs, py, rs, py, ...] 交替排列，
         与 welch_t_speedup 的配对契约一致（每次 repeat 跑一对 rs+py 算 speedup）。
@@ -222,7 +217,7 @@ class BenchRunner:
         results_a = []
         results_b = []
         for i in range(repeats):
-            # A 组：rs + py 配对（与 E01_O1_ab_stats.py 的 speedup 计算模式一致）
+            # A 组：rs + py 配对
             results_a.append(self.run_scenario("rs", f"{scenario_a_name}-rs-r{i}", measure_script_a))
             results_a.append(self.run_scenario("py", f"{scenario_a_name}-py-r{i}", measure_script_a))
             # B 组：rs + py 配对

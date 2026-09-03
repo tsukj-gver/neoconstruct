@@ -1,6 +1,5 @@
 //! PrefixedArrayNode：前缀长度数组读写。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.6（独立 Node，不依赖 FocusedSeq/Rebuild）。
 //! Python 参考：`construct/construct/core.py` `PrefixedArray`（L4934-4983）。
 //!
 //! ## 概述
@@ -11,24 +10,24 @@
 //!
 //! - `countfield` 是任意能产生整数的 Node（FormatField / Bytes(1) + Adapter 等）。
 //!   实际场景常见的是 `VarInt`、`Byte`、`Int16ub` 等。
-//! - parse 时 countfield 返回的对象必须可 `extract::<i64>()`，否则返回 `Range` 错误
-//!   （PA-2）。负数 count 返回 `Range` 错误（PA-1）。
+//! - parse 时 countfield 返回的对象必须可 `extract::<i64>()`，否则返回 `Range` 错误。
+//!   负数 count 返回 `Range` 错误。
 //! - 嵌套数组（PrefixedArray 内 PrefixedArray）：内层 `_index` 覆盖外层，循环结束
-//!   后恢复（与 ArrayNode 同语义，设计 §3.2.2）。
-//! - `sizeof` 永远返回 `Err`（元素数量运行时未知，设计 §4.6.4 保守策略）。
+//!   后恢复（与 ArrayNode 同语义）。
+//! - `sizeof` 永远返回 `Err`（元素数量运行时未知，保守策略）。
 //!
 //! ## 与 ArrayNode 的差异
 //!
 //! - PrefixedArray 的 count 来自流（countfield.parse），而非编译期或表达式。
-//! - build 时 PrefixedArray 不校验长度（PA-5：count 超出 countfield 表示范围由
+//! - build 时 PrefixedArray 不校验长度（count 超出 countfield 表示范围由
 //!   countfield 节点自行报错），ArrayNode build 时严格校验 `len(obj) == count`。
 //!
 //! ## 性能要点
 //!
-//! - **4.7 lazy path 迁移**：成功路径不调 `path.push_index/pop`（P0-3 模式推广），
+//! - **lazy path**：成功路径不调 `path.push_index/pop`，
 //!   子节点返回 Err 时通过 `ConstructError::push_path_index(i)` 重建索引段。
 //!   countfield 错误仍用 `push_path_segment("countfield")`（字段名，非索引）。
-//! - **4.7 PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
+//! - **PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
 //! - parse 比 ArrayNode 多一次 countfield.parse（~15-30ns）。
 
 use crate::context::Context;
@@ -49,7 +48,7 @@ use pyo3::types::PyList;
 /// # parse 行为
 ///
 /// 1. `countfield.parse(stream)` → 得到 Python 整数对象
-/// 2. extract i64；非整数返回 `Range` 错误（PA-2），负数返回 `Range` 错误（PA-1）
+/// 2. extract i64；非整数返回 `Range` 错误，负数返回 `Range` 错误
 /// 3. 创建 PyList（预分配容量）
 /// 4. `for i in 0..count`：设置 `ctx._index = i`，inner.parse，append 到 list
 /// 5. 循环结束恢复 `ctx._index`
@@ -57,13 +56,13 @@ use pyo3::types::PyList;
 /// # build 行为
 ///
 /// 1. 校验 obj 是 list/tuple/iterable，收集到 Vec
-/// 2. 先 build countfield：`countfield.build(len, ...)`（PA-5：超出表示范围由
+/// 2. 先 build countfield：`countfield.build(len, ...)`（超出表示范围由
 ///    countfield 自行报错）
 /// 3. 遍历元素：设置 `ctx._index = i`，inner.build
 ///
 /// # sizeof 行为
 ///
-/// 永远返回 `Err`（保守策略，设计 §4.6.4）：元素数量运行时未知。
+/// 永远返回 `Err`（保守策略）：元素数量运行时未知。
 #[derive(Debug)]
 pub struct PrefixedArrayNode {
     /// 计数字段（如 Byte、Int16ub、VarInt）。
@@ -91,7 +90,7 @@ impl PrefixedArrayNode {
         &self.inner
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     /// countfield 与 inner 任一含表达式即返回 true。
     pub fn has_expressions(&self) -> bool {
         self.countfield.has_expressions() || self.inner.has_expressions()
@@ -113,7 +112,7 @@ impl super::Construct for PrefixedArrayNode {
         // 1. 解析 countfield 得到 count（Python 整数对象）。
         let count_obj = self.countfield.parse(py, stream, ctx, path)?;
 
-        // 2. extract 为 i64。非整数返回 Range 错误（PA-2）。
+        // 2. extract 为 i64。非整数返回 Range 错误。
         let count_i64: i64 = count_obj
             .bind(py)
             .extract()
@@ -122,7 +121,7 @@ impl super::Construct for PrefixedArrayNode {
                 path: path.to_string(),
             })?;
 
-        // 3. 负数 count 返回 Range 错误（PA-1）。
+        // 3. 负数 count 返回 Range 错误。
         if count_i64 < 0 {
             return Err(ConstructError::Range {
                 message: format!("invalid PrefixedArray count {}", count_i64),
@@ -132,15 +131,15 @@ impl super::Construct for PrefixedArrayNode {
         let count = count_i64 as usize;
 
         // 4. 内联 Array 逻辑（避免构造临时 ArrayNode 实例）。
-        // 4.7 PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList。
+        // PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList。
         let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(count);
 
-        // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
+        // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
 
         for i in 0..count {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
                 Err(mut e) => {
@@ -167,13 +166,13 @@ impl super::Construct for PrefixedArrayNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        // build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
         let items = super::common::collect_obj_to_vec(obj, "PrefixedArray", path)?;
 
         let count = items.len();
 
         // 2. 先构建 countfield（写入长度）。
-        //    PA-5：count 超出 countfield 表示范围时，由 countfield 节点自行报错
+        //    count 超出 countfield 表示范围时，由 countfield 节点自行报错
         //    （如 FormatFieldNode 抛 FormatField/Stream 错误），PrefixedArrayNode
         //    不做额外校验（对齐 Python core.py）。
         let count_py = count.into_py(py);
@@ -188,7 +187,7 @@ impl super::Construct for PrefixedArrayNode {
 
         for (i, elem) in items.into_iter().enumerate() {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
             if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 e.push_path_index(i);
@@ -202,7 +201,7 @@ impl super::Construct for PrefixedArrayNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 设计 §4.6.4：保守返回 Err。
+        // 保守返回 Err。
         // 元素数量运行时未知，无法静态计算。对齐 Python PrefixedArray._actualsize
         // 需流上下文（无静态 _sizeof）。
         Err(ConstructError::Generic {
@@ -212,8 +211,7 @@ impl super::Construct for PrefixedArrayNode {
     }
 }
 
-// 恢复 ctx._index 已提升为 `Context::restore_index` 方法（P0-1 整合）。
-// 保留此注释作为 PrefixedArrayNode 模式采用声明参考。
+// 恢复 ctx._index 由 `Context::restore_index` 方法承担。
 //
 // ---------------------------------------------------------------------------
 // 单元测试
@@ -303,7 +301,7 @@ mod tests {
 
     #[test]
     fn parse_byte_count_reads_n_elements() {
-        // PA：countfield=Byte，inner=Byte
+        // countfield=Byte，inner=Byte
         // 数据：[count=3, e0=10, e1=20, e2=30]
         with_py(|py| {
             let node = prefixed_byte_byte();
@@ -328,7 +326,7 @@ mod tests {
 
     #[test]
     fn parse_count_zero_returns_empty_list_but_consumes_countfield() {
-        // PA-3: count = 0 → 返回空 list（countfield 已消耗）
+        // count = 0 → 返回空 list（countfield 已消耗）
         with_py(|py| {
             let node = prefixed_byte_byte();
             let mut stream = ParseStream::new(&[0x00, 0xFF, 0xFF]);
@@ -368,7 +366,7 @@ mod tests {
 
     #[test]
     fn parse_count_insufficient_returns_stream_error() {
-        // PA-4: count > 实际可解析元素数 → inner.parse 失败时错误向上传播
+        // count > 实际可解析元素数 → inner.parse 失败时错误向上传播
         with_py(|py| {
             let node = prefixed_byte_byte();
             // count=5，但只提供 2 个字节
@@ -410,7 +408,7 @@ mod tests {
 
     #[test]
     fn parse_count_not_integer_returns_range_error() {
-        // PA-2: countfield 解析结果不是整数（如 countfield 是 Bytes(2)）
+        // countfield 解析结果不是整数（如 countfield 是 Bytes(2)）
         // 用 Bytes(2) 作为 countfield，会返回 bytes 而非 int → extract i64 失败
         with_py(|py| {
             let countfield =
@@ -437,7 +435,7 @@ mod tests {
 
     #[test]
     fn parse_countfield_signed_negative_returns_range_error() {
-        // PA-1: countfield 是 Int8sb（signed），解析得到负数 → Range 错误
+        // countfield 是 Int8sb（signed），解析得到负数 → Range 错误
         // 注意：FormatFieldDescriptor 当前仅有 unsigned 8-bit，用 Int8sb 单例测试
         with_py(|py| {
             let countfield =
@@ -615,7 +613,7 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // 4.7 lazy path：error.path 由 inner.build 产生 "root"，PrefixedArray 重建为 "root[0]"。
+            // lazy path：error.path 由 inner.build 产生 "root"，PrefixedArray 重建为 "root[0]"。
             let p = err.path().unwrap_or("");
             assert!(
                 p == "root[0]" || p.ends_with("[0]"),
@@ -632,7 +630,7 @@ mod tests {
 
     #[test]
     fn build_count_overflow_propagates_countfield_error() {
-        // PA-5: count 超出 countfield 表示范围 → 由 countfield 自行报错
+        // count 超出 countfield 表示范围 → 由 countfield 自行报错
         // 用 Byte 作 countfield，list 含 256 个元素 → Byte 无法表示 256
         with_py(|py| {
             let node = prefixed_byte_byte();
@@ -671,12 +669,12 @@ mod tests {
     }
 
     // ======================================================================
-    // 4.7 lazy path 嵌套组合测试（设计 §6.2）
+    // lazy path 嵌套组合测试
     // ======================================================================
 
     #[test]
     fn parse_struct_inside_prefixed_array_error_path() {
-        // 4.7 设计 §6.2：PrefixedArray(Byte, Struct{x: Byte})，
+        // PrefixedArray(Byte, Struct{x: Byte})，
         // Array[1].x EOF → path = "root[1].x"
         // 重建顺序（从叶到根）：
         //   1. leaf FormatField error path = "root"
@@ -722,7 +720,7 @@ mod tests {
 
     #[test]
     fn parse_returns_native_list_type() {
-        // 4.7：验证 Vec 中转后返回的仍是原生 list 类型。
+        // 验证 Vec 中转后返回的仍是原生 list 类型。
         with_py(|py| {
             let node = prefixed_byte_byte();
             let mut stream = ParseStream::new(&[0x03, 0x01, 0x02, 0x03]);
@@ -801,7 +799,7 @@ mod tests {
 
     #[test]
     fn sizeof_always_returns_error() {
-        // PA-6: sizeof 永远 Err
+        // sizeof 永远 Err
         with_py(|py| {
             let ctx = setup_ctx(py);
             let node = prefixed_byte_byte();

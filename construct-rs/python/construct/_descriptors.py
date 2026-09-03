@@ -1,13 +1,10 @@
 """类型描述符的 Python 侧重导出（纯 Python 委托层）。
 
-设计依据：``docs/design/基础设施/架构设计.md`` §A.4（类型描述符）、§D.3（Python 包结构）、
-``docs/design/模块设计/模块设计-BitStream.md`` §8.2（bit 描述符）。
-
 实际的描述符 ``pyclass`` 定义在 Rust 侧（``src/descriptors/``），由
 ``_construct_rust`` 扩展模块提供。本模块将其重导出，供 ``__init__.py``
 和内部模块使用。
 
-三种描述符形态（§A.4）：
+描述符形态：
 
 1. **预定义单例**（无参数原子描述符）：
    - ``Int8ub``, ``Int8ul``, ``Int8sb``, ``Int8sl``
@@ -19,17 +16,17 @@
 2. **可实例化描述符**（带参数）：
    - ``Bytes(length)`` — 读取 ``length`` 字节
    - ``BitsInteger(length, signed=False, swapped=False)`` — bit 级整数
-     （Phase 3.1 仅常量 length，表达式 length 编译期拒绝）
+      （仅常量 length，表达式 length 编译期拒绝）
 
 3. **StructMixin 子类引用**（嵌套结构）：
    - 直接传 StructMixin 子类作为描述符：``field(Inner)``
 
-4. **纯 Python 描述符（Phase 3.1 bit 域）**：
+4. **纯 Python 描述符（bit 域等）**：
    - ``BitsIntegerDescriptor`` — bit 级整数（由 Rust type-name 识别）
    - ``Bit()`` / ``Nibble()`` / ``Octet()`` — ``BitsInteger(1/4/8)`` 语法糖
 """
 
-# RepeatUntilDescriptor.__init__ 需要的 CompilationError（v5 callable 检查）。
+# RepeatUntilDescriptor.__init__ 需要的 CompilationError（callable 检查）。
 from ._errors import CompilationError
 
 # 从 Rust 扩展导入描述符类与单例。
@@ -71,7 +68,7 @@ except ImportError:  # pragma: no cover
     pass
 
 
-# BytesInteger 作为 BytesIntegerDescriptor 的别名导出（Phase 6.1）。
+# BytesInteger 作为 BytesIntegerDescriptor 的别名导出。
 # 用户通过 BytesInteger(3, signed=True) 创建 BytesIntegerDescriptor 实例。
 try:
     from ._construct_rust import (
@@ -79,7 +76,7 @@ try:
         # 同时暴露 BytesInteger 别名（Python construct 兼容名）。
     )
     BytesInteger = BytesIntegerDescriptor
-    # Phase 6.1 Float 单例（FormatFieldDescriptor pyclass 实例）
+    # Float 单例（FormatFieldDescriptor pyclass 实例）
     from ._construct_rust import (
         Float16b,
         Float16l,
@@ -87,7 +84,7 @@ try:
         Float32l,
         Float64b,
         Float64l,
-        # Phase 6.1 Int24 单例（BytesIntegerDescriptor pyclass 实例）
+        # Int24 单例（BytesIntegerDescriptor pyclass 实例）
         Int24ub,
         Int24ul,
         Int24sb,
@@ -98,17 +95,14 @@ except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.1: BitsInteger / Bit / Nibble / Octet 纯 Python 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §8.2。
+# BitsInteger / Bit / Nibble / Octet 纯 Python 描述符
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
 # 匹配到 "BitsIntegerDescriptor" 字符串，构建对应的 ``Node::BitsInteger``。
 # （详见 compile.rs 的 build_bits_integer_node）
 #
-# 使用方式：必须在 Bitwise/BitStruct 域内使用（Phase 3.1 仅实现节点与编译，
-# BitwiseNode/BitStructMixin 由后续子任务实现）。
+# 使用方式：必须在 Bitwise/BitStruct 域内使用。
 # ---------------------------------------------------------------------------
 
 
@@ -118,7 +112,7 @@ class BitsIntegerDescriptor:
     bit 级整数描述符，对应 Python construct 的 ``BitsInteger``。
     必须在 Bitwise（或 BitStruct）域内使用。
 
-    Phase 3.1：仅支持常量 length（int）。表达式 length（``FieldRef``/``ExprRef``）
+    仅支持常量 length（int）。表达式 length（``FieldRef``/``ExprRef``）
     在 Rust 编译管线（``compile_schema``）返回 ``CompilationError``。
 
     ``_expr_params`` 协议返回 ``{"length": <value>}``（仅当 length 是 FieldRef/ExprRef
@@ -163,7 +157,7 @@ def BitsInteger(length, signed=False, swapped=False):
 
     使用方式（在 Bitwise 域内）::
 
-        # BitStruct 字段（Phase 3.2 BitStructMixin 实现后）
+        # BitStruct 字段
         @dataclass
         class Header(BitStructMixin):
             flag: int = field(Bit())
@@ -209,9 +203,7 @@ def Octet():
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.2: Bitwise 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §8.2、§11。
+# Bitwise 描述符
 #
 # ``Bitwise(subcon)`` 是核心包装器，将字节流转为 bit 流。construct-rs 通过
 # type name "BitwiseDescriptor" 识别，递归编译内部 subcon（bitwise=true 上下文），
@@ -270,9 +262,7 @@ def Bitwise(subcon):
 
 
 # ---------------------------------------------------------------------------
-# Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-BitStream.md`` §4.2 / §4.4 / §4.5 / §4.6 / §8.2。
+# Padding / Bytewise / BitsSwapped / ByteSwapped 描述符
 #
 # - ``PaddingDescriptor``：根据编译期 ``bitwise`` 上下文编译为 ``BitPaddingNode``
 #   （bit 域，pattern 严格 0x00/0x01）或 ``PaddingNode``（字节域）。
@@ -285,13 +275,13 @@ def Bitwise(subcon):
 class PaddingDescriptor:
     """``Padding(length, pattern=b"\\x00")`` 描述符。
 
-    单位由编译期 ``bitwise`` 上下文决定（设计 §2.4 决策 B4）：
+    单位由编译期 ``bitwise`` 上下文决定：
 
     - 字节域（普通 Struct 内）：``PaddingNode``，length 单位为字节，pattern 任意 0-255。
     - bit 域（Bitwise/BitStruct 内）：``BitPaddingNode``，length 单位为 bit，
       pattern 严格 ``0x00`` 或 ``0x01``（其他值返回 ``PaddingError``）。
 
-    Phase 3.1 / 3.3：仅支持常量 length（int）。表达式 length 在 Rust 编译管线
+    仅支持常量 length（int）。表达式 length 在 Rust 编译管线
     返回 ``CompilationError``。
 
     :param length: 填充长度（bit 或字节，由上下文决定）。
@@ -413,7 +403,7 @@ class BitsSwappedDescriptor:
     def __init__(self, subcon):
         """初始化 BitsSwapped 描述符。
 
-        :param subcon: 被包裹的子构造器（必须定长，Phase 3.1 已知限制）。
+        :param subcon: 被包裹的子构造器（必须定长，已知限制）。
         """
         self.subcon = subcon
 
@@ -433,7 +423,7 @@ def BitsSwapped(subcon):
         d = BitsSwapped(Bitwise(Bytes(8)))
         d.parse(b"\\x01")  # bit 反序后解析
 
-    注意：Phase 3 的 ``TransformNode`` 要求定长 subcon（设计 §13.5 已知限制）。
+    注意：``TransformNode`` 要求定长 subcon（已知限制）。
 
     :param subcon: 被包裹的子构造器。
     :return: ``BitsSwappedDescriptor`` 实例。
@@ -474,7 +464,7 @@ def ByteSwapped(subcon):
 
         Int24ul <--> ByteSwapped(Int24ub) <--> BytesInteger(3, swapped=True)
 
-    注意：Phase 3 的 ``TransformNode`` 要求定长 subcon。
+    注意：``TransformNode`` 要求定长 subcon。
 
     :param subcon: 被包裹的子构造器。
     :return: ``ByteSwappedDescriptor`` 实例。
@@ -483,9 +473,7 @@ def ByteSwapped(subcon):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4: Array 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §6.2.2 / §6.3。
+# Array 描述符
 #
 # ``Array(count, subcon, discard=False)`` 是固定次数数组描述符，对应 Python
 # construct 的 ``Array``。construct-rs 通过 type name "ArrayDescriptor" 识别，
@@ -495,7 +483,7 @@ def ByteSwapped(subcon):
 # - int 常量 → ``CountSource::Const``
 # - FieldRef/ExprRef → ``CountSource::Expr``（从 expr_programs 取 "count" 键）
 #
-# 限制（§6.2.2 P3.1）：inner subcon 暂不支持含表达式的子描述符
+# 限制：inner subcon 暂不支持含表达式的子描述符
 # （如 ``Array(N, Bytes(m))`` 中 ``m`` 是字段引用）。需将 inner 表达式
 # 扁平化到字段层级（``m`` 必须是同 Struct 内已声明的 int 字段）。
 # ---------------------------------------------------------------------------
@@ -562,7 +550,7 @@ def Array(count, subcon, discard=False):
 
     运算符重载：``Byte[5]`` 等价于 ``Array(5, Byte)``（Python construct 推荐语法）。
 
-    限制（Phase 4）：inner subcon 不支持含表达式的子描述符（如
+    限制：inner subcon 不支持含表达式的子描述符（如
     ``Array(N, Bytes(m))``）。若需 inner 表达式，请将 inner 扁平化为
     独立字段。
 
@@ -575,9 +563,7 @@ def Array(count, subcon, discard=False):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.2: GreedyRange 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.2 / §6.3。
+# GreedyRange 描述符
 #
 # ``GreedyRange(subcon, discard=False)`` 是读到流结束的数组描述符，对应 Python
 # construct 的 ``GreedyRange``。construct-rs 通过 type name "GreedyRangeDescriptor"
@@ -636,7 +622,8 @@ def GreedyRange(subcon, discard=False):
     - 子构造器解析失败（如 EOF、字节不足）：seek 回最后一次成功位置，正常终止
     - StopIf 触发（StopField 哨兵）：正常终止
 
-    限制（Phase 4）：
+    限制：
+
     - sizeof 永远返回 ``SizeofError``（元素数量运行时未知）
     - 嵌套 ``GreedyRange(GreedyRange(...))`` 在 EOF 时会无限循环（与 Python
       construct 行为一致），属用户误用。请改用 ``GreedyRange(Array(N, ...))``
@@ -650,18 +637,15 @@ def GreedyRange(subcon, discard=False):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.3: PrefixedArray 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.6 / §6.3。
+# PrefixedArray 描述符
 #
 # ``PrefixedArray(countfield, subcon)`` 是前缀长度数组描述符，对应 Python
 # construct 的 ``PrefixedArray``。construct-rs 通过 type name "PrefixedArrayDescriptor"
 # 识别，构建 ``Node::PrefixedArray(PrefixedArrayNode)``。
 #
 # 与 Python 原版的关键差异：
-# - construct-rs 不依赖 FocusedSeq/Rebuild（未实现），而是独立 Node
-#   （设计决策 A6，§5.1 选项 A）。
-# - ``len_`` 辅助函数不实现（§6.3.3）。
+# - construct-rs 不依赖 FocusedSeq/Rebuild，而是独立 Node。
+# - ``len_`` 辅助函数不实现。
 # ---------------------------------------------------------------------------
 
 
@@ -720,10 +704,10 @@ def PrefixedArray(countfield, subcon):
     build 行为：
     - 取 list 长度，先 build ``countfield`` 写入长度
     - 遍历 list build ``subcon``
-    限制（Phase 4）：
+    限制：
 
-    - sizeof 永远返回 ``SizeofError``（元素数量运行时未知，§4.6.4）
-    - count 超出 countfield 表示范围时由 countfield 节点自行报错（PA-5）
+    - sizeof 永远返回 ``SizeofError``（元素数量运行时未知）
+    - count 超出 countfield 表示范围时由 countfield 节点自行报错
 
     :param countfield: 计数字段（描述符）。
     :param subcon: 元素子构造器。
@@ -733,12 +717,10 @@ def PrefixedArray(countfield, subcon):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.4: Index / StopIf 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.4 / §4.5 / §6.3。
+# Index / StopIf 描述符
 #
 # - ``Index()``：取当前数组迭代下标（对应 Python construct 的 ``Index``）。
-#   construct-rs 中 IndexNode 是用户访问数组下标的唯一机制（v3 决策 §3.3），
+#   construct-rs 中 IndexNode 是用户访问数组下标的唯一机制，
 #   直接调 ``ctx.index()`` 读取，不走 ExprProgram。
 #
 # - ``StopIf(condfunc)``：早停信号（对应 Python construct 的 ``StopIf``）。
@@ -759,7 +741,7 @@ class IndexDescriptor:
     内使用。在数组外使用时 parse 返回 ``None``（对齐 Python
     ``context.get("_index", None)``）。
 
-    ``_expr_params`` 协议返回空 dict：Index 无表达式参数（v3 决策，§3.3）。
+    ``_expr_params`` 协议返回空 dict：Index 无表达式参数。
     """
 
     __slots__ = ()
@@ -790,7 +772,7 @@ def Index():
         Packet.parse(b"\\x01\\x02\\x03")
         # items = [Item(i=0, v=1), Item(i=1, v=2), Item(i=2, v=3)]
 
-    在数组外使用时，``Index()`` parse 返回 ``None``（IX-2）：
+    在数组外使用时，``Index()`` parse 返回 ``None``：
 
     ::
 
@@ -798,7 +780,7 @@ def Index():
         class Top(StructMixin):
             idx: int = rfield(Index())    # 不在数组内，parse 得到 None
 
-    在表达式中引用下标（v3 决策，§3.3）：先用 Index 字段声明，再用字段名引用::
+    在表达式中引用下标：先用 Index 字段声明，再用字段名引用::
 
         @dataclass
         class Item(StructMixin):
@@ -811,9 +793,7 @@ def Index():
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.5 v5: Element 描述符（v5 新增）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.7 / §6.3.1。
+# Element 描述符
 #
 # ``Element()`` 是 RepeatUntil 终止表达式中"当前元素"的引用入口。
 # 与 Index 字段平行（Index 是 Array 内"当前下标"引用入口）。
@@ -822,7 +802,7 @@ def Index():
 
 
 class ElementDescriptor:
-    """``Element()`` 描述符（v5 新增）。
+    """``Element()`` 描述符。
 
     RepeatUntil 终止表达式中"当前元素"的引用入口。无参数。
 
@@ -830,13 +810,11 @@ class ElementDescriptor:
     Element 字段在 Packet 实例中始终为 None（不持有真实数据）——其值由
     RepeatUntilNode 在迭代时通过 set_field_at 借用设置。
 
-    与 Index 字段平行（设计决策记录 Phase 4 决策 3 + 决策 5）：用户面形式一致
+    与 Index 字段平行：用户面形式一致
     （``rfield(<构造器字段>())`` + 字段名引用），表达式系统输入类型保持纯粹
     （仅 ``_FieldDescriptor`` / ``_ExprRef`` / ``int``，不引入新 ExprOp 指令）。
 
     ``_expr_params`` 协议返回空 dict：Element 无表达式参数。
-
-    设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.7。
     """
 
     __slots__ = ()
@@ -849,7 +827,7 @@ class ElementDescriptor:
 
 
 def Element():
-    """创建一个 Element 描述符（v5 新增）。
+    """创建一个 Element 描述符。
 
     RepeatUntil 终止表达式中"当前元素"的引用入口。
 
@@ -865,7 +843,7 @@ def Element():
 
     Element 字段在 Packet 实例中始终为 None（值由 RepeatUntilNode 借用设置）。
 
-    限制（Phase 4.5 v5）：
+    限制：
 
     - 必须为 RO 模式（``rfield(Element())``），编译期校验
     - 必须声明在 RepeatUntil 字段之前（前序字段引用约束）
@@ -934,7 +912,7 @@ def StopIf(condfunc):
         Packet.parse(b"\\x05\\x99")         # x=5, 不停, y=0x99
         # Packet(x=5, y=0x99)
 
-    使用方式（在 GreedyRange 中，GR-4）::
+    使用方式（在 GreedyRange 中）::
 
         @dataclass
         class Item(StructMixin):
@@ -945,7 +923,7 @@ def StopIf(condfunc):
         items.parse(b"\\x01\\x02\\xFF")
         # [Item(x=1), Item(x=2), Item(x=0xFF)]
 
-    注：``StopIf`` 在 ``Array`` 内不捕获（设计 SI-3，Array 是固定次数，
+    注：``StopIf`` 在 ``Array`` 内不捕获（Array 是固定次数，
     StopIf 在 Array 内是用户误用，错误向上传播）。
 
     :param condfunc: 条件（``True`` / ``False`` / 字段名引用表达式）。
@@ -955,51 +933,30 @@ def StopIf(condfunc):
 
 
 # ---------------------------------------------------------------------------
-# Phase 4 子任务 4.5: RepeatUntil 描述符
+# RepeatUntil 描述符
 #
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.3 / §6.3 / §10.1。
-#
-# ``RepeatUntil(predicate, subcon, discard=False)`` 是终止表达式数组描述符，对应
-# Python construct 的 ``RepeatUntil``。construct-rs 通过 type name "RepeatUntilDescriptor"
-# 识别，构建 ``Node::RepeatUntil(RepeatUntilNode)``。
-#
-# 两条终止表达式路径（设计 §4.3.1 / §2.5）：
-# - **Expr 路径**（性能 ≥8x）：简单 lambda（如 ``lambda x,_,_: x > 5``）编译期
-#   通过 AST 识别并翻译为 ExprProgram ``[GetElem, Const(N), Op]``，运行时零 FFI。
-#   仅支持整数元素 + 6 种比较运算（>, >=, ==, !=, <, <=）。
-# - **PyCallable 路径**（性能 ≥3x）：复杂 lambda 回落到 Python callable，
-#   每次迭代跨 FFI 调用。
-# ---------------------------------------------------------------------------
-
-
-# ---------------------------------------------------------------------------
-# Phase 4 子任务 4.5 v5: RepeatUntil 描述符（v5 完全重写）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Array.md`` §4.3 / §6.3.1 / §13（v5）。
-#
-# v5 用户硬约束：
-# - 删除 AST 识别器（``_AST_OP_TO_EXPROP`` / ``_try_compile_repeat_predicate``）
-# - 不再接收 Python lambda/callable（用户硬约束 #1）
-# - 第一参数从 ``predicate`` 改名为 ``terminator``（用户硬约束 #3，统一使用"终止表达式"表述）
-# - terminator 必须是 Phase 2 表达式（``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 组合）
-#   编译为 ExprProgram，运行时零 FFI 求值（用户硬约束 #4）
+# 设计约束：
+# - 不接收 Python lambda/callable（终止逻辑必须是字段表达式，避免隐藏决策路径）
+# - 第一参数 ``terminator``（统一使用"终止表达式"表述）
+# - terminator 必须是字段表达式（``_FieldDescriptor`` / ``_ExprRef`` / ``int`` 组合），
+#   编译为 ExprProgram，运行时零 FFI 求值
 # ---------------------------------------------------------------------------
 
 
 class RepeatUntilDescriptor:
-    """``RepeatUntil(terminator, subcon, discard=False)`` 描述符（v5 重写）。
+    """``RepeatUntil(terminator, subcon, discard=False)`` 描述符。
 
     终止表达式数组：解析元素到 list 直到终止表达式求值非零（最后元素包含在内），
     或从 list 构建字节序列直到某元素满足终止表达式。对应 Python construct 的 ``RepeatUntil``。
 
-    :param terminator: 终止表达式（Phase 2 表达式：``_FieldDescriptor`` / ``_ExprRef`` /
+    :param terminator: 终止表达式（``_FieldDescriptor`` / ``_ExprRef`` /
                        ``int`` 组合）。必须引用同 Struct 中已声明的 Element 字段
                        （如 ``e > 5``，其中 ``e`` 是 ``rfield(Element())``）。
                        求值结果非零即终止。不接收 Python lambda / callable。
     :param subcon: 元素子构造器（描述符）。
     :param discard: 若为 True，parse 返回空 list 但仍消耗流。
 
-    ``_expr_params`` 协议（v5）：
+    ``_expr_params`` 协议：
 
     - 返回 ``{"terminator": <expr>, "element_field_idx": <int>}``（编译期由
       ``set_compiled_expr_params`` 注入）。
@@ -1009,27 +966,27 @@ class RepeatUntilDescriptor:
 
     与 Python construct 的差异：
 
-    - **不接收 Python lambda / callable**：用户硬约束 #1（避免隐藏决策路径）。
-      Phase 2 表达式 VM 无法描述的终止逻辑（如 list 切片），用户须改用 Adapter
-      （显式慢路径）。详见 §13.9 能力边界。
-    - **discard 语义简化**：v5 中 discard 仅影响 parse 方向 list 收集；
+    - **不接收 Python lambda / callable**（避免隐藏决策路径）。
+      字段表达式 VM 无法描述的终止逻辑（如 list 切片），用户须改用 Adapter
+      （显式慢路径）。
+    - **discard 语义简化**：discard 仅影响 parse 方向 list 收集；
       build 方向 discard 不影响终止表达式求值（终止表达式不接收 list 参数）。
     """
 
     __slots__ = ("terminator", "subcon", "discard", "_expr_params", "_element_field_idx")
 
     def __init__(self, terminator, subcon, discard=False):
-        """初始化 RepeatUntil 描述符（v5 重写）。
+        """初始化 RepeatUntil 描述符。
 
-        :param terminator: 终止表达式（Phase 2 表达式）。
+        :param terminator: 终止表达式。
         :param subcon: 元素子构造器。
         :param discard: 是否丢弃解析结果。
         """
-        # 用户硬约束 #1：terminator 不能是 callable（v5 删除 PyCallable 路径）。
+        # terminator 不能是 callable。
         # callable 包括 lambda / 函数 / 实现了 __call__ 的类实例。
         if callable(terminator):
             raise CompilationError(
-                "RepeatUntil terminator must be a Phase 2 expression "
+                "RepeatUntil terminator must be a field expression "
                 "(_FieldDescriptor / _ExprRef / int), not a Python callable. "
                 "Example: RepeatUntil(e > 5, Int8ub) where 'e' is rfield(Element()). "
                 "For complex termination logic depending on list/context, "
@@ -1068,11 +1025,11 @@ class RepeatUntilDescriptor:
 
 
 def RepeatUntil(terminator, subcon, discard=False):
-    """创建一个 RepeatUntil 描述符（v5 重写）。
+    """创建一个 RepeatUntil 描述符。
 
     终止表达式数组。对应 Python construct 的 ``RepeatUntil``。
 
-    使用方式（终止表达式 = Phase 2 表达式，引用 Element 字段）::
+    使用方式（终止表达式引用 Element 字段）::
 
         @dataclass
         class Packet(StructMixin):
@@ -1082,19 +1039,19 @@ def RepeatUntil(terminator, subcon, discard=False):
         Packet.parse(b"\\x01\\x02\\x06\\xAA")
         # Packet(e=None, payload=[1, 2, 6])    # 最后元素 6 满足 e > 5
 
-    限制（Phase 4.5 v5）：
+    限制：
 
-    - **不接收 Python lambda / callable**（用户硬约束 #1）。如传入 callable,
+    - **不接收 Python lambda / callable**。如传入 callable,
       ``RepeatUntilDescriptor.__init__`` 立即抛 ``CompilationError``。
     - 终止表达式必须引用 Element 字段（编译期校验，否则 ``terminator must reference
       an Element field`` 错误）。
     - sizeof 永远返回 ``SizeofError``
     - inner subcon 不支持含表达式的子描述符（与 ``Array`` / ``Bitwise`` 同限制）
 
-    Phase 2 表达式 VM 无法描述的终止逻辑（如 list 切片、字符串比较），
-    用户须改用 Adapter（显式慢路径）。详见 §13.9 能力边界。
+    字段表达式 VM 无法描述的终止逻辑（如 list 切片、字符串比较），
+    用户须改用 Adapter（显式慢路径）。
 
-    :param terminator: 终止表达式（Phase 2 表达式，引用 Element 字段）。
+    :param terminator: 终止表达式（引用 Element 字段）。
     :param subcon: 元素子构造器。
     :param discard: 若为 True，parse 返回空 list 但仍消耗流。
     :return: ``RepeatUntilDescriptor`` 实例。
@@ -1103,9 +1060,7 @@ def RepeatUntil(terminator, subcon, discard=False):
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.1: VarInt / ZigZag 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Primitives收尾.md`` §1.4。
+# VarInt / ZigZag 描述符
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
@@ -1174,9 +1129,7 @@ ZigZag = ZigZagDescriptor()
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.1: 整数别名（Byte / Short / Int / Long）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Primitives收尾.md`` §1.2.1。
+# 整数别名（Byte / Short / Int / Long）
 #
 # 这 4 个是 Python 层别名到现有 FormatField 单例：
 #   Byte  = Int8ub   (FormatField(">", "B"))
@@ -1199,24 +1152,21 @@ except NameError:  # pragma: no cover - 仅在扩展未构建时触发
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.2: Strings 描述符（6 个）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Strings.md`` v2 §4.4 / §10.2。
+# Strings 描述符（6 个）
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
 # 匹配到 "CStringDescriptor" / "GreedyStringDescriptor" / ... 字符串，
-# 构建对应的 Node 变体（详见 compile.rs Phase 6.2 分支）。
+# 构建对应的 Node 变体（详见 compile.rs 对应分支）。
 #
 # **编码字符串（encoding）**：用户传入字符串（如 ``"utf8"`` / ``"utf_16_le"``），
 # Rust 编译期调 ``Encoding::from_user_str`` 解析为 ``Encoding`` enum。
 # 不接受无后缀编码（``utf16``/``utf32`` 等），错误信息引导用户用显式 _le/_be。
-# （PM 决策 6.2-D1 + P2b + P8，详见 Strings 设计 §2.1.3）
 #
 # **length 字段（PaddedString）**：可为 int 或 FieldRef/ExprRef 表达式，
 # 与 BytesDescriptor 同模式（``_expr_params`` 协议）。
 #
-# 与 Python construct 的差异（设计 §3.7.3 + Strings §10 P5）：
+# 与 Python construct 的差异：
 #
 # - **StringEncoded 不实现为 Node**：兼容别名一调用即抛 StringError（_errors.py）
 # - **无后缀编码拒绝**：``utf16``/``utf_16``/``u16``/``utf32``/``utf_32``/``u32``
@@ -1230,7 +1180,7 @@ class CStringDescriptor:
     C 风格 null 终止字符串。对应 Python construct 的 ``CString``（core.py L1811）。
 
     Python 原版是 ``StringEncoded(NullTerminated(GreedyBytes, term=...), encoding)``
-    macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A）。
+    macro 嵌套；construct-rs 独立实现。
 
     编码字符串在 Rust 编译期解析（``Encoding::from_user_str``）。
 
@@ -1242,7 +1192,7 @@ class CStringDescriptor:
     :param include: 是否将 term 包含在解码数据中。默认 False。
     :param consume: 是否消费 term（True=消费；False=seek 回退 unit 字节）。默认 True。
                      **注意**：当前 CStringNode 实现不暴露 consume（与 Python ``CString``
-                     实际行为一致，详见 Strings 设计 §3.1）；此参数仅为兼容性保留。
+                     实际行为一致）；此参数仅为兼容性保留。
     :param require: 是否在 EOF 时报错。默认 True。
     """
 
@@ -1285,11 +1235,11 @@ def CString(encoding, **kwargs):
 
         P.parse(b"hello\\x00")  # → P(name="hello")
 
-    支持的编码（PM 决策 6.2-D1）：``ascii`` / ``utf8`` / ``utf_8`` / ``u8`` /
+    支持的编码：``ascii`` / ``utf8`` / ``utf_8`` / ``u8`` /
     ``utf_16_le`` / ``utf_16_be`` / ``utf_32_le`` / ``utf_32_be``。
 
     **BREAKING CHANGE**：不接受无后缀编码（``utf16`` / ``utf32`` 等），
-    会编译期报错引导用户改用显式 ``_le`` / ``_be`` 后缀（Strings 设计 §2.1.3 P2b）。
+    会编译期报错引导用户改用显式 ``_le`` / ``_be`` 后缀。
 
     :param encoding: 编码字符串。
     :param term: 终止符字节串（None = 编码单元全零字节串）。
@@ -1307,7 +1257,7 @@ class GreedyStringDescriptor:
     读到流结束并解码。对应 Python construct 的 ``GreedyString``（core.py L1837）。
 
     Python 原版是 ``StringEncoded(GreedyBytes, encoding)`` macro 嵌套；
-    construct-rs 独立实现（PM 决策 1 方案 A）。
+    construct-rs 独立实现。
 
     ``_expr_params`` 协议返回空 dict：GreedyString 无表达式参数。
 
@@ -1357,7 +1307,7 @@ class PaddedStringDescriptor:
     固定长度填充字符串。对应 Python construct 的 ``PaddedString``（core.py L1747）。
 
     Python 原版是 ``StringEncoded(FixedSized(length, NullStripped(...)), encoding)``
-    三层 macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A）。
+    三层 macro 嵌套；construct-rs 独立实现。
 
     length 支持：
     - int 常量 → BytesLength::Const
@@ -1434,7 +1384,7 @@ class PascalStringDescriptor:
     长度前缀字符串。对应 Python construct 的 ``PascalString``（core.py L1778）。
 
     Python 原版是 ``StringEncoded(Prefixed(lengthfield, GreedyBytes), encoding)``
-    macro 嵌套；construct-rs 独立实现（PM 决策 1 方案 A），不依赖 Prefixed（Phase 7）。
+    macro 嵌套；construct-rs 独立实现，不依赖 Prefixed。
 
     ``_expr_params`` 协议返回空 dict：PascalString 自身无表达式参数
     （lengthfield 由递归处理，与 PrefixedArrayDescriptor 同限制：lengthfield
@@ -1626,15 +1576,13 @@ def NullStripped(subcon, pad=b"\x00"):
 
 
 # ---------------------------------------------------------------------------
-# Phase 6.3: 内置 Adapter 描述符（Subconstruct / Peek / RawCopy / Rebuild / Pass）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Adapter核心.md`` §6.4。
+# 内置 Adapter 描述符（Subconstruct / Peek / RawCopy / Rebuild / Pass）
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile_schema 的 build_node_from_descriptor 通过 ``type(desc).__name__``
-# 匹配到对应的 Node 变体（详见 compile.rs Phase 6.3 分支）。
+# 匹配到对应的 Node 变体（详见 compile.rs 对应分支）。
 #
-# 双层分工（PM 决策 2）：
+# 双层分工：
 # - **内置 Adapter**（本节 5 个）：Rust Node 变体，性能 ≥10x（用户主动选具体名）
 # - **用户面 Adapter**（_adapters.py）：Python 类，用户继承写 _decode/_encode
 #   性能不设硬门禁（用户主动接受 Python 层解码开销）
@@ -1744,7 +1692,7 @@ class RawCopyDescriptor:
 
     ``_expr_params`` 协议返回空 dict。
 
-    已知差异（设计 §5.3 RC-build-1）：construct-rs 的 build 不返回值，
+    已知差异：construct-rs 的 build 不返回值，
     用户无法拿到 build 出的 raw bytes。需要 raw bytes 应走 parse 路径。
     """
 
@@ -1799,9 +1747,9 @@ class RebuildDescriptor:
     ``_expr_params`` 协议返回 ``{"func": <expr>}``：编译期将 expr 翻译为 ExprOp
     指令列表，存入 expr_programs 的 "func" 键（与 ComputedDescriptor 同模式）。
 
-    限制（设计 §5.3 RB-callable）：func 必须是 Phase 2 表达式
+    限制：func 必须是字段表达式
     （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
-    （与 ADR-014 RepeatUntil v5 同脉络）。
+    （与 RepeatUntil 同约束）。
     """
 
     __slots__ = ("subcon", "func")
@@ -1831,7 +1779,7 @@ class RebuildDescriptor:
 def Rebuild(subcon, func):
     """创建一个 Rebuild 描述符。
 
-    使用方式（func 是 Phase 2 表达式；RO 用 ``rfield``，v0.1.1 起 RW 也可用）::
+    使用方式（func 是字段表达式；RO 用 ``rfield``，v0.1.1 起 RW 也可用）::
 
         @dataclass
         class P(StructMixin):
@@ -1847,7 +1795,7 @@ def Rebuild(subcon, func):
 
     限制：
 
-    - **不接收 Python callable / lambda**（同 RepeatUntil v5）。如传入 callable，
+    - **不接收 Python callable / lambda**（同 RepeatUntil）。如传入 callable，
       编译期无法转换为 ExprOp，会报 CompilationError。
 
     :param subcon: 被包装的子构造器。
@@ -1863,7 +1811,7 @@ class PassDescriptor:
     No-op 节点：parse 返回 None；build 不写字节；sizeof=0。
     对应 Python construct 的 ``Pass``（core.py L4687）。
 
-    主要用于 Phase 7 ``If``/``Switch`` 的默认值（如 ``If(cond, then)`` 等价于
+    主要用于 ``If``/``Switch`` 的默认值（如 ``If(cond, then)`` 等价于
     ``IfThenElse(cond, then, Pass)``）。
 
     ``_expr_params`` 协议返回空 dict。
@@ -1883,14 +1831,12 @@ Pass = PassDescriptor()
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.2: Streams 描述符（Seek / Pointer / Prefixed）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Streams.md`` §3.6。
+# Streams 描述符（Seek / Pointer / Prefixed）
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
 # 匹配到 "SeekDescriptor" / "PointerDescriptor" / "PrefixedDescriptor" 字符串，
-# 构建对应的 Node 变体（详见 compile.rs Phase 7.2 分支）。
+# 构建对应的 Node 变体（详见 compile.rs 对应分支）。
 #
 # - SeekDescriptor：at（int 或 FieldRef/ExprRef）+ whence（int 0/1/2）
 # - PointerDescriptor：offset（int 或表达式）+ subcon + relativeOffset（bool）+ stream（None）
@@ -1899,7 +1845,7 @@ Pass = PassDescriptor()
 
 
 class SeekDescriptor:
-    """``Seek(at, whence=0)`` 描述符（Phase 7.2）。
+    """``Seek(at, whence=0)`` 描述符。
 
     流定位节点：parse/build 执行 ``stream.seek(at, whence)``。
     对应 Python construct 的 ``Seek``（core.py L4594）。
@@ -1972,7 +1918,7 @@ def Seek(at, whence=0):
 
 
 class PointerDescriptor:
-    """``Pointer(offset, subcon, stream=None, relativeOffset=False)`` 描述符（Phase 7.2）。
+    """``Pointer(offset, subcon, stream=None, relativeOffset=False)`` 描述符。
 
     绝对偏移读写节点：seek 到 ``offset`` 处理 ``subcon``，再 seek 回原位置
     （不占主流位置）。对应 Python construct 的 ``Pointer``（core.py L4384）。
@@ -2070,7 +2016,7 @@ def Pointer(offset, subcon, stream=None, relativeOffset=False):
 
 
 class PrefixedDescriptor:
-    """``Prefixed(lengthfield, subcon, includelength=False)`` 描述符（Phase 7.2）。
+    """``Prefixed(lengthfield, subcon, includelength=False)`` 描述符。
 
     长度前缀子流节点：``lengthfield`` 给出字节数，``subcon`` 在该子流上处理。
     对应 Python construct 的 ``Prefixed``（core.py L4862）。
@@ -2155,17 +2101,15 @@ def Prefixed(lengthfield, subcon, includelength=False):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P0: Const / Default / Check 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §1。
+# Const / Default / Check 描述符
 #
 # 这些描述符是纯 Python 类（不需要 Rust pyclass），通过 type name 识别。
 # compile.rs 的 build_node_from_descriptor 通过 ``type(desc).__name__``
 # 匹配到 "ConstDescriptor" / "DefaultDescriptor" / "CheckDescriptor" 字符串，
-# 构建对应的 Node 变体（详见 compile.rs Phase 8 P0 分支）。
+# 构建对应的 Node 变体（详见 compile.rs 对应分支）。
 #
 # - ConstDescriptor：value（任意 Python 对象，常为 int/bytes/str）+ subcon
-#   subcon 缺省时若 value 是 bytes，自动推断为 Bytes(len(value))（CN-7）。
+#   subcon 缺省时若 value 是 bytes，自动推断为 Bytes(len(value))。
 # - DefaultDescriptor：value（FieldRef/ExprRef/int）+ subcon
 #   value 编译为 ExprProgram（与 Rebuild func 同模式）。
 # - CheckDescriptor：func（FieldRef/ExprRef/int，编译为 ExprProgram）
@@ -2203,11 +2147,11 @@ class ConstDescriptor:
         :param subcon: 子构造器。None 时根据 value 推断（bytes → Bytes(len)）。
         """
         if subcon is None:
-            # CN-7: value 是 bytes 但 subcon 缺省 → Bytes(len(value))
+            # value 是 bytes 但 subcon 缺省 → Bytes(len(value))
             if isinstance(value, (bytes, bytearray)):
                 subcon = Bytes(len(value))
             else:
-                # CN-8: value 非 bytes 且 subcon 缺省 → 编译期错误
+                # value 非 bytes 且 subcon 缺省 → 编译期错误
                 raise CompilationError(
                     "Const requires explicit subcon when value is not bytes, "
                     "e.g. Const(255, Int32ub)"
@@ -2269,9 +2213,9 @@ class DefaultDescriptor:
     ``_expr_params`` 协议返回 ``{"value": self.value}``：编译期将 value 翻译为
     ExprOp 列表（int 常量也包装为单条 Const，与 Rebuild func 同模式）。
 
-    限制（设计 §1 DF-4）：value 必须是 Phase 2 表达式
+    限制：value 必须是字段表达式
     （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
-    （与 Rebuild 同脉络，ADR-014 硬约束）。
+    （与 Rebuild 同约束）。
 
     :param subcon: 子构造器（描述符）。
     :param value: 默认值（int 常量或 FieldRef/ExprRef 表达式，**不接受 callable**）。
@@ -2347,9 +2291,9 @@ class CheckDescriptor:
     ``_expr_params`` 协议返回 ``{"func": self.func}``：编译期将 func 翻译为 ExprOp 列表
     （与 ComputedDescriptor / RebuildDescriptor 同模式）。
 
-    限制（设计 §1 CK-5）：func 必须是 Phase 2 表达式
+    限制：func 必须是字段表达式
     （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
-    （与 Rebuild 同脉络，ADR-014 硬约束）。
+    （与 Rebuild 同约束）。
 
     :param func: 断言表达式（int 或 FieldRef/ExprRef 组合，**不接受 callable**）。
     """
@@ -2377,7 +2321,7 @@ def Check(func):
 
     断言检查。对应 Python construct 的 ``Check``（core.py L3081）。
 
-    使用方式（必须作为 RO 字段，用 ``rfield`` 包装；func 是 Phase 2 表达式）::
+    使用方式（必须作为 RO 字段，用 ``rfield`` 包装；func 是字段表达式）::
 
         @dataclass
         class P(StructMixin):
@@ -2401,13 +2345,11 @@ def Check(func):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P0: Terminated / Probe 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §5。
+# Terminated / Probe 描述符
 #
 # - TerminatedDescriptor：singleton，无参数。parse 时校验 stream EOF。
 # - ProbeDescriptor：into（None 或字段名 str）+ lookahead（None 或 int）。
-#   [设计质疑] into 用 FieldName 而非 ExprProgram（详见 probe.rs 模块级注释）。
+#   into 用字段名（FieldName）而非 ExprProgram。
 # ---------------------------------------------------------------------------
 
 
@@ -2441,7 +2383,7 @@ class ProbeDescriptor:
     对应 Python construct 的 ``Probe``（debug.py L6）。
 
     ``_expr_params`` 协议返回空 dict：Probe 无表达式参数
-    （into 是字段名引用而非 FieldRef/ExprRef 表达式，[设计质疑] 详见 probe.rs）。
+    （into 是字段名引用而非 FieldRef/ExprRef 表达式）。
 
     :param into: 可选字段名（任意类型字段），None 表示打印整个 context。
     :param lookahead: 可选 peek 字节数（int），None 表示不 peek。
@@ -2485,10 +2427,10 @@ def Probe(into=None, lookahead=None):
 
         Probe(lookahead=4)    # parse 时额外 hex 打印下 4 字节
 
-    [设计质疑] 与 Python construct 的差异：
+    与 Python construct 的差异：
 
     - Python ``Probe(lambda ctx: expr)`` 支持任意 callable。construct-rs 仅支持
-      字段名（``Probe(into="field_name")``），不支持 callable（与 ADR-014 一致）。
+      字段名（``Probe(into="field_name")``），不支持 callable。
     - 用户需要打印复杂表达式结果时，应先用 ``Computed(expr)`` 字段，再 ``Probe(into=...)``。
 
     :param into: 可选字段名（str），None 表示打印整个 context。
@@ -2499,13 +2441,11 @@ def Probe(into=None, lookahead=None):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P0: Aligned 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §4。
+# Aligned 描述符
 #
 # AlignedDescriptor：modulus（int 或 FieldRef/ExprRef）+ subcon + pattern（1-byte bytes）。
 # modulus 表达式路径走 ExprProgram（与 SeekDescriptor at 同模式）。
-# pattern 编译期校验 len == 1（AL-11/AL-12）。
+# pattern 编译期校验 len == 1。
 # ---------------------------------------------------------------------------
 
 
@@ -2517,7 +2457,7 @@ class AlignedDescriptor:
 
     - parse：inner.parse 后，``pad = -(tell_after - tell_before) % modulus``，
     - build：inner.build 后写 ``pattern * pad`` 字节
-    - sizeof：modulus 表达式时返回 Err（D-P0-3，对齐 Python SizeofError）
+    - sizeof：modulus 表达式时返回 Err（对齐 Python SizeofError）
 
     ``_expr_params`` 协议：当 ``modulus`` 是 int 时返回 ``{}``（跳过编译）；
     当 modulus 是 FieldRef/ExprRef 时返回 ``{"modulus": self.modulus}``。
@@ -2583,9 +2523,9 @@ def Aligned(modulus, subcon, pattern=b"\x00"):
 
     限制：
 
-    - **modulus 必须 >= 2**（AL-6/AL-7/AL-8）。编译期或运行期 PaddingError。
-    - **pattern 必须是 1-byte bytes**（AL-11/AL-12）。编译期 PaddingError。
-    - **sizeof 不支持 modulus 表达式**（D-P0-3，对齐 Python SizeofError）。
+    - **modulus 必须 >= 2**。编译期或运行期 PaddingError。
+    - **pattern 必须是 1-byte bytes**。编译期 PaddingError。
+    - **sizeof 不支持 modulus 表达式**（对齐 Python SizeofError）。
 
     :param modulus: 对齐模数（int >= 2 或 FieldRef/ExprRef 表达式）。
     :param subcon: 子构造器。
@@ -2596,12 +2536,10 @@ def Aligned(modulus, subcon, pattern=b"\x00"):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P0: Hex / HexDump 描述符
-#
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §2。
+# Hex / HexDump 描述符
 #
 # Hex/HexDump 是 construct 核心库内置 Adapter（非用户自定义），在 construct-rs 中
-# 实现为 Rust Node（非 AdapterCallbackNode，§0.2 判据 2，详见设计 §2.2 + ADR-022）。
+# 实现为 Rust Node（非 AdapterCallbackNode）。
 # ---------------------------------------------------------------------------
 
 
@@ -2735,13 +2673,11 @@ def HexDump(subcon):
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P0: Checksum 描述符
+# Checksum 描述符
 #
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §3。
+# ChecksumDescriptor 双轨方案：
 #
-# ChecksumDescriptor 双轨方案（PM 决策 D-1 接受）：
-#
-# - hashfunc：``HashAlgo`` enum（B1/B2 零拷贝）或 Python callable（A1/A2 兼容）
+# - hashfunc：``HashAlgo`` enum（零拷贝）或 Python callable（兼容）
 # - bytes_source：start/end 表达式（StreamRange）或 bytesfunc_name 字段引用（ContextBytes）
 #
 # compile.rs 通过 ``type(hashfunc).__name__ == "HashAlgo"`` 识别 enum 类型，
@@ -2755,10 +2691,10 @@ class ChecksumDescriptor:
     校验和节点：parse 校验 hash，build 计算 hash。
     对应 Python construct 的 ``Checksum``（core.py L5532）。
 
-    construct-rs 扩展双轨方案（设计 §3.5）：
+    construct-rs 扩展双轨方案：
 
-    - **路径 B1**（推荐零拷贝）：``HashAlgo`` enum + ``start/end`` 表达式
-    - **路径 A2**（Python 原版兼容）：Python callable + ``bytesfunc`` 字段引用
+    - **内置哈希路径**（推荐零拷贝）：``HashAlgo`` enum + ``start/end`` 表达式
+    - **Python callable 路径**（Python 原版兼容）：callable + ``bytesfunc`` 字段引用
 
     parse 行为：
 
@@ -2848,7 +2784,7 @@ def Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
 
     校验和节点。对应 Python construct 的 ``Checksum``（core.py L5532）。
 
-    使用方式（路径 B1：HashAlgo + StreamRange 零拷贝推荐）::
+    使用方式（HashAlgo + StreamRange，零拷贝推荐）::
 
         from construct import (
             StructMixin, Bytes, Tell, Checksum, HashAlgo, rfield, field
@@ -2862,7 +2798,7 @@ def Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
             end: int = rfield(Tell())                         # 标记结束
             checksum: bytes = rfield(Checksum(Bytes(32), HashAlgo.SHA256, start, end))
 
-    使用方式（路径 A2：Python callable + ContextBytes 兼容）::
+    使用方式（Python callable + ContextBytes 兼容）::
 
         import hashlib
         from construct import RawCopy
@@ -2876,10 +2812,10 @@ def Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
                 bytesfunc="fields",   # 引用 RawCopy dict 的 "data" 字段
             ))
 
-    限制（设计 §3.8）：
+    限制：
 
-    - **bytesfunc 不支持 lambda**（ADR-014，与 Rebuild 同脉络）。
-    - **HashAlgo 未知值编译期拒绝**（CS-10）。
+    - **bytesfunc 不支持 lambda**（与 Rebuild 同约束）。
+    - **HashAlgo 未知值编译期拒绝**。
     - **CRC32/Adler32 返回 big-endian 4 字节**（对齐 ``to_bytes(4, 'big')`` 习惯）。
 
     :param checksumfield: 校验字段描述符。
@@ -2916,7 +2852,7 @@ __all__ = [
     "Int64sb",
     "Int64sl",
     "GreedyBytes",
-    # Phase 6.1 Primitives
+    # Primitives 补充与别名
     "BytesIntegerDescriptor",
     "BytesInteger",
     "Float16b",
@@ -2940,16 +2876,16 @@ __all__ = [
     "Half",
     "Single",
     "Double",
-    # Phase 3.1 bit 域描述符
+    # bit 域描述符
     "BitsIntegerDescriptor",
     "BitsInteger",
     "Bit",
     "Nibble",
     "Octet",
-    # Phase 3.2 Bitwise
+    # Bitwise
     "BitwiseDescriptor",
     "Bitwise",
-    # Phase 3.3 Padding / Bytewise / BitsSwapped / ByteSwapped
+    # Padding / Bytewise / BitsSwapped / ByteSwapped
     "PaddingDescriptor",
     "Padding",
     "BytewiseDescriptor",
@@ -2958,24 +2894,24 @@ __all__ = [
     "BitsSwapped",
     "ByteSwappedDescriptor",
     "ByteSwapped",
-    # Phase 4 Array / GreedyRange / PrefixedArray
+    # Array / GreedyRange / PrefixedArray
     "ArrayDescriptor",
     "Array",
     "GreedyRangeDescriptor",
     "GreedyRange",
     "PrefixedArrayDescriptor",
     "PrefixedArray",
-    # Phase 4 Index / StopIf / RepeatUntil
+    # Index / StopIf / RepeatUntil
     "IndexDescriptor",
     "Index",
     "StopIfDescriptor",
     "StopIf",
     "RepeatUntilDescriptor",
     "RepeatUntil",
-    # Phase 4.5 v5 Element
+    # Element
     "ElementDescriptor",
     "Element",
-    # Phase 6.2 Strings
+    # Strings
     "CStringDescriptor",
     "CString",
     "GreedyStringDescriptor",
@@ -2988,7 +2924,7 @@ __all__ = [
     "NullTerminated",
     "NullStrippedDescriptor",
     "NullStripped",
-    # Phase 6.3 内置 Adapter
+    # 内置 Adapter
     "SubconstructDescriptor",
     "Subconstruct",
     "PeekDescriptor",
@@ -2999,37 +2935,37 @@ __all__ = [
     "Rebuild",
     "PassDescriptor",
     "Pass",
-    # Phase 7.2 Streams
+    # Streams
     "SeekDescriptor",
     "Seek",
     "PointerDescriptor",
     "Pointer",
     "PrefixedDescriptor",
     "Prefixed",
-    # Phase 8 P0: Const / Default / Check
+    # Const / Default / Check
     "ConstDescriptor",
     "Const",
     "DefaultDescriptor",
     "Default",
     "CheckDescriptor",
     "Check",
-    # Phase 8 P0: Terminated / Probe
+    # Terminated / Probe
     "TerminatedDescriptor",
     "Terminated",
     "ProbeDescriptor",
     "Probe",
-    # Phase 8 P0: Aligned
+    # Aligned
     "AlignedDescriptor",
     "Aligned",
-    # Phase 8 P0: Hex / HexDump
+    # Hex / HexDump
     "HexDescriptor",
     "Hex",
     "HexDumpDescriptor",
     "HexDump",
-    # Phase 8 P0: Checksum
+    # Checksum
     "ChecksumDescriptor",
     "Checksum",
-    # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+    # Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
     # / ProcessXor / ProcessRotateLeft / NamedTuple
     "EnumDescriptor",
     "Enum",
@@ -3055,9 +2991,9 @@ __all__ = [
 
 
 # ---------------------------------------------------------------------------
-# Phase 8 P1+P2 描述符（10 个构造器 + EnumInteger/EnumIntegerString 内部类）
-#
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P1P2.md``。
+# Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence /
+# ProcessXor / ProcessRotateLeft / NamedTuple 描述符
+# （含 EnumInteger/EnumIntegerString 内部类）
 #
 # 这些描述符是纯 Python 类（通过 type name 识别），与 compile.rs 中的分支对应。
 # 编译期把 mapping/flags/valids 等 Python 对象物化为 Rust 端 Py<PyDict>/Py<PyFrozenSet>。
@@ -3104,8 +3040,7 @@ class EnumDescriptor:
     """``Enum(subcon, *merge, **mapping)`` 描述符。
 
     枚举映射：subcon 整数 ↔ label 字符串（int-convertible）。对应 Python construct
-    ``Enum``（core.py L1920）。在 construct-rs 中实现为 Rust Node（非 AdapterCallback，
-    详见设计 §1.2 §0.2 判据）。
+    ``Enum``（core.py L1920）。在 construct-rs 中实现为 Rust Node（非 AdapterCallback）。
 
     - parse：inner.parse → decmapping 查 label；命中返回 label（EnumIntegerString），
       未命中返回 EnumInteger(obj)（int 子类，**不报错**）
@@ -3369,7 +3304,7 @@ class UnionDescriptor:
     联合体：多视角 parse（每 subcon 独立 parse 后回退到 fallback）。对应 Python
     construct ``Union``（core.py L3641）。
 
-    :param parsefrom: None / int / str / 表达式（不支持 callable，ADR-014）。
+    :param parsefrom: None / int / str / 表达式（不支持 callable）。
     :param subcons: 位置 subcons（匿名，按顺序）。
     :param subconskw: 关键字 subcons（命名，写入 obj dict）。
     """
@@ -3458,7 +3393,7 @@ def Sequence(*subcons, **subconskw):
         d2 = Sequence(count=Byte, data=GreedyBytes)
         d2.parse(b"\\x03ABC")   # → [3, b"ABC"]
 
-    **已知 parity 差异（C-1）**：含 RO 字段（Check/Computed/Tell 等）的 build，
+    **已知 parity 差异**：含 RO 字段（Check/Computed/Tell 等）的 build，
     construct-rs RO 字段不从 list 取值（走 compute_ro_value），list 不含 RO 字段占位。
     Python 原版 list 需含 RO 字段占位 None。用户迁移需调整 build 输入。
 
@@ -3479,7 +3414,7 @@ class ProcessXorDescriptor:
     是 FieldRef/ExprRef 时返回 ``{"pad": padfunc}``。
 
     :param padfunc: XOR pad（int/bytes/FieldRef/ExprRef 表达式）。
-                    **不接受 callable**（ADR-014，PX-7 parity 差异）。
+                    **不接受 callable**（parity 差异）。
     :param subcon: 子构造器。
     """
 
@@ -3626,7 +3561,7 @@ def NamedTuple(tuplename, tuplefields, subcon):
         coord.parse(b"\\x01\\x02")   # → coord(x=1, y=2)
         coord.build(coord_nt)       # → b"\\x01\\x02"
 
-    **已知 parity 差异（C-2）**：NamedTuple over Struct 时，construct-rs 只传
+    **已知 parity 差异**：NamedTuple over Struct 时，construct-rs 只传
     tuplefields 命名的字段（忽略实例 __dict__ 中其他字段）；Python ``factory(**obj)``
     传 Container 所有字段，多余字段报 TypeError。construct-rs 更宽松。
 

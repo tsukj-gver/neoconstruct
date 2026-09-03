@@ -1,6 +1,5 @@
 //! BytewiseNode：bit→byte 适配器。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.4、§9.4。
 //! Python 参考：`construct/construct/core.py` `Bytewise(subcon)`（L1081）。
 //!
 //! ## 职责
@@ -8,7 +7,7 @@
 //! BytewiseNode 在 bit 域（BitwiseNode 内）为内部 subcon 重建字节对齐的子流。
 //! 必须在 Bitwise 域内使用。
 //!
-//! ## parse 流程（两条路径，设计 §4.4）
+//! ## parse 流程（两条路径）
 //!
 //! **对齐快路径**（`stream.bit_pos() == 0`）：直接 `inner.parse(stream, ...)`——
 //! inner 是字节节点（FormatField/Bytes/Struct），在同一 stream 上字节级读取，
@@ -28,7 +27,7 @@
 //!
 //! ## sizeof
 //!
-//! `inner.sizeof(ctx)? * 8`——inner 报字节数，外层报 bit 数（决策 B3）。
+//! `inner.sizeof(ctx)? * 8`——inner 报字节数，外层报 bit 数。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -43,12 +42,12 @@ use crate::nodes::Node;
 ///
 /// 详见模块级文档。
 ///
-/// # 错误（§9.4 BY-1~BY-4）
+/// # 错误
 ///
-/// - BY-1：inner.sizeof() 返回 Err（变长 subcon）→ parse/build 返回 `BitField` 错误
-/// - BY-2：bit 对齐（bit_pos==0）→ 走快路径，零额外开销
-/// - BY-3：bit 未对齐（bit_pos!=0）→ 走慢路径，逐 bit 提取到临时缓冲
-/// - BY-4：在 Bitwise 外使用 → 已知差异，Python 抛 KeyError，construct-rs 走对齐快路径
+/// - inner.sizeof() 返回 Err（变长 subcon）→ parse/build 返回 `BitField` 错误
+/// - bit 对齐（bit_pos==0）→ 走快路径，零额外开销
+/// - bit 未对齐（bit_pos!=0）→ 走慢路径，逐 bit 提取到临时缓冲
+/// - 在 Bitwise 外使用 → 已知差异，Python 抛 KeyError，construct-rs 走对齐快路径
 #[derive(Debug)]
 pub struct BytewiseNode {
     /// 字节级子树根（FormatField/Bytes/Struct/StructRef 等）。
@@ -82,15 +81,15 @@ impl Construct for BytewiseNode {
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
         if stream.is_byte_aligned() {
-            // BY-2: 对齐快路径——直接委托 inner 在同一 stream 上读取。
+            // 对齐快路径——直接委托 inner 在同一 stream 上读取。
             // inner 是字节节点，bit_pos==0 时字节级 read 可用。
             return self.inner.parse(py, stream, ctx, path);
         }
 
-        // BY-3: 未对齐慢路径——从 bit 流提取到临时字节缓冲。
-        // BY-1: inner 必须有定长 sizeof。
+        // 未对齐慢路径——从 bit 流提取到临时字节缓冲。
+        // inner 必须有定长 sizeof。
         let size = self.inner.sizeof(ctx).map_err(|e| {
-            // 把 inner 的 sizeof 错误转换为 BitField（设计 §9.4 BY-1）。
+            // 把 inner 的 sizeof 错误转换为 BitField。
             ConstructError::BitField {
                 message: format!(
                     "Bytewise requires a fixed-sized subcon (inner sizeof failed: {})",
@@ -161,11 +160,11 @@ impl Construct for BytewiseNode {
         path: &mut Path,
     ) -> Result<(), ConstructError> {
         if stream.is_byte_aligned() {
-            // BY-2: 对齐快路径——直接委托 inner 在同一 stream 上写入。
+            // 对齐快路径——直接委托 inner 在同一 stream 上写入。
             return self.inner.build(py, obj, stream, ctx, path);
         }
 
-        // BY-3: 未对齐慢路径——inner build 到临时 BuildStream，再逐 bit 写回主流。
+        // 未对齐慢路径——inner build 到临时 BuildStream，再逐 bit 写回主流。
         let size = self
             .inner
             .sizeof(ctx)
@@ -203,7 +202,7 @@ impl Construct for BytewiseNode {
     }
 
     fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // inner.sizeof() 返回字节数，外层报 bit 数（决策 B3）。
+        // inner.sizeof() 返回字节数，外层报 bit 数。
         // inner 可能返回 Err（变长 subcon），此时 Bytewise 的 sizeof 也 Err。
         let inner_bytes = self.inner.sizeof(ctx)?;
         Ok(inner_bytes * 8)
@@ -248,7 +247,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — BY-2 对齐快路径
+    // parse — 对齐快路径
     // ======================================================================
 
     #[test]
@@ -309,7 +308,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — BY-3 未对齐慢路径
+    // parse — 未对齐慢路径
     // ======================================================================
 
     #[test]
@@ -402,12 +401,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — BY-1 变长 subcon 错误
+    // parse — 变长 subcon 错误
     // ======================================================================
 
     #[test]
     fn parse_unaligned_variable_size_inner_returns_bitfield_error() {
-        // BY-1: GreedyBytes 无定长 sizeof，在未对齐慢路径报 BitField
+        // GreedyBytes 无定长 sizeof，在未对齐慢路径报 BitField
         with_py(|py| {
             let inner = Node::GreedyBytes(crate::nodes::greedy_bytes::GreedyBytesNode::new());
             let node = BytewiseNode::new(inner);
@@ -434,7 +433,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — BY-2 对齐快路径
+    // build — 对齐快路径
     // ======================================================================
 
     #[test]
@@ -455,7 +454,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — BY-3 未对齐慢路径
+    // build — 未对齐慢路径
     // ======================================================================
 
     #[test]

@@ -1,6 +1,5 @@
 //! AlignedNode：字节对齐包装节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §4.3。
 //! Python 参考：`construct/construct/core.py` `Aligned`（L4261-4331）。
 //!
 //! ## 行为概述
@@ -27,7 +26,7 @@ use crate::nodes::Node;
 /// 对齐包装节点：inner 解析/构建后，填充字节到 modulus 的整数倍。
 ///
 /// 对应 Python construct `Aligned(modulus, subcon, pattern=b"\\x00")`
-/// （core.py L4261）。与 PaddingNode 同模式（Phase 3.3 验证）。
+/// （core.py L4261）。与 PaddingNode 同模式。
 ///
 /// # padding 算法
 ///
@@ -85,7 +84,7 @@ impl AlignedNode {
     /// 返回 modulus 是否为编译期常量（单条 [`ExprOp::Const`] 指令）。
     ///
     /// 编译期常量 modulus 不需要 ctx 字段求值（Const 指令不入 ctx），
-    /// 因此 sizeof 可静态计算（D-P0-3），Struct static_size 预分配可恢复。
+    /// 因此 sizeof 可静态计算，Struct static_size 预分配可恢复。
     fn modulus_is_const(&self) -> bool {
         matches!(self.modulus.ops(), [ExprOp::Const(_)])
     }
@@ -174,8 +173,8 @@ impl Construct for AlignedNode {
     }
 
     fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // D-P0-3：检测 modulus 是否编译期常量（单条 ExprOp::Const 指令）。
-        // - 编译期常量且 >= 2：计算 inner.sizeof + pad（对齐 Python AL-3/4/5）。
+        // 检测 modulus 是否编译期常量（单条 ExprOp::Const 指令）。
+        // - 编译期常量且 >= 2：计算 inner.sizeof + pad。
         // - 非常量或非法常量（< 2）：返回 Err（对齐 Python SizeofError）。
         //
         // 编译期常量 modulus 通过 ExprProgram::Const 包装，sizeof 签名无 py 参数，
@@ -257,12 +256,12 @@ mod tests {
     }
 
     // ======================================================================
-    // has_expressions — D-P0-3：编译期常量 modulus 不计入表达式
+    // has_expressions — 编译期常量 modulus 不计入表达式
     // ======================================================================
 
     #[test]
     fn has_expressions_const_modulus_no_expr_inner_returns_false() {
-        // D-P0-3：modulus=Const(4) + inner 无表达式 → false
+        // modulus=Const(4) + inner 无表达式 → false
         // 允许 Struct static_size 预分配恢复（schema.rs L86-90）。
         let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
         let node = AlignedNode::new(inner, modulus_four(), 0x00);
@@ -299,12 +298,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — AL-1 / AL-14
+    // parse
     // ======================================================================
 
     #[test]
     fn parse_consumes_padding() {
-        // AL-1: Aligned(4, Int16ub).parse(b'\x00\x01\x00\x00') → 1
+        // Aligned(4, Int16ub).parse(b'\x00\x01\x00\x00') → 1
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
@@ -326,7 +325,7 @@ mod tests {
 
     #[test]
     fn parse_greedy_bytes_then_padding() {
-        // AL-14: Aligned(4, GreedyBytes).parse(b'\x01\x02\x03\x04')
+        // Aligned(4, GreedyBytes).parse(b'\x01\x02\x03\x04')
         //   inner 读 3 字节，consumed=3, pad=1, 读 1 字节填充
         with_py(|py| {
             let inner = Node::GreedyBytes(crate::nodes::greedy_bytes::GreedyBytesNode::new());
@@ -345,7 +344,7 @@ mod tests {
 
     #[test]
     fn parse_modulus_lt_2_raises_padding_error() {
-        // AL-9: Aligned(1, Int16ub) parse → 运行期 PaddingError
+        // Aligned(1, Int16ub) parse → 运行期 PaddingError
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
             let modulus = ExprProgram::new(vec![ExprOp::Const(1)]);
@@ -362,7 +361,7 @@ mod tests {
 
     #[test]
     fn parse_with_expression_modulus() {
-        // AL-9 等价：Aligned(some_field, ...) where some_field=4
+        // 等价：Aligned(some_field, ...) where some_field=4
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             // modulus: GetInt(0)（字段 0 = "mod" = 4）
@@ -380,12 +379,12 @@ mod tests {
     }
 
     // ======================================================================
-    // build — AL-2 / AL-10
+    // build
     // ======================================================================
 
     #[test]
     fn build_writes_padding() {
-        // AL-2: Aligned(4, Int16ub).build(1) → b'\x00\x01\x00\x00'
+        // Aligned(4, Int16ub).build(1) → b'\x00\x01\x00\x00'
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
@@ -401,7 +400,7 @@ mod tests {
 
     #[test]
     fn build_with_pattern() {
-        // AL-10: Aligned(4, Int16ub, pattern=b'\xff').build(1) → b'\x00\x01\xff\xff'
+        // Aligned(4, Int16ub, pattern=b'\xff').build(1) → b'\x00\x01\xff\xff'
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
             let node = AlignedNode::new(inner, modulus_four(), 0xFF);
@@ -417,7 +416,7 @@ mod tests {
 
     #[test]
     fn build_no_padding_when_aligned() {
-        // AL-5: Aligned(4, Bytes(4)).build(b'xxxx') → b'xxxx'（无 padding）
+        // Aligned(4, Bytes(4)).build(b'xxxx') → b'xxxx'（无 padding）
         with_py(|py| {
             let inner = Node::Bytes(BytesNode::new_const(4));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
@@ -432,48 +431,39 @@ mod tests {
     }
 
     // ======================================================================
-    // sizeof — D-P0-3：编译期常量成功（AL-3/4/5），运行期表达式 Err
+    // sizeof — 编译期常量成功，运行期表达式 Err
     // ======================================================================
 
     #[test]
     fn sizeof_const_modulus_returns_inner_plus_pad() {
-        // D-P0-3 / AL-3: Aligned(4, Int16ub).sizeof() → 4 (inner_len=2, pad=2)
+        // Aligned(4, Int16ub).sizeof() → 4 (inner_len=2, pad=2)
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
             let ctx = Context::placeholder(py);
-            assert_eq!(
-                node.sizeof(&ctx).expect("AL-3: const modulus 4 + Int16ub"),
-                4
-            );
+            assert_eq!(node.sizeof(&ctx).expect("const modulus 4 + Int16ub"), 4);
         });
     }
 
     #[test]
     fn sizeof_const_modulus_pad_one() {
-        // AL-4: Aligned(4, Bytes(3)).sizeof() → 4 (inner_len=3, pad=1)
+        // Aligned(4, Bytes(3)).sizeof() → 4 (inner_len=3, pad=1)
         with_py(|py| {
             let inner = Node::Bytes(BytesNode::new_const(3));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
             let ctx = Context::placeholder(py);
-            assert_eq!(
-                node.sizeof(&ctx).expect("AL-4: const modulus 4 + Bytes(3)"),
-                4
-            );
+            assert_eq!(node.sizeof(&ctx).expect("const modulus 4 + Bytes(3)"), 4);
         });
     }
 
     #[test]
     fn sizeof_const_modulus_no_pad_when_aligned() {
-        // AL-5: Aligned(4, Bytes(4)).sizeof() → 4 (inner_len=4, pad=0)
+        // Aligned(4, Bytes(4)).sizeof() → 4 (inner_len=4, pad=0)
         with_py(|py| {
             let inner = Node::Bytes(BytesNode::new_const(4));
             let node = AlignedNode::new(inner, modulus_four(), 0x00);
             let ctx = Context::placeholder(py);
-            assert_eq!(
-                node.sizeof(&ctx).expect("AL-5: const modulus 4 + Bytes(4)"),
-                4
-            );
+            assert_eq!(node.sizeof(&ctx).expect("const modulus 4 + Bytes(4)"), 4);
         });
     }
 
@@ -491,7 +481,7 @@ mod tests {
 
     #[test]
     fn sizeof_runtime_modulus_returns_err() {
-        // D-P0-3: modulus 是运行期表达式（GetInt）→ sizeof 返回 Err（对齐 Python SizeofError）
+        // modulus 是运行期表达式（GetInt）→ sizeof 返回 Err（对齐 Python SizeofError）
         // 区分编译期常量（应成功，见上）vs 运行期表达式（应 Err）。
         let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
         let modulus = ExprProgram::new(vec![ExprOp::GetInt(0)]);

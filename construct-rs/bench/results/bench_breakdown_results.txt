@@ -10,35 +10,35 @@ construct-rs parse 分阶段计时（根因验证）
   repeat (中位数): 5
   测量时间       : 2026-06-22 03:49:58
 
-测量阶段（方案 B'）：
+测量阶段：
   - Full parse           : Flat.parse(data) [Rust 内完整构造实例]
   - Rust _parse_raw      : schema._parse_raw(data) [直接返回实例]
   - Python construct     : pc.Struct(...).parse(data) [绝对基线]
 
 === B1 (3 fields) ===
 Full parse (Flat.parse):           386.0 ns
-Rust _parse_raw:                   319.9 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Rust _parse_raw:                   319.9 ns  (raw == full，实例在 Rust 内构造)
 Python construct:                 3123.2 ns
 Full 加速比:                   8.09x
 Rust-only 加速比:              9.76x
 
 === B2 (10 fields) ===
 Full parse (Flat.parse):           628.2 ns
-Rust _parse_raw:                   557.6 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Rust _parse_raw:                   557.6 ns  (raw == full，实例在 Rust 内构造)
 Python construct:                 6068.0 ns
 Full 加速比:                   9.66x
 Rust-only 加速比:             10.88x
 
 === B3 (50 fields) ===
 Full parse (Flat.parse):          2020.3 ns
-Rust _parse_raw:                  1963.0 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Rust _parse_raw:                  1963.0 ns  (raw == full，实例在 Rust 内构造)
 Python construct:                23314.2 ns
 Full 加速比:                  11.54x
 Rust-only 加速比:             11.88x
 
 === B4 (100 fields) ===
 Full parse (Flat.parse):          3656.3 ns
-Rust _parse_raw:                  3570.1 ns  (方案 B'：raw == full，实例在 Rust 内构造)
+Rust _parse_raw:                  3570.1 ns  (raw == full，实例在 Rust 内构造)
 Python construct:                44097.1 ns
 Full 加速比:                  12.06x
 Rust-only 加速比:             12.35x

@@ -1,35 +1,35 @@
-"""Phase 8 性能基准（Controlled A/B Test vs Python construct 2.10.70）。
+"""Adapters / Struct / Streams 性能基准（Controlled A/B Test vs Python construct 2.10.70）。
 
-覆盖 Phase 8 全部构造器（P0 + P1P2），每构造器 2-3 场景 × parse/build。
+覆盖全部构造器（P0 + P1P2），每构造器 2-3 场景 × parse/build。
 
 P0（8 构造器）:
-- 8.1 Const / Default / Check
-- 8.4 Hex / HexDump
-- 8.5 Checksum（B1 零拷贝 vs Python RawCopy+callable）
-- 8.8 Aligned
-- 8.9 Terminated
+- Const / Default / Check
+- Hex / HexDump
+- Checksum（B1 零拷贝 vs Python RawCopy+callable）
+- Aligned
+- Terminated
 
 P1P2（10 构造器）:
-- 8.2 Enum / FlagsEnum / Mapping
-- 8.3 OneOf / NoneOf
-- 8.6 Union
-- 8.7 Sequence
-- 8.12 ProcessXor / ProcessRotateLeft
-- 8.11 NamedTuple
+- Enum / FlagsEnum / Mapping
+- OneOf / NoneOf
+- Union
+- Sequence
+- ProcessXor / ProcessRotateLeft
+- NamedTuple
 
-门禁：默认 ≥10x（Phase 8 S-PERF 出口标准）。
-关注点（设计预测可能 <10x）：Hex（显示类构造）、Enum（dict lookup）。
+门禁：默认 ≥10x。
+关注点（可能 <10x）：Hex（显示类构造）、Enum（dict lookup）。
 
-测量口径（performance-gate SKILL.md Checkpoint 4）：
+测量口径：
 - 子进程隔离（rs venv vs py venv）
 - ≥5 次采样，报告 min/max/mean/stddev
 - 绝对基线：Python construct==2.10.70
 
 用法::
 
-    python bench/bench_phase8.py
-    python bench/bench_phase8.py --group p0
-    python bench/bench_phase8.py --case CS1
+    python bench/bench_adapters_struct_streams.py
+    python bench/bench_adapters_struct_streams.py --group p0
+    python bench/bench_adapters_struct_streams.py --case CS1
 """
 
 from __future__ import annotations
@@ -56,7 +56,7 @@ from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
 # ---------------------------------------------------------------------------
-# venv 解析（与 bench_phase6/7.py 一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
+# venv 解析（与其他 bench 脚本一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
 _DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
@@ -146,8 +146,8 @@ def _make_p0_case(impl, case):
             return mk_py(["m" / Const(255, Int32ul)], b'\xff\x00\x00\x00', dict(m=None))
 
     # ===== Default =====
-    # DF1: Default(Byte, 0) with bare int constant — fixed (DF1 bug fix:
-    # _extract_and_compile_exprs now compiles int constants as Const ExprOp).
+    # DF1: Default(Byte, 0) with bare int constant —— int 常量由
+    # _extract_and_compile_exprs 编译为 Const ExprOp。
     if C == 'DF1':  # Default constant value (obj=None triggers default 0)
         if impl == 'rs':
             return mk_rs(['    val: int = field(Default(Byte, 0))'],
@@ -215,8 +215,8 @@ def _make_p0_case(impl, case):
 
     # ===== Terminated =====
     if C == 'TM1':  # Terminated at EOF
-        # Fixed (TM1 bug fix): rfield(Terminated) now supported —
-        # compute_ro_value returns Py_None for Terminated (build is no-op).
+        # rfield(Terminated) 支持：compute_ro_value 对 Terminated 返回
+        # Py_None（build 是 no-op）。
         if impl == 'rs':
             return mk_rs(['    v: int = field(Byte)',
                           '    _t: object = rfield(Terminated)'],
@@ -465,53 +465,52 @@ def _make_p1p2_case(impl, case):
 # ---------------------------------------------------------------------------
 # (case_id, constructor, group, desc, path_type, scale)
 P0_CASES = [
-    # 8.1 Const / Default / Check
+    # Const / Default / Check
     ("CN1", "Const", "p0", "Const(b'IHDR') bytes 单字段", "standalone", "N=1"),
     ("CN2", "Const", "p0", "Const(255, Int32ul) int 单字段", "standalone", "N=1"),
     ("DF1", "Default", "p0", "Default(Byte, count) obj provided (pass-through)", "nested_in_struct", "N=2"),
     ("DF2", "Default", "p0", "Default(Byte, count) 表达式默认值", "nested_in_struct", "N=2"),
     ("CK1", "Check", "p0", "Check(a+b>0) 表达式断言", "nested_in_struct", "N=2"),
-    # 8.4 Hex / HexDump
+    # Hex / HexDump
     ("HX1", "Hex", "p0", "Hex(Int32ub) int 显示", "standalone", "N=1"),
     ("HX2", "Hex", "p0", "Hex(Bytes(4)) bytes 显示", "standalone", "N=1"),
     ("HD1", "HexDump", "p0", "HexDump(Bytes(4)) bytes 显示", "standalone", "N=1"),
-    # 8.8 Aligned
+    # Aligned
     ("AL1", "Aligned", "p0", "Aligned(4, Int16ub) modulus=4", "standalone", "N=1"),
     ("AL2", "Aligned", "p0", "Aligned(8, Bytes(3)) modulus=8", "standalone", "N=1"),
-    # 8.9 Terminated
+    # Terminated
     ("TM1", "Terminated", "p0", "Terminated EOF 断言", "nested_in_struct", "N=1"),
 ]
 
 CS_CASES = [
-    # 8.5 Checksum（特殊：B1 零拷贝 vs Python RawCopy+callable）
+    # Checksum（特殊：B1 零拷贝 vs Python RawCopy+callable）
     ("CS1", "Checksum", "p0", "Checksum B1 SHA256 N=64 data", "nested_in_struct", "N=64"),
     ("CS2", "Checksum", "p0", "Checksum B1 SHA256 N=1024 data", "nested_in_struct", "N=1024"),
 ]
 
 P1P2_CASES = [
-    # 8.2 Enum / FlagsEnum / Mapping
+    # Enum / FlagsEnum / Mapping
     ("EN1", "Enum", "p1p2", "Enum(Byte, 3 mappings) 正常映射", "standalone", "N=1"),
     ("EN2", "Enum", "p1p2", "Enum(Byte, 8 mappings) 多映射", "standalone", "N=1"),
     ("FE1", "FlagsEnum", "p1p2", "FlagsEnum(Byte, 4 flags)", "standalone", "N=1"),
     ("MP1", "Mapping", "p1p2", "Mapping(Byte, 3 pairs) 正常映射", "standalone", "N=1"),
-    # 8.3 OneOf / NoneOf
+    # OneOf / NoneOf
     ("OO1", "OneOf", "p1p2", "OneOf(Byte, [1,2,3])", "standalone", "N=1"),
     ("NO1", "NoneOf", "p1p2", "NoneOf(Byte, [1,2,3])", "standalone", "N=1"),
-    # 8.6 Union
+    # Union
     ("UN1", "Union", "p1p2", "Union(0, raw=Bytes(4), ints=Int32ub)", "standalone", "N=1"),
-    # 8.7 Sequence
+    # Sequence
     ("SQ1", "Sequence", "p1p2", "Sequence(Int8ub, Int8ub, Int8ub)", "standalone", "N=3"),
-    # 8.12 ProcessXor / ProcessRotateLeft
+    # ProcessXor / ProcessRotateLeft
     ("PX1", "ProcessXor", "p1p2", "ProcessXor(0xff, Int32ub)", "standalone", "N=1"),
     ("PR1", "ProcessRotateLeft", "p1p2", "ProcessRotateLeft(4, 1, Int32ub)", "standalone", "N=1"),
-    # 8.11 NamedTuple
+    # NamedTuple
     ("NT1", "NamedTuple", "p1p2", "NamedTuple over Struct{2}", "nested_in_struct", "N=1"),
 ]
 
 ALL_BENCH_CASES = P0_CASES + CS_CASES + P1P2_CASES
 
-# 门禁：默认 ≥10x。Checksum 无门禁（设计 §3.7.2 仅要求 B1≥1.3x vs A2，
-# 本 bench 测的是 vs Python 原版基线，需达标 ≥4x 项目目标但设计未设硬门禁到 10x）。
+# 门禁：默认 ≥10x。Checksum 取项目目标 ≥4x（vs Python 原版基线）。
 GATES = {}
 for case_id, *_ in ALL_BENCH_CASES:
     if case_id.startswith("CS"):
@@ -581,7 +580,7 @@ print(json.dumps({{
 
 
 def main():
-    parser = argparse.ArgumentParser(description="construct-rs Phase 8 性能基准测试")
+    parser = argparse.ArgumentParser(description="construct-rs Adapters/Struct/Streams 性能基准测试")
     parser.add_argument("--group", action="append", choices=["p0", "p1p2"],
                         help="仅测量指定分组（可多次指定），默认全部")
     parser.add_argument("--case", action="append",
@@ -618,7 +617,7 @@ def main():
     runner = BenchRunner(rs_python, py_python, _CRS_PYTHON_DIR, config=config)
 
     print("=" * 78)
-    print("Phase 8 性能基准（Controlled A/B Test vs Python construct 2.10.70）")
+    print("性能基准（Controlled A/B Test vs Python construct 2.10.70）")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -699,13 +698,13 @@ def main():
         if len(gate_failures) > 20:
             print(f"    ... 还有 {len(gate_failures) - 20} 项")
 
-    csv_path = _BENCH_DIR / "results" / "bench_phase8_csv.json"
+    csv_path = _BENCH_DIR / "results" / "bench_adapters_struct_streams_csv.json"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         json.dump(csv_rows, f, ensure_ascii=False, indent=2)
     print(f"\nCSV 数据：{csv_path}")
 
-    report_path = _BENCH_DIR / "results" / "bench_phase8"
+    report_path = _BENCH_DIR / "results" / "bench_adapters_struct_streams"
     report.write(report_path)
     print(f"详细结果：{report_path}.json / .md")
 

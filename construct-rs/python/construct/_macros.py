@@ -1,14 +1,11 @@
-"""Phase 8 宏模块：AlignedStruct + Timestamp。
-
-设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §4.7（AlignedStruct）
-+ ``docs/design/模块设计/模块设计-Phase8-P1P2.md`` §6.2（Timestamp）。
+"""宏模块：AlignedStruct + Timestamp。
 
 AlignedStruct 是 Python 函数（宏），展开为 dataclass + 每字段套 Aligned 包装。
 Timestamp 是 Python 函数（宏），返回 Adapter 子类（依赖 arrow，无法 Rust 化）。
 
-**F-1（REV 驳回修正）**：``import arrow`` 必须放在 Timestamp 函数体内（对齐 Python
+**注意**：``import arrow`` 必须放在 Timestamp 函数体内（对齐 Python
 core.py L3478），而非模块顶部。原因：``_macros.py`` 是共享模块，顶部 ``import arrow``
-失败时会导致整个模块加载失败，连带破坏 P0 已验收的 ``AlignedStruct``。函数体内导入
+失败时会导致整个模块加载失败，连带破坏 ``AlignedStruct``。函数体内导入
 使 arrow 缺失仅影响 Timestamp 调用（用户 ``pip install arrow`` 后可用）。
 """
 
@@ -39,8 +36,8 @@ def AlignedStruct(modulus, **subconskw):
     性能说明：宏展开为 dataclass + Aligned 节点（每字段独立 padding），
     与 Python 原版 Struct 语义一致。无独立 AlignedStructNode 变体。
 
-    :param modulus: 整数或表达式（不支持 context lambda，ADR-014）。
-    :param subconskw: 字段名=描述符（关键字参数，D-P0-4 不支持位置参数）。
+    :param modulus: 整数或表达式（不支持 context lambda）。
+    :param subconskw: 字段名=描述符（关键字参数，不支持位置参数）。
     :return: 动态生成的 dataclass 类（继承 StructMixin）。
     """
     fields = [
@@ -56,18 +53,18 @@ def Timestamp(subcon, unit, epoch):
     对应 Python construct core.py:3453 的 Timestamp 函数（macro）。
     construct-rs 实现为 Python 层（arrow 依赖，无法 Rust 化）。
 
-    嵌入 Struct 时走 AdapterCallbackNode（2 FFI，用户主动选择 arrow = 接受折衷，
-    PM 决策 D-3）。性能不设硬门禁（Python 层 arrow 路径）。
+    嵌入 Struct 时走 AdapterCallbackNode（2 FFI，用户主动选择 arrow = 接受折衷）。
+    性能不设硬门禁（Python 层 arrow 路径）。
 
-    **F-1**：``import arrow`` 在函数体内（延迟导入），arrow 缺失时仅 Timestamp
+    **延迟导入**：``import arrow`` 在函数体内，arrow 缺失时仅 Timestamp
     调用失败，不影响同模块的 ``AlignedStruct``。
 
-    **C-5（REV 修正）**：subcon 类型检查——若非描述符/Construct 实例则抛
+    **subcon 类型检查**：若非描述符/Construct 实例则抛
     TimestampError。Python core.py 不做检查（运行时由 subcon.parse 失败抛错），
     construct-rs 提前在 macro 中检查，提供更友好的错误信息。
 
     :param subcon: Int*/Float* 描述符，或 Int32ub（msdos 模式自动用 BitStruct）。
-                   必须是描述符类型（编译期校验，C-5）。
+                   必须是描述符类型（编译期校验）。
     :param unit: int/float（秒/毫秒/微秒分辨率）或 "msdos"。
     :param epoch: int（年）/ Arrow 实例 / "msdos"。
     :raises TimestampError: 参数类型错误（unit/epoch/subcon）。
@@ -82,7 +79,7 @@ def Timestamp(subcon, unit, epoch):
     """
     import arrow
 
-    # C-5：subcon 类型检查（必须在场，None 或非合法描述符 → TimestampError）。
+    # subcon 类型检查（必须在场，None 或非合法描述符 → TimestampError）。
     # Rust pyclass（如 FormatFieldDescriptor）的 hasattr 行为可能与纯 Python 类不同，
     # 因此仅做最低限度的 None 检查 + 类型对象检查。详细类型检查由 inner.parse/build
     # 在运行时自然抛错。

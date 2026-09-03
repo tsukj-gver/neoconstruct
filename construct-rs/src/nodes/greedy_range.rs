@@ -1,6 +1,5 @@
 //! GreedyRangeNode：读到流结束的数组读写。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.2。
 //! Python 参考：`construct/construct/core.py` `GreedyRange`（L2570-2634）。
 //!
 //! ## 概述
@@ -11,7 +10,7 @@
 //! - **parse 终止条件**：
 //!   - 子构造器返回 `StopField`（StopIf 触发）：正常终止，seek 回 fallback。
 //!   - 子构造器返回其他错误：seek 回 fallback，正常终止（吞掉错误，对齐 Python
-//!     `except Exception` 路径，详见设计 §9.5 GE-1/GE-2）。
+//!     `except Exception` 路径）。
 //!   - 流读到 EOF：子构造器返回 Stream 错误，按上一条规则回退终止。
 //! - `discard=True` 时仍消耗流但不收集结果（返回空 list）。
 //! - 嵌套数组（GreedyRange 内 GreedyRange）：内层 `_index` 覆盖外层，
@@ -20,10 +19,10 @@
 //!
 //! ## 性能要点
 //!
-//! - **4.7 lazy path 迁移**：成功路径不调 `path.push_index/pop`（P0-3 模式推广），
+//! - **lazy path**：成功路径不调 `path.push_index/pop`，
 //!   子节点返回 Err 时通过 `ConstructError::push_path_index(i)` 重建索引段。
 //!   特殊：parse 的"吞错误回退"分支丢弃错误，不重建 path（对齐 Python `except Exception`）。
-//! - **4.7 PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
+//! - **PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`。
 //!   count 未知用 `Vec::new()` 起步，Rust Vec 增长策略（doubling）比 CPython list（~1.125x）高效。
 //! - 每次迭代记录 `fallback = stream.tell()`（~1ns），失败时 seek 回退。
 //! - `ctx.set_index` 是栈字段写入（~1ns）。
@@ -46,15 +45,14 @@ use pyo3::types::PyList;
 /// # parse 行为
 ///
 /// 1. 创建空 PyList（无法预知容量，动态增长）
-/// 2. 保存外层 `ctx._index`（嵌套数组支持，设计 §3.2.2）
+/// 2. 保存外层 `ctx._index`（嵌套数组支持）
 /// 3. `loop`：
 ///    - 记录 `fallback = stream.tell()`
 ///    - 设置 `ctx._index = i`、`path.push_index(i)`
 ///    - inner.parse：
 ///      - Ok(elem)：若 !discard，append 到 list；i += 1；继续
-///      - Err(StopField)：seek 回 fallback，break（设计 §4.2.2）
-///      - Err(其他)：seek 回 fallback，break（对齐 Python `except Exception`，
-///        设计 §9.5 GE-1/GE-2）
+///      - Err(StopField)：seek 回 fallback，break
+///      - Err(其他)：seek 回 fallback，break（对齐 Python `except Exception`）
 /// 4. 恢复 `ctx._index` 到入口值
 ///
 /// # build 行为
@@ -95,8 +93,7 @@ impl GreedyRangeNode {
         self.discard
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
-    /// GreedyRange 无 count 表达式，仅递归检查 inner。
+    /// has_expressions 判断：GreedyRange 无 count 表达式，仅递归检查 inner。
     pub fn has_expressions(&self) -> bool {
         self.inner.has_expressions()
     }
@@ -114,12 +111,12 @@ impl super::Construct for GreedyRangeNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 4.7 PyList Vec 中转：count 未知，用 Vec::new() 起步。
+        // PyList Vec 中转：count 未知，用 Vec::new() 起步。
         // Rust Vec 增长策略（doubling）比 CPython list（~1.125x）高效，
         // 对 N=1000 约 ~10 次 realloc vs PyList ~60 次。
         let mut elems: Vec<Py<PyAny>> = Vec::new();
 
-        // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
+        // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
 
         let mut i: usize = 0;
@@ -128,8 +125,8 @@ impl super::Construct for GreedyRangeNode {
             let fallback = stream.tell();
 
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
-
+            // lazy path：成功路径不调 path.push_index/pop。
+            //
             match self.inner.parse(py, stream, ctx, path) {
                 Ok(elem) => {
                     if !self.discard {
@@ -139,7 +136,7 @@ impl super::Construct for GreedyRangeNode {
                 }
                 Err(ConstructError::StopField { .. }) => {
                     // StopIf 触发：正常终止（对齐 Python StopFieldError 捕获）。
-                    // StopIf 不消耗字节，但仍 seek 回 fallback（防御性，对齐设计 §4.2.2）。
+                    // StopIf 不消耗字节，但仍 seek 回 fallback（防御性）。
                     // 错误是哨兵，丢弃；无需重建 path。
                     let _ = stream.seek(fallback, path);
                     break;
@@ -147,7 +144,7 @@ impl super::Construct for GreedyRangeNode {
                 Err(e) => {
                     // 其他错误：seek 回退 + 正常终止。
                     // 对齐 Python L2609-2614 的 `except Exception` 路径
-                    // （ExplicitError 暂无等价变体，统一回退，设计 §9.5 GE-1）。
+                    // （ExplicitError 暂无等价变体，统一回退）。
                     // **不调 push_path_index**——错误被丢弃（对齐 Python 语义），
                     // path 此时为 Root 态，seek 内部不读 path 内容仅传递。
                     let _ = e;
@@ -172,14 +169,14 @@ impl super::Construct for GreedyRangeNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        // build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
         let items = super::common::collect_obj_to_vec(obj, "GreedyRange", path)?;
 
         let old_index = ctx.index();
 
         for (i, elem) in items.into_iter().enumerate() {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
             match self.inner.build(py, elem_bound, stream, ctx, path) {
                 Ok(()) => {}
@@ -204,7 +201,7 @@ impl super::Construct for GreedyRangeNode {
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
         // 对齐 Python `GreedyRange._sizeof` L2630-2631：永远 SizeofError。
-        // 设计 §4.2.4：保守用 Generic（错误消息明确）。
+        // 保守用 Generic（错误消息明确）。
         Err(ConstructError::Generic {
             message: "GreedyRange size is undefined".to_string(),
             path: String::new(),
@@ -212,8 +209,6 @@ impl super::Construct for GreedyRangeNode {
     }
 }
 
-// 恢复 ctx._index 已提升为 `Context::restore_index` 方法（P0-1 整合）。
-// 保留此注释作为 GreedyRangeNode 模式采用声明参考。
 //
 // ---------------------------------------------------------------------------
 // 单元测试
@@ -291,7 +286,7 @@ mod tests {
 
     #[test]
     fn parse_empty_stream_returns_empty_list() {
-        // GR-1: 空流（立即 EOF）→ 返回空 list
+        // 空流（立即 EOF）→ 返回空 list
         with_py(|py| {
             let node = GreedyRangeNode::new(byte_node(), false);
             let mut stream = ParseStream::new(&[]);
@@ -346,12 +341,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：子构造器失败时回退（GR-2, GR-3, GR-5）
+    // parse：子构造器失败时回退
     // ======================================================================
 
     #[test]
     fn parse_first_element_fallback_returns_empty_list() {
-        // GR-2: 第一个元素解析失败 → 回退到 pos=0，返回空 list
+        // 第一个元素解析失败 → 回退到 pos=0，返回空 list
         // 用 Int16ub（2 字节）作为 inner，流只有 1 字节 → 第一次解析就失败
         with_py(|py| {
             let node = GreedyRangeNode::new(int16ub_node(), false);
@@ -370,7 +365,7 @@ mod tests {
 
     #[test]
     fn parse_partial_element_fallback_returns_previous_elements() {
-        // GR-3/GR-5: 第 N 个元素解析失败 → 回退，返回前 N-1 个完整元素
+        // 第 N 个元素解析失败 → 回退，返回前 N-1 个完整元素
         // 用 Int16ub：前 4 字节 = 2 个完整 Int16ub，第 5 字节不足
         with_py(|py| {
             let node = GreedyRangeNode::new(int16ub_node(), false);
@@ -408,12 +403,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：discard 行为（GR-6）
+    // parse：discard 行为
     // ======================================================================
 
     #[test]
     fn parse_discard_returns_empty_but_consumes_stream() {
-        // GR-6: discard=True 仍消耗流，返回空 list
+        // discard=True 仍消耗流，返回空 list
         with_py(|py| {
             let node = GreedyRangeNode::new(byte_node(), true);
             let mut stream = ParseStream::new(&[0x01, 0x02, 0x03, 0x04]);
@@ -511,17 +506,17 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：StopField 捕获（GR-4，StopIfNode 集成）
+    // parse：StopField 捕获（StopIfNode 集成）
     // ======================================================================
 
     #[test]
     fn parse_stop_if_always_terminates_immediately() {
-        // GR-4 集成：GreedyRange(StopIf(Always)) → 第一次迭代就触发 StopField，
+        // GreedyRange(StopIf(Always)) → 第一次迭代就触发 StopField，
         // GreedyRange 捕获并 break，返回空 list。
         //
         // 关键：inner 直接是 StopIfNode（非 Struct 包装），StopField 不被中间节点捕获，
         // 直接传播到 GreedyRange。
-        // 设计 §4.2.2 / §9.4：GreedyRange 在 inner.parse 返回 StopField 时正常终止。
+        // GreedyRange 在 inner.parse 返回 StopField 时正常终止。
         with_py(|py| {
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
             let inner = Node::StopIf(StopIfNode::new(StopIfCondition::Always));
@@ -542,7 +537,7 @@ mod tests {
 
     #[test]
     fn parse_stop_if_never_reads_until_eof() {
-        // GR-4 边界：GreedyRange(StopIf(Never)) 永不停止，
+        // 边界：GreedyRange(StopIf(Never)) 永不停止，
         // 每次 append Py_None，读到 EOF 才终止（Stream 错误被吞，正常终止）。
         with_py(|py| {
             use crate::nodes::stop_if::StopIfCondition;
@@ -571,9 +566,9 @@ mod tests {
 
     #[test]
     fn parse_stop_if_in_struct_does_not_propagate() {
-        // GR-4 行为差异说明：Struct 内的 StopIf 被 Struct 捕获，不传播到 GreedyRange。
+        // 行为差异说明：Struct 内的 StopIf 被 Struct 捕获，不传播到 GreedyRange。
         // 这是 construct-rs 与 Python construct 的已知差异（Python 用 FocusedSeq 透传）。
-        // 设计 §4.7：StructNode 捕获 StopField 后正常返回实例。
+        // StructNode 捕获 StopField 后正常返回实例。
         //
         // 场景：GreedyRange(Struct{x: Byte, stop: StopIf(Always)})
         // 每次 Struct.parse 都会捕获 StopIf(Always)，返回 Instance{x: ...}，
@@ -617,7 +612,7 @@ mod tests {
 
     #[test]
     fn parse_empty_stream_with_stop_if_returns_empty_list() {
-        // GR-4 边界：空流 + StopIf → 第一次迭代 EOF 触发 Stream 错误 → GreedyRange 回退 + 终止
+        // 边界：空流 + StopIf → 第一次迭代 EOF 触发 Stream 错误 → GreedyRange 回退 + 终止
         with_py(|py| {
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
             let inner = Node::StopIf(StopIfNode::new(StopIfCondition::Always));
@@ -635,7 +630,7 @@ mod tests {
 
     #[test]
     fn build_stop_if_always_stops_after_first_element() {
-        // GR-4 build 方向：StopIf 在第一个元素就触发 → 仅 build 第一个
+        // build 方向：StopIf 在第一个元素就触发 → 仅 build 第一个
         with_py(|py| {
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
             // inner: StopIf(Always) 不写字节，但触发 StopField
@@ -655,7 +650,7 @@ mod tests {
 
     #[test]
     fn build_stop_if_never_builds_all_elements() {
-        // GR-4 build 边界：StopIf(Never) 不停止，全部 build
+        // build 边界：StopIf(Never) 不停止，全部 build
         with_py(|py| {
             // inner: GreedyRange(Struct{Byte, StopIf(Never)})
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
@@ -732,7 +727,7 @@ mod tests {
 
     #[test]
     fn build_empty_list_writes_nothing() {
-        // GR-7: build 时空列表 → 不写字节
+        // build 时空列表 → 不写字节
         with_py(|py| {
             let node = GreedyRangeNode::new(byte_node(), false);
             let obj = py.eval_bound("[]", None, None).expect("eval");
@@ -747,7 +742,7 @@ mod tests {
 
     #[test]
     fn build_propagates_inner_error() {
-        // GR-8: build 时某元素失败 → 错误向上传播（不回退，build 无 seek）
+        // build 时某元素失败 → 错误向上传播（不回退，build 无 seek）
         // 用 Int16ub 作为 inner，传入 [1, 2, 3]，第一个就因类型不符失败
         with_py(|py| {
             let node = GreedyRangeNode::new(int16ub_node(), false);
@@ -759,7 +754,7 @@ mod tests {
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // 4.7 lazy path：error.path 由 inner.build 产生 "root"，GreedyRange 重建为 "root[0]"。
+            // lazy path：error.path 由 inner.build 产生 "root"，GreedyRange 重建为 "root[0]"。
             // 验证 path 为 "root[0]"，不出现 "root.[0][0]" 双重标记或 ".[" 前缀。
             let p = err.path().unwrap_or("");
             assert!(
@@ -777,7 +772,7 @@ mod tests {
 
     #[test]
     fn build_struct_inside_greedy_range_error_path() {
-        // 4.7 设计 §6.2：GreedyRange(Struct{x: Byte})，build 时 Struct[1].x 失败
+        // GreedyRange(Struct{x: Byte})，build 时 Struct[1].x 失败
         // → path 应为 "root[1].x"
         // 重建顺序（从叶到根）：
         //   1. leaf FormatField build error path = "root"
@@ -823,7 +818,7 @@ mod tests {
 
     #[test]
     fn parse_returns_native_list_type() {
-        // 4.7：验证 Vec 中转后返回的仍是原生 list 类型。
+        // 验证 Vec 中转后返回的仍是原生 list 类型。
         with_py(|py| {
             let node = GreedyRangeNode::new(byte_node(), false);
             let mut stream = ParseStream::new(&[0x01, 0x02, 0x03]);
@@ -907,7 +902,7 @@ mod tests {
 
     #[test]
     fn sizeof_always_returns_error() {
-        // GR-9: sizeof 永远 Err
+        // sizeof 永远 Err
         with_py(|py| {
             let ctx = setup_ctx(py);
             let node = GreedyRangeNode::new(byte_node(), false);

@@ -1,6 +1,4 @@
-"""表达式编译管线测试（Phase 2.3 Part C）。
-
-设计依据：``docs/design/模块设计/模块设计-表达式系统.md`` §3.1-§3.7。
+"""表达式编译管线测试。
 
 覆盖：
 - ``_compile_expr_tree``：表达式树 → ExprOp 指令列表（后序遍历）
@@ -13,8 +11,7 @@
 - ``_expr_programs_to_list``：格式转换
 - 错误路径：float / bool / 未知类型 / 未知 operator
 
-注意：当前阶段（2.3）Rust 侧的 ``BytesDescriptor`` 尚未扩展 ``_expr_params``
-（那是后续子任务）。因此本测试使用 mock 对象模拟 ``_expr_params`` 协议。
+注意：本测试使用 mock 对象模拟 ``_expr_params`` 协议，聚焦编译管线本身。
 """
 
 import operator
@@ -47,8 +44,8 @@ from construct._mixin import (
 class _MockExprParamsDescriptor:
     """模拟实现了 ``_expr_params`` 协议的描述符。
 
-    真实描述符（如扩展后的 ``BytesDescriptor``、``ComputedDescriptor``）将在
-    后续子任务中实现。此处用纯 Python mock 验证编译管线逻辑。
+    真实描述符（如 ``BytesDescriptor``、``ComputedDescriptor``）实现同一协议。
+    此处用纯 Python mock 验证编译管线逻辑。
 
     ``_expr_params`` 返回 ``{param_name: value}``，value 可以是：
     - int / 常量：不编译
@@ -67,7 +64,7 @@ class _MockExprParamsDescriptor:
 
 
 class _MockSubconWrapperDescriptor:
-    """模拟仅含 ``subcon`` 槽位的包装器描述符（v0.1.1 P1 递归收集测试）。"""
+    """模拟仅含 ``subcon`` 槽位的包装器描述符（递归收集测试用）。"""
 
     def __init__(self, subcon):
         self.subcon = subcon
@@ -77,7 +74,7 @@ class _MockSubconWrapperDescriptor:
 
 
 class _MockSubconsWrapperDescriptor:
-    """模拟仅含 ``subcons`` 列表槽位的容器描述符（v0.1.1 P1 递归收集测试）。"""
+    """模拟仅含 ``subcons`` 列表槽位的容器描述符（递归收集测试用）。"""
 
     def __init__(self, subcons):
         self.subcons = list(subcons)
@@ -87,7 +84,7 @@ class _MockSubconsWrapperDescriptor:
 
 
 class _MockSwitchLikeDescriptor:
-    """模拟 Switch 形态：``cases`` dict + ``default`` 槽位（v0.1.1 P1 测试）。"""
+    """模拟 Switch 形态：``cases`` dict + ``default`` 槽位（嵌套收集测试用）。"""
 
     def __init__(self, cases, default):
         self.cases = cases
@@ -482,8 +479,8 @@ class TestCheckWoReference:
 class TestExtractAndCompileExprs:
     """``_extract_and_compile_exprs`` 从描述符提取表达式参数。
 
-    v0.1.1 起返回 ``(result_dict, repeat_untils)`` 元组（设计 v0.1.1-修复
-    设计.md §1/§2）；无 RepeatUntil 的用例 repeat_untils 恒为 ``[]``。
+    v0.1.1 起返回 ``(result_dict, repeat_untils)`` 元组；
+    无 RepeatUntil 的用例 repeat_untils 恒为 ``[]``。
     """
 
     def test_descriptor_without_expr_params_returns_empty(self):
@@ -494,9 +491,9 @@ class TestExtractAndCompileExprs:
         assert repeat_untils == []
 
     def test_descriptor_with_int_constant_param_compiles_as_const(self):
-        """``_expr_params`` 含 int 常量 → 编译为单条 Const ExprOp（DF1 修复）。
+        """``_expr_params`` 含 int 常量 → 编译为单条 Const ExprOp。
 
-        设计 §1.2.2："int 常量也包装为单条 Const"。
+        规则：int 常量也包装为单条 Const。
         DefaultDescriptor.value / CheckDescriptor.func 需要 ExprProgram。
         """
         desc = _MockExprParamsDescriptor({"length": 4})
@@ -504,7 +501,7 @@ class TestExtractAndCompileExprs:
         assert result == {"length": [("const", 4)]}
 
     def test_descriptor_with_int_constant_zero(self):
-        """int 常量 0 编译为 ``[("const", 0)]``（DF1 常见用例 ``Default(Byte, 0)``）。"""
+        """int 常量 0 编译为 ``[("const", 0)]``（常见用例 ``Default(Byte, 0)``）。"""
         desc = _MockExprParamsDescriptor({"value": 0})
         result, _ = _extract_and_compile_exprs(desc, {}, "test")
         assert result == {"value": [("const", 0)]}
@@ -578,15 +575,14 @@ class TestExtractAndCompileExprs:
 
 
 # ---------------------------------------------------------------------------
-# v0.1.1 P1：嵌套表达式递归收集（槽位名协议 + 扁平键合并）
+# 嵌套表达式递归收集（槽位名协议 + 扁平键合并）
 # ---------------------------------------------------------------------------
 
 
 class TestNestedExprCollection:
-    """v0.1.1 P1：``_extract_and_compile_exprs`` 递归遍历嵌套描述符。
+    """``_extract_and_compile_exprs`` 递归遍历嵌套描述符。
 
-    设计依据：``docs/design/基础设施/v0.1.1-修复设计.md`` §1（方案 C：扁平键 +
-    冲突检测）、§2（槽位名协议：9 槽位 + 值守卫 + 按字段防环）。
+    机制：扁平键 + 冲突检测；槽位名协议（9 槽位 + 值守卫 + 按字段防环）。
     """
 
     def test_nested_expr_in_subcon_slot_collected(self):
@@ -666,7 +662,7 @@ class TestNestedExprCollection:
         assert result == {}
 
     def test_class_object_not_traversed(self):
-        """嵌套 StructMixin 子类（类对象）→ 不遍历（P4 域，ctx 隔离语义）。"""
+        """嵌套 StructMixin 子类（类对象）→ 不遍历（嵌套 Struct 的 ctx 隔离语义）。"""
 
         class Inner:
             pass
@@ -822,7 +818,6 @@ class TestExprProgramsToList:
 class TestCompileSchemaIntegration:
     """验证 ``_compile_schema_for_class`` 能正确传递 modes 和 expr_programs。
 
-    当前阶段（2.3）Rust 侧仅接收 expr_programs 但不解析（仅设置 has_expressions 标志）。
     这些测试验证编译管线不会因 modes/expr_programs 参数而崩溃。
     """
 

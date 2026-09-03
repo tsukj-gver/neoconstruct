@@ -1,6 +1,6 @@
-"""Phase 8 Controlled A/B Test retest — 14 parse <10x cases.
+"""Controlled A/B Test retest — 14 parse <10x cases.
 
-Methodology (performance-gate SKILL Checkpoint 4):
+Methodology:
   1. Alternating rs↔py per round (rs then py back-to-back, repeat ≥5 rounds)
   2. Positive control: UN1 Union parse / SQ1 Sequence parse (known ≥10x)
   3. Negative control: build direction (known ≥10x, same session)
@@ -14,7 +14,7 @@ Each round:
 
 Usage::
 
-    python bench/bench_phase8_ab_retest.py
+    python bench/bench_adapters_retest.py
 """
 
 from __future__ import annotations
@@ -33,11 +33,11 @@ if str(_BENCH_DIR) not in sys.path:
 from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
-# Reuse bench_phase8.py infrastructure
-import bench_phase8
+# Reuse bench_adapters_struct_streams.py infrastructure
+import bench_adapters_struct_streams
 
 # ---------------------------------------------------------------------------
-# venv resolution (same as bench_phase8.py: env var > project .venv/.venv-pc > sys.executable)
+# venv resolution (same as bench_adapters_struct_streams.py: env var > project .venv/.venv-pc > sys.executable)
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
 _DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
@@ -93,7 +93,7 @@ NEGATIVE_CONTROLS = [
     ("MP1", "Mapping"),
 ]
 
-ROUNDS = 5  # ≥5 samples per case (Checkpoint 4 requirement)
+ROUNDS = 5  # ≥5 samples per case
 
 
 def measure_case_round(runner, case_id, direction, config):
@@ -101,16 +101,16 @@ def measure_case_round(runner, case_id, direction, config):
 
     Returns (rs_median_ns, py_median_ns, speedup).
     """
-    dispatcher, src_group = bench_phase8._resolve_case_dispatcher(case_id)
-    make_case_src = bench_phase8._resolve_make_case_src(src_group)
+    dispatcher, src_group = bench_adapters_struct_streams._resolve_case_dispatcher(case_id)
+    make_case_src = bench_adapters_struct_streams._resolve_make_case_src(src_group)
     repeat = config.iterations + config.warmup
     scenario = f"{case_id}-{direction}"
 
-    rs_script = bench_phase8._build_script(
+    rs_script = bench_adapters_struct_streams._build_script(
         "rs", case_id, direction, config.number, repeat,
         _CRS_PYTHON_DIR, make_case_src, dispatcher,
     )
-    py_script = bench_phase8._build_script(
+    py_script = bench_adapters_struct_streams._build_script(
         "py", case_id, direction, config.number, repeat,
         _CRS_PYTHON_DIR, make_case_src, dispatcher,
     )
@@ -189,7 +189,7 @@ def main():
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 78)
-    print(f"Phase 8 Controlled A/B Test Retest | {ts}")
+    print(f"Controlled A/B Test Retest | {ts}")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -274,7 +274,7 @@ def main():
           f"{anomaly_count} ANOMALY (of {len(retest_results)} cases)")
 
     # Save results
-    out_path = _BENCH_DIR / "results" / "bench_phase8_ab_retest.json"
+    out_path = _BENCH_DIR / "results" / "bench_adapters_retest.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
         "timestamp": ts,

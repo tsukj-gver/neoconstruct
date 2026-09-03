@@ -1,23 +1,19 @@
-//! Array 系列节点共享工具层（P1-1 整合）。
-//!
-//! 设计依据：`docs/架构审查-重复代码与抽象质量.md` §4 P1-1。
+//! Array 系列节点共享工具层。
 //!
 //! ## 概述
 //!
 //! Array 系列 4 节点（ArrayNode / GreedyRangeNode / PrefixedArrayNode /
 //! RepeatUntilNode）的 build 路径都需要把用户传入的 obj（list/tuple/任意 iterable）
-//! 收集到 `Vec<Py<PyAny>>`。原 v4 实现中此逻辑在 4 个文件中是近似相同的 ~28 行块
-//! （差异仅错误消息中的类型名），P1-1 整合提取为公共 helper。
+//! 收集到 `Vec<Py<PyAny>>`。该逻辑此前在 4 个文件中重复（差异仅错误消息中的
+//! 类型名），提取为公共 helper。
 //!
-//! ## 模式采用声明（强制）
+//! ## 采用方
 //!
-//! 本模块提供的 helper 已被以下节点采用（v5 实施同步）：
-//! - ✅ ArrayNode（array.rs）
-//! - ✅ GreedyRangeNode（greedy_range.rs）
-//! - ✅ PrefixedArrayNode（prefixed_array.rs）
-//! - ✅ RepeatUntilNode（repeat_until.rs 阶段 6 重写后）
-//!
-//! 已查阅跨阶段模式规范（`docs/设计决策记录.md`）。
+//! 本模块提供的 helper 已被以下节点采用：
+//! - ArrayNode（array.rs）
+//! - GreedyRangeNode（greedy_range.rs）
+//! - PrefixedArrayNode（prefixed_array.rs）
+//! - RepeatUntilNode（repeat_until.rs）
 
 use crate::error::ConstructError;
 use crate::path::Path;
@@ -25,8 +21,6 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyList, PyTuple};
 
 /// 从 list / tuple / 任意 iterable 收集元素到 `Vec<Py<PyAny>>`。
-///
-/// 设计依据：`docs/架构审查-重复代码与抽象质量.md` §4 P1-1（草案签名）。
 ///
 /// # 快路径
 ///

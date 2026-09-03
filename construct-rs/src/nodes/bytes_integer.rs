@@ -1,23 +1,20 @@
 //! BytesIntegerNode：任意字节长度整数（对应 Python construct `BytesInteger`）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Primitives收尾.md` §1.5。
 //! Python 参考：`construct/construct/core.py:1203-1292`（BytesInteger 类）、
 //! `construct/construct/lib/binary.py:38-92`（integer2bytes / bytes2integer 工具）。
 //!
-//! ## 三档路径设计（D-2 决策 + 6.1-fix u128 扩展）
+//! ## 三档路径设计
 //!
 //! - **u64 fast-path（length ≤ 8）**：Rust 原生 u64/i64 + endian 转换，零 Python 调用
 //! - **u128 fast-path（9 ≤ length ≤ 16）**：Rust 原生 u128/i128 + pyo3 `IntoPy`，
 //!   零 unsafe（pyo3 内部封装 `_PyLong_FromByteArray`，由 pyo3 维护者审计，
 //!   与 `u64::into_py` 内部调 `PyLong_FromLongLong` 同性质）。
-//!   设计依据：`docs/design/queries/设计质疑-BytesInteger-num-bigint.md` §3.1。
 //! - **slow-path（length > 16）**：调用 Python `int.from_bytes` / `int.to_bytes`
 //!   （CPython 公开稳定 API，自 Python 3.2 起，无 unsafe raw FFI）
 //!
 //! u64/u128 fast-path 覆盖绝大多数实际用法（UUID / GUID / SHA-1 / MD5 / IPv6 数值
 //! 表示均为 16 字节），slow-path 仅触发于显式 `BytesInteger(17+)` 极罕见用法
-//! （如 RSA 模数通常用 Bytes 而非 BytesInteger）。详见设计 §1.5.1 D-2 决策表
-//! 与设计质疑 §3.3 / §4.1。
+//! （如 RSA 模数通常用 Bytes 而非 BytesInteger）。
 //!
 //! ## Int24 系列
 //!
@@ -25,10 +22,10 @@
 //! （Int24ub = BytesInteger(3, signed=False, swapped=False)，依此类推）。
 //! 3 字节走 fast-path，符号扩展 / endian 由 fast-path 矩阵处理。
 //!
-//! ## 错误类型（P1 v2 修正）
+//! ## 错误类型
 //!
 //! 所有整数相关错误统一用 [`ConstructError::Integer`]（对应 Python `IntegerError`），
-//! 与 `core.py:1248-1267` 对齐。v1 误用 `FormatField` 已修正。
+//! 与 `core.py:1248-1267` 对齐。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -41,7 +38,6 @@ use pyo3::prelude::*;
 const U64_PATH_MAX: usize = 8;
 
 /// u128 fast-path 上限：9 ≤ length ≤ 16 走 Rust 原生 u128/i128 + pyo3 `IntoPy`。
-/// 设计依据：`docs/design/queries/设计质疑-BytesInteger-num-bigint.md` §3.1。
 const U128_PATH_MAX: usize = 16;
 
 /// 任意字节长度整数节点（对应 Python construct `BytesInteger`）。
@@ -102,7 +98,6 @@ impl super::Construct for BytesIntegerNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         if self.length == 0 {
             // 对齐 Python core.py:1248-1249 `raise IntegerError("length must be positive")`。
-            // P1 v2 修正：用 ConstructError::Integer（v1 误用 FormatField）。
             return Err(ConstructError::Integer {
                 message: format!("length {} must be positive", self.length),
                 path: path.to_string(),
@@ -145,7 +140,7 @@ impl super::Construct for BytesIntegerNode {
                 }
             }
         } else if self.length <= U128_PATH_MAX {
-            // ---- u128 fast-path：Rust 原生 u128/i128 + pyo3 IntoPy（6.1-fix 新增） ----
+            // ---- u128 fast-path：Rust 原生 u128/i128 + pyo3 IntoPy ----
             // 逻辑与 u64 fast-path 同构，仅位宽从 8 → 16 字节。
             // pyo3 0.22 原生支持 u128/i128 IntoPy（内部走 _PyLong_FromByteArray 类路径）。
             let mut buf = [0u8; 16];
@@ -179,7 +174,7 @@ impl super::Construct for BytesIntegerNode {
                 }
             }
         } else {
-            // ---- slow-path：调用 Python int.from_bytes（D-2 决策，无 unsafe） ----
+            // ---- slow-path：调用 Python int.from_bytes（无 unsafe） ----
             parse_bigint_from_bytes(py, data, self.signed, self.swapped, path)
         }
     }
@@ -194,7 +189,6 @@ impl super::Construct for BytesIntegerNode {
     ) -> Result<(), ConstructError> {
         if self.length == 0 {
             // 对齐 Python core.py:1262-1263 `if length <= 0: raise IntegerError(...)`。
-            // P1 v2 补全（parity 完备）。
             return Err(ConstructError::Integer {
                 message: format!("length {} must be positive", self.length),
                 path: path.to_string(),
@@ -233,7 +227,7 @@ impl super::Construct for BytesIntegerNode {
             stream.write(bytes_to_write);
             Ok(())
         } else if self.length <= U128_PATH_MAX {
-            // ---- u128 fast-path：extract i128/u128 → 字节序转换 → write（6.1-fix 新增） ----
+            // ---- u128 fast-path：extract i128/u128 → 字节序转换 → write ----
             let (val_u128, is_negative_signed) = if self.signed {
                 let val: i128 = obj.extract::<i128>().map_err(|_| {
                     make_int_error("value is not an integer or out of i128 range", obj, path)
@@ -349,7 +343,7 @@ impl BytesIntegerNode {
         Ok(())
     }
 
-    /// u128 fast-path build 范围检查（6.1-fix 新增，对齐 Python `lib/binary.py:integer2bytes`）。
+    /// u128 fast-path build 范围检查（对齐 Python `lib/binary.py:integer2bytes`）。
     ///
     /// 校验 val_u128 / val_i128 是否能装入 `length`（9-16）字节的 unsigned / signed 表示。
     /// 超范围返回 IntegerError（对齐 Python core.py:1259-1260）。
@@ -422,7 +416,7 @@ impl BytesIntegerNode {
 /// Slow-path：调用 Python `int.from_bytes(data, byteorder, signed=signed)`。
 ///
 /// 对齐 Python `lib/binary.py:bytes2integer`（L82） + `core.py:1255-1256`。
-/// 返回 Python 原生 int（无 Rust 中间类型，符合 §0 #2）。
+/// 返回 Python 原生 int（无 Rust 中间类型）。
 fn parse_bigint_from_bytes(
     py: Python<'_>,
     data: &[u8],
@@ -703,7 +697,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — u128 fast-path（9-16 字节，6.1-fix 新增）
+    // parse — u128 fast-path（9-16 字节）
     // ======================================================================
 
     #[test]
@@ -832,7 +826,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — slow-path（> 16 字节，6.1-fix 边界调整）
+    // parse — slow-path（> 16 字节）
     // ======================================================================
 
     #[test]
@@ -979,7 +973,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — u128 fast-path（9-16 字节，6.1-fix 新增）
+    // build — u128 fast-path（9-16 字节）
     // ======================================================================
 
     #[test]
@@ -1118,7 +1112,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — slow-path（> 16 字节，6.1-fix 边界调整）
+    // build — slow-path（> 16 字节）
     // ======================================================================
 
     #[test]

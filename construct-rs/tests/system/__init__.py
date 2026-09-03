@@ -1,4 +1,4 @@
-"""Phase 9 系统测试：真实二进制协议端到端验证。
+"""系统测试：真实二进制协议端到端验证。
 
 每个协议一个测试文件：
 - test_modbus_rtu.py  — Modbus RTU（功能码 Switch + 寄存器数据 + CRC16 校验）
@@ -12,6 +12,4 @@
 3. build 测试（build 回字节，验证 round-trip 一致）
 4. parity 测试（vs Python construct 2.10.70，子进程隔离）
 5. 复杂场景（条件分支、bitfield ID、CRC/校验）
-
-API gap（若发现）记录在过程记录 `plans/phase9-system-test/traces/9.1-DEV系统测试.md`。
 """

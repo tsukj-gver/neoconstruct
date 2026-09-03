@@ -2,9 +2,7 @@
 
 本模块是 Python construct ``construct/lib/hex.py`` 的复刻，
 提供 Hex/HexDump 显示类。Rust 端在 parse 时通过 ``construct.lib.hex`` 加载这些类
-（编译期物化为 ``Py<PyType>``，避免每次 parse 调 import）。
-
-设计依据：``docs/design/模块设计/模块设计-Phase8-P0.md`` §2.1 / §2.8。
+    （编译期物化为 ``Py<PyType>``，避免每次 parse 调 import）。
 
 与 Python 原版（``construct/lib/hex.py``）的差异：
 

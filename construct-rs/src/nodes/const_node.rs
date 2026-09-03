@@ -1,6 +1,5 @@
 //! ConstNode：常量字段节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §1.2.1。
 //! Python 参考：`construct/construct/core.py` `Const`（L2808-2876）。
 //!
 //! ## 行为概述
@@ -38,7 +37,7 @@ use crate::nodes::Node;
 ///
 /// `value: Py<PyAny>` 持有任意 Python 对象（int/bytes/str 等）。比较走 pyo3
 /// `obj.bind(py).rich_compare(value.bind(py), CompareOp::Eq)`，由 CPython 调度
-/// 到对应类型的 `__eq__`（对 int/bytes/str 是 C 级实现，§0.2 判据 2）。
+/// 到对应类型的 `__eq__`（对 int/bytes/str 是 C 级实现）。
 #[derive(Debug)]
 pub struct ConstNode {
     /// 被包装的子树根。

@@ -1,19 +1,18 @@
 //! HexNode / HexDumpNode：Hex 显示包装节点（共享模块）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §2.3。
 //! Python 参考：`construct/construct/core.py` `Hex`（L3523-3580）+ `HexDump`（L3583-3635）。
 //!
 //! ## 关键设计决策：Hex/HexDump 走 Rust Node（非 AdapterCallbackNode）
 //!
 //! Hex/HexDump 是 construct 核心库内置 Adapter（非用户自定义），与 Subconstruct/RawCopy 同档。
 //! parse 逻辑简单（按 obj 类型分支 + Python 显示类 factory 调用），Rust 内联判断 +
-//! Python 类构造即可（§0.2 判据 2，C API 不算额外 FFI）。
+//! Python 类构造即可（C API 调用不算额外 FFI）。
 //!
-//! ## 性能优化（方案 A+B，ARCH 分析报告 §6）
+//! ## 性能优化
 //!
-//! - **方案 A**：int 分支用 Rust 内 `call1(cls, (intvalue,))` + `setattr("fmtstr", fmtstr)`
+//! - **int 分支直调**：int 分支用 Rust 内 `call1(cls, (intvalue,))` + `setattr("fmtstr", fmtstr)`
 //!   替代跨 FFI 的 `call_method1("new", ...)`，消除 Python 字节码进入。
-//! - **方案 B**：fmtstr 编译期 intern 为 `Py<PyString>`，parse 时直接借用，
+//! - **fmtstr 编译期 intern**：fmtstr 编译期 intern 为 `Py<PyString>`，parse 时直接借用，
 //!   消除每次 parse 的 String clone + PyString::new。
 //!
 //! ## 共享 HexDisplayClasses
@@ -35,7 +34,7 @@ use super::Construct;
 ///
 /// 从 `construct.lib.hex` 模块 getattr 一次，存入 HexNode。
 /// 运行时 parse 通过 Rust C API 直接实例化：
-/// - int 分支：`call1(cls, (intvalue,))` + `setattr("fmtstr", fmtstr)`（方案 A）
+/// - int 分支：`call1(cls, (intvalue,))` + `setattr("fmtstr", fmtstr)`
 /// - bytes/dict 分支：`call1(cls, (obj,))`（原实现）
 #[derive(Debug)]
 pub struct HexDisplayClasses {
@@ -112,14 +111,14 @@ pub fn load_hexdump_display_classes(
 /// Hex 显示包装节点：根据 inner.parse 结果类型分派到对应 Python 显示类。
 ///
 /// 对应 Python construct `Hex(subcon)`（core.py L3523）。在 construct-rs 中
-/// 实现为 Rust Node（非 AdapterCallbackNode，详见设计 §2.2 + ADR-022）。
+/// 实现为 Rust Node（非 AdapterCallbackNode）。
 ///
 /// # 三方法行为
 ///
 /// - parse：inner.parse → 按 obj 类型分派 → 调用对应 Python 显示类 factory
 ///   - int → `HexDisplayedInteger(intvalue)` + `setattr("fmtstr", fmtstr)`
-///     （方案 A：Rust 内 call1+setattr 替代跨 FFI 的 `call_method1("new")`，
-///     消除 Python 字节码进入；详见 ARCH 分析报告 §6.1）
+///     （Rust 内 call1+setattr 替代跨 FFI 的 `call_method1("new")`，
+///     消除 Python 字节码进入）
 ///   - bytes → `HexDisplayedBytes(obj)`
 ///   - dict → `HexDisplayedDict(obj)`
 ///   - else → 透传
@@ -132,7 +131,7 @@ pub struct HexNode {
     inner: Box<Node>,
     /// 编译期加载的 Python 显示类引用。
     display_classes: HexDisplayClasses,
-    /// 编译期 intern 的 fmtstr PyString（方案 B：parse 时直接借用，消除每次 PyString::new）。
+    /// 编译期 intern 的 fmtstr PyString（parse 时直接借用，消除每次 PyString::new）。
     /// None 表示 inner sizeof 不可静态计算，需运行期 fallback 构造。
     fmtstr: Option<Py<PyString>>,
 }
@@ -140,7 +139,7 @@ pub struct HexNode {
 impl HexNode {
     /// 创建 `HexNode`。
     ///
-    /// `fmtstr` 参数应为编译期 intern 的 `Py<PyString>`（方案 B）。
+    /// `fmtstr` 参数应为编译期 intern 的 `Py<PyString>`。
     /// 传入 `None` 时 parse 将运行期计算 fmtstr（inner sizeof fallback）。
     pub fn new(
         inner: Node,
@@ -159,7 +158,7 @@ impl HexNode {
         &self.inner
     }
 
-    /// 返回编译期 intern 的 fmtstr 引用（方案 B）。
+    /// 返回编译期 intern 的 fmtstr 引用。
     pub fn fmtstr(&self) -> Option<&Py<PyString>> {
         self.fmtstr.as_ref()
     }
@@ -179,7 +178,7 @@ impl Construct for HexNode {
         if bound.is_instance_of::<PyLong>() {
             // int → HexDisplayedInteger(intvalue) + setattr("fmtstr", fmtstr)
             //
-            // 方案 A（ARCH §6.1）：Rust 内 call1+setattr 替代 call_method1("new")，
+            // int 分支用 Rust 内 call1+setattr 替代 call_method1("new")，
             // 消除 getattr(cls,"new") + staticmethod 描述符 + ceval 字节码 dispatch。
             // call1 走 type.__call__ → long_new（C 级），setattr 走 PyObject_GenericSetAttr（C 级）。
             // 等价完成 HexDisplayedInteger.new(intvalue, fmtstr) 字节码体：
@@ -192,7 +191,7 @@ impl Construct for HexNode {
                     path: path.to_string(),
                 })?;
 
-            // 方案 B（ARCH §6.2）：编译期 intern fmtstr，parse 时直接借用。
+            // 编译期 intern fmtstr，parse 时直接借用。
             match &self.fmtstr {
                 Some(interned) => {
                     new_obj.setattr("fmtstr", interned.bind(py)).map_err(|e| {
@@ -298,7 +297,7 @@ mod tests {
 
     #[test]
     fn parse_int_returns_hex_displayed_integer() {
-        // HX-1: Hex(Int32ub).parse(b'\x00\x00\x01\x02') → HexDisplayedInteger(258)
+        // Hex(Int32ub).parse(b'\x00\x00\x01\x02') → HexDisplayedInteger(258)
         with_py(|py| {
             let classes = match try_load_classes(py) {
                 Some(c) => c,
@@ -328,7 +327,7 @@ mod tests {
                 .and_then(|r| r.extract().ok())
                 .unwrap_or_default();
             assert_eq!(s, "0x00000102");
-            // parity 验证：fmtstr 属性已设置（方案 A setattr）
+            // parity 验证：fmtstr 属性已设置
             let fmtstr_val: String = bound.getattr("fmtstr").unwrap().extract().unwrap();
             assert_eq!(fmtstr_val, "08X");
         });
@@ -336,7 +335,7 @@ mod tests {
 
     #[test]
     fn parse_bytes_returns_hex_displayed_bytes() {
-        // HX-2: Hex(Bytes(4)).parse(b'\x00\x00\x01\x02') → HexDisplayedBytes
+        // Hex(Bytes(4)).parse(b'\x00\x00\x01\x02') → HexDisplayedBytes
         with_py(|py| {
             let classes = match try_load_classes(py) {
                 Some(c) => c,
@@ -357,7 +356,7 @@ mod tests {
 
     #[test]
     fn build_forwards_to_inner() {
-        // HX-6: Hex(Int32ub).build(HexDisplayedInteger(258, "08X")) → b'\x00\x00\x01\x02'
+        // Hex(Int32ub).build(HexDisplayedInteger(258, "08X")) → b'\x00\x00\x01\x02'
         with_py(|py| {
             let classes = match try_load_classes(py) {
                 Some(c) => c,

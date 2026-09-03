@@ -1,29 +1,21 @@
-"""v0.1.1 回归测试：BUG-1/BUG-2 红灯基线 + 行为锁定用例。
+"""v0.1.1 回归测试：BUG-1/BUG-2 修复行为锁定 + 边界行为锁定用例。
 
-设计依据：
-- ``plans/v0.1.1/traces/v0.1.1-1-BUG复现与遗漏调查.md`` §5.3 红灯基线清单
-- 期望值全部取自该报告实测数据（§1.1 BUG-1 基线、§1.2 BUG-2 表格、
-  §4.4 monkeypatch 验证表、P2/P3 条目实测）；Bitwise×Switch 与
-  Prefixed×Array(count) 两项报告未给修复后 parse 期望值，用当前库即可
-  运行的「常量 key / 常量 count 对照组」锚定（对照组喂相同数据实测，
-  表达式变体应分派同分支同值——见各用例 docstring）。
+期望值全部取自实测数据（原版 construct 2.10.70 基线）；Bitwise×Switch 与
+Prefixed×Array(count) 两项无原版对照，用当前库即可运行的「常量 key /
+常量 count 对照组」锚定（对照组喂相同数据实测，表达式变体应分派同分支
+同值——见各用例 docstring）。
 
-覆盖（问题编号见调查报告 §4 P1-P10）：
-- P1（BUG-1 本体）：Prefixed × Switch parse/build/roundtrip（typ=1/2 两分支）
-- P1（C1 矩阵最小集）：PrefixedArray×Switch、Bitwise×Switch、Prefixed×If、
+覆盖：
+- BUG-1 回归：Prefixed × Switch parse/build/roundtrip（typ=1/2 两分支）
+- BUG-1 同族矩阵：PrefixedArray×Switch、Bitwise×Switch、Prefixed×If、
   Prefixed×Computed、Prefixed×Bytes(len)、Prefixed×Array(count)
-- P2（BUG-2 本体）：field(Const(...)) / field(Default(...)) 无参实例化 + build
-- P3：wfield(Padding(...)) 无参实例化 + build
-- P2 泛化：field(Rebuild(...)) 无参实例化 + build
-- P10（行为锁定，不加 xfail）：顶层 Switch(typ+1) parse/build
-- P5（负例锁定，不加 xfail）：Const(5) 无 subcon → CompilationError
+- BUG-2 回归：field(Const(...)) / field(Default(...)) 无参实例化 + build
+- wfield(Padding(...)) 无参实例化 + build
+- field(Rebuild(...)) 无参实例化 + build（值提供型同族泛化）
+- 行为锁定：顶层 Switch(typ+1) parse/build（宽松行为，按功能保留）
+- 负例锁定：Const(5) 无 subcon → CompilationError（与原版对齐）
 
-标记规则（PM 决策）：修复前应失败的用例标 ``xfail(strict=True)``——修复后
-XPASS 会转为 FAILURE 报错，强制清理误留标记；P10/P5 为当前即通过的
-锁定/负例用例，不加标记。**v0.1.1-3 修复落地后 19 个 xfail 标记已全部
-移除**（2026-09-03，修复真实性由用例转绿证明；标记规则保留备查）。
-
-红灯用例的 dataclass 一律定义在测试函数体内：P1 类用例失败点在类定义
+dataclass 一律定义在测试函数体内：BUG-1 类用例的失败点在类定义
 （``__init_subclass__`` 编译期），模块级定义会使整个文件收集失败。
 """
 
@@ -54,14 +46,15 @@ from construct import (
 
 
 # ---------------------------------------------------------------------------
-# P1 BUG-1 本体：Prefixed × Switch
+# BUG-1 回归：Prefixed × Switch
 # ---------------------------------------------------------------------------
 
 
 class TestBug1PrefixedSwitch:
-    """P1（BUG-1 本体）：Switch keyfunc 引用根字段，经 Prefixed 包装后编译期失败。
+    """BUG-1 回归：Switch keyfunc 引用根字段，经 Prefixed 包装后正常编译
+    parse/build（v0.1.1 前该写法编译期失败）。
 
-    修复后预期（报告 §1.1 原版基线 + §4.4 monkeypatch 验证）：
+    预期行为（原版 construct 2.10.70 基线）：
     - ``P.parse(b"\\x01\\x01\\x7f")`` → ``(typ=1, br=127)``
     - ``P.parse(b"\\x02\\x02AB")`` → ``(typ=2, br=b"AB")``
     - ``P(typ=1, br=127).build()`` → ``b"\\x01\\x01\\x7f"``
@@ -69,7 +62,7 @@ class TestBug1PrefixedSwitch:
     """
 
     def test_parse_typ1_branch(self):
-        """P1: parse typ=1 → Int8ub 分支（期望值：报告 §1.1）。"""
+        """BUG-1 回归：parse typ=1 → Int8ub 分支（原版基线期望值）。"""
 
         @dataclass
         class P(StructMixin):
@@ -81,7 +74,7 @@ class TestBug1PrefixedSwitch:
         assert parsed.br == 127
 
     def test_parse_typ2_branch(self):
-        """P1: parse typ=2 → Bytes(2) 分支（期望值：报告 §4.4）。"""
+        """BUG-1 回归：parse typ=2 → Bytes(2) 分支。"""
 
         @dataclass
         class P(StructMixin):
@@ -93,7 +86,7 @@ class TestBug1PrefixedSwitch:
         assert parsed.br == b"AB"
 
     def test_build_typ1_branch(self):
-        """P1: build typ=1 → ``b'\\x01\\x01\\x7f'``（期望值：报告 §4.4）。"""
+        """BUG-1 回归：build typ=1 → ``b'\\x01\\x01\\x7f'``。"""
 
         @dataclass
         class P(StructMixin):
@@ -103,7 +96,7 @@ class TestBug1PrefixedSwitch:
         assert P(typ=1, br=127).build() == b"\x01\x01\x7f"
 
     def test_build_typ2_branch(self):
-        """P1: build typ=2 → ``b'\\x02\\x02AB'``（期望值：报告 §1.1 原版基线）。"""
+        """BUG-1 回归：build typ=2 → ``b'\\x02\\x02AB'``（原版基线期望值）。"""
 
         @dataclass
         class P(StructMixin):
@@ -113,7 +106,7 @@ class TestBug1PrefixedSwitch:
         assert P(typ=2, br=b"AB").build() == b"\x02\x02AB"
 
     def test_roundtrip_both_branches(self):
-        """P1: parse → build 字节还原，两分支（期望值：报告 §4.4 build 行）。"""
+        """BUG-1 回归：parse → build 字节还原，两分支。"""
 
         @dataclass
         class P(StructMixin):
@@ -126,18 +119,18 @@ class TestBug1PrefixedSwitch:
 
 
 # ---------------------------------------------------------------------------
-# P1 C1 矩阵最小集：包装器 × 表达式消费者
+# BUG-1 同族矩阵：包装器 × 表达式消费者
 # ---------------------------------------------------------------------------
 
 
 class TestC1WrapperConsumerMatrix:
-    """P1（C1 矩阵最小集）：表达式消费者嵌套在各包装器内 → 同族编译期失败。
+    """BUG-1 同族矩阵：表达式消费者嵌套在各包装器内均可正常编译解析。
 
-    每个组合至少 parse 一例（v0.1.1-2 任务要求）；期望值来源见各 docstring。
+    每个组合至少 parse 一例；期望值来源见各 docstring。
     """
 
     def test_prefixed_array_switch_parse(self):
-        """P1: PrefixedArray×Switch parse（期望值：报告 §4.4 PrefixedArray 行）。"""
+        """BUG-1 同族：PrefixedArray×Switch parse。"""
 
         @dataclass
         class P(StructMixin):
@@ -151,7 +144,7 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br == [5, 6]
 
     def test_prefixed_array_switch_build(self):
-        """P1: PrefixedArray×Switch build → ``b'\\x01\\x02\\x05\\x06'``（报告 §4.4）。"""
+        """BUG-1 同族：PrefixedArray×Switch build → ``b'\\x01\\x02\\x05\\x06'``。"""
 
         @dataclass
         class P(StructMixin):
@@ -163,12 +156,11 @@ class TestC1WrapperConsumerMatrix:
         assert P(typ=1, br=[5, 6]).build() == b"\x01\x02\x05\x06"
 
     def test_bitwise_switch_parse(self):
-        """P1: Bitwise×Switch parse（typ=1 → Int8ub 分支）。
+        """BUG-1 同族：Bitwise×Switch parse（typ=1 → Int8ub 分支）。
 
-        期望值锚定：报告未给修复后值，用当前库可运行的常量 key 对照组
+        期望值锚定：用当前库可运行的常量 key 对照组
         ``Bitwise(Switch(1, {1: Int8ub, 2: Bytes(2)}))`` 实测——parse
-        ``b'\\x01\\x7f'`` → br=127（2026-09-03 实测）；typ=1 时表达式
-        变体分派同分支，应同值。
+        ``b'\\x01\\x7f'`` → br=127；typ=1 时表达式变体分派同分支，应同值。
         """
 
         @dataclass
@@ -181,7 +173,7 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br == 127
 
     def test_prefixed_if_parse_true_branch(self):
-        """P1: Prefixed×If parse，cond 为真（期望值：报告 §4.4 If 行）。"""
+        """BUG-1 同族：Prefixed×If parse，cond 为真。"""
 
         @dataclass
         class P(StructMixin):
@@ -193,7 +185,7 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br == 127
 
     def test_prefixed_if_parse_false_branch(self):
-        """P1: Prefixed×If parse，cond 为假 → br=None（期望值：报告 §4.4 If 行）。"""
+        """BUG-1 同族：Prefixed×If parse，cond 为假 → br=None。"""
 
         @dataclass
         class P(StructMixin):
@@ -205,7 +197,7 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br is None
 
     def test_prefixed_computed_parse(self):
-        """P1: Prefixed×Computed parse → br=typ（期望值：报告 §4.4 Computed 行）。"""
+        """BUG-1 同族：Prefixed×Computed parse → br=typ。"""
 
         @dataclass
         class P(StructMixin):
@@ -217,10 +209,10 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br == 1
 
     def test_prefixed_computed_build(self):
-        """P1: Prefixed×Computed build → ``b'\\x01\\x00'``（期望值：报告 §4.4）。
+        """BUG-1 同族：Prefixed×Computed build → ``b'\\x01\\x00'``。
 
         Computed 不消费字节，前缀长度为 0；``br=None`` 显式传值以解耦
-        P2（隐式 default）修复状态。
+        对隐式 default 推导的依赖。
         """
 
         @dataclass
@@ -231,7 +223,7 @@ class TestC1WrapperConsumerMatrix:
         assert P(typ=1, br=None).build() == b"\x01\x00"
 
     def test_prefixed_bytes_len_parse(self):
-        """P1: Prefixed×Bytes(typ) parse（期望值：报告 §4.4 Bytes 行）。"""
+        """BUG-1 同族：Prefixed×Bytes(typ) parse。"""
 
         @dataclass
         class P(StructMixin):
@@ -243,7 +235,7 @@ class TestC1WrapperConsumerMatrix:
         assert parsed.br == b"AB"
 
     def test_prefixed_bytes_len_build(self):
-        """P1: Prefixed×Bytes(typ) build → ``b'\\x02\\x02XY'``（期望值：报告 §4.4）。"""
+        """BUG-1 同族：Prefixed×Bytes(typ) build → ``b'\\x02\\x02XY'``。"""
 
         @dataclass
         class P(StructMixin):
@@ -253,11 +245,11 @@ class TestC1WrapperConsumerMatrix:
         assert P(typ=2, br=b"XY").build() == b"\x02\x02XY"
 
     def test_prefixed_array_count_parse(self):
-        """P1: Prefixed×Array(typ) parse。
+        """BUG-1 同族：Prefixed×Array(typ) parse。
 
-        期望值锚定：报告未给修复后值，用当前库可运行的常量 count 对照组
+        期望值锚定：用当前库可运行的常量 count 对照组
         ``Prefixed(Int8ub, Array(2, Int8ub))`` 实测——parse
-        ``b'\\x02\\x02\\x01\\x02'`` → br=[1, 2]（2026-09-03 实测）；
+        ``b'\\x02\\x02\\x01\\x02'`` → br=[1, 2]；
         typ=2 时表达式变体 count 同值，应同结果。
         """
 
@@ -272,23 +264,20 @@ class TestC1WrapperConsumerMatrix:
 
 
 # ---------------------------------------------------------------------------
-# P2（BUG-2 本体）/ P3 / P2 泛化：值提供型构造器 default 推导
+# BUG-2 回归：值提供型构造器隐式 default 推导
 # ---------------------------------------------------------------------------
 
 
 class TestBug2ValueProviderDefaults:
-    """P2（BUG-2 本体）/ P3 / P2 泛化：值提供型构造器作为 field/wfield 时强制实参。
+    """BUG-2 回归：值提供型构造器作为 field/wfield 时无需强制实参。
 
-    修复后预期（报告 §2.2 修复方向）：Const/Default/Rebuild/Padding 类字段
+    预期行为：Const/Default/Rebuild/Padding 类字段
     获得隐式 ``default=None``（+ ``kw_only=True``），build 由节点层补值
-    （节点层「值提供」语义已支持，见报告 §1.2 关键事实）。
+    （节点层「值提供」语义已支持）。
     """
 
     def test_const_field_no_arg_instantiation_and_build(self):
-        """P2: ``field(Const(5, Int8ub))`` → ``PC()`` 可实例化，build 用常量 5。
-
-        期望值：报告 §1.2（``PC(v=None).build()`` → ``b'\\x05'``，节点层已支持）。
-        """
+        """BUG-2 回归：``field(Const(5, Int8ub))`` → ``PC()`` 可实例化，build 用常量 5。"""
 
         @dataclass
         class PC(StructMixin):
@@ -298,10 +287,7 @@ class TestBug2ValueProviderDefaults:
         assert msg.build() == b"\x05"
 
     def test_default_field_no_arg_instantiation_and_build(self):
-        """P2: ``field(Default(Int8ub, 9))`` → ``PD()`` 可实例化，build 用默认 9。
-
-        期望值：报告 §1.2（``PD(v=None).build()`` → ``b'\\t'``）。
-        """
+        """BUG-2 回归：``field(Default(Int8ub, 9))`` → ``PD()`` 可实例化，build 用默认 9。"""
 
         @dataclass
         class PD(StructMixin):
@@ -311,10 +297,9 @@ class TestBug2ValueProviderDefaults:
         assert msg.build() == b"\t"
 
     def test_wfield_padding_no_arg_instantiation_and_build(self):
-        """P3: ``wfield(Padding(2))`` → ``PW(n=1)`` 可实例化（值被忽略）。
+        """BUG-2 同族：``wfield(Padding(2))`` → ``PW(n=1)`` 可实例化（值被忽略）。
 
-        期望值：报告 P3 条目（``PW(n=1, pad=None).build()`` →
-        ``b'\\x01\\x00\\x00'``——传任意值均被忽略）。
+        build 输出 ``b'\\x01\\x00\\x00'``——传入任意 pad 值均被忽略。
         """
 
         @dataclass
@@ -326,10 +311,9 @@ class TestBug2ValueProviderDefaults:
         assert msg.build() == b"\x01\x00\x00"
 
     def test_rebuild_field_no_arg_instantiation_and_build(self):
-        """P2 泛化: ``field(Rebuild(Int8ub, n))`` → ``PR(n=3)`` 可实例化，build 用表达式值。
+        """BUG-2 同族泛化：``field(Rebuild(Int8ub, n))`` → ``PR(n=3)`` 可实例化。
 
-        期望值：报告 P2 条目（``PR(n=3, v=0).build()`` → ``b'\\x03\\x03'``，
-        传入的 v 被忽略，build 用表达式值 n=3）。
+        build 输出 ``b'\\x03\\x03'``——传入的 v 被忽略，build 用表达式值 n=3。
         """
 
         @dataclass
@@ -342,20 +326,19 @@ class TestBug2ValueProviderDefaults:
 
 
 # ---------------------------------------------------------------------------
-# P10 行为锁定：顶层 Switch(typ+1)
+# 行为锁定：顶层 Switch(typ+1)
 # ---------------------------------------------------------------------------
 
 
-class TestP10TopLevelComplexSwitchLock:
-    """P10（行为锁定）：顶层 Switch(typ+1) 复杂 int 表达式 key 可用——按功能保留。
+class TestTopLevelComplexSwitchLock:
+    """行为锁定：顶层 Switch(typ+1) 复杂 int 表达式 key 可用。
 
-    调查报告 P10/P6：该行为超出设计文档承诺（「复杂表达式编译期拒绝」
-    未实施），实测可用且无害，PM 决策锁定为功能（总纲 §3.1）。
-    期望值：报告 c1_edge.py 实测（2026-09-03）。
+    实测行为：顶层 Switch 的 key 支持「字段引用 + 常量运算」的复杂
+    int 表达式（超出「复杂表达式编译期拒绝」的边界），宽松且无害。
     """
 
     def test_parse_and_build(self):
-        """P10: Switch(typ+1) parse ``b'\\x01\\x7f'`` → br=127；build 还原。"""
+        """行为锁定：Switch(typ+1) parse ``b'\\x01\\x7f'`` → br=127；build 还原。"""
 
         @dataclass
         class P(StructMixin):
@@ -369,7 +352,7 @@ class TestP10TopLevelComplexSwitchLock:
         assert P(typ=1, br=127).build() == b"\x01\x7f"
 
     def test_roundtrip(self):
-        """P10: parse → build → parse 往返一致。"""
+        """行为锁定：parse → build → parse 往返一致。"""
 
         @dataclass
         class P(StructMixin):
@@ -384,19 +367,18 @@ class TestP10TopLevelComplexSwitchLock:
 
 
 # ---------------------------------------------------------------------------
-# P5 负例锁定：Const(5) 无 subcon
+# 负例锁定：Const(5) 无 subcon
 # ---------------------------------------------------------------------------
 
 
-class TestP5ConstWithoutSubconNegative:
-    """P5（负例锁定）：Const(5)（非 bytes、无 subcon）→ CompilationError。
+class TestConstWithoutSubconNegative:
+    """负例锁定：Const(5)（非 bytes、无 subcon）→ CompilationError。
 
-    行为与原版 construct 2.10.70 对齐（原版同样失败），PM 决策不修、
-    以负例锁定（总纲 §3.1）。
+    行为与原版 construct 2.10.70 对齐（原版同样失败）。
     """
 
     def test_const_int_without_subcon_raises(self):
-        """P5: ``field(Const(5))`` 类定义即报 CompilationError，文案给出正确示例。"""
+        """负例锁定：``field(Const(5))`` 类定义即报 CompilationError，文案给出正确示例。"""
         with pytest.raises(CompilationError) as exc_info:
 
             @dataclass

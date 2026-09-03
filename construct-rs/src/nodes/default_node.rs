@@ -1,6 +1,5 @@
 //! DefaultNode：默认值字段节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §1.2.2。
 //! Python 参考：`construct/construct/core.py` `Default`（L3030-3078）。
 //!
 //! ## 行为概述
@@ -10,10 +9,10 @@
 //! - build：obj is None → 求值 ExprProgram 得 i64 → 转 PyLong → inner.build；
 //!   否则 inner.build(obj)
 //!
-//! ## 表达式约束（DF-4 / ADR-014）
+//! ## 表达式约束
 //!
-//! `value` 必须是 Phase 2 表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
-//! **不接收 Python lambda/callable**（与 RebuildNode RB-5 同硬约束）。
+//! `value` 必须是字段表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
+//! **不接收 Python lambda/callable**（与 RebuildNode 同约束）。
 //! 常量值编译期包装为单条 `Const` ExprProgram。
 
 use crate::context::Context;
@@ -30,7 +29,7 @@ use crate::nodes::Node;
 ///
 /// 对应 Python construct `Default(subcon, value)`（core.py L3030）。
 /// Python 的 value 可为常量或 context lambda；construct-rs 强制编译为 ExprProgram
-/// 或编译期常量（与 Rebuild func 同脉络，ADR-014 硬约束）。
+/// 或编译期常量（与 Rebuild func 同脉络）。
 ///
 /// # 三方法行为
 ///
@@ -44,7 +43,7 @@ use crate::nodes::Node;
 /// 用户传 `Default(Byte, 0)` 时，0 在编译期编译为
 /// `ExprProgram { ops: vec![ExprOp::Const(0)] }`（与 Computed 常量模式同，
 /// 详见 `nodes/computed.rs`）。Python 用户写 `Default(Byte, lambda ctx: ...)`
-/// 不支持——parity 已知差异（DF-4）。
+/// 不支持——parity 已知差异。
 #[derive(Debug)]
 pub struct DefaultNode {
     /// 被包装的子树根。
@@ -166,7 +165,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — 转发 inner（DF-1 / DF-2）
+    // parse — 转发 inner
     // ======================================================================
 
     #[test]
@@ -187,12 +186,12 @@ mod tests {
     }
 
     // ======================================================================
-    // build — DF-1 / DF-2 / DF-3 / DF-5
+    // build — obj 为 None 用默认值；否则转发 inner
     // ======================================================================
 
     #[test]
     fn build_none_uses_constant_value() {
-        // DF-1: Default(Byte, 0).build(None) → b'\x00'
+        // Default(Byte, 0).build(None) → b'\x00'
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let value = ExprProgram::new(vec![ExprOp::Const(0)]);
@@ -209,7 +208,7 @@ mod tests {
 
     #[test]
     fn build_non_none_uses_obj() {
-        // DF-2: Default(Byte, 0).build(5) → b'\x05'
+        // Default(Byte, 0).build(5) → b'\x05'
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let value = ExprProgram::new(vec![ExprOp::Const(0)]);
@@ -226,7 +225,7 @@ mod tests {
 
     #[test]
     fn build_none_uses_expression_value() {
-        // DF-3: Default(Byte, x + 1).build(None) where x=4 → b'\x05'
+        // Default(Byte, x + 1).build(None) where x=4 → b'\x05'
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             // value: GetInt(0) + Const(1)
@@ -244,7 +243,7 @@ mod tests {
 
     #[test]
     fn build_none_expression_error_propagates() {
-        // DF-5: Default 表达式求值失败 → 错误向上传播
+        // Default 表达式求值失败 → 错误向上传播
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let value = ExprProgram::new(vec![ExprOp::GetInt(0)]);

@@ -1,10 +1,11 @@
-"""Hex Parse Optimization Controlled A/B Test (Plan A+B retest).
+"""Hex Parse Optimization Controlled A/B Test.
 
-Focused retest of HX1/HX2/HD1 parse after Plan A+B optimization.
+Focused retest of HX1/HX2/HD1 parse after the display-format optimization
+(setattr + intern fmtstr).
 - Positive control: UN1 Union parse (known >=10x)
 - Negative control: CN1 Const build (known >=10x, same session)
 
-Methodology (performance-gate SKILL Checkpoint 4):
+Methodology:
   1. Alternating rs<->py per round (rs then py back-to-back, repeat >=5 rounds)
   2. >=5 samples per case, report min/max/mean/stddev
   3. Cross-time comparison: optimized vs pre-optimization baseline
@@ -26,7 +27,7 @@ if str(_BENCH_DIR) not in sys.path:
 from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
-import bench_phase8
+import bench_adapters_struct_streams
 
 # venv 解析（与 conftest.py 一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
 _PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
@@ -47,7 +48,7 @@ def _resolve_venv(env_var, venv_dir):
     return sys.executable
 
 
-# Pre-optimization baseline (from PERF-retest.md, Controlled A/B Test 2026-07-31)
+# Pre-optimization baseline (Controlled A/B Test)
 PRE_OPT_BASELINE = {
     "HX1_parse": {"rs_ns": 581, "py_ns": 2519, "speedup": 4.36},
     "HX2_parse": {"rs_ns": 330, "py_ns": 2296, "speedup": 6.87},
@@ -58,16 +59,16 @@ ROUNDS = 5
 
 
 def measure_case_round(runner, case_id, direction, config):
-    dispatcher, src_group = bench_phase8._resolve_case_dispatcher(case_id)
-    make_case_src = bench_phase8._resolve_make_case_src(src_group)
+    dispatcher, src_group = bench_adapters_struct_streams._resolve_case_dispatcher(case_id)
+    make_case_src = bench_adapters_struct_streams._resolve_make_case_src(src_group)
     repeat = config.iterations + config.warmup
     scenario = f"{case_id}-{direction}"
 
-    rs_script = bench_phase8._build_script(
+    rs_script = bench_adapters_struct_streams._build_script(
         "rs", case_id, direction, config.number, repeat,
         _CRS_PYTHON_DIR, make_case_src, dispatcher,
     )
-    py_script = bench_phase8._build_script(
+    py_script = bench_adapters_struct_streams._build_script(
         "py", case_id, direction, config.number, repeat,
         _CRS_PYTHON_DIR, make_case_src, dispatcher,
     )
@@ -122,7 +123,7 @@ def main():
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 78)
-    print(f"Hex Parse Optimization A/B Test (Plan A+B) | {ts}")
+    print(f"Hex Parse Optimization A/B Test | {ts}")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -164,7 +165,7 @@ def main():
 
     print()
     print("=" * 60)
-    print("TARGET CASES: HX1/HX2/HD1 parse (Plan A+B optimized)")
+    print("TARGET CASES: HX1/HX2/HD1 parse (optimized)")
     print("=" * 60)
     for case_id, constructor in hex_cases:
         print(f"\n  [{case_id}] {constructor} parse:")
@@ -211,7 +212,7 @@ def main():
     out_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
         "timestamp": ts,
-        "optimization": "Plan A+B (call1+setattr + intern fmtstr)",
+        "optimization": "setattr + intern fmtstr",
         "config": {
             "number": config.number,
             "iterations": config.iterations,

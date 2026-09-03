@@ -1,6 +1,5 @@
 """examples/example.py 的端到端验证。
 
-设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）。
 覆盖范围：ModbusRTUMessage 的 build 与 parse 往返一致性。
 """
 

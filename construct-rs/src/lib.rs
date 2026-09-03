@@ -3,20 +3,6 @@
 //! 本 crate 是 Python 包 `construct` 的高性能 Rust 内核。
 //! 编译后由 maturin 安装为 `construct._construct_rust` 扩展模块，
 //! Python 侧通过 `from ._construct_rust import *` 导入。
-//!
-//! ## Phase 1
-//!
-//! - 子任务 1.1：项目骨架，注册模块名与 `version` 函数，验证 FFI 链路。
-//! - 子任务 1.2：Rust 基础设施（错误 / Path / Stream / Context），不暴露给 Python。
-//! - 子任务 1.3：Node 系统 + 3 个原子节点（FormatField / Bytes / GreedyBytes）。
-//! - 子任务 1.4：复合节点（StructNode / StructRefNode）+ CompiledSchema 定义。
-//! - 子任务 1.5+1.6：编译入口 `compile_schema`、执行入口 `_parse_raw` / `_build_raw`、
-//!   类型描述符 pyclass（Int8ub 等 16 种单例 + BytesDescriptor + GreedyBytesDescriptor）。
-//! - 子任务 1.8：错误映射更新——模块初始化时缓存 Python 异常类引用，
-//!   `From<ConstructError> for PyErr` 按变体选择对应 Python 异常类。
-//!
-//! 参考设计：`docs/架构设计.md` §D.1（crate 结构）、§B（FFI 边界）、§A.4（描述符）、
-//! §B.8（错误映射）。
 
 pub mod compile;
 pub mod context;
@@ -36,7 +22,7 @@ use nodes::format_field::PythonFormat;
 use pyo3::prelude::*;
 use schema::CompiledSchema;
 
-// Phase 2 表达式系统核心类型，re-export 供 crate 内其他模块直接使用。
+// 表达式系统核心类型，re-export 供 crate 内其他模块直接使用。
 pub use expr::{eval_expr_any, eval_expr_bool, eval_expr_int, ExprOp, ExprProgram};
 
 /// 返回 construct-rs Rust 内核的版本号字符串。
@@ -56,16 +42,16 @@ fn version() -> &'static str {
 ///
 /// 注册项：
 /// - `version` 函数 + `__version__` 常量
-/// - [`compile::compile_schema`]：编译入口 FFI 函数（§B.2）
-/// - [`schema::CompiledSchema`]：编译产物 pyclass（§B.6），含 `_parse_raw` / `_build_raw`
-/// - 类型描述符 pyclass（§A.4）：
+/// - [`compile::compile_schema`]：编译入口 FFI 函数
+/// - [`schema::CompiledSchema`]：编译产物 pyclass，含 `_parse_raw` / `_build_raw`
+/// - 类型描述符 pyclass：
 ///   - 16 个 `FormatFieldDescriptor` 单例（`Int8ub` 等）
 ///   - `BytesDescriptor`（可实例化）
 ///   - `GreedyBytesDescriptor` 单例（`GreedyBytes`）
 ///
 /// 模块初始化时还会调用 [`error::init_exception_classes`]，从 `construct._errors`
 /// 缓存 Python 异常类引用，使 `From<ConstructError> for PyErr` 能按变体映射到
-/// `StreamError` 等（§B.8）。
+/// `StreamError` 等。
 #[pymodule]
 fn _construct_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     let py = m.py();
@@ -86,16 +72,16 @@ fn _construct_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // 16 个 FormatFieldDescriptor 预定义单例
     register_format_singletons(py, m)?;
 
-    // Phase 6.1：6 个 Float FormatFieldDescriptor 预定义单例
+    // 6 个 Float FormatFieldDescriptor 预定义单例
     register_float_singletons(py, m)?;
 
-    // Phase 6.1：4 个 Int24 BytesIntegerDescriptor 预定义单例
+    // 4 个 Int24 BytesIntegerDescriptor 预定义单例
     register_int24_singletons(py, m)?;
 
     // GreedyBytes 预定义单例
     m.add("GreedyBytes", Py::new(py, GreedyBytesDescriptor)?)?;
 
-    // 缓存 Python 异常类引用（子任务 1.8）。
+    // 缓存 Python 异常类引用。
     // 失败不致命：未初始化时 From<ConstructError> 回退到 PyValueError。
     // 但记录到 stderr 帮助调试。
     if let Err(e) = error::init_exception_classes(py) {
@@ -152,7 +138,7 @@ fn register_format_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResu
     Ok(())
 }
 
-/// 注册 6 个 Float 格式预定义单例到模块（Phase 6.1）。
+/// 注册 6 个 Float 格式预定义单例到模块。
 ///
 /// 对应 Python construct 的 `Float16b` / `Float16l` / `Float32b` / `Float32l` /
 /// `Float64b` / `Float64l`。每个单例为 `FormatFieldDescriptor` pyclass 实例。
@@ -172,7 +158,7 @@ fn register_float_singletons(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResul
     Ok(())
 }
 
-/// 注册 4 个 Int24 BytesIntegerDescriptor 预定义单例到模块（Phase 6.1）。
+/// 注册 4 个 Int24 BytesIntegerDescriptor 预定义单例到模块。
 ///
 /// 对应 Python construct 的 `Int24ub` / `Int24ul` / `Int24sb` / `Int24sl`。
 /// 每个单例为 `BytesIntegerDescriptor { length: 3, ... }` 实例。

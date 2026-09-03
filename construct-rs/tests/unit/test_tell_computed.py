@@ -1,7 +1,4 @@
-"""Tell + Computed 端到端测试（Phase 2.6）。
-
-设计依据：``docs/design/模块设计/模块设计-表达式系统.md`` §3.7.4（描述符）、§4.6.1-§4.6.2（节点）、
-§5.3-§5.4（StructNode RO 处理）。
+"""Tell + Computed 端到端测试。
 
 覆盖：
 - ``rfield(Tell())``：parse 返回流位置；build 不从实例取值（自动计算）

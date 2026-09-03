@@ -1,6 +1,5 @@
 //! RawCopyNode：捕获原始字节的节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §1.3。
 //! Python 参考：`construct/construct/core.py` `RawCopy`（L4761-4814）。
 //!
 //! ## 行为概述
@@ -14,10 +13,10 @@
 //! - 含 `'value'` 键：inner.build(value)
 //! - 否则：RawCopyError（Generic）
 //!
-//! ## 已知差异（设计 §5.3 RC-build-1）
+//! ## 已知差异
 //!
 //! Python RawCopy.build 返回 Container(data=...)（供后续字段引用）。
-//! construct-rs 的 build 不返回值（§0 #1 一次 FFI 的体现），用户面无法拿到
+//! construct-rs 的 build 不返回值（"一次 FFI"原则的体现），用户面无法拿到
 //! build 出的 raw bytes。用户需要 raw bytes 应走 parse 路径。
 
 use crate::context::Context;
@@ -49,10 +48,10 @@ use crate::nodes::Node;
 /// - 含 `'value'` 键：inner.build(value)
 /// - 否则：`ConstructError::Generic`
 ///
-/// # §0 合规性
+/// # 一次 FFI 合规性
 ///
-/// parse 用 `PyDict` 直接构造（dict 本身就是 Python 对象，§0 #1 合规——
-/// 与 StructNode 用实例 `__dict__` 同脉络，ADR-008 验证）。
+/// parse 用 `PyDict` 直接构造（dict 本身就是 Python 对象——
+/// 与 StructNode 用实例 `__dict__` 同脉络）。
 #[derive(Debug)]
 pub struct RawCopyNode {
     /// 被捕获原始字节的子树根。
@@ -101,7 +100,7 @@ impl Construct for RawCopyNode {
         stream.seek(offset1, path)?;
         let data_slice = stream.read(length, path)?;
 
-        // 构造 Python dict（直接 PyDict，无中间 Container 类型——设计 §1.3.1）
+        // 构造 Python dict（直接 PyDict，无中间 Container 类型）
         let dict = PyDict::new_bound(py);
         dict.set_item("data", PyBytes::new_bound(py, data_slice))?;
         dict.set_item("value", value.bind(py))?;
@@ -131,7 +130,7 @@ impl Construct for RawCopyNode {
         })?;
 
         if has_data {
-            // RC-3: 直接 write(data)，不调 inner.build
+            // 含 data 键：直接 write(data)，不调 inner.build
             let data_obj = obj.get_item("data").map_err(|e| ConstructError::Generic {
                 message: format!("RawCopy build: failed to get 'data' item: {}", e),
                 path: path.to_string(),
@@ -143,15 +142,15 @@ impl Construct for RawCopyNode {
             stream.write(data_bytes);
             Ok(())
         } else if has_value {
-            // RC-4: inner.build(value)
-            // 注：construct-rs build 不返回值，无法回流 raw bytes（设计 §5.3 RC-build-1）
+            // 含 value 键：inner.build(value)
+            // 注：construct-rs build 不返回值，无法回流 raw bytes
             let value = obj.get_item("value").map_err(|e| ConstructError::Generic {
                 message: format!("RawCopy build: failed to get 'value' item: {}", e),
                 path: path.to_string(),
             })?;
             self.inner.build(py, &value, stream, ctx, path)
         } else {
-            // RC-5/RC-6: 无 data 也无 value → RawCopyError（Generic）
+            // 无 data 也无 value → RawCopyError（Generic）
             Err(ConstructError::Generic {
                 message: "RawCopy cannot build: both 'data' and 'value' keys are missing"
                     .to_string(),
@@ -206,7 +205,7 @@ mod tests {
 
     #[test]
     fn parse_int8ub_returns_full_dict() {
-        // RC-1: RawCopy(Int8ub) parse 1 字节 → dict{data=b"\xff", value=255,
+        // RawCopy(Int8ub) parse 1 字节 → dict{data=b"\xff", value=255,
         //        offset1=0, offset2=1, length=1}
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
@@ -320,7 +319,7 @@ mod tests {
 
     #[test]
     fn build_from_data_writes_directly() {
-        // RC-3: RawCopy.build({"data": b"\xff"}) → 直接 write，不调 inner.build
+        // RawCopy.build({"data": b"\xff"}) → 直接 write，不调 inner.build
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let node = RawCopyNode::new(inner);
@@ -340,7 +339,7 @@ mod tests {
 
     #[test]
     fn build_from_value_calls_inner_build() {
-        // RC-4: RawCopy.build({"value": 255}) → inner.build(255) → 写出 b"\xff"
+        // RawCopy.build({"value": 255}) → inner.build(255) → 写出 b"\xff"
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let node = RawCopyNode::new(inner);
@@ -381,7 +380,7 @@ mod tests {
 
     #[test]
     fn build_missing_both_keys_returns_error() {
-        // RC-5/RC-6: 无 data 无 value → Generic 错误
+        // 无 data 无 value → Generic 错误
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let node = RawCopyNode::new(inner);

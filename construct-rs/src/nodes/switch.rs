@@ -1,6 +1,5 @@
-//! SwitchNode：多分支条件节点（PM 决策 1：A+B 混合方案）。
+//! SwitchNode：多分支条件节点（i64 / PyObject 双路径匹配）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §3。
 //! Python 参考：`construct/construct/core.py` `Switch`（L4002-4058）。
 //!
 //! ## 行为概述
@@ -8,19 +7,19 @@
 //! `Switch(keyfunc, cases, default=Pass)` 求值 keyfunc，根据结果在 cases dict 中
 //! 匹配，命中则委托对应 subcon 的 parse/build；未命中走 default。
 //!
-//! ## 路线 A+B 混合（PM 决策 1）
+//! ## 双路径匹配
 //!
-//! - 路线 A（[`SwitchKey::ConstInt`] / [`SwitchKey::IntExpr`]）：i64 key，
+//! - i64 路径（[`SwitchKey::ConstInt`] / [`SwitchKey::IntExpr`]）：i64 key，
 //!   Rust 内 `==` 匹配（零 FFI）；keyfunc 支持 int/bool 常量与字段名表达式
 //!   （含算术，如 `n + 1`）
-//! - 路线 B（[`SwitchKey::FieldRef`]）：PyObject key，`PyObject_RichCompare` 匹配
-//!   （每比较 1 FFI，N=cases 数）；保留变体，当前编译路径仅产出路线 A
-//! - keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）
+//! - PyObject 路径（[`SwitchKey::FieldRef`]）：PyObject key，`PyObject_RichCompare` 匹配
+//!   （每比较 1 FFI，N=cases 数）；保留变体，当前编译路径仅产出 i64 路径
+//! - keyfunc 不接收 Python callable/lambda
 //!
-//! ## sizeof 实现（设计 §3.5 注解）
+//! ## sizeof 实现
 //!
 //! `sizeof` 拆分 `match_sub_int`（无需 py token）和 `match_sub_py`（需 py）。
-//! `sizeof` 仅调 `match_sub_int`，避免无谓获取 GIL（设计推荐方案）。
+//! `sizeof` 仅调 `match_sub_int`，避免无谓获取 GIL。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -37,27 +36,26 @@ use super::{Construct, Node};
 // SwitchKey
 // ---------------------------------------------------------------------------
 
-/// Switch 的 keyfunc 来源（PM 决策 1：A+B 混合，设计 §3.3）。
+/// Switch 的 keyfunc 来源。
 ///
 /// 编译期从用户面 keyfunc 分类：
 /// - `ConstInt(k)`：常量 int key（罕见，主要用于调试）
-/// - `IntExpr(prog)`：字段名 int 表达式（`n` 是 int 字段，含算术如 `n + 1`）→ 路线 A（零 FFI）
-/// - `FieldRef(name)`：单字段引用（`tag` 是 str/bytes 字段）→ 路线 B（PyObject __eq__）；
+/// - `IntExpr(prog)`：字段名 int 表达式（`n` 是 int 字段，含算术如 `n + 1`）→ i64 路径（零 FFI）
+/// - `FieldRef(name)`：单字段引用（`tag` 是 str/bytes 字段）→ PyObject 路径（PyObject __eq__）；
 ///   保留变体，当前编译路径仅产出 ConstInt / IntExpr
 ///
-/// keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）。
+/// keyfunc 不接收 Python callable/lambda。
 ///
-/// [设计质疑]：设计文档 §3.3 标注 `#[derive(Debug, Clone)]`，但 `FieldName`
-/// 未实现 `Clone`。删除 `Clone` derive，与 `IfThenElseNode` 等持有非 Clone
-/// 字段的类型保持一致。
+/// 注：`FieldName` 未实现 `Clone`，因此不 derive `Clone`，与 `IfThenElseNode`
+/// 等持有非 Clone 字段的类型保持一致。
 #[derive(Debug)]
 pub enum SwitchKey {
     /// 常量 int key（编译期已知）。
     ConstInt(i64),
-    /// 单字段 int 表达式（路线 A）。
+    /// 单字段 int 表达式（i64 匹配路径）。
     /// 运行时求值 ExprProgram 得 i64 → Rust 内 i64 == 匹配 cases（零 FFI）。
     IntExpr(ExprProgram),
-    /// 单字段引用（路线 B）。
+    /// 单字段引用（PyObject 匹配路径）。
     /// 运行时从 ctx 读 PyObject → cases 用 PyObject `__eq__` 匹配（每比较 1 FFI）。
     FieldRef(FieldName),
 }
@@ -66,16 +64,16 @@ pub enum SwitchKey {
 // SwitchCase
 // ---------------------------------------------------------------------------
 
-/// 单个 case 项：Python key + 预编译的 subcon（设计 §3.3）。
+/// 单个 case 项：Python key + 预编译的 subcon。
 ///
 /// 编译期从 Python dict `{key: subcon}` 展开。每个 case 同时缓存：
 /// - `key_py`：Python 侧 key（int/str/bytes），用于 PyObject `__eq__`
-/// - `key_int`：若 key 是 int，额外存 i64 用于零 FFI 快速匹配（路线 A 快速路径）
+/// - `key_int`：若 key 是 int，额外存 i64 用于零 FFI 快速匹配（i64 快速路径）
 #[derive(Debug)]
 pub struct SwitchCase {
     /// Python 侧 key（原始对象，用于 PyObject `__eq__`）。
     key_py: Py<PyAny>,
-    /// 若 key 是 int，缓存其 i64 值（路线 A 快速匹配用）；否则 None。
+    /// 若 key 是 int，缓存其 i64 值（i64 快速匹配用）；否则 None。
     key_int: Option<i64>,
     /// 该 key 对应的子树。
     subcon: Box<Node>,
@@ -128,19 +126,19 @@ impl SwitchCase {
 /// - build：对称
 /// - sizeof：仅 [`SwitchKey::ConstInt`] 返回确定路径；其他返回 Err（无法在 sizeof 求值）
 ///
-/// # 路线 A+B 混合匹配（PM 决策 1）
+/// # 双路径匹配
 ///
-/// 求出 key 后的匹配顺序（核心优化，设计 §3.4）：
-/// 1. **路线 A 快速路径**：若 key 是 IntExpr 求值结果 i64，遍历 cases 的 `key_int`，
+/// 求出 key 后的匹配顺序（核心优化）：
+/// 1. **i64 快速路径**：若 key 是 IntExpr 求值结果 i64，遍历 cases 的 `key_int`，
 ///    Rust 内 i64 == 匹配（零 FFI）
-/// 2. **路线 B 慢路径**：快速路径未命中，或 key 是 FieldRef(PyObject)，遍历 cases
+/// 2. **PyObject 慢路径**：快速路径未命中，或 key 是 FieldRef(PyObject)，遍历 cases
 ///    用 `PyObject_RichCompare` 求 `__eq__`（每比较 1 FFI）
 /// 3. **default 兜底**：全部未命中，委托 default subcon
 ///
-/// # 已知限制（与 Python 不完全 parity，设计 §12-D2）
+/// # 已知限制（与 Python 不完全 parity）
 ///
-/// - `default=Error` 不支持：Python 的 `Error` 构造器 Phase 7 不实现
-/// - keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）
+/// - `default=Error` 不支持：Python 的 `Error` 构造器未实现
+/// - keyfunc 不接收 Python callable/lambda
 #[derive(Debug)]
 pub struct SwitchNode {
     /// keyfunc 编译期分类。
@@ -177,12 +175,12 @@ impl SwitchNode {
     }
 
     /// has_expressions：IntExpr 与 FieldRef 都引用 Struct 字段，返回 true。
-    /// ConstInt 不引用字段，返回 false（设计 §3.3）。
+    /// ConstInt 不引用字段，返回 false。
     pub fn has_expressions(&self) -> bool {
         !matches!(self.key, SwitchKey::ConstInt(_))
     }
 
-    /// 求值 keyfunc，返回 (i64 快速匹配值, PyObject 慢匹配值)（设计 §3.4）。
+    /// 求值 keyfunc，返回 (i64 快速匹配值, PyObject 慢匹配值)。
     ///
     /// - [`SwitchKey::ConstInt`] → `(Some(k), None)` —— 仅走快速路径
     /// - [`SwitchKey::IntExpr`] → `(Some(求值结果), None)` —— 仅走快速路径
@@ -224,7 +222,7 @@ impl SwitchNode {
         }
     }
 
-    /// 路线 A 快速路径：i64 匹配 cases，返回命中 subcon 引用（设计 §3.5 拆分）。
+    /// i64 快速路径：i64 匹配 cases，返回命中 subcon 引用。
     ///
     /// 不需要 py token（纯 Rust i64 == 比较），可在 sizeof 接口调用。
     fn match_sub_int(&self, key_int: i64) -> &Node {
@@ -238,7 +236,7 @@ impl SwitchNode {
         &self.default
     }
 
-    /// 路线 B 慢路径：PyObject `__eq__` 匹配 cases（设计 §3.5 拆分）。
+    /// PyObject 慢路径：PyObject `__eq__` 匹配 cases。
     ///
     /// 需要 py token（调 `PyObject_RichCompare`）。
     fn match_sub_py<'a>(&'a self, key_py: &Py<PyAny>, py: Python<'_>) -> &'a Node {
@@ -255,7 +253,7 @@ impl SwitchNode {
 // py_eq：PyObject __eq__ 容错比较
 // ---------------------------------------------------------------------------
 
-/// PyObject `__eq__` 比较（CPython `PyObject_RichCompare` 包装，设计 §3.4）。
+/// PyObject `__eq__` 比较（CPython `PyObject_RichCompare` 包装）。
 ///
 /// 返回 `true` 当且仅当 `a == b`（Py_EQ）且结果非异常。
 /// 异常（如自定义 `__eq__` 抛错）按 Python 语义视为不匹配（返回 false），
@@ -321,7 +319,7 @@ impl Construct for SwitchNode {
         // 对齐 Python L4051-4058：try evaluate(keyfunc) → match → sizeof；
         // except (KeyError, AttributeError) → SizeofError。
         //
-        // sizeof 接口无 py token，无法求值表达式。处理（设计 §3.5）：
+        // sizeof 接口无 py token，无法求值表达式。处理：
         // - ConstInt(k) → match_sub_int → sizeof（确定路径）
         // - IntExpr / FieldRef → 返回 Generic（SizeofError 等价）
         match &self.key {
@@ -441,7 +439,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-1: cases = {} + default=Pass → 任意 key 走 default
+    // cases = {} + default=Pass → 任意 key 走 default
     // ======================================================================
 
     #[test]
@@ -460,12 +458,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-2/SW-3: 路线 A IntExpr 快速匹配 / 未命中走 default
+    // IntExpr 快速匹配 / 未命中走 default
     // ======================================================================
 
     #[test]
     fn parse_int_expr_key_matches_case() {
-        // SW-2: keyfunc=n, n=2, cases={1:A, 2:B} → 匹配 B (Int16ub)
+        // keyfunc=n, n=2, cases={1:A, 2:B} → 匹配 B (Int16ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -495,7 +493,7 @@ mod tests {
 
     #[test]
     fn parse_int_expr_key_no_match_falls_to_default() {
-        // SW-3: keyfunc=n, n=99, cases={1:A, 2:B} → default (Pass)
+        // keyfunc=n, n=99, cases={1:A, 2:B} → default (Pass)
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -522,7 +520,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-4: IntExpr 字段缺失 → ExprFieldMissing
+    // IntExpr 字段缺失 → ExprFieldMissing
     // ======================================================================
 
     #[test]
@@ -546,12 +544,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-5/SW-6: 路线 B FieldRef 慢路径匹配
+    // FieldRef 慢路径匹配
     // ======================================================================
 
     #[test]
     fn parse_field_ref_str_key_matches_case() {
-        // SW-5: keyfunc=tag, tag="foo", cases={"foo":A, "bar":B} → 匹配 A
+        // keyfunc=tag, tag="foo", cases={"foo":A, "bar":B} → 匹配 A
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -578,7 +576,7 @@ mod tests {
 
     #[test]
     fn parse_field_ref_no_match_falls_to_default() {
-        // SW-6: keyfunc=tag, tag="x", cases={"foo":A} → default
+        // keyfunc=tag, tag="x", cases={"foo":A} → default
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![str_case(py, "foo", fmt_node(PythonFormat::UnsignedInt8Big))];
@@ -679,12 +677,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-9/SW-10: sizeof
+    // sizeof
     // ======================================================================
 
     #[test]
     fn sizeof_const_int_returns_matched_subcon_size() {
-        // SW-10: ConstInt(2) 路径 sizeof 调用 → match cases → 委托 sizeof
+        // ConstInt(2) 路径 sizeof 调用 → match cases → 委托 sizeof
         with_py(|py| {
             let cases = vec![
                 int_case(py, 1, fmt_node(PythonFormat::UnsignedInt8Big)),
@@ -698,7 +696,7 @@ mod tests {
 
     #[test]
     fn sizeof_int_expr_returns_error() {
-        // SW-9: IntExpr 路径 sizeof 调用 → Generic（无法求值）
+        // IntExpr 路径 sizeof 调用 → Generic（无法求值）
         with_py(|py| {
             let node = SwitchNode::new(
                 SwitchKey::IntExpr(int_expr_key(0)),
@@ -730,12 +728,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SW-12: 慢路径 __eq__ 抛异常 → py_eq 捕获 → 视为不匹配
+    // 慢路径 __eq__ 抛异常 → py_eq 捕获 → 视为不匹配
     // ======================================================================
 
     #[test]
     fn parse_field_ref_eq_raises_treated_as_no_match() {
-        // SW-12: cases 中含一个 __eq__ 抛异常的 key（用自定义类）
+        // cases 中含一个 __eq__ 抛异常的 key（用自定义类）
         // py_eq 捕获 PyErr → 返回 false → 继续 / default
         with_py(|py| {
             // 构造一个 BadEq 类，__eq__ 抛 RuntimeError

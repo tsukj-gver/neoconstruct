@@ -1,30 +1,26 @@
 //! Node 系统：Construct trait 定义与 Node 枚举（enum_dispatch 静态分派）。
 //!
-//! 设计依据：`docs/架构设计.md` §C.1（Construct trait）、§C.2（Node enum）、
-//! `docs/模块设计-BitStream.md` §6。
-//!
 //! ## 概述
 //!
 //! 执行树的每个节点实现统一的 [`Construct`] trait，提供 `parse` / `build` / `sizeof`
 //! 三个方法。节点类型用封闭 [`Node`] 枚举列举，通过 `enum_dispatch` 宏自动生成
 //! `match` 分派代码，无 `Box<dyn>` 动态分派开销。
 //!
-//! ## 当前范围
+//! ## 节点分类
 //!
-//! 当前含 13 个节点变体：
 //! - 原子节点：[`FormatFieldNode`](format_field::FormatFieldNode)（整数读写）、
 //!   [`BytesNode`](bytes::BytesNode)（固定/表达式长度字节）、
 //!   [`GreedyBytesNode`](greedy_bytes::GreedyBytesNode)（剩余字节）、
-//!   [`BitsIntegerNode`](bits_integer::BitsIntegerNode)（bit 级整数，Phase 3.1）
+//!   [`BitsIntegerNode`](bits_integer::BitsIntegerNode)（bit 级整数）
 //! - 复合节点：[`StructNode`](struct_node::StructNode)（字段序列根节点）、
 //!   [`StructRefNode`](struct_ref::StructRefNode)（嵌套引用其他 StructMixin 子类）、
-//!   [`BitwiseNode`](bitwise::BitwiseNode)（bit 域包装器，Phase 3.2）、
-//!   [`BytewiseNode`](bytewise::BytewiseNode)（bit→byte 适配器，Phase 3.3）、
-//!   [`TransformNode`](transform::TransformNode)（字节级变换，Phase 3.3）
+//!   [`BitwiseNode`](bitwise::BitwiseNode)（bit 域包装器）、
+//!   [`BytewiseNode`](bytewise::BytewiseNode)（bit→byte 适配器）、
+//!   [`TransformNode`](transform::TransformNode)（字节级变换）
 //! - RO 节点：[`TellNode`](tell::TellNode)（流位置）、
 //!   [`ComputedNode`](computed::ComputedNode)（表达式计算值）
-//! - 填充节点：[`BitPaddingNode`](bit_padding::BitPaddingNode)（bit 级填充，Phase 3.3）、
-//!   [`PaddingNode`](padding::PaddingNode)（字节级填充，Phase 3.3）
+//! - 填充节点：[`BitPaddingNode`](bit_padding::BitPaddingNode)（bit 级填充）、
+//!   [`PaddingNode`](padding::PaddingNode)（字节级填充）
 
 pub mod adapter_callback;
 pub mod aligned;
@@ -147,7 +143,7 @@ pub use zigzag::ZigZagNode;
 /// 所有构造器节点实现的统一接口。
 ///
 /// parse 直接产出 Python 对象（`Py<PyAny>`），build 直接读取 Python 对象
-/// （`&Bound<PyAny>`）——不经过任何 Rust 中间类型（FFI 设计 §5）。
+/// （`&Bound<PyAny>`）——不经过任何 Rust 中间类型。
 ///
 /// 每个具体节点类型实现此 trait，然后通过 `enum_dispatch` 在 [`Node`] 枚举上
 /// 自动生成静态分派的 `match` 代码。
@@ -172,7 +168,7 @@ pub trait Construct {
     ///
     /// `py` 与 `ctx` 共享同一个生命周期 `'py`——两者均绑定到调用方的 GIL scope。
     /// 这允许 StructNode.parse 将实例 `__dict__`（来自 `py` 的 GIL scope）
-    /// 注入到 ctx 中（R4 优化）。
+    /// 注入到 ctx 中。
     ///
     /// # 返回
     ///
@@ -222,17 +218,17 @@ pub trait Construct {
 /// 使用 `enum_dispatch` 宏自动为 `Node` 生成 [`Construct`] trait 的实现，
 /// 通过 `match` 静态分派到具体节点类型，无 `Box<dyn>` 动态分派开销。
 ///
-/// 新增节点类型需在此枚举添加变体（Phase 2+ 扩展时修改）。
+/// 新增节点类型需在此枚举添加变体。
 ///
-/// # 当前变体
+/// # 变体分组
 ///
-/// - 4 个原子节点：`FormatField`、`Bytes`、`GreedyBytes`、`BitsInteger`（Phase 3.1）
-/// - 5 个复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）、
-///   `Bitwise`（bit 域包装器，Phase 3.2，首个递归 `Box<Node>` 变体）、
-///   `Bytewise`（bit→byte 适配器，Phase 3.3，递归 `Box<Node>`）、
-///   `Transform`（字节级变换，Phase 3.3，递归 `Box<Node>`）
-/// - 2 个 RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
-/// - 2 个填充节点：`BitPadding`（bit 级，Phase 3.3）、`Padding`（字节级，Phase 3.3）
+/// - 原子节点：`FormatField`、`Bytes`、`GreedyBytes`、`BitsInteger`
+/// - 复合节点：`Struct`（字段序列）、`StructRef`（嵌套引用）、
+///   `Bitwise`（bit 域包装器，首个递归 `Box<Node>` 变体）、
+///   `Bytewise`（bit→byte 适配器，递归 `Box<Node>`）、
+///   `Transform`（字节级变换，递归 `Box<Node>`）
+/// - RO 节点：`Tell`（流位置）、`Computed`（表达式计算值）
+/// - 填充节点：`BitPadding`（bit 级）、`Padding`（字节级）
 #[derive(Debug)]
 #[enum_dispatch(Construct)]
 pub enum Node {
@@ -251,169 +247,167 @@ pub enum Node {
     /// RO 节点：从表达式计算值（对应 Python construct `Computed`）
     Computed(ComputedNode),
     /// bit 级整数节点：`BitsInteger` / `Bit` / `Nibble` / `Octet`
-    /// （对应 Python construct `BitsInteger`，必须在 `Bitwise` 域内使用，Phase 3.1）
+    /// （对应 Python construct `BitsInteger`，必须在 `Bitwise` 域内使用）
     BitsInteger(BitsIntegerNode),
     /// bit 域包装器节点：建立 bit 级游标边界，结束时校验对齐
-    /// （对应 Python construct `Bitwise` / `BitStruct`，Phase 3.2）。
+    /// （对应 Python construct `Bitwise` / `BitStruct`）。
     ///
     /// 首个递归 Node 变体——`inner: Box<Node>` 打破 enum 的无限大小。
     /// enum_dispatch 仍正常工作（dispatch 到 BitwiseNode::parse，内部解引用 Box）。
     Bitwise(BitwiseNode),
     /// bit→byte 适配器节点：在 bit 域内为内部 subcon 重建字节对齐的子流
-    /// （对应 Python construct `Bytewise`，Phase 3.3，递归 `Box<Node>`）。
+    /// （对应 Python construct `Bytewise`，递归 `Box<Node>`）。
     Bytewise(BytewiseNode),
     /// 字节级变换节点：`BitsSwapped` / `ByteSwapped`
-    /// （对应 Python construct `Transformed` 的两种变换，Phase 3.3，递归 `Box<Node>`）。
+    /// （对应 Python construct `Transformed` 的两种变换，递归 `Box<Node>`）。
     Transform(TransformNode),
     /// bit 级填充节点：`Padding` 在 Bitwise 域内的行为
-    /// （Phase 3.3，pattern 严格校验 0x00/0x01）。
+    /// （pattern 严格校验 0x00/0x01）。
     BitPadding(BitPaddingNode),
     /// 字节级填充节点：`Padding` 在普通 Struct 域内的行为
-    /// （对应 Python construct `Padding` 字节域用法，Phase 3.3 补全 Phase 1 遗留）。
+    /// （对应 Python construct `Padding` 字节域用法）。
     Padding(PaddingNode),
     /// 固定次数数组节点（对应 Python construct `Array(count, subcon, discard)`）。
-    /// Phase 4 新增。inner 用 `Box<Node>`，count 可为常量或 ExprProgram。
+    /// inner 用 `Box<Node>`，count 可为常量或 ExprProgram。
     Array(ArrayNode),
     /// 读到流结束的数组节点（对应 Python construct `GreedyRange(subcon, discard)`）。
-    /// Phase 4 新增。inner 用 `Box<Node>`，parse 直到流末尾或子构造器失败。
+    /// inner 用 `Box<Node>`，parse 直到流末尾或子构造器失败。
     GreedyRange(GreedyRangeNode),
     /// 前缀长度数组节点（对应 Python construct `PrefixedArray(countfield, subcon)`）。
-    /// Phase 4 新增。countfield 与 inner 都用 `Box<Node>`；parse 先解析 countfield
+    /// countfield 与 inner 都用 `Box<Node>`；parse 先解析 countfield
     /// 得到 count，再循环 count 次 inner.parse；build 先取 list 长度 build countfield，
     /// 再遍历 list build inner。
     PrefixedArray(PrefixedArrayNode),
     /// 终止表达式数组节点（对应 Python construct `RepeatUntil(predicate, subcon, discard)`）。
-    /// Phase 4.5 新增。inner 用 `Box<Node>`，终止表达式为 ExprProgram（编译期从
+    /// inner 用 `Box<Node>`，终止表达式为 ExprProgram（编译期从
     /// 用户面表达式编译，运行时零 FFI）。parse/build 循环直到终止表达式求值非零
     /// （最后元素包含在内）；build 无元素满足则 `Repeat` 错误。sizeof 永远 Err。
     RepeatUntil(RepeatUntilNode),
     /// 取当前数组迭代下标的节点（对应 Python construct `Index`）。
-    /// Phase 4 新增（设计 §4.4）。直接调 `ctx.index()` 读取，不走 ExprProgram
-    /// （v3 决策，§3.3）。parse 返回 PyLong 或 Py_None；build 是 no-op；sizeof=0。
+    /// 直接调 `ctx.index()` 读取，不走 ExprProgram。
+    /// parse 返回 PyLong 或 Py_None；build 是 no-op；sizeof=0。
     Index(IndexNode),
     /// 早停信号节点（对应 Python construct `StopIf(condfunc)`）。
-    /// Phase 4 新增（设计 §4.5）。条件为真时返回 `ConstructError::StopField` 哨兵，
+    /// 条件为真时返回 `ConstructError::StopField` 哨兵，
     /// 被外层 StructNode / GreedyRangeNode 捕获，停止后续字段/迭代。
     /// 条件可为编译期常量（Always / Never）或表达式（Expr）。
     StopIf(StopIfNode),
-    /// RepeatUntil 当前元素引用入口节点（v5 新增；Python construct 无对应物）。
-    /// Phase 4.5 v5 新增（设计 §4.7）。parse 始终返回 Py_None，值由
+    /// RepeatUntil 当前元素引用入口节点（Python construct 无对应物）。
+    /// parse 始终返回 Py_None，值由
     /// RepeatUntilNode 在迭代时 set_expr_value_raw/set_expr_value_py 借用设置；build 是 no-op；
     /// sizeof 返回 0；has_expressions 返回 false。
     Element(ElementNode),
-    /// 单子构造器包装节点（对应 Python Subconstruct）。Phase 6.3 新增。
+    /// 单子构造器包装节点（对应 Python Subconstruct）。
     /// 持有 `Box<Node>`，parse/build/sizeof 全部转发给 inner。
     Subconstruct(SubconstructNode),
-    /// 预读不消费流节点（对应 Python Peek）。Phase 6.3 新增。
+    /// 预读不消费流节点（对应 Python Peek）。
     /// parse 后 seek 回入口位置；build 是 no-op；sizeof 返回 0。
     Peek(PeekNode),
-    /// 原始字节捕获节点（对应 Python RawCopy）。Phase 6.3 新增。
+    /// 原始字节捕获节点（对应 Python RawCopy）。
     /// parse 返回 dict(data,value,offset1,offset2,length)。
     RawCopy(RawCopyNode),
-    /// build 时基于表达式重算字段节点（对应 Python Rebuild）。Phase 6.3 新增。
+    /// build 时基于表达式重算字段节点（对应 Python Rebuild）。
     /// 必须作为 RO 字段使用（与 Computed 同类）。build 求值表达式后调 inner.build。
     Rebuild(RebuildNode),
-    /// No-op 节点（对应 Python Pass）。Phase 6.3 新增（Phase 7 If/Switch 默认值依赖）。
+    /// No-op 节点（对应 Python Pass）。
     /// parse 返回 Py_None；build 不写字节；sizeof 返回 0。
     Pass(PassNode),
-    /// 用户面 Adapter 嵌入 Struct 字段的钩子节点（PM 决策 6.3-D1 接受）。
-    /// Phase 6.3 新增。subcon 在 Rust 内执行，_decode/_encode 通过 Rust→Python 回调。
+    /// 用户面 Adapter 嵌入 Struct 字段的钩子节点。
+    /// subcon 在 Rust 内执行，_decode/_encode 通过 Rust→Python 回调。
     AdapterCallback(AdapterCallbackNode),
-    /// Phase 6.1 新增：LEB128 无符号变长整数（对应 Python construct `VarInt`）。
+    /// LEB128 无符号变长整数（对应 Python construct `VarInt`）。
     /// fast-path u64 范围；slow-path（>2^64）调缓存 Python 函数。
     VarInt(VarIntNode),
-    /// Phase 6.1 新增：有符号变长整数（对应 Python construct `ZigZag`）。
+    /// 有符号变长整数（对应 Python construct `ZigZag`）。
     /// ZigZag 数值变换后复用 VarIntNode 字节编解码。
     ZigZag(ZigZagNode),
-    /// Phase 6.1 新增：任意字节长度整数（对应 Python construct `BytesInteger`）。
+    /// 任意字节长度整数（对应 Python construct `BytesInteger`）。
     /// fast-path（≤8 字节）Rust 原生 u64/i64；slow-path（>8 字节）调 Python int.from_bytes。
     /// Int24ub/ul/sb/sl 是 length=3 的 Python 层别名。
     BytesInteger(BytesIntegerNode),
-    // === Phase 6.2 Strings（6 个新变体） ===
-    /// C 风格 null 终止字符串（Phase 6.2）。
+    // === Strings ===
+    /// C 风格 null 终止字符串。
     CString(crate::nodes::strings::CStringNode),
-    /// 贪婪字符串：读到 EOF + decode（Phase 6.2）。
+    /// 贪婪字符串：读到 EOF + decode。
     GreedyString(crate::nodes::strings::GreedyStringNode),
-    /// 固定长度填充字符串（Phase 6.2）。
+    /// 固定长度填充字符串。
     PaddedString(crate::nodes::strings::PaddedStringNode),
-    /// 长度前缀字符串（Phase 6.2）。
+    /// 长度前缀字符串。
     PascalString(crate::nodes::strings::PascalStringNode),
-    /// null 终止包装器（持有任意 inner，Phase 6.2）。
+    /// null 终止包装器（持有任意 inner）。
     NullTerminated(crate::nodes::strings::NullTerminatedNode),
-    /// null 剥离包装器（持有任意 inner，Phase 6.2）。
+    /// null 剥离包装器（持有任意 inner）。
     NullStripped(crate::nodes::strings::NullStrippedNode),
-    // === Phase 7.1 Conditional（4 个新变体） ===
-    /// 双分支条件节点（对应 Python construct `IfThenElse`，Phase 7.1）。
+    // === Conditional ===
+    /// 双分支条件节点（对应 Python construct `IfThenElse`）。
     /// 条件可为常量或 ExprProgram；then/else 都是 `Box<Node>`。
     IfThenElse(IfThenElseNode),
-    /// 多分支条件节点（对应 Python construct `Switch`，Phase 7.1）。
-    /// keyfunc 走 ExprProgram(i64) + FieldRef(PyObject) 混合（PM 决策 1）。
+    /// 多分支条件节点（对应 Python construct `Switch`）。
+    /// keyfunc 走 ExprProgram(i64) + FieldRef(PyObject) 混合。
     Switch(SwitchNode),
-    /// 多分支尝试节点（对应 Python construct `Select`，Phase 7.1）。
+    /// 多分支尝试节点（对应 Python construct `Select`）。
     /// 遍历 subcons，首个成功者胜出；ExplicitError 穿透。
     Select(SelectNode),
-    /// 聚焦字段序列节点（对应 Python construct `FocusedSeq`，Phase 7.1）。
+    /// 聚焦字段序列节点（对应 Python construct `FocusedSeq`）。
     /// context nesting + 返回单聚焦字段值。
     FocusedSeq(FocusedSeqNode),
-    // === Phase 7.2 Streams（3 个新变体） ===
-    /// 流定位节点（对应 Python construct `Seek`，Phase 7.2）。
+    // === Streams ===
+    /// 流定位节点（对应 Python construct `Seek`）。
     /// parse/build 执行 stream.seek；sizeof 永远 Err。
     Seek(SeekNode),
-    /// 绝对偏移读写节点（对应 Python construct `Pointer`，Phase 7.2）。
+    /// 绝对偏移读写节点（对应 Python construct `Pointer`）。
     /// seek 到 offset 处理 subcon 再 seek 回；sizeof 返回 0。
     Pointer(PointerNode),
-    /// 长度前缀子流节点（对应 Python construct `Prefixed`，Phase 7.2）。
+    /// 长度前缀子流节点（对应 Python construct `Prefixed`）。
     /// lengthfield 给出字节数，subcon 在子流上处理。
     Prefixed(PrefixedNode),
-    // === Phase 8 P0 批次 ===
-    /// 8.1：常量字段节点（对应 Python Const）。parse 校验 == value；build 用 value。
+    /// 常量字段节点（对应 Python Const）。parse 校验 == value；build 用 value。
     Const(ConstNode),
-    /// 8.1：默认值字段节点（对应 Python Default）。build obj=None 时用 value 表达式。
+    /// 默认值字段节点（对应 Python Default）。build obj=None 时用 value 表达式。
     Default(DefaultNode),
-    /// 8.1：断言检查节点（对应 Python Check）。必须作为 RO 字段使用。
+    /// 断言检查节点（对应 Python Check）。必须作为 RO 字段使用。
     Check(CheckNode),
-    /// 8.8：对齐包装节点（对应 Python Aligned）。填充字节到 modulus 的整数倍。
+    /// 对齐包装节点（对应 Python Aligned）。填充字节到 modulus 的整数倍。
     Aligned(AlignedNode),
-    /// 8.4：Hex 显示包装节点（对应 Python Hex，Rust Node 非 AdapterCallback）。
+    /// Hex 显示包装节点（对应 Python Hex，Rust Node 非 AdapterCallback）。
     Hex(HexNode),
-    /// 8.4：HexDump 显示包装节点（对应 Python HexDump）。
+    /// HexDump 显示包装节点（对应 Python HexDump）。
     HexDump(HexDumpNode),
-    /// 8.5：校验和节点（对应 Python Checksum，双轨 hashfunc + StreamRange）。
+    /// 校验和节点（对应 Python Checksum，双轨 hashfunc + StreamRange）。
     Checksum(ChecksumNode),
-    /// 8.9：EOF 断言节点（对应 Python Terminated）。
+    /// EOF 断言节点（对应 Python Terminated）。
     Terminated(TerminatedNode),
-    /// 8.9：调试探针节点（对应 Python Probe）。
-    /// [设计质疑] into 字段用 FieldName 而非 ExprProgram（详见 probe.rs 模块级注释）。
+    /// 调试探针节点（对应 Python Probe）。
+    /// into 字段用 FieldName 而非 ExprProgram（详见 probe.rs 模块级注释）。
     Probe(ProbeNode),
-    // === Phase 8 P1 批次 ===
-    /// 8.2：枚举映射节点（对应 Python Enum，Rust Node 非 AdapterCallback）。
+    /// 枚举映射节点（对应 Python Enum，Rust Node 非 AdapterCallback）。
     /// decmapping/encmapping 在编译期物化为 Py<PyDict>。
     Enum(EnumNode),
-    /// 8.2：标志位枚举节点（对应 Python FlagsEnum）。
+    /// 标志位枚举节点（对应 Python FlagsEnum）。
     /// flags 物化为 Vec<(Py<PyString>, i64)>，运行时遍历构造 dict。
     FlagsEnum(FlagsEnumNode),
-    /// 8.2：通用对象映射节点（对应 Python Mapping，无映射时报错）。
+    /// 通用对象映射节点（对应 Python Mapping，无映射时报错）。
     /// key/value 任意 hashable，与 EnumNode 结构同但语义不同。
     Mapping(MappingNode),
-    /// 8.3：单值校验节点（对应 Python OneOf）。
+    /// 单值校验节点（对应 Python OneOf）。
     /// valids 编译期物化为 Py<PyFrozenSet>，C API 查询不计 FFI。
     OneOf(OneOfNode),
-    /// 8.3：排除值校验节点（对应 Python NoneOf）。
+    /// 排除值校验节点（对应 Python NoneOf）。
     /// 与 OneOf 结构同，校验取反。
     NoneOf(NoneOfNode),
-    /// 8.6：联合体节点（对应 Python Union，多视角 parse）。
+    /// 联合体节点（对应 Python Union，多视角 parse）。
     /// 含 ParseFrom 策略（None/Index/Name/Expr）+ context nesting。
     Union(UnionNode),
-    /// 8.7：位置序字段序列节点（对应 Python Sequence）。
-    /// parse 产出 PyList；build 接收 list（RO 字段不从 list 取值，C-1）。
+    /// 位置序字段序列节点（对应 Python Sequence）。
+    /// parse 产出 PyList；build 接收 list（RO 字段不从 list 取值）。
     Sequence(SequenceNode),
-    /// 8.12：XOR 字节变换节点（对应 Python ProcessXor）。
+    /// XOR 字节变换节点（对应 Python ProcessXor）。
     /// XorPad enum（Int/Bytes/Expr）含 fast-path（pad==0/全零不变换）。
     ProcessXor(ProcessXorNode),
-    /// 8.12：位旋转左移节点（对应 Python ProcessRotateLeft）。
+    /// 位旋转左移节点（对应 Python ProcessRotateLeft）。
     /// ROTATION_TABLES const 表 + 4 分支位运算。
     ProcessRotateLeft(ProcessRotateLeftNode),
-    /// 8.11：NamedTuple 包装节点（对应 Python NamedTuple）。
+    /// NamedTuple 包装节点（对应 Python NamedTuple）。
     /// factory 编译期物化为 Py<PyType>（collections.namedtuple）。
     NamedTuple(NamedTupleNode),
 }
@@ -422,8 +416,7 @@ impl Node {
     /// 判断此节点（或其子树）是否含有表达式字段。
     ///
     /// 当前仅 [`Node::Struct`] 携带 `has_expressions` 标志（编译期计算），
-    /// [`Node::Bitwise`] / [`Node::Bytewise`] / [`Node::Transform`] 递归检查内部子树
-    /// （Phase 3.2 / 3.3）。
+    /// [`Node::Bitwise`] / [`Node::Bytewise`] / [`Node::Transform`] 递归检查内部子树。
     /// 其他节点变体（原子节点、`StructRef`、`Tell`、`Computed`、填充节点）返回 `false`。
     ///
     /// `struct_ref.rs` 与 `schema.rs` 通过此方法判断内层/根节点是否含表达式，
@@ -441,7 +434,7 @@ impl Node {
             Node::Index(i) => i.has_expressions(),
             Node::StopIf(s) => s.has_expressions(),
             Node::Element(e) => e.has_expressions(),
-            // Phase 6.3：内置 Adapter 递归检查 inner（与 Bitwise/Transform 同模式）。
+            // Subconstruct / Peek / RawCopy 递归检查 inner（与 Bitwise/Transform 同模式）。
             Node::Subconstruct(s) => s.inner().has_expressions(),
             Node::Peek(p) => p.inner().has_expressions(),
             Node::RawCopy(r) => r.inner().has_expressions(),
@@ -449,7 +442,7 @@ impl Node {
             Node::Rebuild(_) => true,
             // Pass / AdapterCallback 无表达式字段（AdapterCallback 的 _decode/_encode
             // 是 Python 回调，不走 ExprProgram）。
-            // Phase 6.2 Strings：
+            // Strings：
             // PaddedString 的 BytesLength::Expr 时返回 true；
             // PascalString / NullTerminated / NullStripped 递归检查 inner 子树；
             // CString / GreedyString 无表达式（encoding 是编译期 enum）。
@@ -457,7 +450,7 @@ impl Node {
             Node::PascalString(p) => p.has_expressions(),
             Node::NullTerminated(n) => n.has_expressions(),
             Node::NullStripped(n) => n.has_expressions(),
-            // Phase 7.1：Conditional 系列。
+            // Conditional 系列。
             // IfThenElse：仅 Expr 条件返回 true（与 StopIf 同模式）。
             // Switch：IntExpr / FieldRef 引用字段返回 true（ConstInt 返回 false）。
             // Select / FocusedSeq：递归检查子树（与 Bitwise / Transform 同模式）。
@@ -465,14 +458,14 @@ impl Node {
             Node::Switch(s) => s.has_expressions(),
             Node::Select(s) => s.has_expressions(),
             Node::FocusedSeq(f) => f.has_expressions(),
-            // Phase 7.2：Streams 系列。
+            // Streams 系列。
             // Seek：仅 Expr at 返回 true（与 StopIf 同模式）。
             // Pointer：Expr offset 或 subcon 含表达式。
             // Prefixed：lengthfield 或 subcon 含表达式（与 PrefixedArray 同模式）。
             Node::Seek(s) => s.has_expressions(),
             Node::Pointer(p) => p.has_expressions(),
             Node::Prefixed(p) => p.has_expressions(),
-            // Phase 8 P0：Const 递归检查 inner（与 Subconstruct 同模式）。
+            // Const 递归检查 inner（与 Subconstruct 同模式）。
             Node::Const(c) => c.inner().has_expressions(),
             // Default 含 value 表达式，总返回 true（与 Rebuild 同模式）。
             Node::Default(_) => true,
@@ -482,34 +475,34 @@ impl Node {
             // - modulus 是编译期常量（Const）且 inner 无表达式 → false（恢复 static_size 预分配）
             // - modulus 是运行期表达式 或 inner 含表达式 → true
             Node::Aligned(a) => a.has_expressions(),
-            // Phase 8.4：Hex/HexDump 递归检查 inner（与 Subconstruct 同模式）。
+            // Hex/HexDump 递归检查 inner（与 Subconstruct 同模式）。
             Node::Hex(h) => h.inner().has_expressions(),
             Node::HexDump(h) => h.inner().has_expressions(),
-            // Phase 8.5：Checksum 递归 checksumfield + 含 start/end 表达式（StreamRange），
+            // Checksum 递归 checksumfield + 含 start/end 表达式（StreamRange），
             // 总返回 true（保守处理，与 Rebuild 同模式）。
             Node::Checksum(_) => true,
-            // Phase 8.9：Terminated 是单元结构体，无表达式。
+            // Terminated 是单元结构体，无表达式。
             Node::Terminated(_) => false,
             // Probe 含 into FieldName，引用 Struct 字段时返回 true（与 Switch FieldRef 同模式）。
             Node::Probe(p) => p.into_field().is_some(),
-            // Phase 8 P1：Enum/FlagsEnum/Mapping 递归检查 inner（与 Subconstruct 同模式）。
+            // Enum/FlagsEnum/Mapping 递归检查 inner（与 Subconstruct 同模式）。
             Node::Enum(e) => e.inner().has_expressions(),
             Node::FlagsEnum(f) => f.inner().has_expressions(),
             Node::Mapping(m) => m.inner().has_expressions(),
-            // Phase 8 P1：OneOf/NoneOf 递归检查 inner。
+            // OneOf/NoneOf 递归检查 inner。
             Node::OneOf(o) => o.inner().has_expressions(),
             Node::NoneOf(n) => n.inner().has_expressions(),
-            // Phase 8 P1：Union 编译期预算（与 FocusedSeq 同模式）。
+            // Union 编译期预算（与 FocusedSeq 同模式）。
             Node::Union(u) => u.has_expressions(),
-            // Phase 8 P1：Sequence 编译期预算（与 FocusedSeq 同模式）。
+            // Sequence 编译期预算（与 FocusedSeq 同模式）。
             Node::Sequence(s) => s.has_expressions(),
-            // Phase 8 P1：ProcessXor inner 子树 + 可能含 Expr pad。
+            // ProcessXor inner 子树 + 可能含 Expr pad。
             Node::ProcessXor(p) => {
                 p.inner().has_expressions() || matches!(p.pad(), XorPad::Expr(_))
             }
-            // Phase 8 P1：ProcessRotateLeft 恒含 amount/group 表达式。
+            // ProcessRotateLeft 恒含 amount/group 表达式。
             Node::ProcessRotateLeft(_) => true,
-            // Phase 8 P2：NamedTuple 递归检查 inner（与 Subconstruct 同模式）。
+            // NamedTuple 递归检查 inner（与 Subconstruct 同模式）。
             Node::NamedTuple(n) => n.inner().has_expressions(),
             _ => false,
         }
@@ -518,16 +511,14 @@ impl Node {
     /// 为 RO 字段在 build 方向计算值。
     ///
     /// RO 字段不从实例取值，而是通过节点自身的逻辑计算。
-    /// 设计依据：`docs/模块设计-表达式系统.md` §5.4。
     ///
     /// 当前支持的 RO 节点：
     /// - [`Node::Tell`]：返回当前 `BuildStream` 的写入位置（`usize → PyLong`）。
     /// - [`Node::Computed`]：通过 [`crate::expr::eval_expr_int`] 求值表达式。
     ///
-    /// 其他节点（如 `Const`、`ContextParam`）将在 Phase 3 扩展时添加分支。
+    /// 其余支持的分支见下方 match；不支持的节点类型返回 `Err` 兜底。
     ///
-    /// NH-1 重构：从 struct_node.rs 的自由函数移至 `impl Node` 方法，
-    /// 使其成为 Node 的公共 API，未来添加 Const/ContextParam 时只需在此方法中增加分支。
+    /// 作为 `impl Node` 的公共 API，新增 RO 节点类型时在此方法中增加分支即可。
     ///
     /// # 参数
     ///
@@ -539,7 +530,7 @@ impl Node {
     /// # 错误
     ///
     /// - [`ConstructError::Generic`]：节点类型不支持作为 RO（如 `FormatField`、`Bytes`）。
-    ///   编译期校验（§5.6）应保证此分支不被触发，此处为运行时兜底。
+    ///   编译期校验应保证此分支不被触发，此处为运行时兜底。
     /// - 其他错误由 `Computed` 求值向上传播（`ExprContext` / `ExprFieldMissing` 等）。
     pub fn compute_ro_value(
         &self,
@@ -556,36 +547,34 @@ impl Node {
                 let v = crate::expr::eval_expr_int(c.expr(), ctx, py)?;
                 Ok(v.into_py(py))
             }
-            // Phase 4：Index 作为 RO 字段时，返回 ctx.index()（PyLong 或 Py_None）。
-            // 与 IndexNode.parse 行为一致（设计 §4.4.2 / §6.1.2）。
+            // Index 作为 RO 字段时，返回 ctx.index()（PyLong 或 Py_None）。
+            // 与 IndexNode.parse 行为一致。
             // 典型用法：`idx: int = rfield(Index())`——build 时不需要用户输入。
             Node::Index(_) => Ok(ctx.index().into_py(py)),
-            // Phase 4：StopIf 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // StopIf 作为 RO 字段时，compute_ro_value 返回 Py_None
             // （实际条件检查由 StopIfNode.build 完成，compute_ro_value 仅占位）。
-            // 设计 §6.1.2 注释：「StopIfNode 不作为 RO 字段（其 build 行为是检查条件
-            // 而非计算值）」——但实际作为 RO 字段在 build 方向是兼容的：
+            // 作为 RO 字段在 build 方向是兼容的：
             // compute_ro_value 返回 None（占位），随后 StructNode 调 StopIfNode.build
             // 执行条件检查（可能抛 StopField 哨兵）。这避免了 Rw 模式下强制 getattr
             // 「stop」属性的负担（用户不需要为 StopIf 字段提供值）。
             Node::StopIf(_) => Ok(py.None()),
-            // Phase 4.5 v5：Element 作为 RO 字段时返回 None（Element 字段不持有
+            // Element 作为 RO 字段时返回 None（Element 字段不持有
             // 真实数据——值由 RepeatUntilNode 在迭代时借用设置）。
-            // 设计 §4.7.4。
             Node::Element(_) => Ok(py.None()),
-            // Phase 6.3：Rebuild 作为 RO 字段时，求值表达式得到 i64 → PyLong。
-            // 与 Computed 同模式（设计 §1.4.3 / §3.2）。
+            // Rebuild 作为 RO 字段时，求值表达式得到 i64 → PyLong。
+            // 与 Computed 同模式。
             Node::Rebuild(r) => {
                 let v = crate::expr::eval_expr_int(r.func(), ctx, py)?;
                 Ok(v.into_py(py))
             }
-            // Phase 8.1：Check 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // Check 作为 RO 字段时，compute_ro_value 返回 Py_None
             // （与 StopIf 同模式——实际条件检查由 CheckNode.build 完成，
             // compute_ro_value 仅占位返回 Py_None，避免 StructNode 强制 getattr）。
             Node::Check(_) => Ok(py.None()),
-            // Phase 8.9：Terminated 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // Terminated 作为 RO 字段时，compute_ro_value 返回 Py_None
             // （与 StopIf/Check 同模式——Terminated::build 是 no-op，不需要从 obj 取值）。
             Node::Terminated(_) => Ok(py.None()),
-            // Phase 8.1：Default 作为 RO 字段时，compute_ro_value 求值 value 表达式
+            // Default 作为 RO 字段时，compute_ro_value 求值 value 表达式
             // （与 Computed/Rebuild 同模式）。随后 StructNode 将结果传给 DefaultNode.build，
             // 因 obj 非 None，DefaultNode 直接转发 inner.build。
             Node::Default(d) => {

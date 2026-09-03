@@ -1,10 +1,10 @@
-//! PascalStringNode：长度前缀字符串（Phase 6.2 §3.6）。
+//! PascalStringNode：长度前缀字符串。
 //!
 //! Python 参考：`construct/construct/core.py` `PascalString`（L1778-1808）。
 //!
 //! Python 原版是 `StringEncoded(Prefixed(lengthfield, GreedyBytes), encoding)` macro 嵌套；
-//! 本设计独立实现（PM 决策 1 方案 A）：内联"lengthfield 解析 + 读 N 字节 + decode"，
-//! 不依赖 Prefixed（Phase 7 Streams）。
+//! construct-rs 独立实现：内联"lengthfield 解析 + 读 N 字节 + decode"，
+//! 不依赖 Prefixed。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -20,7 +20,7 @@ use pyo3::prelude::*;
 /// # parse 行为
 ///
 /// 1. `lengthfield.parse(stream)` → 得到 Python 整数对象
-/// 2. extract i64；非整数 → [`ConstructError::Range`]（PA-2 对齐）；负数 → Range（PA-1 对齐）
+/// 2. extract i64；非整数 → [`ConstructError::Range`]；负数 → Range
 /// 3. 读 N 字节
 /// 4. [`Encoding::decode`] → `PyString`
 ///
@@ -90,7 +90,7 @@ impl crate::nodes::Construct for PascalStringNode {
                 return Err(e);
             }
         };
-        // 2. extract 为 i64。非整数返回 Range 错误（PA-2 对齐）。
+        // 2. extract 为 i64。非整数返回 Range 错误。
         let length_i64: i64 = length_obj.bind(py).extract().map_err(|_| {
             let type_name = length_obj
                 .bind(py)
@@ -106,7 +106,7 @@ impl crate::nodes::Construct for PascalStringNode {
                 path: path.to_string(),
             }
         })?;
-        // 3. 负数 count 返回 Range 错误（PA-1 对齐）。
+        // 3. 负数 count 返回 Range 错误。
         if length_i64 < 0 {
             return Err(ConstructError::Range {
                 message: format!("PascalString length is negative: {}", length_i64),
@@ -132,7 +132,7 @@ impl crate::nodes::Construct for PascalStringNode {
         // 1. encode 数据。
         let encoded = self.encoding.encode(py, obj, path)?;
         // 2. build lengthfield（传入 encoded.len() 作为 Python int）。
-        //    lengthfield 自行检查长度范围（如 Byte 超过 255 报 Range，对齐 PrefixedArray PA-5）。
+        //    lengthfield 自行检查长度范围（如 Byte 超过 255 报 Range，对齐 PrefixedArray）。
         let len_obj = (encoded.len() as i64).into_py(py);
         let len_bound = len_obj.bind(py);
         if let Err(mut e) = self.lengthfield.build(py, len_bound, stream, ctx, path) {
@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn build_byte_lengthfield_overflow_returns_error() {
-        // PA-5 对齐：Byte 超过 255 时 lengthfield.build 报错（FormatField 范围检查）
+        // Byte 超过 255 时 lengthfield.build 报错（FormatField 范围检查）
         with_py(|py| {
             let node = PascalStringNode::new(byte_node(), Encoding::Utf8);
             // 300 字节的字符串，Byte lengthfield 装不下

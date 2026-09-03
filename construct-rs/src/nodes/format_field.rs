@@ -1,19 +1,17 @@
-//! FormatFieldNode：使用 struct 模块格式读写整数。
+//! FormatFieldNode：使用 struct 模块格式读写整数与浮点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.1。
 //! Python 参考：`construct/construct/core.py` `FormatField`（L1124-1175）。
 //!
-//! ## Phase 1 范围
+//! ## 支持范围
 //!
-//! 支持 16 种整数格式：`u8` / `i8` / `u16` / `i16` / `u32` / `i32` / `u64` / `i64`
-//! × 大端 / 小端。不支持浮点和布尔（推迟到 Phase 2）。
+//! 16 种整数格式：`u8` / `i8` / `u16` / `i16` / `u32` / `i32` / `u64` / `i64`
+//! × 大端 / 小端；另有 6 种 IEEE 754 浮点格式（Float16 / Float32 / Float64 × 双端序）。
 //!
 //! ## 设计简化
 //!
-//! 设计文档 §C.3.1 使用 `OnceLock<PythonFormat>` 延迟解析格式字符串。Phase 1
-//! 直接在构造时确定 `PythonFormat`（编译时已知），无需延迟解析。
+//! 直接在构造时确定 `PythonFormat`（编译时已知），无需延迟解析格式字符串。
 //!
-//! ## REV 约束落实
+//! ## build 值范围校验
 //!
 //! build 时禁止 `as` 截断：使用 `try_into` 显式校验值范围。例如
 //! `Int8ub.build(300)` 返回 `FormatFieldError`（300 超出 u8 范围），
@@ -30,10 +28,9 @@ use pyo3::prelude::*;
 // PythonFormat
 // ---------------------------------------------------------------------------
 
-/// 预编译的整数格式枚举：8 种类型 × 2 种字节序 = 16 种变体。
+/// 预编译的格式枚举：16 种整数变体（8 种类型 × 2 种字节序）+ 6 种 IEEE 754 浮点变体。
 ///
-/// 每个 `Int*ub`/`Int*sb`/`Int*ul`/`Int*sl` 预定义单例对应一个变体。
-/// Phase 2 将扩展浮点和布尔格式（`Float32`、`Float64`、`Bool`）。
+/// 每个 `Int*ub`/`Int*sb`/`Int*ul`/`Int*sl`/`Float*l`/`Float*b` 预定义单例对应一个变体。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PythonFormat {
     /// 无符号 1 字节整数，大端（`>B`，对应 `Int8ub`）
@@ -68,7 +65,7 @@ pub enum PythonFormat {
     SignedInt64Big,
     /// 有符号 8 字节整数，小端（`<q`，对应 `Int64sl`）
     SignedInt64Little,
-    // ---- Phase 6.1 新增：Float 系列 6 个变体（IEEE 754）----
+    // ---- Float 系列 6 个变体（IEEE 754）----
     /// 半精度 IEEE 754，大端（`>e`，对应 `Float16b`）。Float16 用 `half` crate。
     Float16Big,
     /// 半精度 IEEE 754，小端（`<e`，对应 `Float16l`）。
@@ -90,7 +87,7 @@ impl PythonFormat {
     ///
     /// - `endianity`：字节序字符，`'>'`（大端）、`'<'`（小端）、`'='`（本机）
     /// - `format`：格式字符，`'B'`/`'b'`/`'H'`/`'h'`/`'I'`/`'i'`/`'Q'`/`'q'`
-    ///   （Phase 6.1 新增 `'e'` Float16 / `'f'` Float32 / `'d'` Float64）
+    ///   （浮点：`'e'` Float16 / `'f'` Float32 / `'d'` Float64）
     ///
     /// # 返回
     ///
@@ -119,7 +116,7 @@ impl PythonFormat {
             ('Q', false) => Self::UnsignedInt64Little,
             ('q', true) => Self::SignedInt64Big,
             ('q', false) => Self::SignedInt64Little,
-            // Phase 6.1：Float 系列（'e'/'f'/'d' × 2 endian = 6 变体）
+            // Float 系列（'e'/'f'/'d' × 2 endian = 6 变体）
             ('e', true) => Self::Float16Big,
             ('e', false) => Self::Float16Little,
             ('f', true) => Self::Float32Big,
@@ -137,7 +134,7 @@ impl PythonFormat {
             | Self::UnsignedInt8Little
             | Self::SignedInt8Big
             | Self::SignedInt8Little => 1,
-            // Float16 与 Int16 同为 2 字节（Phase 6.1）
+            // Float16 与 Int16 同为 2 字节
             Self::UnsignedInt16Big
             | Self::UnsignedInt16Little
             | Self::SignedInt16Big
@@ -182,7 +179,7 @@ impl PythonFormat {
             Self::UnsignedInt64Little => "<Q",
             Self::SignedInt64Big => ">q",
             Self::SignedInt64Little => "<q",
-            // Phase 6.1：Float 系列 fmtstr
+            // Float 系列 fmtstr
             Self::Float16Big => ">e",
             Self::Float16Little => "<e",
             Self::Float32Big => ">f",
@@ -226,7 +223,7 @@ impl PythonFormat {
 /// # build 行为
 ///
 /// 1. 从 Python 对象 `extract` 数值。
-/// 2. 使用 `try_into` 显式校验值范围（禁止 `as` 截断，落实 REV 约束）。
+/// 2. 使用 `try_into` 显式校验值范围（禁止 `as` 截断）。
 /// 3. 按字节序 `to_be_bytes` / `to_le_bytes` 写入流。
 ///
 /// 值超出范围 → `FormatFieldError`（对应 Python construct 的 `struct.error`）。
@@ -346,7 +343,7 @@ impl super::Construct for FormatFieldNode {
                 let arr = read_array::<8>(stream, path)?;
                 Ok(i64::from_le_bytes(arr).into_py(py))
             }
-            // ---- Phase 6.1：Float 系列 parse 分支 ----
+            // ---- Float 系列 parse 分支 ----
             // Float16 → PyFloat：Python 无 f16 类型，half::f16::to_f64 转 f64 后创建 PyFloat，
             // 与 CPython struct 模块 'e' 格式行为一致。
             PythonFormat::Float16Big => {
@@ -388,7 +385,7 @@ impl super::Construct for FormatFieldNode {
     ) -> Result<(), ConstructError> {
         let fmtstr = self.format.fmtstr();
         match self.format {
-            // 8/16/32-bit: 先 extract 为 i64，再 try_into 显式收窄（REV 约束）
+            // 8/16/32-bit: 先 extract 为 i64，再 try_into 显式收窄
             PythonFormat::UnsignedInt8Big => {
                 let val: u8 = build_small_int::<u8>(obj, fmtstr, path)?;
                 stream.write(&val.to_be_bytes());
@@ -462,16 +459,16 @@ impl super::Construct for FormatFieldNode {
                     .map_err(|_| make_build_error(fmtstr, obj, path))?;
                 stream.write(&val.to_le_bytes());
             }
-            // ---- Phase 6.1：Float 系列 build 分支 ----
+            // ---- Float 系列 build 分支 ----
             //
-            // P2 v2 设计要点（详见设计文档 §1.3.3）：
+            // 设计要点：
             // - int→float 兼容：所有 6 个 Float build 分支加 i64/u64 fallback。
             //   Python `struct.pack('>f', 42)` 接受 int，mashumaro `v: float` 注解运行时不强制。
             //   Rust 顺序：extract f32/f64（Python float）→ i64 as f32/f64 → u64 as f32/f64。
             // - Float16 范围检查：超 f16 max（65504）的 finite float手动返回 FormatFieldError，
-            //   对齐 `struct.pack('>e', 70000)` OverflowError→construct FormatFieldError（BC-B12）。
+            //   对齐 `struct.pack('>e', 70000)` OverflowError→construct FormatFieldError。
             //   NaN/Inf 放行（由 from_f64 处理）。
-            // - Float32 范围：extract::<f32>() 对超范围值触发 pyo3 OverflowError（BC-B8）。
+            // - Float32 范围：extract::<f32>() 对超范围值触发 pyo3 OverflowError。
             //   int 输入走 i64/u64 fallback（i64/u64::MAX < f32::MAX，as f32 不溢出）。
             // - Float64 无范围检查：f64 精度足以容纳所有 i64/u64。
             PythonFormat::Float16Big => {
@@ -561,7 +558,7 @@ fn make_build_error(fmtstr: &str, obj: &Bound<'_, PyAny>, path: &Path) -> Constr
 
 /// 对 8/16/32 位整数：extract 为 i64，再 `try_into` 显式收窄到目标类型。
 ///
-/// 落实 REV 约束：禁止 `as u8` 截断。`try_into` 在值超出范围时返回 `Err`，
+/// 禁止 `as u8` 截断：`try_into` 在值超出范围时返回 `Err`，
 /// 转为 `FormatFieldError`。
 fn build_small_int<T>(
     obj: &Bound<'_, PyAny>,
@@ -578,17 +575,17 @@ where
         .map_err(|_| make_build_error(fmtstr, obj, path))
 }
 
-// ---- Phase 6.1：Float build 辅助函数 ----
+// ---- Float build 辅助函数 ----
 
 /// IEEE 754 half precision 的最大有限正值（65504.0）。
 ///
-/// 用于 Float16 build 的范围检查（对齐 Python `struct.pack('>e', 70000)` OverflowError，
-/// 即设计文档 BC-B12）。大于此值的 finite float 手动返回 FormatFieldError。
+/// 用于 Float16 build 的范围检查（对齐 Python `struct.pack('>e', 70000)` OverflowError）。
+/// 大于此值的 finite float 手动返回 FormatFieldError。
 const F16_MAX_ABS: f64 = 65504.0;
 
 /// 从 Python 对象提取 f64，带 int fallback（Float16/Float64 build 用）。
 ///
-/// P2 v2 修正：Python `struct.pack` 接受 int（自动转 float），mashumaro `v: float`
+/// Python `struct.pack` 接受 int（自动转 float），mashumaro `v: float`
 /// 注解运行时不强制。Rust 顺序：
 /// 1. `extract::<f64>()`（Python float）
 /// 2. `i64 as f64`（Python int，f64 精度足以容纳所有 i64）
@@ -610,8 +607,7 @@ fn extract_float_with_int_fallback(
 ///
 /// 与 [`extract_float_with_int_fallback`] 平行，但首选项是 `f32`。
 /// Python float 超出 f32 范围时（如 `1e40`）`extract::<f32>` 触发 pyo3
-/// OverflowError → FormatFieldError（对齐 `struct.pack('>f', 1e40)` OverflowError，
-/// 即 BC-B8）。
+/// OverflowError → FormatFieldError（对齐 `struct.pack('>f', 1e40)` OverflowError）。
 fn extract_f32_with_int_fallback(
     obj: &Bound<'_, PyAny>,
     fmtstr: &str,
@@ -676,7 +672,7 @@ mod tests {
     fn format_from_chars_invalid_returns_none() {
         assert_eq!(PythonFormat::from_chars('>', 'x'), None);
         assert_eq!(PythonFormat::from_chars('!', 'B'), None);
-        // Phase 6.1: 'e'/'f'/'d' 现已支持（Float16/32/64）。用其他无效字符验证。
+        // 'e'/'f'/'d'（Float16/32/64）合法；其他无效字符应返回 None。
         assert_eq!(PythonFormat::from_chars('>', 'F'), None);
         assert_eq!(PythonFormat::from_chars('>', 'E'), None);
         assert_eq!(PythonFormat::from_chars('>', 'D'), None);
@@ -1065,7 +1061,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — 值范围校验（REV 约束：禁止 as 截断）
+    // build — 值范围校验（禁止 as 截断）
     // ======================================================================
 
     #[test]

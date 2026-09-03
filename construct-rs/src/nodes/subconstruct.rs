@@ -1,6 +1,5 @@
 //! SubconstructNode：单子构造器包装节点（纯转发）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §1.1。
 //! Python 参考：`construct/construct/core.py` `Subconstruct`（L787-810）。
 //!
 //! ## 行为概述
@@ -9,7 +8,7 @@
 //! Python 中 Substruct 是抽象基类（Adapter/RawCopy/Peek/Rebuild/Tunnel 的父类），
 //! construct-rs 把它实现为**具体节点**，用于：
 //! - 用户显式包装（极少用，主要供未来 Pointer/Prefixed 复用）
-//! - 作为 §2 其他内置 Adapter 的实现基础（共享"持有 `Box<Node>` + 转发"模式）
+//! - 作为其他内置 Adapter 的实现基础（共享"持有 `Box<Node>` + 转发"模式）
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -122,7 +121,7 @@ mod tests {
 
     #[test]
     fn parse_format_field_returns_inner_value() {
-        // SC-1: Subconstruct(FormatField) parse 应与直接 FormatField parse 一致
+        // Subconstruct(FormatField) parse 应与直接 FormatField parse 一致
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let node = SubconstructNode::new(inner);

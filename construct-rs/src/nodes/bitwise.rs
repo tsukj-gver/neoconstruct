@@ -1,8 +1,5 @@
 //! BitwiseNode：bit 域包装器（核心节点）。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.3（BitwiseNode 详细设计）、
-//! §2.3（决策 B3：bit 域 sizeof 单位换算）、§9.3（边界条件 BW-1~BW-5）、
-//! §13.4（嵌套 Bitwise 的对齐语义）。
 //! Python 参考：`construct/construct/core.py` `Bitwise`（L1030）、
 //! `lib/bitstream.py` `RestreamedBytesIO.close`（L50-54，缓冲清空校验）。
 //!
@@ -14,11 +11,11 @@
 //! 内部 `inner` 是一棵完整的 [`Node`] 子树（通常是 [`StructNode`](super::StructNode)，
 //! 由 BitStructMixin 编译；或单个 BitsInteger，由 `Bitwise(BitsInteger(N))` 编译）。
 //!
-//! ## parse 流程（设计 §4.3）
+//! ## parse 流程
 //!
 //! 1. 记录入口 bit 游标 `entry_bit_pos = stream.bit_pos()`。
 //!    - 顶层 Bitwise：`entry_bit_pos == 0`（字节对齐入口）。
-//!    - 嵌套 Bitwise：`entry_bit_pos` 可能为 0-7（bit_pos 延续不重置，见 §13.4）。
+//!    - 嵌套 Bitwise：`entry_bit_pos` 可能为 0-7（bit_pos 延续不重置）。
 //! 2. 调用 `inner.parse(stream, ...)`——inner 内部的 bit 节点通过 `read_bits` 推进 bit_pos。
 //! 3. 校验 `stream.bit_pos() == entry_bit_pos`（内层消耗的 bit 数是 8 倍数），
 //!    否则返回 [`ConstructError::BitField`]。
@@ -32,9 +29,9 @@
 //! ## sizeof
 //!
 //! `inner.sizeof(ctx)? / 8`——inner 报 bit 数，外层报字节数。若 inner sizeof 非 8 倍数，
-//! 返回 [`ConstructError::BitField`]（设计 BW-2）。
+//! 返回 [`ConstructError::BitField`]。
 //!
-//! ## 嵌套 Bitwise 对齐语义（§13.4）
+//! ## 嵌套 Bitwise 对齐语义
 //!
 //! 顶层 Bitwise 入口 `entry_bit_pos=0`，退化为"退出 bit_pos==0"的绝对校验。
 //! 嵌套 Bitwise 入口 `entry_bit_pos` 可能为 1-7，退出检查回到入口值（相对校验）。
@@ -54,13 +51,13 @@ use crate::nodes::Node;
 ///
 /// 详见模块级文档。
 ///
-/// # 错误（§9.3 BW-1~BW-5）
+/// # 错误
 ///
-/// - BW-1：inner 消耗 bit 数非 8 倍数 → parse/build 返回 `BitField` 错误
-/// - BW-2：inner.sizeof() 非 8 倍数 → sizeof 返回 `BitField` 错误
-/// - BW-3：inner 含表达式字段（sizeof Err）→ sizeof 向上传播
-/// - BW-4：嵌套 Bitwise → 入口 bit_pos 任意，退出检查回到入口值
-/// - BW-5：空 BitStruct → parse/build 不读写，sizeof=0
+/// - inner 消耗 bit 数非 8 倍数 → parse/build 返回 `BitField` 错误
+/// - inner.sizeof() 非 8 倍数 → sizeof 返回 `BitField` 错误
+/// - inner 含表达式字段（sizeof Err）→ sizeof 向上传播
+/// - 嵌套 Bitwise → 入口 bit_pos 任意，退出检查回到入口值
+/// - 空 BitStruct → parse/build 不读写，sizeof=0
 #[derive(Debug)]
 pub struct BitwiseNode {
     /// 被包裹的子树根（Box 因 Node 递归）。
@@ -99,7 +96,7 @@ impl Construct for BitwiseNode {
         // 委托给 inner 子树——inner 内部的 bit 节点通过 read_bits 推进 bit_pos。
         let result = self.inner.parse(py, stream, ctx, path)?;
 
-        // 对齐校验（设计 §4.3）：消耗的 bit 数必须是 8 倍数。
+        // 对齐校验：消耗的 bit 数必须是 8 倍数。
         // 对齐 Python RestreamedBytesIO.close() 缓冲清空校验（bitstream.py L50-54）。
         let exit_bit_pos = stream.bit_pos();
         if exit_bit_pos != entry_bit_pos {
@@ -131,7 +128,7 @@ impl Construct for BitwiseNode {
         // 委托给 inner 子树——inner 内部的 bit 节点通过 write_bits 填充部分字节。
         self.inner.build(py, obj, stream, ctx, path)?;
 
-        // 对齐校验（设计 §4.3）。
+        // 对齐校验。
         let exit_bit_pos = stream.bit_pos();
         if exit_bit_pos != entry_bit_pos {
             return Err(ConstructError::BitField {
@@ -149,15 +146,15 @@ impl Construct for BitwiseNode {
     }
 
     fn sizeof(&self, ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // inner.sizeof() 返回 bit 数，外层报字节数（设计决策 B3）。
+        // inner.sizeof() 返回 bit 数，外层报字节数。
         let inner_bits = self.inner.sizeof(ctx)?;
 
-        // BW-2: inner sizeof 非 8 倍数 → BitField 错误。
+        // inner sizeof 非 8 倍数 → BitField 错误。
         // 注意：inner_bits % 8 != 0 时返回错误（与 parse/build 时校验一致），
-        // 而非 Python 的 size//8 截断。construct-rs fail-fast（设计 BW-2）。
+        // 而非 Python 的 size//8 截断。construct-rs fail-fast。
         //
         // sizeof 签名不携带 path 参数，因此 path 字段为空字符串。
-        // message 已含 "Bitwise inner sizeof N" 定位信息（3.2 P1 已知遗留）。
+        // message 已含 "Bitwise inner sizeof N" 定位信息。
         if inner_bits % 8 != 0 {
             return Err(ConstructError::BitField {
                 message: format!(
@@ -307,12 +304,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — 对齐校验（BW-1）
+    // parse — 对齐校验
     // ======================================================================
 
     #[test]
     fn parse_unaligned_inner_returns_bitfield_error() {
-        // BW-1: Bitwise(BitsInteger(5)) inner 只消耗 5 bit，非 8 倍数
+        // Bitwise(BitsInteger(5)) inner 只消耗 5 bit，非 8 倍数
         // → parse 返回 BitField 错误
         with_py(|py| {
             let inner = Node::BitsInteger(BitsIntegerNode::new(5, false, false));
@@ -340,12 +337,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — 空 BitStruct（BW-5）
+    // parse — 空 BitStruct
     // ======================================================================
 
     #[test]
     fn parse_empty_bitstruct_returns_empty_instance() {
-        // BW-5: Bitwise(Struct()) parse b'' → {} 实例
+        // Bitwise(Struct()) parse b'' → {} 实例
         with_py(|py| {
             let inner_struct = StructNode::new_for_test(py, Vec::new());
             let node = BitwiseNode::new(Node::Struct(inner_struct));
@@ -427,7 +424,7 @@ mod tests {
 
     #[test]
     fn build_unaligned_inner_returns_bitfield_error() {
-        // BW-1 (build): Bitwise(BitsInteger(5)) 内层 5 bit 未填满字节
+        // build: Bitwise(BitsInteger(5)) 内层 5 bit 未填满字节
         with_py(|py| {
             let inner = Node::BitsInteger(BitsIntegerNode::new(5, false, false));
             let node = BitwiseNode::new(inner);
@@ -609,7 +606,7 @@ mod tests {
 
     #[test]
     fn sizeof_inner_not_multiple_of_8_returns_bitfield_error() {
-        // BW-2: Bitwise(BitsInteger(5)) → 5 bit 非 8 倍数
+        // Bitwise(BitsInteger(5)) → 5 bit 非 8 倍数
         with_py(|py| {
             let inner = Node::BitsInteger(BitsIntegerNode::new(5, false, false));
             let node = BitwiseNode::new(inner);
@@ -631,7 +628,7 @@ mod tests {
 
     #[test]
     fn sizeof_empty_struct_is_zero() {
-        // BW-5: Bitwise(Struct()) → sizeof = 0
+        // Bitwise(Struct()) → sizeof = 0
         with_py(|py| {
             let inner_struct = StructNode::new_for_test(py, Vec::new());
             let node = BitwiseNode::new(Node::Struct(inner_struct));
@@ -641,7 +638,7 @@ mod tests {
     }
 
     // ======================================================================
-    // 嵌套 Bitwise（BW-4，§13.4）
+    // 嵌套 Bitwise
     // ======================================================================
 
     #[test]
@@ -706,7 +703,7 @@ mod tests {
     #[test]
     fn nested_bitwise_inner_unaligned_returns_bitfield_error() {
         // 嵌套 Bitwise(Bitwise(BitsInteger(5)))
-        // 内层 Bitwise 消耗 5 bit，非 8 倍数 → BitField 错误（BW-4）
+        // 内层 Bitwise 消耗 5 bit，非 8 倍数 → BitField 错误
         with_py(|py| {
             let innermost = Node::BitsInteger(BitsIntegerNode::new(5, false, false));
             let inner_bitwise = Node::Bitwise(BitwiseNode::new(innermost));

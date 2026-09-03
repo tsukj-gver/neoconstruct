@@ -1,18 +1,16 @@
 //! construct-rs 内部统一错误类型，以及向 pyo3 `PyErr` 的转换。
 //!
-//! 设计依据：`docs/架构设计.md` §B.8。
-//!
 //! ## 错误流转
 //!
 //! ```text
 //! 节点方法签名:  fn parse(...) -> Result<T, ConstructError>     ← Rust 内部用结构化错误
 //!                               ↓ impl From<ConstructError> for PyErr
-//! FFI 入口签名:  fn _parse_raw(...) -> PyResult<PyDict>          ← 入口处转为 PyErr
+//! FFI 入口签名:  fn _parse_raw(...) -> PyResult<Py<PyAny>>     ← 入口处转为 PyErr
 //!                               ↓ pyo3 自动抛出
 //! Python 侧:    except StreamError as e: ...                    ← 用户捕获 Python 异常
 //! ```
 //!
-//! ## 异常类映射（子任务 1.8）
+//! ## 异常类映射
 //!
 //! Python 异常类定义在 `construct._errors`（纯 Python 单一定义），Rust 侧在模块
 //! 初始化时（[`crate::_construct_rust`]）通过 [`init_exception_classes`] 缓存这些
@@ -100,8 +98,8 @@ pub enum ConstructError {
         path: String,
     },
 
-    // --- 表达式求值错误（Phase 2，§4.5）---
-    // SF-2 修复：所有 Expr* 变体携带 `path` 字段，支持 `push_path_segment`
+    // --- 表达式求值错误 ---
+    // 所有 Expr* 变体携带 `path` 字段，支持 `push_path_segment`
     // 重建路径，与 Stream/FormatField/Generic 等变体行为一致。
     /// 表达式求值：字段值类型不匹配（期望 i64，实际为 str/bytes 等）。
     ///
@@ -171,7 +169,7 @@ pub enum ConstructError {
     /// encoderunit=8 bits（`core.py` L1068），close() 检查 rbuffer/wbuffer 为空
     /// 等价于"消耗 bit 数为 8 倍数"。
     ///
-    /// Python 无独立 `BitFieldError`，复用 `StreamError` 映射（§7.3）。
+    /// Python 无独立 `BitFieldError`，复用 `StreamError` 映射。
     #[error("bit field error: {message} at {path}")]
     BitField {
         /// 错误详情。
@@ -185,8 +183,8 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct 的 `IntegerError`（`core.py` L49、L1367/L1374/L1378/L1387）。
     ///
-    /// Phase 3.3 新增：将原 BitsInteger 节点使用 `FormatField` 变体的实现统一改为
-    /// `Integer`，使用户可通过 `except IntegerError` 精确捕获（3.1 VET P1 修复）。
+    /// BitsInteger 节点的运行时错误使用此变体，用户可通过 `except IntegerError`
+    /// 精确捕获。
     #[error("integer error: {message} at {path}")]
     Integer {
         /// 错误详情。
@@ -199,8 +197,8 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct 的 `PaddingError`（`core.py` L124、L4146）。
     ///
-    /// Phase 3.3 新增：`BitPaddingNode::new` 在编译期对非法 pattern 返回此错误，
-    /// 比 Python 在 `bits2bytes` 阶段延迟 `KeyError` 更早暴露（设计 §4.2 P1 修复）。
+    /// `BitPaddingNode::new` 在编译期对非法 pattern 返回此错误，
+    /// 比 Python 在 `bits2bytes` 阶段延迟 `KeyError` 更早暴露。
     /// 字节级 `PaddingNode` 的负长度等错误也归此类。
     #[error("padding error: {message} at {path}")]
     Padding {
@@ -210,7 +208,7 @@ pub enum ConstructError {
         path: String,
     },
 
-    // --- Phase 4 Array 系列错误（设计 §3.4）---
+    // --- Array 系列错误 ---
     /// Array count 无效（负数或与给定列表长度不符）。
     ///
     /// 对应 Python construct 的 `RangeError`（`core.py` L2528、L2541、L2543）。
@@ -242,8 +240,8 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct 的 `StopFieldError`（`core.py` L4106）。
     ///
-    /// 作为 `Result` 的哨兵变体而非 panic，保证 `Construct` trait 签名不变
-    /// （设计 §2.4 决策 A4）。正常路径由 `GreedyRangeNode` 等捕获，不应到达 FFI 入口。
+    /// 作为 `Result` 的哨兵变体而非 panic，保证 `Construct` trait 签名不变。
+    /// 正常路径由 `GreedyRangeNode` 等捕获，不应到达 FFI 入口。
     #[error("stop field signal at {path}")]
     StopField {
         /// 错误发生的路径。
@@ -255,8 +253,7 @@ pub enum ConstructError {
     /// 对应 Python construct 的 `IndexFieldError`。
     ///
     /// 当前设计 `IndexNode` 在 `_index` 为 `None` 时返回 `Py_None`（对齐 Python
-    /// `context.get("_index", None)`），不主动触发此变体。保留供未来严格模式使用
-    /// （设计 §3.4.4）。
+    /// `context.get("_index", None)`），不主动触发此变体。保留供未来严格模式使用。
     #[error("index field error: {message} at {path}")]
     IndexField {
         /// 错误详情。
@@ -269,7 +266,7 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct 的 `StringError`（core.py L54）。
     ///
-    /// Phase 6.2 新增（设计 §3.8 决策 A）：使 String 系列构造器的字符串错误可被
+    /// 使 String 系列构造器的字符串错误可被
     /// `except StringError` 精确捕获，与 Python construct 用户面对齐。
     ///
     /// 触发场景：
@@ -291,18 +288,16 @@ pub enum ConstructError {
     /// 显式错误：用户主动抛出（对应 Python construct `ExplicitError`，core.py L89）。
     ///
     /// **不被 Select / Peek 吞掉**——直接向上传播。Python 中由 `Error` 构造器
-    /// （Phase 7 暂不实现）或用户在 `_emitparse`/Adapter 回调中主动抛出。
-    ///
-    /// Phase 7 引入（PM 决策 2 / ADR-022 PE-3 收尾，设计 §1.2）。
+    /// 或用户在 `_emitparse`/Adapter 回调中主动抛出。
     ///
     /// 触发场景：
     /// - Select 遍历 subcons 时，某 subcon 抛 Explicit → Select 直接传播（不尝试后续）
     /// - Peek 预读时，inner 抛 Explicit → Peek 直接传播（不返回 Py_None）
     ///
-    /// **已知差异 D1**（设计 §1.5 / §12）：当前 `From<PyErr> for ConstructError`
-    /// 统一转 `Generic`，无法保留 Python 侧的 `ExplicitError` 类型信息。Phase 7
-    /// 范围内 Rust 不主动构造 Explicit 变体（仅供 Select/Peek 识别用，未来
-    /// Phase 8+ 修复 `From<PyErr>` 后用户路径才能完整 parity）。
+    /// **已知差异**：当前 `From<PyErr> for ConstructError`
+    /// 统一转 `Generic`，无法保留 Python 侧的 `ExplicitError` 类型信息。
+    /// Rust 不主动构造 Explicit 变体（仅供 Select/Peek 识别用；
+    /// 用户路径的完整 parity 依赖 `From<PyErr>` 的后续改进）。
     #[error("explicit error: {message} at {path}")]
     Explicit {
         /// 错误详情。
@@ -315,8 +310,6 @@ pub enum ConstructError {
     ///
     /// 触发场景：[`crate::nodes::select::SelectNode`] 的 `parse` / `build` 遍历全部
     /// subcons 后无成功者。
-    ///
-    /// Phase 7 引入（设计 §1.2 / §4.2）。
     #[error("select error: {message} at {path}")]
     Select {
         /// 错误详情（如 "no subconstruct matched"）。
@@ -325,12 +318,10 @@ pub enum ConstructError {
         path: String,
     },
 
-    // --- Phase 8 P0 批次（5 个新变体）---
+    // --- 校验类错误（Const / Check / Checksum / Terminated / CancelParsing）---
     /// 常量字段错误：parse 时 subcon 结果与期望值不符，或 build 时 obj 非 None/期望值。
     ///
     /// 对应 Python construct `ConstError`（core.py L74）。
-    ///
-    /// Phase 8.1 引入（设计 §1.1 / §1.2.1）。
     #[error("const error: {message} at {path}")]
     Const {
         /// 错误详情（含期望值与实际值的 repr）。
@@ -342,8 +333,6 @@ pub enum ConstructError {
     /// 断言检查错误：Check 节点的表达式求值为假。
     ///
     /// 对应 Python construct `CheckError`（core.py L84）。
-    ///
-    /// Phase 8.1 引入（设计 §1.1 / §1.2.3）。
     #[error("check error: {message} at {path}")]
     Check {
         /// 错误详情（如 "check failed during parsing"）。
@@ -355,8 +344,6 @@ pub enum ConstructError {
     /// 校验和错误：parse 时 hash 不匹配。
     ///
     /// 对应 Python construct `ChecksumError`（core.py L144）。
-    ///
-    /// Phase 8.5 引入（设计 §3.5 / §3.6）。
     #[error("checksum error: {message} at {path}")]
     Checksum {
         /// 错误详情（含 read / computed 的 hex 编码）。
@@ -368,8 +355,6 @@ pub enum ConstructError {
     /// 终止符错误：Terminated 节点 parse 时 stream 未到 EOF。
     ///
     /// 对应 Python construct `TerminatedError`（core.py L129）。
-    ///
-    /// Phase 8.9 引入（设计 §5.1 / §5.2.1）。
     #[error("terminated error: {message} at {path}")]
     Terminated {
         /// 错误详情（如 "expected end of stream"）。
@@ -384,9 +369,9 @@ pub enum ConstructError {
     /// 代码 `raise CancelParsing()`，跨 FFI 转为 ConstructError::CancelParsing。
     /// schema.rs parse 入口捕获后返回 Py_None（对齐 Python L418 `except: pass`）。
     ///
-    /// # 触发场景限制（PM 决策 D-7）
+    /// # 触发场景限制
     ///
-    /// construct-rs 表达式系统不接 lambda（ADR-006），用户无法在 Computed 表达式
+    /// construct-rs 表达式系统不接 lambda，用户无法在 Computed 表达式
     /// 中 raise CancelParsing。**仅 Python 层用户代码可触发**：
     /// - 用户继承 Adapter 写 `_decode` 内 raise CancelParsing
     /// - 用户在 StructMixin 子类的 `__post_init__` 内 raise
@@ -395,23 +380,21 @@ pub enum ConstructError {
     ///
     /// CancelParsing 被顶层 catch（schema.rs），parse 返回 None；
     /// ExplicitError 不被顶层 catch，正常向上传播为 ConstructError。
-    ///
-    /// Phase 8.10 引入（设计 §6）。
     #[error("cancel parsing at {path}")]
     CancelParsing {
         /// 错误发生的路径（顶层 catch 后丢弃，对齐 Python `pass`）。
         path: String,
     },
 
-    // --- Phase 8 P1+P2 批次（6 个新变体）---
+    // --- Mapping / Validation / Union / Rotation / NamedTuple 错误 ---
     /// 映射错误：Enum/FlagsEnum/Mapping 的 label↔value 查找失败。
     ///
     /// 对应 Python construct `MappingError`（core.py L102）。
     ///
-    /// Phase 8.2 引入（设计 §1.1）。触发场景：
-    /// - Enum build 时 label 不在 encmapping（C-6：bool 边界由编译期处理）
+    /// 触发场景：
+    /// - Enum build 时 label 不在 encmapping（bool 边界由编译期处理）
     /// - FlagsEnum build 时未知 label
-    /// - Mapping parse/build 时 key 不在映射（C-4：包含 TypeError → MappingError 转换）
+    /// - Mapping parse/build 时 key 不在映射（包含 TypeError → MappingError 转换）
     #[error("mapping error: {message} at {path}")]
     Mapping {
         /// 错误详情（含期望与实际值的 repr）。
@@ -424,7 +407,7 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct `ValidationError`（core.py L125）。
     ///
-    /// Phase 8.3 引入（设计 §2.1）。触发场景：
+    /// 触发场景：
     /// - OneOf parse/build 时 obj ∉ valids
     /// - NoneOf parse/build 时 obj ∈ invalids
     /// - Validator 子类的 _validate 返回 False
@@ -439,8 +422,6 @@ pub enum ConstructError {
     /// Union 错误：Union build 时无 subcon 匹配，或 parsefrom 解析失败。
     ///
     /// 对应 Python construct `UnionError`（core.py L130）。
-    ///
-    /// Phase 8.6 引入（设计 §3.1）。
     #[error("union error: {message} at {path}")]
     Union {
         /// 错误详情。
@@ -453,7 +434,7 @@ pub enum ConstructError {
     ///
     /// 对应 Python construct `RotationError`（core.py L138）。
     ///
-    /// Phase 8.12 引入（设计 §5.5）。触发场景：
+    /// 触发场景：
     /// - group < 1
     /// - data.len() % group != 0
     #[error("rotation error: {message} at {path}")]
@@ -467,8 +448,6 @@ pub enum ConstructError {
     /// NamedTuple 错误：inner 非 Struct/Sequence/Array/GreedyRange，或字段提取失败。
     ///
     /// 对应 Python construct `NamedTupleError`（core.py L120）。
-    ///
-    /// Phase 8.11 引入（设计 §6.1.1）。
     #[error("namedtuple error: {message} at {path}")]
     NamedTuple {
         /// 错误详情。
@@ -504,12 +483,12 @@ impl ConstructError {
             | ConstructError::String { message, .. }
             | ConstructError::Explicit { message, .. }
             | ConstructError::Select { message, .. }
-            // Phase 8 P0 新增（4 个有 message 字段；CancelParsing 无 message）。
+            // 校验类（Const / Check / Checksum / Terminated）。
             | ConstructError::Const { message, .. }
             | ConstructError::Check { message, .. }
             | ConstructError::Checksum { message, .. }
             | ConstructError::Terminated { message, .. }
-            // Phase 8 P1+P2 新增（5 个有 message 字段；CancelParsing 无 message）。
+            // Mapping / Validation / Union / Rotation / NamedTuple。
             | ConstructError::Mapping { message, .. }
             | ConstructError::Validation { message, .. }
             | ConstructError::Union { message, .. }
@@ -548,13 +527,13 @@ impl ConstructError {
             | ConstructError::String { path, .. }
             | ConstructError::Explicit { path, .. }
             | ConstructError::Select { path, .. }
-            // Phase 8 P0 新增（5 个变体都携带 path）。
+            // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
             | ConstructError::Const { path, .. }
             | ConstructError::Check { path, .. }
             | ConstructError::Checksum { path, .. }
             | ConstructError::Terminated { path, .. }
             | ConstructError::CancelParsing { path }
-            // Phase 8 P1+P2 新增（5 个变体都携带 path）。
+            // Mapping / Validation / Union / Rotation / NamedTuple。
             | ConstructError::Mapping { path, .. }
             | ConstructError::Validation { path, .. }
             | ConstructError::Union { path, .. }
@@ -615,13 +594,13 @@ impl ConstructError {
             ConstructError::String { .. } => "String",
             ConstructError::Explicit { .. } => "Explicit",
             ConstructError::Select { .. } => "Select",
-            // Phase 8 P0 新增。
+            // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
             ConstructError::Const { .. } => "Const",
             ConstructError::Check { .. } => "Check",
             ConstructError::Checksum { .. } => "Checksum",
             ConstructError::Terminated { .. } => "Terminated",
             ConstructError::CancelParsing { .. } => "CancelParsing",
-            // Phase 8 P1+P2 新增。
+            // Mapping / Validation / Union / Rotation / NamedTuple。
             ConstructError::Mapping { .. } => "Mapping",
             ConstructError::Validation { .. } => "Validation",
             ConstructError::Union { .. } => "Union",
@@ -630,7 +609,7 @@ impl ConstructError {
         }
     }
 
-    /// 在错误路径中插入一个字段段（P0-3 优化：错误路径延迟构建路径）。
+    /// 在错误路径中插入一个字段段（lazy path 模式：错误路径延迟重建）。
     ///
     /// 成功路径不再维护 `Path` 栈（无 `push_field`/`pop`），因此叶节点产生的
     /// 错误路径只含根（`"root"`）。父 `StructNode` 在子节点返回 `Err` 时调用此方法，
@@ -666,7 +645,7 @@ impl ConstructError {
         self.set_path(new_path);
     }
 
-    /// 在错误路径中插入一个数组索引段（4.7：Array 系列 lazy path 迁移）。
+    /// 在错误路径中插入一个数组索引段（Array 系列 lazy path 模式）。
     ///
     /// 与 [`push_path_segment`](Self::push_path_segment) 平行，但插入 `[i]` 而非 `.field`。
     /// 用于 Array 系列节点（Array / GreedyRange / PrefixedArray / RepeatUntil）在
@@ -732,13 +711,13 @@ impl ConstructError {
             | ConstructError::String { path, .. }
             | ConstructError::Explicit { path, .. }
             | ConstructError::Select { path, .. }
-            // Phase 8 P0 新增（5 个变体都含 path）。
+            // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
             | ConstructError::Const { path, .. }
             | ConstructError::Check { path, .. }
             | ConstructError::Checksum { path, .. }
             | ConstructError::Terminated { path, .. }
             | ConstructError::CancelParsing { path }
-            // Phase 8 P1+P2 新增（5 个变体都含 path）。
+            // Mapping / Validation / Union / Rotation / NamedTuple。
             | ConstructError::Mapping { path, .. }
             | ConstructError::Validation { path, .. }
             | ConstructError::Union { path, .. }
@@ -750,7 +729,7 @@ impl ConstructError {
 }
 
 // ---------------------------------------------------------------------------
-// Python 异常类缓存（子任务 1.8）
+// Python 异常类缓存
 // ---------------------------------------------------------------------------
 
 /// 全局缓存的 Python 异常类引用。
@@ -775,72 +754,72 @@ struct ExceptionClasses {
     unresolved_reference_error: Py<PyType>,
     /// 对应 `ConstructError::Generic`。
     generic_construct_error: Py<PyType>,
-    /// `ConstructError` 基类，用于 Phase 2 新增的 Expr* 变体
+    /// `ConstructError` 基类，用于 Expr* 变体
     /// （ExprType / ExprFieldMissing / ExprContext / ExprDivByZero / ExprStackUnderflow）。
     ///
-    /// Phase 2 暂无专门的 ExprError Python 类，统一映射到基类。
-    /// 后续子任务可增加专门的 ExprError 类并在此缓存。
+    /// 当前无专门的 ExprError Python 类，统一映射到基类。
+    /// 若需更精确的错误类型映射，可增加专门的 ExprError 类并在此缓存。
     construct_error_base: Py<PyType>,
-    /// 对应 `ConstructError::Integer`（Phase 3.3）。
+    /// 对应 `ConstructError::Integer`。
     /// Python construct 的 `IntegerError`，用于 BitsInteger 节点的运行时错误。
     integer_error: Py<PyType>,
-    /// 对应 `ConstructError::Padding`（Phase 3.3）。
+    /// 对应 `ConstructError::Padding`。
     /// Python construct 的 `PaddingError`，用于 Padding 字段的非法 pattern 等。
     padding_error: Py<PyType>,
-    /// 对应 `ConstructError::Range`（Phase 4）。
+    /// 对应 `ConstructError::Range`。
     /// Python construct 的 `RangeError`，用于 Array count 无效等。
     range_error: Py<PyType>,
-    /// 对应 `ConstructError::Repeat`（Phase 4）。
+    /// 对应 `ConstructError::Repeat`。
     /// Python construct 的 `RepeatError`，用于 RepeatUntil build 无元素满足终止表达式。
     repeat_error: Py<PyType>,
-    /// 对应 `ConstructError::StopField`（Phase 4）。
+    /// 对应 `ConstructError::StopField`。
     /// Python construct 的 `StopFieldError`，StopIf 早停信号。
     stop_field_error: Py<PyType>,
-    /// 对应 `ConstructError::IndexField`（Phase 4）。
+    /// 对应 `ConstructError::IndexField`。
     /// Python construct 的 `IndexFieldError`，Index 节点 _index 缺失（保留）。
     index_field_error: Py<PyType>,
-    /// 对应 `ConstructError::String`（Phase 6.2）。
+    /// 对应 `ConstructError::String`。
     /// Python construct 的 `StringError`（core.py L54），String 系列构造器的
     /// 编解码失败 / 非 Unicode 输入等。
     string_error: Py<PyType>,
-    /// 对应 `ConstructError::Explicit`（Phase 7）。
+    /// 对应 `ConstructError::Explicit`。
     /// Python construct 的 `ExplicitError`（core.py L89），用户主动抛出的错误
     /// （Select / Peek 不吞掉，直接向上传播）。
     explicit_error: Py<PyType>,
-    /// 对应 `ConstructError::Select`（Phase 7）。
+    /// 对应 `ConstructError::Select`。
     /// Python construct 的 `SelectError`（core.py L109），Select 遍历全部
     /// subcons 后无成功者。
     select_error: Py<PyType>,
-    // === Phase 8 P0 新增（5 个变体）===
-    /// 对应 `ConstructError::Const`（Phase 8.1）。
+    // === 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）===
+    /// 对应 `ConstructError::Const`。
     /// Python construct 的 `ConstError`（core.py L74）。
     const_error: Py<PyType>,
-    /// 对应 `ConstructError::Check`（Phase 8.1）。
+    /// 对应 `ConstructError::Check`。
     /// Python construct 的 `CheckError`（core.py L84）。
     check_error: Py<PyType>,
-    /// 对应 `ConstructError::Checksum`（Phase 8.5）。
+    /// 对应 `ConstructError::Checksum`。
     /// Python construct 的 `ChecksumError`（core.py L144）。
     checksum_error: Py<PyType>,
-    /// 对应 `ConstructError::Terminated`（Phase 8.9）。
+    /// 对应 `ConstructError::Terminated`。
     /// Python construct 的 `TerminatedError`（core.py L129）。
     terminated_error: Py<PyType>,
-    /// 对应 `ConstructError::CancelParsing`（Phase 8.10）。
+    /// 对应 `ConstructError::CancelParsing`。
     /// Python construct 的 `CancelParsing`（core.py L149）。用户主动取消解析。
     cancel_parsing_error: Py<PyType>,
-    // === Phase 8 P1+P2 新增（5 个变体）===
-    /// 对应 `ConstructError::Mapping`（Phase 8.2）。
+    // === Mapping / Validation / Union / Rotation / NamedTuple ===
+    /// 对应 `ConstructError::Mapping`。
     /// Python construct 的 `MappingError`（core.py L102）。
     mapping_error: Py<PyType>,
-    /// 对应 `ConstructError::Validation`（Phase 8.3）。
+    /// 对应 `ConstructError::Validation`。
     /// Python construct 的 `ValidationError`（core.py L125）。
     validation_error: Py<PyType>,
-    /// 对应 `ConstructError::Union`（Phase 8.6）。
+    /// 对应 `ConstructError::Union`。
     /// Python construct 的 `UnionError`（core.py L130）。
     union_error: Py<PyType>,
-    /// 对应 `ConstructError::Rotation`（Phase 8.12）。
+    /// 对应 `ConstructError::Rotation`。
     /// Python construct 的 `RotationError`（core.py L138）。
     rotation_error: Py<PyType>,
-    /// 对应 `ConstructError::NamedTuple`（Phase 8.11）。
+    /// 对应 `ConstructError::NamedTuple`。
     /// Python construct 的 `NamedTupleError`（core.py L120）。
     namedtuple_error: Py<PyType>,
 }
@@ -856,11 +835,11 @@ static EXCEPTIONS: GILOnceCell<ExceptionClasses> = GILOnceCell::new();
 impl ExceptionClasses {
     /// 检查 `cls_ptr` 是否确切等于缓存中某个内置异常类（指针相等比较）。
     ///
-    /// 用于 O3 fast-path 前置条件检查（设计 §1.3.1 U1 第 ③ 条）：仅当 `cls` 是
+    /// 用于 fast-path 前置条件检查：仅当 `cls` 是
     /// 确切内置异常类时，才能安全跳过 Python `__init__` 字节码；用户子类化必须
-    /// 走 `call1` 慢路径，否则会绕过用户的 `__init__` 重写（破坏 BC3 兼容性）。
+    /// 走 `call1` 慢路径，否则会绕过用户的 `__init__` 重写。
     ///
-    /// # 子类化检测方法（按 4.x-REV OBS-2 修订）
+    /// # 子类化检测方法
     ///
     /// 用裸指针相等比较，**而非** `PyType_IsSubtype`：后者检查"A 是否 B 的子类"，
     /// 对任何子类返回 true，不适用于"是否确切等于内置类"判定。指针比较直接判定
@@ -879,10 +858,7 @@ impl ExceptionClasses {
         // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
         // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
         //
-        // Phase 6.2：数组扩容 13 → 14（新增 string_error，设计 §3.8.3）。
-        // Phase 7：数组扩容 14 → 16（新增 explicit_error / select_error，设计 §1.3）。
-        // Phase 8 P0：数组扩容 16 → 21（新增 const/check/checksum/terminated/cancel_parsing）。
-        // Phase 8 P1+P2：数组扩容 21 → 26（新增 mapping/validation/union/rotation/namedtuple）。
+        // 数组覆盖全部 26 个缓存异常类；新增缓存字段时需同步扩容此数组与类型长度。
         let builtin_ptrs: [*mut ffi::PyObject; 26] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
@@ -900,13 +876,13 @@ impl ExceptionClasses {
             self.string_error.as_ptr(),
             self.explicit_error.as_ptr(),
             self.select_error.as_ptr(),
-            // Phase 8 P0 新增。
+            // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
             self.const_error.as_ptr(),
             self.check_error.as_ptr(),
             self.checksum_error.as_ptr(),
             self.terminated_error.as_ptr(),
             self.cancel_parsing_error.as_ptr(),
-            // Phase 8 P1+P2 新增。
+            // Mapping / Validation / Union / Rotation / NamedTuple。
             self.mapping_error.as_ptr(),
             self.validation_error.as_ptr(),
             self.union_error.as_ptr(),
@@ -958,13 +934,13 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         string_error: get("StringError")?,
         explicit_error: get("ExplicitError")?,
         select_error: get("SelectError")?,
-        // Phase 8 P0 新增。
+        // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
         const_error: get("ConstError")?,
         check_error: get("CheckError")?,
         checksum_error: get("ChecksumError")?,
         terminated_error: get("TerminatedError")?,
         cancel_parsing_error: get("CancelParsing")?,
-        // Phase 8 P1+P2 新增。
+        // Mapping / Validation / Union / Rotation / NamedTuple。
         mapping_error: get("MappingError")?,
         validation_error: get("ValidationError")?,
         union_error: get("UnionError")?,
@@ -983,7 +959,7 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
 /// 不存在对应类时（如未来新增变体），返回 `None`，调用方应回退到
 /// [`PyValueError`] 或 [`construct_error`](ExceptionClasses::construct_error) 基类。
 ///
-/// # O2 优化（4.x 错误路径 D 类）
+/// # 借用返回（避免 incref 开销）
 ///
 /// 返回 `&Bound<'py, PyType>` 借用引用，**不**调用 `clone()`（避免 `Py_INCREF`/
 /// `Py_DECREF` 各一次的 ~20ns incref 开销）。借用周期由 `classes` 参数的生命周期
@@ -1001,39 +977,39 @@ fn select_exception_class<'py>(
         ConstructError::Compilation { .. } => &classes.compilation_error,
         ConstructError::UnresolvedReference { .. } => &classes.unresolved_reference_error,
         ConstructError::Generic { .. } => &classes.generic_construct_error,
-        // Phase 2 Expr* 变体暂无专门的 Python 异常类，统一映射到基类 ConstructError。
+        // Expr* 变体无专门的 Python 异常类，统一映射到基类 ConstructError。
         ConstructError::ExprType { .. }
         | ConstructError::ExprFieldMissing { .. }
         | ConstructError::ExprContext { .. }
         | ConstructError::ExprDivByZero { .. }
         | ConstructError::ExprStackUnderflow { .. } => &classes.construct_error_base,
-        // Phase 3.2 BitField：Python construct 无独立 BitFieldError，
-        // 设计 §7.3 规定复用 StreamError（与 Python RestreamedBytesIO.close 缓冲
+        // BitField：Python construct 无独立 BitFieldError，
+        // 复用 StreamError（与 Python RestreamedBytesIO.close 缓冲
         // 清空校验的 StreamError 对齐）。
         ConstructError::BitField { .. } => &classes.stream_error,
-        // Phase 3.3：BitsInteger 运行时错误映射到 Python IntegerError，
+        // BitsInteger 运行时错误映射到 Python IntegerError，
         // 与 Python construct 的 IntegerError 对齐（core.py L49/L1367 等）。
         ConstructError::Integer { .. } => &classes.integer_error,
-        // Phase 3.3：Padding 错误映射到 Python PaddingError（core.py L124/L4146）。
+        // Padding 错误映射到 Python PaddingError（core.py L124/L4146）。
         ConstructError::Padding { .. } => &classes.padding_error,
-        // Phase 4 Array 系列（设计 §3.4.5）。
+        // Array 系列。
         ConstructError::Range { .. } => &classes.range_error,
         ConstructError::Repeat { .. } => &classes.repeat_error,
         ConstructError::StopField { .. } => &classes.stop_field_error,
         ConstructError::IndexField { .. } => &classes.index_field_error,
-        // Phase 6.2：String 系列错误映射到 Python StringError（core.py L54）。
+        // String 系列错误映射到 Python StringError（core.py L54）。
         ConstructError::String { .. } => &classes.string_error,
-        // Phase 7：显式错误映射到 Python ExplicitError（core.py L89）。
+        // 显式错误映射到 Python ExplicitError（core.py L89）。
         ConstructError::Explicit { .. } => &classes.explicit_error,
-        // Phase 7：Select 错误映射到 Python SelectError（core.py L109）。
+        // Select 错误映射到 Python SelectError（core.py L109）。
         ConstructError::Select { .. } => &classes.select_error,
-        // Phase 8 P0 新增（5 个变体）。
+        // 校验与取消类（Const / Check / Checksum / Terminated / CancelParsing）。
         ConstructError::Const { .. } => &classes.const_error,
         ConstructError::Check { .. } => &classes.check_error,
         ConstructError::Checksum { .. } => &classes.checksum_error,
         ConstructError::Terminated { .. } => &classes.terminated_error,
         ConstructError::CancelParsing { .. } => &classes.cancel_parsing_error,
-        // Phase 8 P1+P2 新增（5 个变体）。
+        // Mapping / Validation / Union / Rotation / NamedTuple。
         ConstructError::Mapping { .. } => &classes.mapping_error,
         ConstructError::Validation { .. } => &classes.validation_error,
         ConstructError::Union { .. } => &classes.union_error,
@@ -1064,13 +1040,13 @@ fn build_exception_instance<'py>(
     }
 }
 
-/// O3 fast-path：绕过 Python `__init__` 直接构造异常实例（4.x 错误路径 D 类优化）。
+/// 异常构造 fast-path：绕过 Python `__init__` 直接构造异常实例。
 ///
-/// 仅对 [`ExceptionClasses`] 缓存的 16 个内置异常类启用（指针相等比较判定，见
+/// 仅对 [`ExceptionClasses`] 缓存的 26 个内置异常类启用（指针相等比较判定，见
 /// [`ExceptionClasses::is_builtin_class`]）。用户子类化的异常返回 `None`，由调用方
 /// 走 [`build_exception_instance`] 慢路径以保证用户的 `__init__` 被调用。
 ///
-/// # fast-path 流程（对应设计 §1.3.1 U1-U4）
+/// # fast-path 流程
 ///
 /// 1. `PyType_GenericAlloc(cls, 0)` 分配实例（CPython 固有 ~200ns，不可压缩）。
 /// 2. `PyObject_SetAttrString(instance, "message", msg)` 写入 `message` 属性。
@@ -1078,16 +1054,16 @@ fn build_exception_instance<'py>(
 /// 4. `PyObject_SetAttrString(instance, "args", (message,))` 写入 `args` 字段
 ///    （`BaseException_setattro` 在 CPython 中对 `"args"` 特殊处理，绕过 READONLY
 ///    member 限制——见 `Objects/exceptions.c` 中 `BaseException_setattro`）。
-/// 5. 包装为 `PyErr`（O4：直接构造，避免中间层 incref）。
+/// 5. 包装为 `PyErr`（直接构造，避免中间层 incref）。
 ///
 /// 与慢路径 [`build_exception_instance`] 的行为差异：
 /// - 慢路径：`args = (full,)`，其中 `full = "Error in path X\nY"` 或 `Y`。
 /// - fast-path：`args = (message,)`（不含 path 前缀）。
 /// - `str(e)` 行为一致：Python 侧 `__str__` 已重写为基于 `self.path` + `self.message`
 ///   格式化，不依赖 `args`。
-/// - `repr(e)` / `pickle` 行为差异由设计 §3.1.3 ADR-019 决策 4 显式批准。
+/// - `repr(e)` / `pickle` 行为与慢路径存在已知差异（`args` 不含 path 前缀，属有意设计）。
 ///
-/// # 失败模式（BC6 回退）
+/// # 失败模式（回退到慢路径）
 ///
 /// 任何步骤返回 -1 或 NULL 时：
 /// 1. 调用 `ffi::PyErr_Clear()` 清除挂起的 Python 异常（避免污染后续调用）。
@@ -1104,10 +1080,10 @@ fn build_exception_instance<'py>(
 /// 最后 `Bound::from_owned_ptr_or_opt` 消费 instance 指针（不 incref），所有权
 /// 转移给 `Bound<PyAny>`，再转移给 `PyErr`。
 ///
-/// # 安全性（按设计 §1.3.1 unsafe CPython C API 安全前置条件列表）
+/// # 安全性
 ///
-/// 内部 4 个 `unsafe` 块各对应 U1-U4 之一，每个块的内联 `SAFETY` 注释列出前置条件
-/// + 失败模式 + BC6 回退路径。函数本身是 safe（所有 unsafe 操作均被前置条件检查包裹）。
+/// 内部 4 个 `unsafe` 块各自标注前置条件，每个块的内联 `SAFETY` 注释列出前置条件
+/// + 失败模式 + 慢路径回退。函数本身是 safe（所有 unsafe 操作均被前置条件检查包裹）。
 fn try_fast_path_alloc<'py>(
     py: Python<'py>,
     cls: &Bound<'py, PyType>,
@@ -1115,23 +1091,23 @@ fn try_fast_path_alloc<'py>(
     message: &str,
     path: Option<&str>,
 ) -> Option<PyErr> {
-    // U1 前置条件 ③：确切类型为内置类（指针相等比较，非 PyType_IsSubtype）。
+    // 前置条件：确切类型为内置类（指针相等比较，非 PyType_IsSubtype）。
     // 用户子类化（cls != 任何内置类）→ 返回 None，走慢路径。
     if !classes.is_builtin_class(cls.as_ptr()) {
         return None;
     }
 
-    // SAFETY: 以下 unsafe 块逐项满足 U1-U4 前置条件。
+    // SAFETY: 以下 unsafe 块逐项满足各自注释标明的前置条件。
     // - GIL 持有：py: Python<'py> token 在作用域内（FFI 入口已持 GIL）。
     // - cls 有效：来自 Bound<PyType>（pyo3 类型保证）。
     // - cls 确切为内置类：上面 is_builtin_class 指针比较已验证。
     unsafe {
-        // U1: 分配实例。
+        // 步骤 1：分配实例。
         // 前置条件：GIL 持有；cls 是有效 PyTypeObject；cls 是确切内置类。
         // 失败模式：返回 NULL + PyErr_MemoryError（仅 OOM），下面 is_null() 分支处理。
         let instance: *mut ffi::PyObject = ffi::PyType_GenericAlloc(cls.as_type_ptr(), 0);
         if instance.is_null() {
-            // BC6: 清除挂起的异常，回退到慢路径。
+            // 清除挂起的异常，回退到慢路径。
             ffi::PyErr_Clear();
             return None;
         }
@@ -1139,12 +1115,12 @@ fn try_fast_path_alloc<'py>(
         // 构造 message PyString（new_bound 返回 owned Bound，refcount=1）。
         let msg_bound: Bound<'py, PyString> = PyString::new_bound(py, message);
 
-        // U2: 设置 message 属性。
-        // 前置条件：instance 是 U1 返回的非空对象；msg_bound.as_ptr() 是有效 PyString。
+        // 步骤 2：设置 message 属性。
+        // 前置条件：instance 是步骤 1 返回的非空对象；msg_bound.as_ptr() 是有效 PyString。
         // 失败模式：返回 -1（极端，如内置类被 monkey patch __setattr__），下面分支处理。
         if ffi::PyObject_SetAttrString(instance, c_str!("message").as_ptr(), msg_bound.as_ptr()) < 0
         {
-            // BC6: 清除异常 + 释放已分配实例，回退慢路径。
+            // 清除异常 + 释放已分配实例，回退慢路径。
             ffi::PyErr_Clear();
             ffi::Py_DecRef(instance);
             return None;
@@ -1159,9 +1135,9 @@ fn try_fast_path_alloc<'py>(
             None => ffi::Py_None(),
         };
 
-        // U3: 设置 path 属性。
-        // 前置条件：instance 是 U1 返回的非空对象；path_ptr 是有效 PyString 或 Py_None。
-        // 失败模式：同 U2。
+        // 步骤 3：设置 path 属性。
+        // 前置条件：instance 是步骤 1 返回的非空对象；path_ptr 是有效 PyString 或 Py_None。
+        // 失败模式：同步骤 2。
         if ffi::PyObject_SetAttrString(instance, c_str!("path").as_ptr(), path_ptr) < 0 {
             ffi::PyErr_Clear();
             ffi::Py_DecRef(instance);
@@ -1170,7 +1146,7 @@ fn try_fast_path_alloc<'py>(
         // 引用计数：path_owned 的 PyString 现 refcount=2（path_owned + instance.path）；
         // 若为 Py_None，Py_None 全局 refcount +1（由 instance 持有）。
 
-        // U4: 设置 args = (message,)。
+        // 步骤 4：设置 args = (message,)。
         // BaseException_setattro 在 CPython 中对 "args" 特殊处理（虽 member 标记 READONLY）：
         //   - 检查 name == &_Py_ID(args)，调 Py_XSETREF(self->args, value)。
         //   - 调用方无需操作 C struct 字段。
@@ -1187,7 +1163,7 @@ fn try_fast_path_alloc<'py>(
         }
         // 引用计数：args_tuple 现 refcount=2（args_tuple + instance.args）。
 
-        // O4: 直接构造 PyErr。Bound::from_owned_ptr_or_opt 消费 instance 指针
+        // 直接构造 PyErr。Bound::from_owned_ptr_or_opt 消费 instance 指针
         // （不 incref），所有权转移给 Bound<PyAny>。再 PyErr::from_value_bound
         // 包装（不 incref，转移所有权）。
         let bound_any: Bound<'py, PyAny> = Bound::from_owned_ptr_or_opt(py, instance)?.into_any();
@@ -1206,20 +1182,20 @@ fn try_fast_path_alloc<'py>(
 /// 无论映射到哪个 Python 异常类，错误消息的格式都与 `construct._errors.ConstructError`
 /// 一致：path 非 None 时为 `"Error in path {path}\n{message}"`，否则为 `{message}`。
 ///
-/// ## 4.x 错误路径 D 类优化（O1-O4）
+/// ## 错误路径性能优化
 ///
-/// 优化路径（设计 §1.3）：
+/// 优化路径：
 ///
-/// | 优化项 | 目标 FFI 来源 | 实现 |
-/// |--------|--------------|------|
-/// | O1 lazy 字符串 | F1 | 借用 `&err` 进入 with_gil 闭包，避免 `to_string()` 预格式化 |
-/// | O2 避免 incref | F5 | `select_exception_class` 返回 `&Bound<'py, PyType>`，不 `clone()` |
-/// | O3 绕过 __init__ | F6+F7 | `try_fast_path_alloc` 用 raw CPython C API 直接构造 |
-/// | O4 PyErr 直接构造 | F8 | `PyErr::from_value_bound` 一步构造，无中间层 |
+/// | 优化项 | 实现 |
+/// |--------|------|
+/// | lazy 字符串 | 借用 `&err` 进入 with_gil 闭包，避免 `to_string()` 预格式化 |
+/// | 避免 incref | `select_exception_class` 返回 `&Bound<'py, PyType>`，不 `clone()` |
+/// | 绕过 __init__ | `try_fast_path_alloc` 用 raw CPython C API 直接构造 |
+/// | PyErr 直接构造 | `PyErr::from_value_bound` 一步构造，无中间层 |
 ///
 /// 慢路径（[`build_exception_instance`]）保留作为：
-/// - 用户子类化异常的兼容路径（BC3）
-/// - fast-path 失败的回退路径（BC6）
+/// - 用户子类化异常的兼容路径
+/// - fast-path 失败的回退路径
 ///
 /// ## GIL 获取
 ///
@@ -1227,11 +1203,11 @@ fn try_fast_path_alloc<'py>(
 /// 触发（成功路径零成本），开销可接受（~微秒级）。
 impl From<ConstructError> for PyErr {
     fn from(err: ConstructError) -> Self {
-        // O1: 借用 err，避免在 with_gil 闭包外预格式化 message/path。
+        // 借用 err，避免在 with_gil 闭包外预格式化 message/path。
         // 闭包捕获 &err，借用其 message()/path() 返回的 &str（零拷贝）。
         Python::with_gil(|py| match EXCEPTIONS.get(py) {
             Some(classes) => {
-                // O1: 直接借用 err.message() / err.path()，不调 to_string()。
+                // 直接借用 err.message() / err.path()，不调 to_string()。
                 // 对于无单一 message 字段的结构化变体（ExprType/ExprFieldMissing/
                 // ExprStackUnderflow/StopField），使用 Display（to_string）作为
                 // 完整消息，path=None（避免重复，path 已嵌入 Display 输出）。
@@ -1245,19 +1221,19 @@ impl From<ConstructError> for PyErr {
                     }
                 };
 
-                // O2: 借用类引用，无 incref。
+                // 借用类引用，无 incref。
                 let cls: &Bound<'_, PyType> = select_exception_class(&err, classes, py);
 
-                // O3 + O4: 尝试 fast-path。仅内置类生效；用户子类化 / fast-path 失败
+                // 尝试 fast-path。仅内置类生效；用户子类化 / fast-path 失败
                 // 时返回 None，落到下面的慢路径。
                 if let Some(pyerr) = try_fast_path_alloc(py, cls, classes, message, path) {
                     return pyerr;
                 }
 
-                // 慢路径（BC3 用户子类化 / BC6 fast-path 失败）：原有 call1 实现。
+                // 慢路径（用户子类化 / fast-path 失败）：call1 实现。
                 match build_exception_instance(py, cls, message, path) {
                     Ok(instance) => PyErr::from_value_bound(instance),
-                    // BC1 fallback：异常实例构造失败，回退到 PyValueError + full_message。
+                    // fallback：异常实例构造失败，回退到 PyValueError + full_message。
                     Err(_) => PyValueError::new_err(err.full_message()),
                 }
             }
@@ -1266,7 +1242,7 @@ impl From<ConstructError> for PyErr {
     }
 }
 
-/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（P0-4 优化；Phase 8.10 CancelParsing 识别）。
+/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（含 CancelParsing 识别）。
 ///
 /// 使 `dict.set_item(...)?` 等返回 `PyResult` 的 C API 调用能通过 `?` 直接传播，
 /// 无需在每个调用点写 `map_err` 闭包。错误上下文（字段名、路径）由上层
@@ -1274,7 +1250,7 @@ impl From<ConstructError> for PyErr {
 ///
 /// 对齐 pydantic-core 的 `ValResult: From<PyErr>`（model_fields.rs:363）。
 ///
-/// # Phase 8.10 CancelParsing 识别（设计 §6.2.2）
+/// # CancelParsing 识别
 ///
 /// 用户从 Python 代码 `raise CancelParsing()` 时，pyo3 把 PyErr 传给 Rust。
 /// 本实现检查 PyErr 的类型是否为缓存的 `cancel_parsing_error`（指针相等），
@@ -1283,7 +1259,7 @@ impl From<ConstructError> for PyErr {
 impl From<PyErr> for ConstructError {
     fn from(e: PyErr) -> Self {
         Python::with_gil(|py| {
-            // Phase 8.10：识别 CancelParsing（指针相等比较，与 is_builtin_class 同模式）。
+            // 识别 CancelParsing（指针相等比较，与 is_builtin_class 同模式）。
             if let Some(classes) = EXCEPTIONS.get(py) {
                 let err_type_ptr = e.get_type_bound(py).as_ptr();
                 if err_type_ptr == classes.cancel_parsing_error.as_ptr() {
@@ -1555,13 +1531,11 @@ mod tests {
             "class StringError(ConstructError): pass\n",
             "class ExplicitError(ConstructError): pass\n",
             "class SelectError(ConstructError): pass\n",
-            // Phase 8 P0 新增。
             "class ConstError(ConstructError): pass\n",
             "class CheckError(ConstructError): pass\n",
             "class ChecksumError(ConstructError): pass\n",
             "class TerminatedError(ConstructError): pass\n",
             "class CancelParsing(ConstructError): pass\n",
-            // Phase 8 P1+P2 新增。
             "class MappingError(ConstructError): pass\n",
             "class ValidationError(ConstructError): pass\n",
             "class UnionError(ConstructError): pass\n",
@@ -1595,13 +1569,11 @@ mod tests {
             string_error: get("StringError"),
             explicit_error: get("ExplicitError"),
             select_error: get("SelectError"),
-            // Phase 8 P0 新增。
             const_error: get("ConstError"),
             check_error: get("CheckError"),
             checksum_error: get("ChecksumError"),
             terminated_error: get("TerminatedError"),
             cancel_parsing_error: get("CancelParsing"),
-            // Phase 8 P1+P2 新增。
             mapping_error: get("MappingError"),
             validation_error: get("ValidationError"),
             union_error: get("UnionError"),
@@ -1703,7 +1675,7 @@ mod tests {
     }
 
     // ======================================================================
-    // push_path_segment（P0-3：错误路径延迟重建）
+    // push_path_segment（错误路径延迟重建）
     // ======================================================================
 
     #[test]
@@ -1778,7 +1750,7 @@ mod tests {
 
     #[test]
     fn push_path_segment_on_expr_errors_sets_path() {
-        // SF-2 修复：Expr* 变体现在携带 path 字段，push_path_segment 能正确写入。
+        // Expr* 变体携带 path 字段，push_path_segment 能正确写入。
         let mut err = ConstructError::ExprFieldMissing {
             field: "count".to_string(),
             path: String::new(),
@@ -1801,7 +1773,7 @@ mod tests {
     }
 
     // ======================================================================
-    // push_path_index（4.7：Array 系列 lazy path 迁移）
+    // push_path_index（Array 系列 lazy path 模式）
     // ======================================================================
 
     #[test]
@@ -1934,7 +1906,7 @@ mod tests {
     }
 
     // ======================================================================
-    // From<PyErr> for ConstructError（P0-4：set_item 裸 ?）
+    // From<PyErr> for ConstructError（set_item 裸 ? 直接传播）
     // ======================================================================
 
     #[test]
@@ -1967,14 +1939,14 @@ mod tests {
     }
 
     // ======================================================================
-    // 4.x 错误路径 D 类优化（O1-O4）测试
+    // 错误路径 fast-path 测试
     // ======================================================================
 
     /// 辅助：在 Python 中定义对齐生产 `_errors.py` 行为的异常层次。
     ///
     /// 与现有 [`build_test_classes`] 不同，本辅助在 ConstructError 上同时实现
     /// `__init__` 与 `__str__`（与 `construct-rs/python/construct/_errors.py:46-58` 一致），
-    /// 用于验证 O3 fast-path 绕过 `__init__` 后 `__str__` 行为正确（依赖
+    /// 用于验证 fast-path 绕过 `__init__` 后 `__str__` 行为正确（依赖
     /// `self.path` + `self.message` 而非 `args`）。
     fn build_test_classes_aligned(py: Python<'_>) -> ExceptionClasses {
         let code = concat!(
@@ -2006,13 +1978,11 @@ mod tests {
             "class StringError(ConstructError): pass\n",
             "class ExplicitError(ConstructError): pass\n",
             "class SelectError(ConstructError): pass\n",
-            // Phase 8 P0 新增（与 build_test_classes 同步）。
             "class ConstError(ConstructError): pass\n",
             "class CheckError(ConstructError): pass\n",
             "class ChecksumError(ConstructError): pass\n",
             "class TerminatedError(ConstructError): pass\n",
             "class CancelParsing(ConstructError): pass\n",
-            // Phase 8 P1+P2 新增（与 build_test_classes 同步）。
             "class MappingError(ConstructError): pass\n",
             "class ValidationError(ConstructError): pass\n",
             "class UnionError(ConstructError): pass\n",
@@ -2046,13 +2016,11 @@ mod tests {
             string_error: get("StringError"),
             explicit_error: get("ExplicitError"),
             select_error: get("SelectError"),
-            // Phase 8 P0 新增。
             const_error: get("ConstError"),
             check_error: get("CheckError"),
             checksum_error: get("ChecksumError"),
             terminated_error: get("TerminatedError"),
             cancel_parsing_error: get("CancelParsing"),
-            // Phase 8 P1+P2 新增。
             mapping_error: get("MappingError"),
             validation_error: get("ValidationError"),
             union_error: get("UnionError"),
@@ -2061,14 +2029,14 @@ mod tests {
         }
     }
 
-    /// O3（设计 §1.3.1 U1 前置条件 ③）：`is_builtin_class` 指针比较仅匹配确切内置类。
+    /// `is_builtin_class` 指针比较仅匹配确切内置类（不匹配用户子类）。
     #[test]
     fn is_builtin_class_matches_cached_ptrs_only() {
         ensure_python();
         Python::with_gil(|py| {
             let classes = build_test_classes(py);
 
-            // 内置类的指针应被识别（13 个全部）。
+            // 内置类的指针应被识别。
             assert!(
                 classes.is_builtin_class(classes.stream_error.as_ptr()),
                 "StreamError 应被识别为内置类"
@@ -2091,8 +2059,8 @@ mod tests {
         });
     }
 
-    /// O3 fast-path：内置 StreamError + path → 返回 Some(PyErr)，
-    /// 实例的 message/path/args 属性正确设置（按设计 §1.3 步骤 1-5）。
+    /// fast-path：内置 StreamError + path → 返回 Some(PyErr)，
+    /// 实例的 message/path/args 属性正确设置。
     #[test]
     fn try_fast_path_alloc_builtin_stream_with_path() {
         ensure_python();
@@ -2119,7 +2087,7 @@ mod tests {
                 .expect("extract path");
             assert_eq!(path, "root.x");
 
-            // args = (message,) 而非 (full,)（设计 §3.1.3 ADR-019 决策 4）。
+            // args = (message,) 而非 (full,)（有意设计，str(e) 不依赖 args）。
             let args_repr: String = value
                 .getattr("args")
                 .expect("get args")
@@ -2134,7 +2102,7 @@ mod tests {
         });
     }
 
-    /// O3 fast-path：内置 CompilationError + path=None → 实例 path 属性为 None。
+    /// fast-path：内置 CompilationError + path=None → 实例 path 属性为 None。
     #[test]
     fn try_fast_path_alloc_builtin_compilation_with_none_path() {
         ensure_python();
@@ -2162,7 +2130,7 @@ mod tests {
         });
     }
 
-    /// O3 fast-path：所有 13 个内置异常类都被识别（覆盖测试，避免遗漏某个类）。
+    /// fast-path：全部缓存的内置异常类都被识别（覆盖测试，避免遗漏某个类）。
     #[test]
     fn try_fast_path_alloc_all_builtin_classes_recognized() {
         ensure_python();
@@ -2198,7 +2166,7 @@ mod tests {
         });
     }
 
-    /// O3 + T6（设计 §1.4.4 R2 + 4.x-REV OBS-3）：用户子类化的异常返回 None，
+    /// 用户子类化的异常返回 None，
     /// 信号调用方走慢路径（call1）以调用用户的 __init__。
     #[test]
     fn try_fast_path_alloc_user_subclass_returns_none() {
@@ -2227,15 +2195,15 @@ mod tests {
             let result = try_fast_path_alloc(py, &user_cls, &classes, "msg", Some("p"));
             assert!(
                 result.is_none(),
-                "fast-path 必须对用户子类返回 None，否则 __init__ 不被调用（BC3 违反）"
+                "fast-path 必须对用户子类返回 None，否则 __init__ 不被调用（破坏行为兼容）"
             );
         });
     }
 
-    /// T6（设计 §5.1 + 4.x-REV OBS-3）：用户子类化时，慢路径 [`build_exception_instance`]
+    /// 用户子类化时，慢路径 [`build_exception_instance`]
     /// 调用用户的 __init__（self.extra 被正确设置）。
     ///
-    /// 这是 BC3 兼容性验证：子类化异常的用户自定义行为不被破坏。
+    /// 这是行为兼容性验证：子类化异常的用户自定义行为不被破坏。
     #[test]
     fn slow_path_invokes_user_subclass_init() {
         ensure_python();
@@ -2280,7 +2248,7 @@ mod tests {
         });
     }
 
-    /// O3 行为对齐：fast-path 实例的 `str(e)` 与慢路径一致（依赖 __str__ 重写，
+    /// 行为对齐：fast-path 实例的 `str(e)` 与慢路径一致（依赖 __str__ 重写，
     /// 不依赖 args）。
     #[test]
     fn fast_path_str_matches_slow_path_when_path_set() {
@@ -2317,8 +2285,8 @@ mod tests {
         });
     }
 
-    /// O3 行为差异（设计 §3.1.3 决策 4 + Consequences）：fast-path 的 args=(message,)
-    /// 而慢路径的 args=(full,)。repr 因此不同，但设计显式批准此差异。
+    /// 行为差异（有意设计）：fast-path 的 args=(message,)
+    /// 而慢路径的 args=(full,)。repr 因此不同，str(e) 保持一致。
     #[test]
     fn fast_path_args_differs_from_slow_path_by_design() {
         ensure_python();
@@ -2350,7 +2318,7 @@ mod tests {
             // 两者应不同（args 内容不同）。
             assert_ne!(
                 fast_args, slow_args,
-                "fast-path args 应与慢路径不同（设计显式批准）"
+                "fast-path args 应与慢路径不同（有意设计）"
             );
             assert_eq!(fast_args, "('boom',)");
             assert!(slow_args.contains("Error in path root.x"));

@@ -1,7 +1,4 @@
-"""bench 报告生成（设计 §2.7）。
-
-设计依据：docs/design/基础设施/测试框架设计.md §2.7
-复用 benchmark.py 的 format_results_table + check_gates 模式。
+"""bench 报告生成。
 
 公开 API：
     - BenchReport（dataclass）+ to_json / to_markdown / write
@@ -53,7 +50,7 @@ class BenchReport:
         }, indent=2, ensure_ascii=False)
 
     def to_markdown(self):
-        """序列化为 Markdown 表格（人类可读，用于 PR 描述 / 报告附件）。"""
+        """序列化为 Markdown 表格（人类可读报告）。"""
         lines = ["# Bench Report", ""]
         lines.append(f"- **Timestamp**: {self.timestamp}")
         lines.append(f"- **Python**: {self.environment.get('python_version', '?')}")
@@ -87,7 +84,7 @@ class BenchReport:
 
 
 def check_gates(report, gates):
-    """性能门禁检查（参考 benchmark.py check_gates 函数）。
+    """性能门禁检查。
 
     参数：
         report: BenchReport 实例
@@ -117,7 +114,7 @@ def check_gates(report, gates):
 
 
 def format_results_table(results):
-    """格式化对比表（参考 benchmark.py format_results_table）。
+    """格式化对比表。
 
     列：场景 | impl | median ns | mean ± stdev | min | max | speedup
     """

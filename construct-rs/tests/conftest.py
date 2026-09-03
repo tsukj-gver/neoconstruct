@@ -1,15 +1,12 @@
 """pytest 全局配置 + session 级共享 fixtures。
 
-设计依据：docs/design/基础设施/测试框架设计.md §2.1（conftest.py 扩展契约）
-
 职责：
 1. sys.path 操纵：确保 construct-rs 包优先于 site-packages 中的同名 Python 包
    （基准测试需要安装 Python 原版 ``construct==2.10.70`` 作为绝对基线，与
    construct-rs 同名，安装在 site-packages 下。pytest 默认把 site-packages
    放在 sys.path 前部，会导致 ``import construct`` 误命中 Python 原版）。
 2. venv / 路径 fixtures：供 parity helper（子进程隔离）与 bench runner 复用
-3. 共享 fixtures：测试数据目录 / 临时文件 / 编码参数化（v2 从原 _helpers/fixtures.py
-   合并到此处，pytest 自动发现惯例，消除"需显式 import 才生效"的隐性依赖）
+3. 共享 fixtures：测试数据目录 / 临时文件 / 编码参数化
 """
 
 from __future__ import annotations
@@ -106,7 +103,7 @@ def py_python() -> str:
 def venv_pair(rs_python, py_python) -> dict:
     """聚合 fixture：返回 venv 配置字典。
 
-    **硬性契约（设计 v2 硬性-1）**：dict 的 key 名与 ``run_parity_case`` /
+    **硬性契约**：dict 的 key 名与 ``run_parity_case`` /
     ``BenchRunner.__init__`` 的形参名一一对齐，调用方可直接
     ``run_parity_case(impl, case_id, case_definitions, **venv_pair)`` 解包。
 
@@ -120,7 +117,7 @@ def venv_pair(rs_python, py_python) -> dict:
     }
 
 
-# ===== 共享 fixtures（v2 从原 _helpers/fixtures.py 合并，pytest 自动发现） =====
+# ===== 共享 fixtures（pytest 自动发现） =====
 
 @pytest.fixture(scope="session")
 def test_data_dir() -> Path:
@@ -144,12 +141,11 @@ def tmp_binary_file(tmp_path) -> Path:
     "utf8", "utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be", "ascii",
 ])
 def encoding(request) -> str:
-    """编码参数化 fixture，Phase 6.2 Strings parity 用。
+    """编码参数化 fixture，Strings parity 用。
 
-    注意（整体性，REV 检视提到）：6.2 Strings DEV 实施时需校验这些 encoding
-    字符串与 Python construct / construct-rs 侧的编码名解析兼容（如 "utf8"
-    vs "utf-8"）。Python ``bytes.decode("utf8")`` 可接受，但 construct-rs
-    侧需确认。
+    注意：使用这些 encoding 字符串时需校验其与 Python construct /
+    construct-rs 侧的编码名解析兼容（如 "utf8" vs "utf-8"）。
+    Python ``bytes.decode("utf8")`` 可接受，但 construct-rs 侧需确认。
     """
     return request.param
 

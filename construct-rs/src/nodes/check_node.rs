@@ -1,6 +1,5 @@
 //! CheckNode：断言检查节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §1.2.3。
 //! Python 参考：`construct/construct/core.py` `Check`（L3081-3129）。
 //!
 //! ## 行为概述
@@ -8,10 +7,10 @@
 //! Check 是 Construct 非包装模式的 RO 字段：parse/build 求值表达式，非真抛 CheckError。
 //! sizeof 恒为 0（不消费字节）。
 //!
-//! ## 表达式约束（CK-5 / ADR-014）
+//! ## 表达式约束
 //!
-//! func 必须是 Phase 2 表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
-//! **不接收 Python lambda/callable**（与 RebuildNode RB-5 同硬约束）。
+//! func 必须是字段表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
+//! **不接收 Python lambda/callable**（与 RebuildNode 同约束）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -31,8 +30,8 @@ use super::Construct;
 ///
 /// # 表达式约束
 ///
-/// func 必须是 Phase 2 表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
-/// **不接收 Python lambda/callable**（ADR-014 硬约束）。
+/// func 必须是字段表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram。
+/// **不接收 Python lambda/callable**。
 #[derive(Debug)]
 pub struct CheckNode {
     /// 待求值的断言表达式。
@@ -141,12 +140,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — CK-1 / CK-2
+    // parse — 常量真/假
     // ======================================================================
 
     #[test]
     fn parse_passing_returns_none() {
-        // CK-1: Check(1).parse(...) → None（const 1 视为真）
+        // Check(1).parse(...) → None（const 1 视为真）
         with_py(|py| {
             let func = ExprProgram::new(vec![ExprOp::Const(1)]);
             let node = CheckNode::new(func);
@@ -162,7 +161,7 @@ mod tests {
 
     #[test]
     fn parse_failing_raises_check_error() {
-        // CK-2: Check(0).parse(...) → CheckError（const 0 视为假）
+        // Check(0).parse(...) → CheckError（const 0 视为假）
         with_py(|py| {
             let func = ExprProgram::new(vec![ExprOp::Const(0)]);
             let node = CheckNode::new(func);
@@ -216,12 +215,12 @@ mod tests {
     }
 
     // ======================================================================
-    // build — CK-3
+    // build — 求值断言
     // ======================================================================
 
     #[test]
     fn build_failing_raises_check_error() {
-        // CK-3: Check(0).build(...) → CheckError
+        // Check(0).build(...) → CheckError
         with_py(|py| {
             let func = ExprProgram::new(vec![ExprOp::Const(0)]);
             let node = CheckNode::new(func);
@@ -257,7 +256,7 @@ mod tests {
     }
 
     // ======================================================================
-    // sizeof — CK-4
+    // sizeof — 恒为 0
     // ======================================================================
 
     #[test]

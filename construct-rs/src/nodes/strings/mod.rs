@@ -1,22 +1,20 @@
-//! Strings 子模块（Phase 6.2）：6 个 String Node + 公共编码层。
-//!
-//! 设计依据：`docs/design/模块设计/模块设计-Strings.md` v2。
+//! Strings 子模块：6 个 String Node + 公共编码层。
 //!
 //! # 模块组织
 //!
 //! - [`encoding`]：[`Encoding`] enum（编译期 6 变体）+ decode/encode helper
-//!   （utf8/ascii 安全路径 + utf16/32 raw FFI，§2）。
-//! - [`c_string`]：[`CStringNode`]（§3.1）。
-//! - [`greedy_string`]：[`GreedyStringNode`]（§3.4）。
-//! - [`padded_string`]：[`PaddedStringNode`]（§3.5）。
-//! - [`pascal_string`]：[`PascalStringNode`]（§3.6）。
-//! - [`null_terminated`]：[`NullTerminatedNode`]（§3.2）。
-//! - [`null_stripped`]：[`NullStrippedNode`]（§3.3）。
+//!   （utf8/ascii 安全路径 + utf16/32 raw FFI）。
+//! - [`c_string`]：[`CStringNode`]。
+//! - [`greedy_string`]：[`GreedyStringNode`]。
+//! - [`padded_string`]：[`PaddedStringNode`]。
+//! - [`pascal_string`]：[`PascalStringNode`]。
+//! - [`null_terminated`]：[`NullTerminatedNode`]。
+//! - [`null_stripped`]：[`NullStrippedNode`]。
 //!
 //! # 公共 helper
 //!
 //! [`rstrip_pad`] 由 [`null_stripped::NullStrippedNode`] 与
-//! [`padded_string::PaddedStringNode`] 共享（设计 §3.3.3 / §3.5.3，§10.1 R12）。
+//! [`padded_string::PaddedStringNode`] 共享。
 
 pub mod c_string;
 pub mod encoding;
@@ -34,7 +32,7 @@ pub use null_terminated::NullTerminatedNode;
 pub use padded_string::PaddedStringNode;
 pub use pascal_string::PascalStringNode;
 
-/// 右剥离 pad 字节串（设计 §3.3.3 / §3.5.3）。
+/// 右剥离 pad 字节串。
 ///
 /// 对齐 Python construct `NullStripped._parse` 的 rstrip 算法（core.py L5156-5165）：
 /// - `unit == 1`：单字节 pad，从末尾反复剥离匹配字节（等价 `data.rstrip(pad)`）。

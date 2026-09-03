@@ -1,6 +1,5 @@
 //! UnionNode：联合体节点（多视角 parse）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §3。
 //! Python 参考：`construct/construct/core.py` `Union`（L3641-3800）。
 //!
 //! ## 行为概述
@@ -14,13 +13,13 @@
 //! - build：context nesting；遍历 subcons，找首个 name in obj 的 → build 它，返回
 //! - sizeof：永远 Err（"Union builds depending on actual object dict, size is unknown"）
 //!
-//! ## 已知 parity 限制（C-3，设计 §3.4 / §7.5）
+//! ## 已知 parity 限制
 //!
 //! 1. `context.update(obj)`：Python L3732 把整个 obj dict 合并进 context，
 //!    construct-rs child_ctx 仅 set_field_at 被选中的单个 subcon 字段。
-//!    跨 subcon 引用的 build 用例受此限制（UN-15）。
+//!    跨 subcon 引用的 build 用例受此限制。
 //! 2. `flagbuildnone`：Python L3734-3735 对 flagbuildnone=True 的 subcon 用
-//!    `obj.get(name, None)`（允许 obj 缺键），construct-rs 跳过缺键 subcon（UN-14）。
+//!    `obj.get(name, None)`（允许 obj 缺键），construct-rs 跳过缺键 subcon。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -35,7 +34,6 @@ use super::{Construct, Node};
 
 /// parsefrom 的解析结果（编译期从用户输入编译）。
 ///
-/// 详见设计 §3.2。
 #[derive(Debug)]
 pub enum ParseFrom {
     /// 留在 fallback 位置（Python `parsefrom=None`）。
@@ -275,7 +273,7 @@ mod tests {
 
     #[test]
     fn parse_parsefrom_none_keeps_fallback() {
-        // UN-1: Union(None, raw=Bytes(2), ints=Bytes(2)).parse(b"AB")
+        // Union(None, raw=Bytes(2), ints=Bytes(2)).parse(b"AB")
         //      → dict(raw=b"AB", ints=b"AB")；stream 留在 0（fallback）
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::None);
@@ -300,7 +298,7 @@ mod tests {
 
     #[test]
     fn parse_parsefrom_index_seeks_forward() {
-        // UN-2: Union(0, ...).parse(b"AB") → stream seek 到 forwards[0]=2
+        // Union(0, ...).parse(b"AB") → stream seek 到 forwards[0]=2
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::Index(0));
             let mut stream = ParseStream::new(b"AB");
@@ -314,7 +312,7 @@ mod tests {
 
     #[test]
     fn parse_parsefrom_name() {
-        // UN-3: Union("ints", ...).parse(b"AB") → stream seek 到 forwards[1]=2
+        // Union("ints", ...).parse(b"AB") → stream seek 到 forwards[1]=2
         with_py(|py| {
             let parsefrom = ParseFrom::Name {
                 name: PyString::new_bound(py, "ints").unbind(),
@@ -332,7 +330,7 @@ mod tests {
 
     #[test]
     fn parse_parsefrom_index_out_of_range_raises() {
-        // UN-5: Union(99, ...).parse → Union error
+        // Union(99, ...).parse → Union error
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::Index(99));
             let mut stream = ParseStream::new(b"AB");
@@ -347,7 +345,7 @@ mod tests {
 
     #[test]
     fn build_first_matching() {
-        // UN-7: build(dict(raw=b"AB")) → build raw subcon → b"AB"
+        // build(dict(raw=b"AB")) → build raw subcon → b"AB"
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::None);
             let obj = py.eval_bound("dict(raw=b'AB')", None, None).expect("dict");
@@ -362,7 +360,7 @@ mod tests {
 
     #[test]
     fn build_unknown_name_raises() {
-        // UN-8: build(dict(unknown=1)) → Union error
+        // build(dict(unknown=1)) → Union error
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::None);
             let obj = py.eval_bound("dict(unknown=1)", None, None).expect("dict");
@@ -378,7 +376,7 @@ mod tests {
 
     #[test]
     fn build_non_dict_raises() {
-        // UN-9: build(None) → Union error
+        // build(None) → Union error
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::None);
             let obj = py.eval_bound("None", None, None).expect("None");
@@ -394,7 +392,7 @@ mod tests {
 
     #[test]
     fn sizeof_always_raises() {
-        // UN-10: sizeof → Err（SizeofError 等价）
+        // sizeof → Err（SizeofError 等价）
         with_py(|py| {
             let node = make_union_node(py, ParseFrom::None);
             let ctx = Context::placeholder(py);

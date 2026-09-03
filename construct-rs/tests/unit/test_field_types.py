@@ -1,4 +1,4 @@
-"""测试 Python 侧 field 函数与表达式类型系统（Phase 2 子任务 2.2）。
+"""测试 Python 侧 field 函数与表达式类型系统。
 
 测试覆盖：
 1. field/rfield/wfield 函数返回正确的 _FieldDescriptor（mode、default、context）
@@ -7,8 +7,6 @@
 4. _ExprRef 继续运算（嵌套表达式树）
 5. _collect_field_descriptors 与 _apply_dataclass_field_config
 6. dataclass 集成（RO init=False，default → kw_only）— 需要 Rust 扩展
-
-设计依据：docs/design/模块设计/模块设计-表达式系统.md §2.1-§2.3
 """
 
 import inspect
@@ -111,7 +109,7 @@ class TestFieldFunctions:
         assert desc.default is not _MISSING
 
     def test_field_backward_compat(self):
-        # Phase 1 用法：field(subcon) 仍然兼容（无 default、无 context）
+        # 早期用法：field(subcon) 仍然兼容（无 default、无 context）
         desc = field(_dummy)
         assert desc.mode == "rw"
         assert desc.default is _MISSING
@@ -179,7 +177,7 @@ class TestFieldDescriptorAttributes:
 
 
 class TestFieldDescriptorOperators:
-    """测试 _FieldDescriptor 的算术运算符重载（§2.3.3）。"""
+    """测试 _FieldDescriptor 的算术运算符重载。"""
 
     def setup_method(self):
         self.count = field(_dummy)
@@ -609,7 +607,7 @@ class TestCollectFieldDescriptors:
 
 
 class TestApplyDataclassFieldConfig:
-    """测试 dataclass 字段配置注入（§2.2.1）。"""
+    """测试 dataclass 字段配置注入。"""
 
     def test_ro_field_becomes_init_false(self):
         import dataclasses

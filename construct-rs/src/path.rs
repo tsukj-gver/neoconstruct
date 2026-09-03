@@ -1,7 +1,5 @@
 //! 错误路径追踪栈。
 //!
-//! 设计依据：`docs/架构设计.md` §C.6 + `docs/模块设计-Array性能优化.md` §3。
-//!
 //! ## 用途
 //!
 //! `Path` 用于在 parse/build 的执行树遍历中追踪当前所处的字段位置。
@@ -9,7 +7,7 @@
 //! 错误发生时 `to_string()` 生成如 `"root.header.flags"` 的路径字符串，
 //! 嵌入到 `ConstructError` 中以便定位出错字段。
 //!
-//! ## 性能（4.7 lazy path 迁移后）
+//! ## 性能（lazy path 模式）
 //!
 //! - **成功路径**：`Path::new()` 返回 `Path::Root`（零分配），从不 push，从不读。零成本。
 //! - **错误路径**：叶节点读 `to_string()`（`Root` 返回 `"root"` 字面量），
@@ -24,16 +22,16 @@
 //! - 后续 Field 用 `.` 分隔，如 `".header"`。
 //! - Index 用 `[N]` 后缀，如 `"[2]"`。
 //!
-//! ## [设计质疑] 与 Python construct 的格式差异
+//! ## 与 Python construct 的格式差异
 //!
 //! Python construct 的实际 path 格式（见 `construct/construct/core.py` `Renamed._parse`）：
 //! - 根路径为 `"(parsing)"` / `"(building)"` / `"(sizeof)"`（取决于操作类型）。
 //! - 字段用 `" -> "` 分隔，如 `"(parsing) -> header -> flags"`。
 //!
-//! 设计文档 §C.6 选择了 `"root.field1.field2[N]"` 的简化格式。两者不一致。
-//! Path 是 Rust 内部错误追踪机制，且 Phase 1 中通过 `error.rs` 的 `full_message()`
+//! 本项目选择了 `"root.field1.field2[N]"` 的简化格式。两者不一致。
+//! Path 是 Rust 内部错误追踪机制，通过 `error.rs` 的 `full_message()`
 //! 最终生成给 Python 用户的错误消息。后续若需要严格对齐 Python construct 的 path 格式，
-//! 可在子任务 1.7（Python 异常层次）中调整 `Path::Display` 实现，无需改动调用方。
+//! 可调整 `Path::Display` 实现，无需改动调用方。
 
 use std::fmt;
 
@@ -46,7 +44,7 @@ pub enum PathSegment {
     Root,
     /// 结构体字段名（如 `"address"`）。
     Field(String),
-    /// 数组索引（如 `[2]`）。Phase 2 Array 节点会用到。
+    /// 数组索引（如 `[2]`）。Array 节点使用。
     Index(usize),
 }
 
@@ -54,9 +52,9 @@ pub enum PathSegment {
 ///
 /// 详见模块级文档。
 ///
-/// # 4.7 lazy path 迁移：两态 enum（零分配）
+/// # 两态 enum（零分配）
 ///
-/// 迁移到 lazy path 模式（P0-3）后，生产代码成功路径从不 push。
+/// lazy path 模式下，生产代码成功路径从不 push。
 /// `Root` 变体覆盖 >99% 场景，零堆分配（`Path::new()` 仅构造 enum 变体）。
 ///
 /// - [`Path::Root`]：仅含根段。`new()` / `default()` / 成功路径的常态。
@@ -84,7 +82,7 @@ impl Path {
     ///
     /// 进入执行树时调用一次（parse/build 入口）。
     ///
-    /// 4.7 lazy path 迁移：从 `vec![PathSegment::Root]`（1 次 Vec 堆分配 ~20-30ns）
+    /// lazy path 模式：从 `vec![PathSegment::Root]`（1 次 Vec 堆分配 ~20-30ns）
     /// 改为 `Path::Root`（enum 构造 ~0ns）。
     pub fn new() -> Self {
         Path::Root
@@ -365,7 +363,7 @@ mod tests {
 
     #[test]
     fn empty_path_displays_as_empty_string() {
-        // 4.7 enum 迁移：Path 现在是 enum，直接用 Segments(Vec::new()) 构造空路径。
+        // Path 是 enum，直接用 Segments(Vec::new()) 构造空路径。
         let p = Path::Segments(Vec::new());
         assert!(p.is_empty());
         assert_eq!(p.to_string(), "");
@@ -385,7 +383,7 @@ mod tests {
     }
 
     // ======================================================================
-    // 4.7 Item 6：enum 零分配测试（设计 §6.3）
+    // enum 零分配测试
     // ======================================================================
 
     #[test]

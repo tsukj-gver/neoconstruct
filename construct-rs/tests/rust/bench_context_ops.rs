@@ -1,4 +1,4 @@
-//! Context 操作 micro-benchmark（Phase 2.5 性能退化排查）。
+//! Context 操作 micro-benchmark。
 //!
 //! 测量 Context 的关键操作在 Rust 级别的纳秒成本，用于隔离 Vec 化优化的
 //! 开销来源。

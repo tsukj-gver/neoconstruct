@@ -1,6 +1,5 @@
 //! ProcessRotateLeftNode：位旋转左移节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §5.5-5.6。
 //! Python 参考：`construct/construct/core.py` `ProcessRotateLeft`（L5424-5529）。
 //!
 //! ## 行为概述

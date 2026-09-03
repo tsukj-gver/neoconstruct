@@ -1,9 +1,9 @@
-//! CStringNode：C 风格 null 终止字符串（Phase 6.2 §3.1）。
+//! CStringNode：C 风格 null 终止字符串。
 //!
 //! Python 参考：`construct/construct/core.py` `CString`（L1811-1834）。
 //!
 //! Python 原版是 `StringEncoded(NullTerminated(GreedyBytes, term=encodingunit(encoding)), encoding)`
-//! macro 嵌套；本设计独立实现（PM 决策 1 方案 A）：直接扫描 term + decode。
+//! macro 嵌套；construct-rs 独立实现：直接扫描 term + decode。
 
 use crate::context::Context;
 use crate::error::ConstructError;

@@ -1,17 +1,16 @@
 //! BytesNode：固定/表达式长度字节读写。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.2、`docs/模块设计-表达式系统.md` §4.7。
 //! Python 参考：`construct/construct/core.py` `Bytes`（L924-980）。
 //!
-//! ## Phase 2 范围
+//! ## 长度来源
 //!
 //! `length` 可以是编译期常量（[`BytesLength::Const`]）或表达式程序
 //! （[`BytesLength::Expr`]）。表达式长度在 parse 时通过 [`crate::expr::eval_expr_int`]
 //! 求值得到（如 `Bytes(count)` / `Bytes(count + 1)`）。
 //!
-//! ## REV 约束（Phase 1 遗留）
+//! ## 已知约束
 //!
-//! build 时**仅接受 `bytes` 输入**。int/bytearray 转换推迟到后续阶段。
+//! build 时**仅接受 `bytes` 输入**。int/bytearray 转换暂不支持。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -26,13 +25,11 @@ use pyo3::types::PyBytes;
 // ---------------------------------------------------------------------------
 
 /// Bytes 的长度来源。
-///
-/// 设计依据：`docs/模块设计-表达式系统.md` §4.7。
 #[derive(Debug, Clone)]
 pub enum BytesLength {
-    /// 固定长度（Phase 1 兼容）。
+    /// 固定长度。
     Const(usize),
-    /// 表达式长度（Phase 2 新增）。parse 时求值为 `usize`。
+    /// 表达式长度。parse 时求值为 `usize`。
     Expr(ExprProgram),
 }
 
@@ -80,7 +77,7 @@ impl BytesLength {
 /// # build 行为
 ///
 /// 校验输入对象为 `bytes` 类型，并校验数据长度是否匹配声明的 `length`
-/// （SF-3 修复：对齐 Python construct `stream_write` 的长度校验行为）。
+/// （对齐 Python construct `stream_write` 的长度校验行为）。
 /// 长度不匹配时返回 `FieldLength` 错误。表达式长度通过 `ctx.get_int_at(idx)`
 /// 求值表达式获取期望长度。
 ///
@@ -95,14 +92,14 @@ pub struct BytesNode {
 }
 
 impl BytesNode {
-    /// Phase 1 兼容构造器：固定长度。
+    /// 固定长度构造器。
     pub fn new_const(length: usize) -> Self {
         Self {
             length: BytesLength::Const(length),
         }
     }
 
-    /// Phase 2 新增：表达式长度。
+    /// 表达式长度构造器。
     ///
     /// parse 时通过 [`eval_expr_int`] 求值 `program` 得到字节数。
     pub fn new_expr(program: ExprProgram) -> Self {
@@ -164,7 +161,7 @@ impl super::Construct for BytesNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // REV 约束：仅接受 bytes（int/bytearray 转换推迟到后续阶段）
+        // 已知约束：仅接受 bytes（int/bytearray 转换暂不支持）
         let py_bytes = obj
             .downcast::<PyBytes>()
             .map_err(|_| ConstructError::Generic {
@@ -179,7 +176,7 @@ impl super::Construct for BytesNode {
             })?;
         let data = py_bytes.as_bytes();
 
-        // SF-3 修复：校验长度（对齐 Python construct 的 stream_write 行为）。
+        // 校验长度（对齐 Python construct 的 stream_write 行为）。
         let expected = match &self.length {
             BytesLength::Const(n) => *n,
             BytesLength::Expr(prog) => {
@@ -304,7 +301,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：Const 路径（Phase 1 兼容）
+    // parse：Const 路径
     // ======================================================================
 
     #[test]
@@ -376,7 +373,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：Expr 路径（Phase 2 新增）
+    // parse：Expr 路径
     // ======================================================================
 
     #[test]
@@ -502,7 +499,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build（Const + Expr：校验长度，SF-3 修复）
+    // build（Const + Expr：校验长度）
     // ======================================================================
 
     #[test]
@@ -535,7 +532,7 @@ mod tests {
 
     #[test]
     fn build_validates_length_mismatch_too_short() {
-        // SF-3 修复：build 校验长度。传 2 字节但声明 4 字节 → FieldLength 错误。
+        // build 校验长度：传 2 字节但声明 4 字节 → FieldLength 错误。
         with_py(|py| {
             let node = BytesNode::new_const(4);
             let obj = py.eval_bound("b'ab'", None, None).expect("eval");
@@ -557,7 +554,7 @@ mod tests {
 
     #[test]
     fn build_validates_length_mismatch_too_long() {
-        // SF-3 修复：声明 2 字节，传 5 字节 → FieldLength 错误。
+        // 声明 2 字节，传 5 字节 → FieldLength 错误。
         with_py(|py| {
             let node = BytesNode::new_const(2);
             let obj = py.eval_bound("b'hello'", None, None).expect("eval");
@@ -573,7 +570,7 @@ mod tests {
 
     #[test]
     fn build_expr_validates_length() {
-        // SF-3 修复：Expr 路径的 build 也校验长度。
+        // Expr 路径的 build 也校验长度。
         with_py(|py| {
             let prog = ExprProgram::new(vec![ExprOp::Const(3)]);
             let node = BytesNode::new_expr(prog);
@@ -589,7 +586,7 @@ mod tests {
 
     #[test]
     fn build_expr_rejects_length_mismatch() {
-        // SF-3 修复：Expr 路径 build 长度不匹配 → FieldLength 错误。
+        // Expr 路径 build 长度不匹配 → FieldLength 错误。
         with_py(|py| {
             let prog = ExprProgram::new(vec![ExprOp::Const(10)]);
             let node = BytesNode::new_expr(prog);
@@ -606,7 +603,7 @@ mod tests {
 
     #[test]
     fn build_rejects_int_input() {
-        // REV 约束：int 转换推迟
+        // 已知约束：int 转换暂不支持
         with_py(|py| {
             let node = BytesNode::new_const(4);
             let obj = py.eval_bound("0", None, None).expect("eval");
@@ -637,7 +634,7 @@ mod tests {
 
     #[test]
     fn build_rejects_bytearray_input() {
-        // REV 约束：bytearray 转换推迟
+        // 已知约束：bytearray 转换暂不支持
         with_py(|py| {
             let node = BytesNode::new_const(5);
             let obj = py

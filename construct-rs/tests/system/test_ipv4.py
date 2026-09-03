@@ -40,10 +40,10 @@ bit 布局：
 - **bitfield**：BitStruct 解析 Version/IHL（共 1 byte）+ DSCP/ECN（共 1 byte）
   + Flags/FragOffset（共 16 bit）
 - **Checksum 校验**：用 ``ipv4_checksum`` 函数在 test 中验证
-  （Checksum 构造器的 bytesfunc 不支持 RawCopy dict 引用，详见 trace）
+  （Checksum 构造器的 bytesfunc 不支持 RawCopy dict 引用）
 - **常量**：Const 校验 Version=4
 
-## API gap
+## 已知边界
 
 IPv4 header checksum 字段在协议中间（offset 10-11），不在帧末尾，
 无法直接用 ``Checksum(start, end)`` + Tell（start/end 需先于 checksum 字段）。

@@ -1,7 +1,5 @@
 """边界情况测试。
 
-设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）。
-
 覆盖：
 - 空 StructMixin 子类（0 字段）
 - 嵌套 StructMixin 子类（多层）
@@ -142,9 +140,9 @@ def test_mutual_reference_via_forward_ref():
     class NodeA(StructMixin):
         tag: int = field(Int8ub)
         # 注：此处的 "NodeB" 字符串引用实际是 Python 名称查找，
-        # 必须在 NodeB 已定义后才能解析。Phase 1 通过延迟桩实现。
+        # 必须在 NodeB 已定义后才能解析。当前通过延迟桩实现。
 
-    # 此处省略真正的互相引用测试——Phase 1 StructRef 节点在 parse 时
+    # 此处省略真正的互相引用测试——StructRef 节点在 parse 时
     # 通过 cls._construct_compiled 动态解析，因此互相引用需要更复杂的设置。
     # 简化为顺序引用：先定义 B，再用 A 引用 B。
     @dataclass

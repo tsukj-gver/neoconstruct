@@ -1,9 +1,9 @@
-//! PaddedStringNode：固定长度填充字符串（Phase 6.2 §3.5）。
+//! PaddedStringNode：固定长度填充字符串。
 //!
 //! Python 参考：`construct/construct/core.py` `PaddedString`（L1747-1775）。
 //!
 //! Python 原版是 `StringEncoded(FixedSized(length, NullStripped(GreedyBytes, pad=...)), encoding)`
-//! 三层 macro 嵌套；本设计独立实现（PM 决策 1 方案 A）：
+//! 三层 macro 嵌套；construct-rs 独立实现：
 //! 内联"固定长度读取 + rstrip pad + decode"，不依赖 FixedSized / NullStripped。
 
 use crate::context::Context;

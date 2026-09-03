@@ -1,12 +1,11 @@
 """construct-rs vs Python construct 2.10.70 BitStream 场景性能基准测试。
 
-设计依据：performance-gate/SKILL.md（性能门禁）、§7（核心技术决策）、Phase 2.5 ``benchmark_expr.py``
-的子进程隔离方法。
+设计依据：子进程隔离方法与 bench_expr.py 一致。
 
-覆盖范围：Phase 3 全部子任务（3.1 BitsInteger / 3.2 Bitwise+BitStruct / 3.3
-Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build} 两个方向。
+覆盖范围：BitsInteger / Bitwise+BitStruct / Bytewise/BitsSwapped/ByteSwapped/Padding。
+共 10 个场景 × {parse, build} 两个方向。
 
-口径（performance-gate/SKILL.md）：
+口径：
     本脚本严格遵循"用户面 API"测量口径：
     - **construct-rs**：通过 ``maturin develop`` 安装到 venv，子进程中 Python ``timeit``
       调用真实用户面 API（``Packet.parse(data)`` / ``packet.build()``）。包含完整的
@@ -18,23 +17,20 @@ Bytewise/BitsSwapped/ByteSwapped/Padding）。共 10 个场景 × {parse, build}
     策略：每个 impl × 场景 × 方向在独立子进程中运行，通过 JSON 输出结果，主进程合并
     打印对比表。
 
-    **重要**：之前 Phase 3.1 / 3.3 性能补测（``experiments/bench_bits``、
-    ``experiments/bench_phase33``）使用 Rust 二进制直接调 Rust 库，跳过了 Python 分发
-    和 FFI 开销，口径错误。本脚本是 Phase 3 性能数据的**权威来源**。
+    **重要**：直接调用 Rust 库的基准（跳过 Python 分发和 FFI 开销）
+    与本脚本口径不同；本脚本按用户面 API 口径测量，是性能数据的**权威来源**。
 
-    **公平口径修订（3.4）**：早期版本 B1-B4 / BW2 / BW3 在 Python 侧使用裸
-    ``Bitwise(BitsInteger(...))`` / ``BitsSwapped(...)`` / ``ByteSwapped(...)``
-    返回 int/bytes，但 Rust 侧用 ``BitStructMixin`` / ``StructMixin`` 创建实例，
-    开销不对等（Rust 多了 tp_new 容器开销）。本修订让 Python 侧也用 ``BitStruct``
-    / ``Struct`` 包裹，两边都创建容器，从而消除"Rust 多付费"的不公平。
+    **公平口径**：Python 侧统一用 ``BitStruct`` / ``Struct`` 包裹（返回
+    Container），与 Rust 侧 ``BitStructMixin`` / ``StructMixin`` 的容器创建
+    开销对等，避免 Rust 单侧承担 tp_new 容器开销导致对比不公平。
 
 用法::
 
-    python tests/benchmark_bitstream.py
+    python bench/bench_bitstream.py
 
 输出：stdout 打印对比表 + 详细日志写 ``bench/results/benchmark_bitstream_results.txt``。
 
-通过标准（Phase 3 总纲 S-PERF）：
+通过标准：
 - BitStruct parse/build 几何平均 ≥10x vs Python construct 2.10.70
 - 单点 <4x 视为门禁失败
 """
@@ -268,7 +264,7 @@ _MEASURE_SCRIPT = textwrap.dedent(
         raise ValueError('unknown case: ' + case)
 
     def _make_case_py(case):
-        # 公平口径（performance-gate/SKILL.md）：
+        # 公平口径：
         # 每个 case 的 Python 用例必须与 Rust 用例产生**对等**的容器/实例开销。
         # - Rust B1-B4 / BS1-BS2 / BW1 使用 BitStructMixin → 实例创建 + 单字段填充
         # - Rust BW2-BW4 使用 StructMixin → 实例创建 + 单字段填充
@@ -400,19 +396,19 @@ def _run_measurement(impl: str, case: str, direction: str) -> dict:
 # ---------------------------------------------------------------------------
 
 CASES = [
-    # Phase 3.1: BitsInteger（在 Bitwise 域内，用 BitStruct 包裹以与 Rust BitStructMixin 对等）
-    ("B1", "3.1", "BitStruct(v=BitsInteger(8))"),
-    ("B2", "3.1", "BitStruct(v=BitsInteger(16))"),
-    ("B3", "3.1", "BitStruct(v=BitsInteger(32))"),
-    ("B4", "3.1", "BitStruct(v=BitsInteger(8, signed=True))"),
-    # Phase 3.2: Bitwise + BitStruct
-    ("BS1", "3.2", "BitStruct(Nibble, BitsInteger(10), Padding(2))"),
-    ("BS2", "3.2", "BitStruct(Bit, Nibble, Octet, Padding(3))"),
-    # Phase 3.3: Bytewise / BitsSwapped / ByteSwapped / Padding
-    ("BW1", "3.3", "BitStruct(Nibble, Bytewise(Int16ub), Nibble)"),
-    ("BW2", "3.3", "Struct(v=BitsSwapped(Bytes(4)))"),
-    ("BW3", "3.3", "Struct(v=ByteSwapped(Int32ub))"),
-    ("BW4", "3.3", "Struct(Bytes(1), Padding(4), Bytes(2))"),
+    # BitsInteger（在 Bitwise 域内，用 BitStruct 包裹以与 Rust BitStructMixin 对等）
+    ("B1", "BitsInteger", "BitStruct(v=BitsInteger(8))"),
+    ("B2", "BitsInteger", "BitStruct(v=BitsInteger(16))"),
+    ("B3", "BitsInteger", "BitStruct(v=BitsInteger(32))"),
+    ("B4", "BitsInteger", "BitStruct(v=BitsInteger(8, signed=True))"),
+    # Bitwise + BitStruct
+    ("BS1", "BitStruct", "BitStruct(Nibble, BitsInteger(10), Padding(2))"),
+    ("BS2", "BitStruct", "BitStruct(Bit, Nibble, Octet, Padding(3))"),
+    # Bytewise / BitsSwapped / ByteSwapped / Padding
+    ("BW1", "ByteSwap", "BitStruct(Nibble, Bytewise(Int16ub), Nibble)"),
+    ("BW2", "ByteSwap", "Struct(v=BitsSwapped(Bytes(4)))"),
+    ("BW3", "ByteSwap", "Struct(v=ByteSwapped(Int32ub))"),
+    ("BW4", "ByteSwap", "Struct(Bytes(1), Padding(4), Bytes(2))"),
 ]
 
 DIRECTIONS = ["parse", "build"]
@@ -423,7 +419,7 @@ CASE_DETAILS = {
     "B2": "BitStruct(v=BitsInteger(16)) parse/build — 16-bit unsigned via Bitwise",
     "B3": "BitStruct(v=BitsInteger(32)) parse/build — 32-bit unsigned via Bitwise",
     "B4": "BitStruct(v=BitsInteger(8, signed=True)) parse/build — 8-bit signed via Bitwise",
-    "BS1": "BitStruct 3 字段（4+10+2=16 bit）— Phase 3 ARCH 实测基线场景",
+    "BS1": "BitStruct 3 字段（4+10+2=16 bit）— 实测基线场景",
     "BS2": "BitStruct 4 字段含 Bit/Nibble/Octet（1+4+8+3=16 bit）",
     "BW1": "BitStruct + Bytewise 嵌入（4+16+4=24 bit，未对齐慢路径）",
     "BW2": "Struct(v=BitsSwapped(Bytes(4))) — TransformNode BitSwap（Struct 包裹）",
@@ -431,7 +427,7 @@ CASE_DETAILS = {
     "BW4": "Struct + 字节级 Padding（1+4+2=7 字节）",
 }
 
-# 性能门禁（Phase 3 总纲 S-PERF）
+# 性能门禁
 GATE_TARGET = 10.0  # 几何平均目标 ≥10x
 GATE_FAIL = 4.0     # 单点 <4x 视为门禁失败
 
@@ -526,7 +522,7 @@ def compute_geomean_speedups(results: dict, cases: list[str]) -> dict:
 
 
 def compute_derived_metrics(results: dict, cases: list[str]) -> dict:
-    """计算 performance-gate/SKILL.md 要求的派生指标。
+    """计算派生指标。
 
     :return: dict 含：
         - per_case: list of {case, rs_parse, rs_build, py_parse, py_build,
@@ -597,10 +593,10 @@ def compute_derived_metrics(results: dict, cases: list[str]) -> dict:
 
 
 def format_derived_metrics(metrics: dict) -> str:
-    """格式化派生指标为可读字符串（performance-gate/SKILL.md 要求）。"""
+    """格式化派生指标为可读字符串。"""
     lines = []
     lines.append("=" * 78)
-    lines.append("派生指标（performance-gate/SKILL.md S-PERF 输出要求）")
+    lines.append("派生指标")
     lines.append("=" * 78)
 
     # 1. parse/build 比率 + 方向一致性
@@ -688,7 +684,7 @@ def check_gates(results: dict, cases: list[str]) -> list[str]:
                     f"< {GATE_FAIL}x"
                 )
 
-    # 2. 几何平均检查（Phase 3 总纲 S-PERF ≥10x）
+    # 2. 几何平均检查（≥10x）
     geomeans = compute_geomean_speedups(results, cases)
     if geomeans["parse"] < GATE_TARGET:
         failures.append(
@@ -713,7 +709,7 @@ def write_results_file(
     """将完整结果写入 bench/results/benchmark_bitstream_results.txt。"""
     out_path = Path(__file__).resolve().parent / "results" / "benchmark_bitstream_results.txt"
 
-    # 构造 case → (phase, desc) 映射
+    # 构造 case → (分组名, desc) 映射
     case_meta = {cid: (phase, desc) for cid, phase, desc in CASES}
 
     lines = []
@@ -731,17 +727,17 @@ def write_results_file(
     lines.append(f"  repeat (中位数) : {REPEAT}")
     lines.append(f"  测量时间        : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
-    lines.append("测量口径（performance-gate/SKILL.md）：")
+    lines.append("测量口径：")
     lines.append("  - construct-rs：maturin develop 安装到 venv，Python timeit 调用")
     lines.append("    用户面 API（Packet.parse / packet.build）。一次 FFI 穿越。")
     lines.append("  - Python construct 2.10.70：pip install 安装到 venv，Python timeit")
     lines.append("    调用等效 API（fmt.parse / fmt.build）。")
     lines.append("  - 子进程隔离：两个同名 construct 包在独立进程中运行，避免 sys.path 冲突。")
     lines.append("  - 相同 timeit 参数（NUMBER/REPEAT），取相同统计量（中位数）。")
-    lines.append("  - 公平口径修订（3.4）：所有场景 Python 侧均用 BitStruct/Struct 包裹，")
+    lines.append("  - 公平口径修订：所有场景 Python 侧均用 BitStruct/Struct 包裹，")
     lines.append("    与 Rust 侧 BitStructMixin/StructMixin 创建容器/实例对等。")
     lines.append("")
-    lines.append(f"通过标准（Phase 3 总纲 S-PERF）：")
+    lines.append(f"通过标准：")
     lines.append(f"  - 几何平均 ≥{GATE_TARGET}x（parse 和 build 两个方向）")
     lines.append(f"  - 单点 <{GATE_FAIL}x 视为门禁失败")
     lines.append("")
@@ -762,7 +758,7 @@ def write_results_file(
         phase, desc = case_meta[case_id]
         if phase != current_phase:
             current_phase = phase
-            lines.append(f"  -- Phase {phase} --")
+            lines.append(f"  -- {phase} --")
         lines.append(f"  {case_id}: {desc}")
     lines.append("")
     lines.append("门禁检查：")
@@ -810,7 +806,7 @@ def main():
         for case_id, phase, desc in CASES:
             if phase != current_phase:
                 current_phase = phase
-                print(f"  -- Phase {phase} --")
+                print(f"  -- {phase} --")
             print(f"  {case_id:<5} {desc}")
         return 0
 

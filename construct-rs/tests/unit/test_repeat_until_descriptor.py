@@ -1,15 +1,15 @@
-"""Phase 4 子任务 4.5 v5 RepeatUntil 描述符单元测试（纯 Python，无 pytest）。
+"""RepeatUntil 描述符单元测试（纯 Python，无 pytest）。
 
-v5 重写后测试覆盖：
-- callable 拒绝（用户硬约束 #1）
-- terminator 表达式编译（Phase 2 表达式系统）
+测试覆盖：
+- callable 拒绝
+- terminator 表达式编译
 - _expr_params 协议（terminator + element_field_idx）
 - set_compiled_expr_params 方法
 
-注意：本测试仅检查 Python 侧描述符的编译行为（v5），
-不涉及 Rust parse/build 路径（由 cargo test + experiments 覆盖）。
+注意：本测试仅检查 Python 侧描述符的编译行为，
+不涉及 Rust parse/build 路径（由 Rust 侧单元测试覆盖）。
 
-运行方式：``python tests/test_repeat_until_descriptor.py``
+运行方式：``python tests/unit/test_repeat_until_descriptor.py``
 """
 
 import sys
@@ -22,7 +22,7 @@ from construct import Int8ub, CompilationError
 
 
 # ============================================================
-# v5 callable 拒绝（用户硬约束 #1）
+# callable 拒绝
 # ============================================================
 
 def test_callable_lambda_rejected():
@@ -31,7 +31,7 @@ def test_callable_lambda_rejected():
         RepeatUntilDescriptor(lambda x, l, c: x > 5, Int8ub)
         raise AssertionError("callable terminator should be rejected")
     except CompilationError as e:
-        assert "callable" in str(e).lower() or "Phase 2 expression" in str(e), (
+        assert "callable" in str(e).lower() or "field expression" in str(e), (
             f"error message should mention callable: {e}"
         )
 
@@ -64,11 +64,11 @@ def test_callable_class_with_call_rejected():
 
 
 # ============================================================
-# v5 terminator 表达式存储
+# terminator 表达式存储
 # ============================================================
 
 def test_terminator_stored_correctly():
-    """terminator（Phase 2 表达式）应被正确存储为属性。"""
+    """terminator（表达式）应被正确存储为属性。"""
     from construct import rfield, Element
     # terminator 是 _FieldDescriptor 引用（e > 5）
     # 但 Element() 在 class 上下文才有 _FieldDescriptor。这里直接用 int 模拟。
@@ -94,7 +94,7 @@ def test_repr_uses_terminator_not_predicate():
 
 
 # ============================================================
-# v5 _expr_params 协议
+# _expr_params 协议
 # ============================================================
 
 def test_expr_params_initial_has_terminator():
@@ -138,7 +138,7 @@ def test_set_compiled_expr_params_with_index_fields():
 # ============================================================
 
 def test_end_to_end_struct_with_element():
-    """端到端：完整的 v5 RepeatUntil + Element StructMixin 子类。"""
+    """端到端：完整的 RepeatUntil + Element StructMixin 子类。"""
     from dataclasses import dataclass
     from construct import (
         StructMixin,

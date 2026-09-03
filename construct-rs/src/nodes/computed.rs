@@ -1,6 +1,5 @@
 //! ComputedNode：从表达式计算值（不消费字节）。
 //!
-//! 设计依据：`docs/模块设计-表达式系统.md` §4.6.2。
 //! Python 参考：`construct/construct/core.py` `Computed`（L3358-3400）。
 //!
 //! ## 行为概述
@@ -35,7 +34,7 @@ use super::Construct;
 /// sizeof 返回 0。
 ///
 /// build 方向是 no-op：值计算由 [`crate::nodes::struct_node`] 的
-/// `compute_ro_value` 在 RO 字段处理时完成（设计 §5.3-§5.4）。
+/// `compute_ro_value` 在 RO 字段处理时完成。
 #[derive(Debug, Clone)]
 pub struct ComputedNode {
     /// 计算表达式（编译后的 ExprProgram）。

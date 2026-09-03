@@ -1,10 +1,8 @@
 """用户面 Adapter 基类（Adapter / SymmetricAdapter）。
 
-设计依据：``docs/design/模块设计/模块设计-Adapter核心.md`` §4。
-
-PM 决策 2（双层分离强化）：通用 Adapter / SymmetricAdapter **基本在 Python 层实现**。
+通用 Adapter / SymmetricAdapter **基本在 Python 层实现**。
 用户继承此类并实现 ``_decode`` / ``_encode``。Rust 仅提供"最小通用钩子"
-（AdapterCallbackNode，PM 决策 6.3-D1 接受），用于 Adapter 嵌入 Struct 字段场景。
+（AdapterCallbackNode），用于 Adapter 嵌入 Struct 字段场景。
 
 # 双层分工
 
@@ -13,20 +11,20 @@ PM 决策 2（双层分离强化）：通用 Adapter / SymmetricAdapter **基本
 | 内置 Adapter（Subconstruct/RawCopy/Peek/Rebuild/Pass） | Rust Node 变体 | 1 次 | ≥10x | 用户用具体名（如 ``Peek(Int8ub)``） |
 | 用户面 Adapter（Adapter/SymmetricAdapter 基类） | Python 类（用户继承） | ≥2 次 | 不设硬门禁 | 用户继承 ``Adapter`` 写 ``_decode``/``_encode`` |
 
-# FFI 边界（设计 §4.3）
+# FFI 边界
 
 用户面 Adapter 嵌入 Struct 字段时，subcon 部分在 Rust 内执行（零 FFI），
 但 ``_decode`` / ``_encode`` 是用户 Python 方法，需 Rust→Python 回调（1 次额外 FFI）。
 总计 2 次 FFI 穿越（parse 入口 + _decode 回调）。
 
-用户主动继承 Adapter = 显式接受此性能折衷（PM 决策 2）。用户面 Adapter
-不设硬性能门禁（设计 §0.2 表）。
+用户主动继承 Adapter = 显式接受此性能折衷。用户面 Adapter
+不设硬性能门禁。
 
-# §0 合规性（设计 §4.4）
+# 合规性说明
 
 AdapterCallbackNode 在执行树内（Node enum 变体），2 次 FFI 是用户主动选择的
-后处理开销，不属于 §0 #1 禁止的"中间表示层"（中间表示层指 Rust 端临时数据类型
-再转换，非用户 Python 回调）。
+后处理开销（``_decode``/``_encode`` 是用户 Python 回调），不引入 Rust 端
+临时中间数据类型再转换。
 
 # 使用示例
 
@@ -91,7 +89,7 @@ class Adapter:
     Adapter **完全在 Python 层实现**——用户继承此类并实现 ``_decode`` / ``_encode``，
     parse/build 路径在 Python 层调用 subcon 的 Rust parse/build。
 
-    **双层分工（PM 决策 2）**：Adapter/SymmetricAdapter 是用户面构造器，
+    **双层分工**：Adapter/SymmetricAdapter 是用户面构造器，
     性能损失用户已显式接受（Rust→Python 回调额外 ~200-300ns/次）。
     内置 Adapter（Subconstruct/RawCopy/Peek/Rebuild/Pass）走 Rust Node 路径，
     性能 ≥10x。
@@ -122,7 +120,6 @@ class Adapter:
     # 性能说明
 
     用户主动继承 Adapter = 显式接受 Python 层解码开销。
-    详见设计文档 §4.3 FFI 边界分析。
 
     # Adapter 与 AdapterDescriptor 的关系
 
@@ -196,9 +193,9 @@ class Adapter:
         嵌入 Struct 字段时不走此路径——StructMixin.parse 直接调 Rust
         StructNode.parse，Adapter 的 _decode 由 AdapterCallbackNode 回调。
 
-        **限制（Phase 6.3 已知）**：subcon 必须有 ``.parse`` 方法（如 Adapter 嵌套
+        **限制（已知）**：subcon 必须有 ``.parse`` 方法（如 Adapter 嵌套
         或 StructMixin 子类）。原子描述符（如 Int8ub）无 .parse 方法，需通过
-        Struct 嵌入使用（推荐用法）。Phase 7+ 可能增加自动包装。
+        Struct 嵌入使用（推荐用法）。后续版本可能增加自动包装。
 
         :param data: 字节串输入。
         :param kw: 用户传入的 context kw。
@@ -229,7 +226,7 @@ class Adapter:
 
         嵌入 Struct 字段时不走此路径。
 
-        **限制（Phase 6.3 已知）**：同 ``parse``，subcon 必须有 ``.build`` 方法。
+        **限制（已知）**：同 ``parse``，subcon 必须有 ``.build`` 方法。
 
         :param obj: 用户的输入值。
         :param kw: 用户传入的 context kw。
@@ -291,20 +288,19 @@ class SymmetricAdapter(Adapter):
 
 
 # ---------------------------------------------------------------------------
-# Validator：用户面校验基类（Phase 8.3）
+# Validator：用户面校验基类
 #
-# 设计依据：``docs/design/模块设计/模块设计-Phase8-P1P2.md`` §2.3。
 # Python 参考：construct core.py:849 的 Validator / ExprValidator。
 #
 # Validator 是 SymmetricAdapter 的子类（``_encode = _decode = _validate``）。
 # construct-rs 用户继承此类并实现 ``_validate(self, obj, context, path) -> bool``，
 # 校验失败（返回 False）时由 ``_decode`` 抛出 ``ValidationError``。
 #
-# 嵌入 Struct 字段时复用 AdapterCallbackNode（Phase 6.3 已实现，2 次 FFI，
-# 用户主动选择继承 Validator = 接受性能折衷，ADR-022）。
+# 嵌入 Struct 字段时复用 AdapterCallbackNode（2 次 FFI，
+# 用户主动选择继承 Validator = 接受性能折衷）。
 #
-# PM 决策 D-4：construct-rs **不导出 ExprValidator**（不接 lambda/callable，ADR-014）。
-# 用户要表达式版校验，使用 Check（Phase 8.1）。
+# construct-rs **不导出 ExprValidator**（不接 lambda/callable）。
+# 用户要表达式版校验，使用 Check。
 # ---------------------------------------------------------------------------
 
 
@@ -321,10 +317,10 @@ class Validator(SymmetricAdapter):
 
     # 嵌入 Struct 字段
 
-    嵌入 Struct 字段时走 AdapterCallbackNode（Phase 6.3），2 次 FFI（parse 入口 +
-    ``_validate`` 回调）。用户主动选择继承 Validator = 接受性能折衷（ADR-022）。
+    嵌入 Struct 字段时走 AdapterCallbackNode，2 次 FFI（parse 入口 +
+    ``_validate`` 回调）。用户主动选择继承 Validator = 接受性能折衷。
 
-    若需表达式版校验（无 Python 回调），使用 ``Check`` (Phase 8.1)。
+    若需表达式版校验（无 Python 回调），使用 ``Check``。
 
     # 使用方式
 
@@ -343,7 +339,7 @@ class Validator(SymmetricAdapter):
 
     # 与 Python construct 的差异
 
-    - **不导出 ExprValidator**：construct-rs 不接收 lambda/callable（ADR-014）。
+    - **不导出 ExprValidator**：construct-rs 不接收 lambda/callable。
       用户要表达式版校验用 ``Check``，要 Python 逻辑校验继承 ``Validator``。
     """
 
@@ -372,7 +368,7 @@ class Validator(SymmetricAdapter):
 class AdapterDescriptor(Adapter):
     """Adapter 在 compile_schema 中的"类型标识"。
 
-    设计 §6.3：compile.rs 通过 ``type(desc).__name__`` 匹配到 ``"AdapterDescriptor"``
+    compile.rs 通过 ``type(desc).__name__`` 匹配到 ``"AdapterDescriptor"``
     字符串，构建对应的 ``Node::AdapterCallback``。
 
     本类作为 ``Adapter`` 的"自动别名"——用户继承 ``Adapter`` 时，子类实例的
@@ -412,8 +408,8 @@ class AdapterDescriptor(Adapter):
 
     或者更优雅的方式：用户子类继承 ``AdapterDescriptor`` 而非 ``Adapter``。
 
-    **Phase 6.3 决策**：保持简单，文档化用户子类需用 AdapterDescriptor 作为
-    基类（或手动重设 __name__）。Phase 6.3 测试用例使用 AdapterDescriptor 基类。
+    保持简单：文档化用户子类需用 AdapterDescriptor 作为
+    基类（或手动重设 __name__）。
     """
 
     pass

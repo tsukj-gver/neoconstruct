@@ -11,11 +11,11 @@ construct-rs vs Python construct 2.10.70 性能基准测试结果
   repeat (中位数): 5
   测量时间       : 2026-06-28 01:43:26
 
-通过标准（§G.4.5）：
+通过标准：
   - B1-B5 ≥ 4x（硬目标）
   - B6 深嵌套 ≥ 2x（已知退化）
   - B7 功能性（不要求加速比）
-  - B1 < 0.5x → 暂停（性能门禁 §2）
+  - B1 < 0.5x → 暂停
 
 对比表：
 用例   方向     construct-rs (ns)  Python construct (ns)  加速比        判定      

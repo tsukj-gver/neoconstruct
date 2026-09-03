@@ -1,9 +1,6 @@
-"""Phase 6.1 Primitives 构造器 Python 行为一致性测试。
+"""Primitives 构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/模块设计/模块设计-Primitives收尾.md §5（边界条件清单）/ §7（parity 模板）
-- docs/design/基础设施/测试框架设计.md §5.1（统一模板）
-- _helpers/parity.py（公共组件）
+组件：_helpers/parity.py（公共组件）。
 
 覆盖范围（17 个构造器，关键边界 case）：
 - 整数别名（4）：Byte / Short / Int / Long
@@ -13,14 +10,14 @@
 - 大整数（1）：BytesInteger（含 fast/slow path）
 
 差异处理：
-- NaN/Inf：由 _helpers/normalize.py 统一标记（设计 §5.1.3），case 内不手动标记
+- NaN/Inf：由 _helpers/normalize.py 统一标记，case 内不手动标记
 - Float16 subnormal：normalize round(6) 容忍精度差异
 - BytesInteger slow-path（>8 字节）：parity 对比 Python int.from_bytes 等价行为
 
 用法::
 
-    pytest tests/parity/test_phase6_primitives_parity.py -v
-    python tests/parity/test_phase6_primitives_parity.py
+    pytest tests/parity/test_primitives_parity.py -v
+    python tests/parity/test_primitives_parity.py
 """
 
 from __future__ import annotations
@@ -71,7 +68,7 @@ _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 # ---------------------------------------------------------------------------
 # case 定义（子进程脚本片段）
 # ---------------------------------------------------------------------------
-# 关键设计点（设计 §7.1）：
+# 关键设计点：
 # - rs 侧用 StructMixin + dataclass + field(Descriptor) 模式
 # - py 侧用 pc.Struct("name"/pc.Descriptor) 或直接 pc.Descriptor（VarInt/ZigZag/BytesInteger）
 # - NaN/Inf 不在 case 内手动标记，由 normalize 统一处理
@@ -326,7 +323,7 @@ def _make_case_py(case_id):
 '''
 
 # ---------------------------------------------------------------------------
-# case 清单（按构造器分组，覆盖 §5 边界条件）
+# case 清单（按构造器分组）
 # ---------------------------------------------------------------------------
 
 ALL_CASES = [
@@ -424,7 +421,7 @@ def test_parity_fidelity(case_id, desc, parity_results):
 
 
 # ---------------------------------------------------------------------------
-# Standalone 模式（python tests/parity/test_phase6_primitives_parity.py）
+# Standalone 模式（python tests/parity/test_primitives_parity.py）
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

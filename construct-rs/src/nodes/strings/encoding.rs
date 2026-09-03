@@ -1,21 +1,18 @@
-//! Strings 编码层（Phase 6.2）：[`Encoding`] enum + decode/encode helper。
+//! Strings 编码层：[`Encoding`] enum + decode/encode helper。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Strings.md` v2 §2。
+//! # 设计摘要
 //!
-//! # 决策摘要
-//!
-//! - **编码表示**（D-1）：编译期 [`Encoding`] enum（6 变体），运行时零字符串匹配。
-//! - **编解码实现**（D-2）：混合方案
+//! - **编码表示**：编译期 [`Encoding`] enum（6 变体），运行时零字符串匹配。
+//! - **编解码实现**：混合方案
 //!   - utf8/ascii 安全路径（std::str + pyo3 `PyString`）
-//!   - utf16/32 raw FFI（unsafe CPython C API，设计 §2.2.2 P1/P2a）
-//! - **无后缀编码**（P2b）：`from_user_str("utf16")` 等编译期 `Compilation` 错误，
-//!   引导用户用 `utf_16_le`/`utf_16_be`（设计 §2.1.3）。
+//!   - utf16/32 raw FFI（unsafe CPython C API）
+//! - **无后缀编码**：`from_user_str("utf16")` 等编译期 `Compilation` 错误，
+//!   引导用户用 `utf_16_le`/`utf_16_be`。
 //!
-//! # ADR-021 引用
+//! # unsafe 使用说明
 //!
 //! utf16/32 raw FFI 是首次在**正常路径**（非错误路径）使用 unsafe CPython C API。
-//! 决策依据与 SAFETY 规范沉淀于 `docs/decisions/ADR-021-strings-utf16-32-raw-ffi.md`
-//! （编号已分配，扩展 ADR-019 先例）。本文件每个 unsafe 块附 SAFETY 注释。
+//! 本文件每个 unsafe 块附 SAFETY 注释。
 
 use crate::error::ConstructError;
 use crate::path::Path;
@@ -24,14 +21,14 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyString};
 use std::borrow::Cow;
 
-/// Phase 6.2 Strings 支持的编码（封闭集合，对齐 Python `possiblestringencodings`）。
+/// Strings 支持的编码（封闭集合，对齐 Python `possiblestringencodings`）。
 ///
 /// 编码在 Descriptor 编译期（`__init_subclass__`）从用户字符串解析为 enum 变体，
-/// 运行时零字符串匹配开销（决策 D-1）。
+/// 运行时零字符串匹配开销。
 ///
 /// 不在列表内的编码名 → [`ConstructError::Compilation`]（编译期失败，不进入运行时）。
 ///
-/// # P2b 决策（v2 §2.1.3）
+/// # 无后缀编码
 ///
 /// **不接受无后缀 `utf16`/`utf_16`/`u16`/`utf32`/`utf_32`/`u32`**。这些在 Python 中
 /// 带"本机字节序 BOM"语义（不可移植），construct-rs 强制用户显式指定字节序。
@@ -57,14 +54,14 @@ impl Encoding {
     /// 对齐 Python `possiblestringencodings` 的**有后缀**编码别名集合
     /// （normalize：去 `-` 改 `_`、转小写）。
     ///
-    /// # P2b 决策（v2 §2.1.3）
+    /// # 无后缀编码
     ///
     /// **不接受无后缀 `utf16`/`utf_16`/`u16`/`utf32`/`utf_32`/`u32`**。这些在 Python 中
     /// 带"本机字节序 BOM"语义（x86 加 LE BOM，Sparc 加 BE BOM），跨平台不可移植。
     /// construct-rs 编译期拒绝，错误信息引导用户改用 `utf_16_le`/`utf_16_be`/
     /// `utf_32_le`/`utf_32_be`。
     ///
-    /// # P8 修正（v2 §14）
+    /// # 错误引导文本
     ///
     /// 错误引导文本通过 `contains("16")` 判定 utf16 族 vs utf32 族，避免
     /// `utf_16` 别名（带下划线）被误导向 `utf_32_le`。
@@ -87,8 +84,8 @@ impl Encoding {
             "utf_16_be" => Ok(Encoding::Utf16Be),
             "utf_32_le" => Ok(Encoding::Utf32Le),
             "utf_32_be" => Ok(Encoding::Utf32Be),
-            // P2b：显式拒绝无后缀别名（utf16/utf_16/u16/utf32/utf_32/u32）。
-            // P8：用 contains("16") 判定族别，避免 utf_16 被误导向 utf_32_le。
+            // 显式拒绝无后缀别名（utf16/utf_16/u16/utf32/utf_32/u32）。
+            // 用 contains("16") 判定族别，避免 utf_16 被误导向 utf_32_le。
             "utf16" | "utf_16" | "u16" | "utf32" | "utf_32" | "u32" => {
                 let is_utf16_family = normalized.contains('1');
                 let (le_hint, be_hint) = if is_utf16_family {
@@ -136,10 +133,10 @@ impl Encoding {
 
     /// bytes → PyUnicode（parse 方向）。
     ///
-    /// # 实现路径（D-2 混合方案）
+    /// # 实现路径（混合方案）
     ///
-    /// - Utf8 / Ascii：std::str::from_utf8 → PyString::new_bound（安全路径 Z）
-    /// - Utf16Le/Be / Utf32Le/Be：CPython `PyUnicode_DecodeUTF16/32` raw FFI（路线 X）
+    /// - Utf8 / Ascii：std::str::from_utf8 → PyString::new_bound（安全路径）
+    /// - Utf16Le/Be / Utf32Le/Be：CPython `PyUnicode_DecodeUTF16/32` raw FFI
     ///
     /// # 错误
     ///
@@ -180,7 +177,7 @@ impl Encoding {
                 }
             }
             Encoding::Utf16Le | Encoding::Utf16Be | Encoding::Utf32Le | Encoding::Utf32Be => {
-                // 路线 X：CPython raw FFI（详见 §2.2.2 P2a + ADR-021）。
+                // CPython raw FFI。
                 self.decode_utf16_32_raw(py, bytes, path)
             }
         }
@@ -191,13 +188,13 @@ impl Encoding {
     /// 返回 `Vec<u8>` 而非 `&[u8]`，因 PyUnicode 内部表示可能需转换分配。
     /// 调用方（各 String Node 的 build）随后 `stream.write(&vec)`。
     ///
-    /// # P1 修订（v2 §2.2.2）
+    /// # encode 分支策略
     ///
     /// encode 按编码分支处理，避免 utf16/32 路径引入 Rust `Cow<str>` 中转层
-    /// （违反 §0 #2"build 直接从 PyObject 读"）：
-    /// - utf8/ascii（安全路径 Z）：`to_cow()` 转 Rust `Cow<str>`。此路径下 ASCII 主导，
+    /// （保持"build 直接从 PyObject 读"）：
+    /// - utf8/ascii（安全路径）：`to_cow()` 转 Rust `Cow<str>`。此路径下 ASCII 主导，
     ///   PyString 内部表示多为 ASCII compact（`to_cow` 返回 `Borrowed`，零分配）。
-    /// - utf16/32（raw FFI 路径 X）：**直接持有原始 `&Bound<PyString>`** 调 CPython
+    /// - utf16/32（raw FFI 路径）：**直接持有原始 `&Bound<PyString>`** 调 CPython
     ///   `PyUnicode_AsUTF16String`/`AsUTF32String`，不经 `Cow<str>`。
     ///
     /// # 输入校验
@@ -212,7 +209,7 @@ impl Encoding {
     ) -> Result<Vec<u8>, ConstructError> {
         match self {
             Encoding::Utf8 | Encoding::Ascii => {
-                // 安全路径 Z：to_cow 在 utf8/ascii 场景可接受。
+                // 安全路径：to_cow 在 utf8/ascii 场景可接受。
                 let py_str = obj
                     .downcast::<PyString>()
                     .map_err(|_| ConstructError::String {
@@ -244,7 +241,7 @@ impl Encoding {
                 }
             }
             Encoding::Utf16Le | Encoding::Utf16Be | Encoding::Utf32Le | Encoding::Utf32Be => {
-                // raw FFI 路径 X：直接 downcast，不调用 to_cow（P1 修订）。
+                // raw FFI 路径：直接 downcast，不调用 to_cow。
                 let py_str = obj
                     .downcast::<PyString>()
                     .map_err(|_| ConstructError::String {
@@ -254,15 +251,15 @@ impl Encoding {
                         ),
                         path: path.to_string(),
                     })?;
-                // 直接传原始 PyString 给 raw FFI（不经 Cow<str>，§0 #2 合规）。
+                // 直接传原始 PyString 给 raw FFI（不经 Cow<str>）。
                 self.encode_utf16_32_raw(py, py_str, path)
             }
         }
     }
 
-    /// UTF-16/32 解码（路线 X：CPython raw FFI）。
+    /// UTF-16/32 解码（CPython raw FFI）。
     ///
-    /// # P2a 修订（v2 §2.2.2）
+    /// # byteorder 取值
     ///
     /// `byteorder` 取值：
     /// - LE → **-1**（强制 LE，不扫描 BOM）
@@ -276,12 +273,12 @@ impl Encoding {
     /// | `+1` | 强制 BE，不检测 BOM |
     ///
     /// 用户传 `utf_16_le`/`utf_16_be` 期望"纯 LE/BE 无 BOM 语义"，必须用 ±1 而非 0。
-    /// 若用 0（v1 错误值），数据流开头恰好是 `\xff\xfe`（LE BOM 字节序列）会被误判
+    /// 若用 0，数据流开头恰好是 `\xff\xfe`（LE BOM 字节序列）会被误判
     /// 为 BOM 消费掉，破坏 parity（Python `bytes.decode("utf_16_le")` 不消费 BOM）。
     ///
     /// # SAFETY
     ///
-    /// 按设计 §2.2.2 + ADR-021（编号已分配）+ ADR-019（错误路径先例）unsafe 前置条件：
+    /// unsafe 前置条件：
     ///
     /// 1. **GIL 持有**：`py: Python<'py>` token 在作用域内（FFI 入口已持 GIL）。
     /// 2. **`bytes.as_ptr()` 有效**：来自 `&[u8]` 切片，生命周期覆盖整个 unsafe 块。
@@ -291,14 +288,14 @@ impl Encoding {
     ///    （CPython 内部可能修改 byteorder 值，但本函数不依赖调用后的值）。
     /// 5. **返回值所有权**：非 NULL 时所有权转移给 `Bound::from_owned_ptr`；
     ///    NULL 时 `PyErr` 已设置，由 `PyErr::fetch` 取回并转换为
-    ///    [`ConstructError::String`]（BC6 回退路径）。
+    ///    [`ConstructError::String`]（回退路径）。
     fn decode_utf16_32_raw<'py>(
         &self,
         py: Python<'py>,
         bytes: &[u8],
         path: &Path,
     ) -> Result<Bound<'py, PyString>, ConstructError> {
-        // P2a：byteorder = -1（LE）或 +1（BE），强制序不扫描 BOM。
+        // byteorder = -1（LE）或 +1（BE），强制序不扫描 BOM。
         let mut byteorder: std::os::raw::c_int = match self {
             Encoding::Utf16Le | Encoding::Utf32Le => -1,
             Encoding::Utf16Be | Encoding::Utf32Be => 1,
@@ -336,7 +333,7 @@ impl Encoding {
             }
         };
         if ptr.is_null() {
-            // BC6：CPython 设置 PyErr（如非法代理对、尾部不完整单元），fetch 取回。
+            // CPython 设置 PyErr（如非法代理对、尾部不完整单元），fetch 取回。
             let py_err = PyErr::fetch(py);
             return Err(ConstructError::String {
                 message: format!(
@@ -370,11 +367,11 @@ impl Encoding {
         Ok(py_str)
     }
 
-    /// UTF-16/32 编码（路线 X：CPython raw FFI）。
+    /// UTF-16/32 编码（CPython raw FFI）。
     ///
-    /// # P1 修订（v2 §2.2.2）
+    /// # 签名说明
     ///
-    /// 签名直接接收 `&Bound<PyString>`，不经 Rust `Cow<str>` 中转（§0 #2 合规）。
+    /// 签名直接接收 `&Bound<PyString>`，不经 Rust `Cow<str>` 中转。
     ///
     /// # 实现要点
     ///
@@ -393,7 +390,7 @@ impl Encoding {
     /// 1. **GIL 持有**：`py: Python<'py>` token。
     /// 2. **`obj.as_ptr()` 有效**：来自 downcast 后的 `&Bound<PyString>`，是有效 PyUnicode。
     /// 3. **返回 PyBytes 非 NULL 时所有权转移**给 `Bound::from_owned_ptr`；NULL 时
-    ///    `PyErr::fetch` 取回转 [`ConstructError::String`]（BC6 回退）。
+    ///    `PyErr::fetch` 取回转 [`ConstructError::String`]（回退路径）。
     fn encode_utf16_32_raw<'py>(
         &self,
         py: Python<'py>,
@@ -420,7 +417,7 @@ impl Encoding {
             }
         };
         if ptr.is_null() {
-            // BC6：极少触发（编码 Unicode 字符串几乎不失败），fetch 取回异常。
+            // 极少触发（编码 Unicode 字符串几乎不失败），fetch 取回异常。
             let py_err = PyErr::fetch(py);
             return Err(ConstructError::String {
                 message: format!(
@@ -498,7 +495,7 @@ mod tests {
     use crate::error::ConstructError;
 
     // ======================================================================
-    // from_user_str：接受有后缀编码（P2b 决策边界）
+    // from_user_str：接受有后缀编码
     // ======================================================================
 
     #[test]
@@ -552,7 +549,7 @@ mod tests {
     }
 
     // ======================================================================
-    // P2b：拒绝无后缀编码（utf16/utf_16/u16/utf32/utf_32/u32）
+    // 拒绝无后缀编码（utf16/utf_16/u16/utf32/utf_32/u32）
     // ======================================================================
 
     #[test]
@@ -592,7 +589,7 @@ mod tests {
     }
 
     // ======================================================================
-    // P8 修正：错误引导文本不误导（utf16 族 → utf_16_le，不 → utf_32_le）
+    // 错误引导文本不误导（utf16 族 → utf_16_le，不 → utf_32_le）
     // ======================================================================
 
     #[test]
@@ -622,7 +619,7 @@ mod tests {
 
     #[test]
     fn p8_utf_16_with_underscore_hinted_to_utf_16_le() {
-        // P8 关键 case：utf_16（带下划线）含 '1'，应识别为 utf16 族
+        // 关键 case：utf_16（带下划线）含 '1'，应识别为 utf16 族
         let err = Encoding::from_user_str("utf_16").expect_err("reject");
         if let ConstructError::Compilation { message } = err {
             assert!(
@@ -800,7 +797,7 @@ mod tests {
     }
 
     // ======================================================================
-    // decode/encode：utf16/32 raw FFI（验证 P2a byteorder + BOM 剥离）
+    // decode/encode：utf16/32 raw FFI（验证 byteorder + BOM 剥离）
     // ======================================================================
 
     #[test]
@@ -831,7 +828,7 @@ mod tests {
 
     #[test]
     fn p2a_decode_utf16_le_does_not_consume_bom() {
-        // P2a：byteorder=-1 不扫描 BOM。
+        // byteorder=-1 不扫描 BOM。
         // 数据流开头恰好是 \xff\xfe（LE BOM 字节序列），应保留为数据字符 U+FEFF。
         ensure_python();
         Python::with_gil(|py| {

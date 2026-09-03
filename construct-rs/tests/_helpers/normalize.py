@@ -1,9 +1,5 @@
 """跨实现比对前的规范化工具。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §2.3（normalize API 契约）+ §5.1.3（NaN/Inf 处理）
-- 提取自原 tests/test_phase4_parity.py line 88-104 与 test_bitstream_parity.py line 75-91
-
 规则要点：
 1. ``_`` 开头键过滤：Python construct Container 含 ``_io`` / ``_index`` 等内部状态，
    construct-rs 用户面 dataclass 不暴露这些；过滤后两侧 dict 才能比对。
@@ -11,11 +7,11 @@
 2. bytes 包装为 ``{"__bytes__": hex}``：JSON 不能直接序列化 bytes。
 3. float 精度：Rust f32/f64 与 Python float 在某些位模式有最后 1 位差异，round(6) 容忍。
 4. NaN/Inf 统一字符串哨兵：JSON 不能直接序列化 NaN/Infinity，且 ``NaN != NaN``
-   会使 rs==py 永远 False。两侧都转为同字符串后比对成立（设计改进-3）。
+   会使 rs==py 永远 False。两侧都转为同字符串后比对成立。
 
-注意（§0 原则合规）：本函数引入的中间形态（``{"__bytes__": hex}`` / ``"__NaN__"``）
+注意：本函数引入的中间形态（``{"__bytes__": hex}`` / ``"__NaN__"``）
 仅存在于测试子进程的 JSON 输出，用于跨 rs/py 实现比对；**不进入 construct-rs 的
-parse/build 运行时数据路径**，故不违反 §0 #2（无中间表示层）。
+parse/build 运行时数据路径**（运行时无中间表示层）。
 """
 
 from __future__ import annotations

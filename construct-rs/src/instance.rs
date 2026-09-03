@@ -1,18 +1,13 @@
 //! 实例构造辅助：[`create_class`] 与 [`force_setattr`]。
 //!
-//! 设计依据：`docs/设计修订-parse路径优化.md` §3.2（方案 B'）。
-//! 参考：`refs/pydantic/pydantic-core/src/validators/model.rs`（line 348-394）。
+//! 参考：pydantic-core `validators/model.rs`（create_class / force_setattr）。
 //!
 //! ## 设计动机
 //!
-//! Phase 1 子任务 1.8 揭示 parse 路径存在两个 §0 违反（详见设计修订 §1）：
-//!
-//! 1. `_parse_raw` 返回 dict 到 Python，Python 侧 `cls(**dict)` 引入 O(N²) kwargs
-//!    unpacking 开销（B4 仅 0.94x）。
-//! 2. dict 跨 FFI 边界返回，是明确的"中间表示层"违反。
-//!
-//! 方案 B' 将实例构造完整移入 Rust：通过 CPython C API 直接调用 `tp_new` 创建
+//! 实例构造完整在 Rust 侧进行：通过 CPython C API 直接调用 `tp_new` 创建
 //! 空实例，再用 `PyObject_GenericSetAttr` 整体替换 `__dict__`。
+//! 相比在 Python 侧执行 `cls(**dict)` 的方案，避免了 O(N²) kwargs
+//! unpacking 开销，且实例不跨 FFI 边界中转。
 //!
 //! ## 与 pydantic-core 的对齐
 //!
@@ -23,19 +18,17 @@
 //!
 //! ## ABI 模式
 //!
-//! **当前状态（8.ENV 后，2026-08-06）**：非 abi3 模式，目标 Python 3.13。
-//! `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` 已弃用（详 8.ENV §2.3 决定性验证）。
-//! 非 abi3 模式下 cpython 子模块可用（`#[cfg(not(Py_LIMITED_API))]`），ADR-023
-//! OPT-SHARED 的 O1-B / O2-A 依赖此子模块。
+//! **当前状态**：非 abi3 模式，目标 Python 3.13。
+//! `PYO3_USE_ABI3_FORWARD_COMPATIBILITY` 已弃用。
+//! 非 abi3 模式下 cpython 子模块可用（`#[cfg(not(Py_LIMITED_API))]`），
+//! KnownHash 写入与 PyBytes 直接访问等优化依赖此子模块。
 //!
-//! ## Phase 8 OPT-SHARED（ADR-023）新增工具函数
+//! ## 直接 dict 访问工具函数
 //!
 //! - [`dict_via_generic_getdict`]：用 `PyObject_GenericGetDict` 直接获取实例
-//!   `__dict__`，绕过 pyo3 getattr 包装链（O1-A，stable ABI）。
+//!   `__dict__`，绕过 pyo3 getattr 包装链（stable ABI）。
 //! - [`set_item_knownhash`]：用 `_PyDict_SetItem_KnownHash` 跳过 interned key
-//!   的 hash 重算（O1-B，cpython 子模块）。
-//!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-OPT-SHARED.md` §1。
+//!   的 hash 重算（cpython 子模块）。
 //!
 //! pyo3 0.22 API 约束（项目锁定 0.22，详见 `Cargo.toml`）：
 //! - `IntoPy<Py<PyAny>>` trait bound（非 0.23+ 的 `IntoPyObject`）。
@@ -170,10 +163,8 @@ pub fn intern_pystring(py: Python<'_>, name: &str) -> Py<PyString> {
     PyString::intern_bound(py, name).into()
 }
 
-/// O1-A：通过 `PyObject_GenericGetDict` 直接获取实例 `__dict__`，绕过 pyo3 getattr
+/// 通过 `PyObject_GenericGetDict` 直接获取实例 `__dict__`，绕过 pyo3 getattr
 /// 包装（MRO + 描述符 dispatch + Bound 包装 + downcast）。
-///
-/// 设计依据：ADR-023 决策 1 + 设计文档 §1.1。
 ///
 /// # ABI 依赖
 ///
@@ -185,7 +176,7 @@ pub fn intern_pystring(py: Python<'_>, name: &str) -> Py<PyString> {
 /// # Python 3.13 managed dict 行为
 ///
 /// Python 3.12 引入 `Py_TPFLAGS_MANAGED_DICT` flag，3.13 默认对所有 heaptype 启用
-/// （CPython typeobj.html：`tp_dictoffset` 设为 -1，表示 "unsafe to use this field"，
+/// （CPython typeobj.html：`tp_dictoffset` 设为 -1，表示不再保证该字段可直接访问，
 /// 官方推荐改调 `PyObject_GenericGetDict()`）。本函数内部由 CPython 正确处理：
 /// - managed dict 模式：从 pre-header `dict_or_values` 槽读 dict
 /// - lazy materialize：若 dict 未物化，触发 materialize 创建 PyDictObject
@@ -201,9 +192,9 @@ pub fn intern_pystring(py: Python<'_>, name: &str) -> Py<PyString> {
 ///
 /// 成功返回 `Bound<PyDict>`（owned 引用，由 pyo3 Bound drop 自动 decref）。
 /// 失败（GenericGetDict 返回 NULL / 返回非 PyDict）返回 `PyErr`——调用方应
-/// fallback 到原 getattr 路径（设计 §1.1.5）。
+/// fallback 到原 getattr 路径。
 ///
-/// # 退化路径（详设计 §1.1.5）
+/// # 退化路径
 ///
 /// | 触发条件 | 行为 |
 /// |---------|------|
@@ -245,9 +236,7 @@ pub fn dict_via_generic_getdict<'py>(
         })
 }
 
-/// O1-B：用 `_PyDict_SetItem_KnownHash` 写入 dict（跳过 hash 重算）。
-///
-/// 设计依据：ADR-023 决策 2 + 设计文档 §1.2。
+/// 用 `_PyDict_SetItem_KnownHash` 写入 dict（跳过 hash 重算）。
 ///
 /// # ABI 依赖
 ///
@@ -256,7 +245,7 @@ pub fn dict_via_generic_getdict<'py>(
 /// `int _PyDict_SetItem_KnownHash(PyObject *mp, PyObject *key, PyObject *value, Py_hash_t hash)`。
 /// pyo3 0.22 cpython 子模块已暴露（`pyo3::ffi::_PyDict_SetItem_KnownHash`，
 /// 经 `pyo3-ffi-0.22.6/src/cpython/dictobject.rs` L29 + lib.rs L459 re-export）。
-/// 该子模块由 `#[cfg(not(Py_LIMITED_API))]` 守护——项目非 abi3（8.ENV 验证），可用。
+/// 该子模块由 `#[cfg(not(Py_LIMITED_API))]` 守护——项目非 abi3，可用。
 ///
 /// # Safety
 ///
@@ -270,12 +259,12 @@ pub fn dict_via_generic_getdict<'py>(
 /// 返回 `Ok(())` 表示成功（C API 返回 0），`Err(PyErr)` 表示失败（C API 返回 -1，
 /// 异常已挂起）。
 ///
-/// # 退化路径（详设计 §1.2.5）
+/// # 退化路径
 ///
 /// - `_PyDict_SetItem_KnownHash` 返回 -1（dict 操作失败）→ 取出挂起异常，返回 `Err`
 ///   （与 `PyDict_SetItem` 同行为，调用方可 fallback）
 /// - 未来 CPython 删除符号 → pyo3 cpython 子模块升级时编译失败（编译期发现）
-/// - 项目切 abi3 → O1-B 整体不可编译（cpython 子模块缺失）
+/// - 项目切 abi3 → 本函数整体不可编译（cpython 子模块缺失）
 pub fn set_item_knownhash(
     py: Python<'_>,
     dict: &Bound<'_, PyDict>,
@@ -413,7 +402,7 @@ mod tests {
 
     #[test]
     fn force_setattr_replaces_dict() {
-        // 方案 B' 核心场景：整体替换 __dict__。
+        // 核心场景：整体替换 __dict__。
         with_py(|py| {
             let cls = make_simple_class(py, "Replaced");
             let instance = create_class(&cls).expect("create_class");
@@ -508,10 +497,10 @@ mod tests {
     }
 
     // ======================================================================
-    // Phase 8 OPT-SHARED：dict_via_generic_getdict（O1-A）
+    // dict_via_generic_getdict
     // ======================================================================
     //
-    // 设计文档 §4.1.1 测试场景：
+    // 测试场景：
     // - 普通 class（有 __dict__）
     // - dataclass（非 frozen）
     // - frozen dataclass
@@ -621,7 +610,7 @@ mod tests {
     }
 
     // ======================================================================
-    // Phase 8 OPT-SHARED：set_item_knownhash（O1-B）
+    // set_item_knownhash
     // ======================================================================
 
     #[test]

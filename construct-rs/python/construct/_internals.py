@@ -1,7 +1,5 @@
 """construct-rs 内部类（与 Python construct core.py 内部类对齐）。
 
-设计依据：``docs/design/模块设计/模块设计-Phase8-P1P2.md`` §1.3.1 + §1.8。
-
 本模块提供 Enum 系列节点所需的内部类：
 
 - :class:`EnumInteger`：int 子类，Enum 无映射 fallback 的返回类型。

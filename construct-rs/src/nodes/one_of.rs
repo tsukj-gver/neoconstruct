@@ -1,6 +1,5 @@
 //! OneOfNode / NoneOfNode：值集合校验节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §2.2。
 //! Python 参考：`construct/construct/core.py` `OneOf`（L6320）/ `NoneOf`（L6342）。
 //!
 //! ## 行为概述
@@ -8,11 +7,11 @@
 //! - OneOf：parse/build 校验 inner 结果 ∈ valids（frozenset）；不在则 ValidationError。
 //! - NoneOf：与 OneOf 取反——校验 inner 结果 ∉ invalids；在则 ValidationError。
 //!
-//! ## 编译期物化（§0.2 判据）
+//! ## 编译期物化
 //!
 //! `valids`/`invalids` 编译期物化为 `Py<PyFrozenSet>`。运行时通过
 //! `PyFrozenSet::contains`（C API `PySet_Contains`）查询，对 int/str/bytes 元素
-//! 走 C 级 `__hash__`/`__eq__`，**不计额外 FFI**（§0.2 判据 2）。
+//! 走 C 级 `__hash__`/`__eq__`，**不计额外 FFI**。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -66,7 +65,7 @@ impl Construct for OneOfNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         let obj = self.inner.parse(py, stream, ctx, path)?;
         let obj_bound = obj.bind(py);
-        // C-6：bool 是 int 子类，valids 含 1 时 True 也匹配（Python 语义）。
+        // bool 是 int 子类，valids 含 1 时 True 也匹配（Python 语义）。
         let contains = self
             .valids
             .bind(py)

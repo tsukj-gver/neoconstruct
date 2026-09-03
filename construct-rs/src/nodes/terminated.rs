@@ -1,6 +1,5 @@
 //! TerminatedNode：EOF 断言节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §5.2.1。
 //! Python 参考：`construct/construct/core.py` `Terminated`（L4727-4755）。
 //!
 //! ## 行为概述

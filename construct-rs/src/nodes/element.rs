@@ -1,6 +1,5 @@
-//! ElementNode：RepeatUntil 终止表达式中"当前元素"引用入口（v5 新增）。
+//! ElementNode：RepeatUntil 终止表达式中"当前元素"引用入口。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.7（v5 新增）。
 //! Python 参考无（construct-rs 新增——Python construct 用 lambda 参数 `x`
 //! 引用当前元素，construct-rs 用 Element 字段 + 字段名引用机制）。
 //!
@@ -8,7 +7,7 @@
 //!
 //! `Element` 是 construct-rs 中 RepeatUntil 终止表达式引用"当前元素"的机制。
 //! 与 Index（引用"当前下标"）平行——两者都遵循"字段名即引用、所有引用统一走
-//! `_FieldDescriptor` + GetInt"哲学（设计决策记录 Phase 4 决策 3 + 决策 5）。
+//! `_FieldDescriptor` + GetInt"哲学。
 //!
 //! - parse 返回 `Py_None`（Element 字段不持有真实数据——其值由 RepeatUntilNode
 //!   在迭代时通过 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, elem)` 借用设置）
@@ -16,13 +15,13 @@
 //! - sizeof 返回 0
 //! - has_expressions 返回 false（ElementNode 自身不引用 Struct 字段，仅作为引用入口）
 //!
-//! ## 用户访问 RepeatUntil 当前元素的机制（设计 §2.5 / §4.7）
+//! ## 用户访问 RepeatUntil 当前元素的机制
 //!
 //! | 用户需求 | construct-rs 写法 | 编译结果 |
 //! |---------|------------------|---------|
 //! | 在 RepeatUntil 终止表达式中引用当前元素 | `e: int = rfield(Element()); RepeatUntil(e > 5, Int8ub)` | `[GetInt(idx_of_e), Const(5), Gt]` |
 //!
-//! v5 决策（用户硬约束 #5 + Element 一致性）：不引入 `ExprOp::GetElem` /
+//! 设计取向（与 Element 一致性）：不引入 `ExprOp::GetElem` /
 //! `_current_elem_ptr` 等表达式内"元素引用"机制。终止表达式统一通过 Element
 //! 字段 + `GetInt(idx_of_e)` 取值（与其他字段引用完全同模式）。
 //!
@@ -45,7 +44,7 @@ use pyo3::prelude::*;
 // ElementNode
 // ---------------------------------------------------------------------------
 
-/// RepeatUntil 当前元素引用入口节点（v5 新增）。
+/// RepeatUntil 当前元素引用入口节点。
 ///
 /// 对应 construct-rs 用户面 `Element()`。Python construct 无对应物——Python 用
 /// lambda 参数 `x` 引用当前元素，construct-rs 用 Element 字段 + 字段名引用机制。
@@ -64,8 +63,6 @@ use pyo3::prelude::*;
 /// # sizeof 行为
 ///
 /// 返回 0（不消耗字节）。
-///
-/// 设计依据：`docs/模块设计-Array.md` §4.7。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct ElementNode;
 
@@ -75,7 +72,7 @@ impl ElementNode {
         Self
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     ///
     /// 返回 `false`——ElementNode 自身不引用 Struct 字段（仅作为引用入口）。
     /// RepeatUntilNode 的 has_expressions 始终返回 true，覆盖 Element 字段的
@@ -164,12 +161,12 @@ mod tests {
     }
 
     // ======================================================================
-    // EL-1：parse 在 RepeatUntil 之外（独立 Struct）返回 Py_None
+    // parse 在 RepeatUntil 之外（独立 Struct）返回 Py_None
     // ======================================================================
 
     #[test]
     fn parse_returns_none_in_standalone_context() {
-        // EL-1 / EL-5：ElementNode.parse 在 RepeatUntil 之外返回 Py_None。
+        // ElementNode.parse 在 RepeatUntil 之外返回 Py_None。
         // Element 字段不持有真实数据——其值由 RepeatUntil 借用设置。
         with_py(|py| {
             let node = ElementNode::new();
@@ -200,7 +197,7 @@ mod tests {
     }
 
     // ======================================================================
-    // EL-3：sizeof 返回 0
+    // sizeof 返回 0
     // ======================================================================
 
     #[test]
@@ -222,12 +219,12 @@ mod tests {
     }
 
     // ======================================================================
-    // EL-4：build 是 no-op
+    // build 是 no-op
     // ======================================================================
 
     #[test]
     fn build_is_noop() {
-        // EL-4: build 不写字节，不消费 obj。
+        // build 不写字节，不消费 obj。
         with_py(|py| {
             let node = ElementNode::new();
             let obj = py.eval_bound("None", None, None).expect("None");
@@ -246,7 +243,7 @@ mod tests {
 
     #[test]
     fn build_ignores_obj_value() {
-        // EL-4: build 忽略 obj 内容。
+        // build 忽略 obj 内容。
         with_py(|py| {
             let node = ElementNode::new();
             let obj = py.eval_bound("12345", None, None).expect("obj");
@@ -262,7 +259,7 @@ mod tests {
 
     #[test]
     fn build_does_not_require_index_in_context() {
-        // EL-4 边界：build 时即使 ctx._index 为 None 也不报错。
+        // 边界：build 时即使 ctx._index 为 None 也不报错。
         with_py(|py| {
             let node = ElementNode::new();
             let obj = py.eval_bound("None", None, None).expect("None");

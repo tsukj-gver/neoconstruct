@@ -1,8 +1,5 @@
 //! 字节流游标抽象：parse 用 `ParseStream`，build 用 `BuildStream`。
 //!
-//! 设计依据：`docs/架构设计.md` §C.4、`docs/模块设计-BitStream.md` §3、
-//! `docs/design/模块设计/模块设计-Streams.md` §3.1（Phase 7.2 Stream 基础设施扩展）。
-//!
 //! ## 关键约束
 //!
 //! - Stream 是纯 Rust 内部抽象，**不跨 FFI**。所有方法均为 Rust 原生操作，无 C API 调用。
@@ -10,7 +7,7 @@
 //! - `BuildStream` 持有 `Vec<u8>`，可通过 `with_capacity` 预分配容量减少 reallocate。
 //! - read 失败时的错误信息与 Python construct `stream_read` 对齐（含 expected/found）。
 //!
-//! ## Bit-level 支持（Phase 3.1）
+//! ## Bit-level 支持
 //!
 //! 除字节游标（`pos`）外，`ParseStream` / `BuildStream` 还维护 **bit 游标**
 //! （`bit_pos: u8`，取值 0-7）。bit 顺序固定为 **MSB-first**（bit 0 是字节最高有效位），
@@ -23,25 +20,23 @@
 //! （可恢复），`write` / `into_bytes` 在 release 行为未定义但不 panic（与 std `Vec` 等
 //! "无额外运行时检查"API 一致）。所有 panic 路径限定为 `debug_assert!`（仅 debug build）。
 //!
-//! ## Phase 7.2：Stream 基础设施扩展（Seek / Pointer / Prefixed 支撑）
+//! ## Seek / Pointer / Prefixed 支撑
 //!
 //! - [`Whence`] enum：流定位参考点（Start / Current / End），对齐 Python
 //!   `io.SEEK_SET/CUR/END`（0/1/2）。
 //! - [`ParseStream::seek_whence`]：通用 seek，支持 whence=Start/Current/End
 //!   （Pointer 负 offset / relativeOffset 用）。现有 [`ParseStream::seek`] 保留
-//!   （whence=0 专用，向后兼容 Phase 4 GreedyRange/Peek 调用方）。
-//! - [`BuildStream::pos`]：新增字段，写入位置可与 `buf.len()` 分离（覆盖写 / 零填充）。
-//!   现有调用方不调 seek，`pos == buf.len()`，行为零变更（设计附录 A 审计表）。
-//! - [`BuildStream::seek`]：新方法，仅移动指针，零填充延迟到下次 [`BuildStream::write`]。
+//!   （whence=0 专用，供 GreedyRange/Peek 调用方）。
+//! - [`BuildStream::pos`]：写入位置可与 `buf.len()` 分离（覆盖写 / 零填充）。
+//!   现有调用方不调 seek，`pos == buf.len()`，行为零变更。
+//! - [`BuildStream::seek`]：移动指针，零填充延迟到下次 [`BuildStream::write`]。
 //! - [`BuildStream::written_len`]：返回 buf 实际长度（与 [`BuildStream::tell`] 的 pos 区分）。
 
 use crate::error::ConstructError;
 use crate::path::Path;
 
 // ---------------------------------------------------------------------------
-// Phase 7.2：Whence enum（Stream 基础设施扩展）
-//
-// 设计依据：`docs/design/模块设计/模块设计-Streams.md` §3.1.1。
+// Whence enum（流定位参考点）
 //
 // 用于 `ParseStream::seek_whence` 与 `BuildStream::seek`，对齐 Python
 // `io.SEEK_SET/CUR/END`（0/1/2）。
@@ -51,11 +46,8 @@ use crate::path::Path;
 ///
 /// 用于 [`ParseStream::seek_whence`] 与 [`BuildStream::seek`]。
 ///
-/// # Phase 7.2 引入
-///
-/// Phase 7 前的 `ParseStream::seek(pos, path)` 仅支持 whence=0（绝对定位）。
 /// Pointer 节点（负 offset / relativeOffset=True）需要 whence=1/2 支持，
-/// 引入此枚举统一三参考点语义。
+/// 此枚举统一三参考点语义（绝对定位 / 相对定位 / 从末尾）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Whence {
     /// 从流开头（绝对定位）。对应 Python whence=0。
@@ -124,8 +116,6 @@ impl<'a> ParseStream<'a> {
     /// 调用前必须 `bit_pos == 0`。否则：
     /// - debug build：`debug_assert!` 触发 panic（开发期捕获调用方 bug）
     /// - release build：返回 `ConstructError::Stream`（携带 path 与 bit 偏移信息）
-    ///
-    /// 详见 `docs/模块设计-BitStream.md` §3.3。
     pub fn read(&mut self, n: usize, path: &Path) -> Result<&'a [u8], ConstructError> {
         debug_assert!(
             self.bit_pos == 0,
@@ -190,7 +180,6 @@ impl<'a> ParseStream<'a> {
     ///
     /// 用于 GreedyRange 失败回退（对齐 Python
     /// `stream_seek(stream, fallback, 0, path)`，`whence=0` 绝对定位）。
-    /// Phase 4 新增（设计 §3.1.1）。
     ///
     /// # 边界
     ///
@@ -218,7 +207,7 @@ impl<'a> ParseStream<'a> {
         Ok(())
     }
 
-    /// 通用 seek，支持 whence=Start/Current/End（Phase 7.2 新增）。
+    /// 通用 seek，支持 whence=Start/Current/End。
     ///
     /// 对齐 Python `stream_seek(stream, offset, whence, path)`（core.py L204）。
     ///
@@ -230,13 +219,13 @@ impl<'a> ParseStream<'a> {
     /// - [`Whence::End`]：`data.len() + at`，`at` 通常为负（从末尾向前）；
     ///   `at > 0` → Stream Err（parse 不可超越 EOF，与 Python BytesIO 差异：
     ///   BytesIO 允许 seek 超过 EOF 但 read 时才报错；parse 场景 seek 超过 EOF
-    ///   无意义，提前报错更清晰，详见设计 §7.1 S6 / 附录 B）。
+    ///   无意义，提前报错更清晰）。
     /// - 重置 `bit_pos = 0`（字节对齐，与现有 [`seek`](Self::seek) 一致）。
     ///
     /// # 与现有 `seek` 的关系
     ///
-    /// 现有 [`ParseStream::seek`](Self::seek)（whence=0 专用）保留不变，供
-    /// GreedyRange / Peek 等已有调用方继续使用（避免破坏 Phase 4 已验收代码）。
+    /// 现有 [`ParseStream::seek`](Self::seek)（whence=0 专用）保留，供
+    /// GreedyRange / Peek 等调用方继续使用。
     /// 新方法 `seek_whence` 供 Pointer / Seek 使用。
     pub fn seek_whence(
         &mut self,
@@ -336,9 +325,8 @@ impl<'a> ParseStream<'a> {
         self.data
     }
 
-    /// 借用底层缓冲的 `[start..end)` 切片（零拷贝，Phase 8.5 新增）。
+    /// 借用底层缓冲的 `[start..end)` 切片（零拷贝）。
     ///
-    /// 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §3.3.1（L-14 教训触发）。
     /// 用于 Checksum StreamRange 模式：Rust 内置 hashfunc 直接操作 `&[u8]`，
     /// 全程零拷贝（不构造 PyBytes）。
     ///
@@ -514,14 +502,14 @@ impl<'a> ParseStream<'a> {
 /// 满 8 bit 后 push 到 `buf`。`current_byte` 中已写入的 bit 永远位于高位
 /// （`bit_pos == 0` 时整字节为 0），未写入的位始终为 0，可安全 `|=`。
 ///
-/// # Phase 7.2：pos 字段（写入位置）
+/// # pos 字段（写入位置）
 ///
-/// 引入 `pos` 字段后，写入位置可与 `buf.len()` 分离，支持覆盖写与零填充：
+/// 写入位置可与 `buf.len()` 分离，支持覆盖写与零填充：
 /// - `pos < buf.len()`：覆盖写（下次 write 从 pos 开始覆盖，pos 推进，buf.len() 不变）
 /// - `pos > buf.len()`：零填充扩展到 pos（下次 write 前 resize）
-/// - `pos == buf.len()`：末尾追加（原 Phase 1-6 行为）
+/// - `pos == buf.len()`：末尾追加
 ///
-/// **向后兼容性**（设计附录 A）：所有现有 build 调用方（StructNode / BitwiseNode /
+/// **向后兼容性**：所有 build 调用方（StructNode / BitwiseNode /
 /// BytesNode / FormatFieldNode / PrefixedArrayNode 等）不调 seek，`pos` 始终
 /// 等于 `buf.len()`，行为零变更。bit 级 API（`write_bits` / `write_padding_bits`）
 /// 不感知 pos（仍 buf.push 末尾），用 `debug_assert!(pos == buf.len())` 守卫契约。
@@ -531,10 +519,10 @@ pub struct BuildStream {
     buf: Vec<u8>,
     /// 当前写入位置（字节偏移）。0..=buf.len()。
     ///
-    /// Phase 7 前无此字段（写入永远是末尾追加）。引入 seek 后，写入位置可与末尾分离：
+    /// 写入位置可与末尾分离：
     /// - `pos < buf.len()`：覆盖写（下次 write 从 pos 开始覆盖，pos 推进，buf.len() 不变）
     /// - `pos > buf.len()`：零填充扩展到 pos（下次 write 前 resize）
-    /// - `pos == buf.len()`：末尾追加（原行为）
+    /// - `pos == buf.len()`：末尾追加
     pos: usize,
     /// 当前字节内 bit 偏移（0-7）。0 表示字节对齐。
     bit_pos: u8,
@@ -562,7 +550,7 @@ impl BuildStream {
 
     /// 写入字节切片（字节级，要求 `bit_pos == 0`）。
     ///
-    /// Phase 7.2 行为变更（设计 §3.1.3）：现在从 `pos` 开始写，可能覆盖或扩展 buf。
+    /// 从 `pos` 开始写，可能覆盖或扩展 buf。
     ///
     /// - `pos + data.len() <= buf.len()`：覆盖写（`buf[pos..pos+data.len()] = data`）
     /// - `pos + data.len() > buf.len()`：先 resize 到 `pos + data.len()`（零填充间隙），
@@ -577,16 +565,13 @@ impl BuildStream {
     /// 调用前必须 `bit_pos == 0`。否则：
     /// - debug build：`debug_assert!` 触发 panic
     /// - release build：行为未定义但不 panic（破坏输出缓冲一致性，调用方契约违反）
-    ///
-    /// 详见 `docs/模块设计-BitStream.md` §3.3。
     pub fn write(&mut self, data: &[u8]) {
         debug_assert!(
             self.bit_pos == 0,
             "byte-level write in bit-unaligned position (bit_pos={})",
             self.bit_pos
         );
-        // 空 write 显式 no-op：避免 pos > buf.len() 时被误扩展（与原 extend_from_slice
-        // 同行为，但 pos 引入后需显式早返回）。
+        // 空 write 显式 no-op：避免 pos > buf.len() 时被误扩展。
         if data.is_empty() {
             return;
         }
@@ -601,11 +586,10 @@ impl BuildStream {
 
     /// 当前写入位置（字节偏移）。
     ///
-    /// Phase 7.2 行为变更（设计 §3.1.3）：返回 `pos`（写入位置），不是 `buf.len()`。
+    /// 返回 `pos`（写入位置），不是 `buf.len()`。
     /// 对齐 Python `io.BytesIO.tell()`（返回当前指针位置）。
     ///
-    /// 旧调用方（StructNode build）依赖 `tell()` 返回末尾位置——由于 StructNode 不调
-    /// seek，`pos` 始终等于 `buf.len()`，行为不变（向后兼容）。
+    /// 不调 seek 的调用方（如 StructNode build）`pos` 始终等于 `buf.len()`。
     ///
     /// 注意：若 `bit_pos != 0`，`tell()` 不包含正在填充的 `current_byte`。
     /// 字节级调用方应在 `bit_pos == 0` 时使用此值。
@@ -615,14 +599,14 @@ impl BuildStream {
 
     /// 已写入字节数（buf 实际长度，非 pos）。
     ///
-    /// Phase 7.2 新增。用于 sizeof 计算与顶层 build 收尾。与 [`tell`](Self::tell)
+    /// 用于 sizeof 计算与顶层 build 收尾。与 [`tell`](Self::tell)
     /// （返回 pos）区分：seek 后 `pos` 可小于 `buf.len()`，但 `buf.len()` 反映
     /// 实际已分配/已写入的边界。
     pub fn written_len(&self) -> usize {
         self.buf.len()
     }
 
-    /// seek 到指定位置（支持零填充扩展，Phase 7.2 新增）。
+    /// seek 到指定位置（支持零填充扩展）。
     ///
     /// 对齐 Python `io.BytesIO.seek(offset, whence)`。
     ///
@@ -729,10 +713,10 @@ impl BuildStream {
             return;
         }
         debug_assert!(n <= 64, "write_bits: n must be <= 64, got {}", n);
-        // Phase 7.2 守卫：bit API 假设末尾追加模型（self.buf.push），不感知 pos。
+        // 守卫：bit API 假设末尾追加模型（self.buf.push），不感知 pos。
         // 若用户在 Bitwise 域内 seek 使 pos != buf.len() 后再调 bit API，
         // 会破坏一致性（bit 写到末尾，pos 未推进）。debug build 捕获契约违反。
-        // Pointer/Seek 在 Bitwise 域内行为未定义（设计附录 A 已知限制）。
+        // Pointer/Seek 在 Bitwise 域内行为未定义（已知限制）。
         //
         // 注意：bit API 自身的连续调用通过下方 `self.pos = self.buf.len()` 保持
         // pos 与 buf.len() 同步（每次 push 后更新），所以连续 bit 写入不会触发
@@ -762,7 +746,7 @@ impl BuildStream {
                 let shift = rem_bits + 8 * (full_bytes - 1 - i);
                 self.buf.push(((masked >> shift) & 0xFF) as u8);
             }
-            // Phase 7.2：bit API 不感知 pos，但保持 pos 与 buf.len() 同步
+            // bit API 不感知 pos，但保持 pos 与 buf.len() 同步
             // （连续 bit 写入视为追加；seek 后调 bit 写由入口 debug_assert 捕获）。
             self.pos = self.buf.len();
 
@@ -790,7 +774,7 @@ impl BuildStream {
         if n == 0 {
             return;
         }
-        // Phase 7.2 守卫：同 write_bits，bit API 假设末尾追加模型。
+        // 守卫：同 write_bits，bit API 假设末尾追加模型。
         debug_assert!(
             self.pos == self.buf.len(),
             "write_padding_bits after seek (pos={}, buf.len()={}); bit API requires append-only mode",
@@ -807,7 +791,7 @@ impl BuildStream {
             // resize_with 比 push 循环更高效（一次性预留容量）
             let old_len = self.buf.len();
             self.buf.resize(old_len + full_bytes, byte_val);
-            // Phase 7.2：bit API 同步 pos（同 write_bits 批量路径）。
+            // bit API 同步 pos（同 write_bits 批量路径）。
             self.pos = self.buf.len();
 
             // 剩余 rem_bits bit 逐位写入
@@ -850,7 +834,7 @@ impl BuildStream {
                 self.buf.push(self.current_byte);
                 self.current_byte = 0;
                 self.bit_pos = 0;
-                // Phase 7.2：bit API 同步 pos（同 write_bits 批量路径）。
+                // bit API 同步 pos（同 write_bits 批量路径）。
                 self.pos = self.buf.len();
             }
         }
@@ -1011,7 +995,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Phase 8.5：ParseStream::slice
+    // ParseStream::slice
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1165,7 +1149,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // ParseStream::seek（Phase 4 新增）
+    // ParseStream::seek
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1256,7 +1240,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // ParseStream bit-level API（Phase 3.1）
+    // ParseStream bit-level API
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1495,7 +1479,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // BuildStream bit-level API（Phase 3.1）
+    // BuildStream bit-level API
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -1737,9 +1721,7 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Phase 7.2：Stream 扩展测试（Whence / seek_whence / BuildStream.seek）
-    //
-    // 设计依据：`docs/design/模块设计/模块设计-Streams.md` §7.1（S1-S15）。
+    // Stream 扩展测试（Whence / seek_whence / BuildStream.seek）
     // ---------------------------------------------------------------------------
 
     // === Whence enum ===
@@ -1762,7 +1744,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_start_basic() {
-        // S1: whence=Start, at=-1 → Err；正常 at → 设置 pos
+        // whence=Start, at=-1 → Err；正常 at → 设置 pos
         let mut s = ParseStream::new(b"abcdef");
         let path = root_path();
         s.seek_whence(3, Whence::Start, &path).expect("seek to 3");
@@ -1788,7 +1770,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_start_beyond_end_returns_err() {
-        // S2: whence=Start, at > data.len() → Err
+        // whence=Start, at > data.len() → Err
         let mut s = ParseStream::new(b"abc");
         let path = root_path();
         let err = s
@@ -1815,7 +1797,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_current_forward() {
-        // S3: whence=Current, tell()=3, at=2 → pos=5
+        // whence=Current, tell()=3, at=2 → pos=5
         let mut s = ParseStream::new(b"abcdef");
         let path = root_path();
         s.seek_whence(3, Whence::Start, &path)
@@ -1827,7 +1809,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_current_backward() {
-        // S4: whence=Current, tell()=5, at=-2 → pos=3
+        // whence=Current, tell()=5, at=-2 → pos=3
         let mut s = ParseStream::new(b"abcdef");
         let path = root_path();
         s.seek_whence(5, Whence::Start, &path)
@@ -1839,7 +1821,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_current_overflow_returns_err() {
-        // S5: whence=Current, tell()=usize::MAX, at=1 → checked_add 失败
+        // whence=Current, tell()=usize::MAX, at=1 → checked_add 失败
         let data = b"abc";
         let mut s = ParseStream::new(data);
         let path = root_path();
@@ -1884,7 +1866,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_end_positive_returns_err() {
-        // S6: whence=End, at=1（正）→ Err（parse 不可超越 EOF）
+        // whence=End, at=1（正）→ Err（parse 不可超越 EOF）
         let mut s = ParseStream::new(b"abcdef");
         let path = root_path();
         let err = s
@@ -1900,7 +1882,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_end_negative_from_eof() {
-        // S7: whence=End, data.len()=10, at=-3 → pos=7
+        // whence=End, data.len()=10, at=-3 → pos=7
         let mut s = ParseStream::new(b"0123456789");
         let path = root_path();
         s.seek_whence(-3, Whence::End, &path)
@@ -1935,7 +1917,7 @@ mod tests {
 
     #[test]
     fn parse_stream_seek_whence_resets_bit_pos() {
-        // S8: seek_whence 重置 bit_pos（与现有 seek 一致）
+        // seek_whence 重置 bit_pos（与现有 seek 一致）
         let mut s = ParseStream::new(&[0xFF, 0xFF]);
         let path = root_path();
         // 制造 bit 偏移
@@ -1951,7 +1933,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_start_does_not_extend_buf() {
-        // S9: BuildStream.seek whence=Start, at=5 → pos=5（不扩展 buf）
+        // BuildStream.seek whence=Start, at=5 → pos=5（不扩展 buf）
         let mut s = BuildStream::new();
         s.write(b"abc"); // buf=[a,b,c], pos=3
         let path = root_path();
@@ -1964,7 +1946,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_then_write_zero_pads() {
-        // S10: seek(10) + write(b"X"), buf.len()=3 → buf 变为 [0]*10 + [X]（len=11）
+        // seek(10) + write(b"X"), buf.len()=3 → buf 变为 [0]*10 + [X]（len=11）
         let mut s = BuildStream::new();
         s.write(b"abc"); // buf=[a,b,c], pos=3
         let path = root_path();
@@ -1993,7 +1975,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_overwrite_existing() {
-        // S11: buf=[1,2,3], seek(1) + write(b"X") → buf=[1,X,3], pos=2
+        // buf=[1,2,3], seek(1) + write(b"X") → buf=[1,X,3], pos=2
         let mut s = BuildStream::new();
         s.write(&[1u8, 2, 3]);
         let path = root_path();
@@ -2007,7 +1989,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_end_positive_extends_pos() {
-        // S12: whence=End, buf.len()=5, at=3 → pos=8（下次 write 零填充）
+        // whence=End, buf.len()=5, at=3 → pos=8（下次 write 零填充）
         let mut s = BuildStream::new();
         s.write(b"abcde"); // buf.len()=5, pos=5
         let path = root_path();
@@ -2024,7 +2006,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_current_negative() {
-        // S13: whence=Current, pos=5, at=-2 → pos=3
+        // whence=Current, pos=5, at=-2 → pos=3
         let mut s = BuildStream::new();
         s.write(b"abcde");
         let path = root_path();
@@ -2034,7 +2016,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_current_underflow_returns_err() {
-        // S14: whence=Current, pos=1, at=-5 → new_pos=-4 < 0 → Err
+        // whence=Current, pos=1, at=-5 → new_pos=-4 < 0 → Err
         let mut s = BuildStream::new();
         s.write(b"a");
         let path = root_path();
@@ -2051,7 +2033,7 @@ mod tests {
 
     #[test]
     fn build_stream_seek_resets_bit_state() {
-        // S15: seek 重置 bit_pos / current_byte（bit 域内 seek 不支持，但仍重置状态）
+        // seek 重置 bit_pos / current_byte（bit 域内 seek 不支持，但仍重置状态）
         let mut s = BuildStream::new();
         s.write_bits(0xAB, 4); // bit_pos=4, current_byte=0xA0
         let path = root_path();
@@ -2096,7 +2078,7 @@ mod tests {
         s.write(b"foo");
         s.write(b"bar");
         s.write(b"baz");
-        // 行为应与 Phase 1-6 一致：append-only
+        // 行为：append-only
         assert_eq!(s.as_bytes(), b"foobarbaz");
         assert_eq!(s.tell(), 9);
         assert_eq!(s.written_len(), 9);

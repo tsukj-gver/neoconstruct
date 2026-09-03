@@ -1,9 +1,5 @@
 """@dataclass 与 StructMixin 集成测试（从 test_field_types.py 拆分）。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §4 步骤 6（test_field_types 拆分）
-- docs/design/模块设计/模块设计-表达式系统.md §2.1-§2.3
-
 这些测试需要 Rust 扩展（__init_subclass__ 调用 compile_schema），验证 @dataclass
 与 field/rfield/wfield/default/kw_only 的集成行为。
 """
@@ -122,8 +118,8 @@ class TestDataclassIntegration:
         assert sig.parameters["reserved"].kind == inspect.Parameter.KEYWORD_ONLY
         assert sig.parameters["version"].kind == inspect.Parameter.KEYWORD_ONLY
 
-    def test_backward_compat_phase1_pattern(self):
-        # Phase 1 用法仍然兼容
+    def test_backward_compat_early_pattern(self):
+        # 早期用法仍然兼容
         @dataclass
         class SimpleMsg(StructMixin):
             address: int = field(Int8ub)

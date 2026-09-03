@@ -1,16 +1,16 @@
-"""Phase 8 OPT-SHARED Controlled A/B Test retest (post O1-A + O1-B + O2-A).
+"""Controlled A/B Test retest after shared-node optimizations.
 
 Target: 7 LOW cases + positive controls + key TM1 shared-tax check.
-Baseline: `bench/results/bench_phase8_313.json` (Python 3.13 non-abi3, 8.ENV §4.1).
+Baseline: `bench/results/bench_adapters_struct_streams_py313.json` (Python 3.13 non-abi3).
 
-Methodology (L-09 + design §4.2):
+Methodology:
   1. Alternating rs↔py per round (rs then py back-to-back, repeat ≥5 rounds)
   2. Positive control: TM1 / EN1 / MP1 (3.13 baseline ≥10x — verify no regression)
   3. Negative control: build direction (same session env drift check)
   4. Failure criterion: TM1 rs_ns > 200ns → shared-tax optimization failed
-     (design §3.3 + ADR-023 §预测; theoretical ~165-180ns + margin)
+     (theoretical ~165-180ns + margin)
 
-Reuses `bench_phase8_ab_retest.py` infrastructure. Environment variables:
+Reuses `bench_adapters_retest.py` infrastructure. Environment variables:
   - CRS_PYTHON: rs venv (default: project-local .venv)
   - PC_PYTHON:  py venv (default: project-local .venv-pc)
 
@@ -32,8 +32,8 @@ _BENCH_DIR = Path(__file__).resolve().parent
 if str(_BENCH_DIR) not in sys.path:
     sys.path.insert(0, str(_BENCH_DIR))
 
-import bench_phase8
-import bench_phase8_ab_retest as ab
+import bench_adapters_struct_streams
+import bench_adapters_retest as ab
 from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
@@ -59,10 +59,10 @@ def _resolve_venv(env_var, venv_dir):
 
 
 # ---------------------------------------------------------------------------
-# OPT-SHARED target cases
+# Shared-node optimization target cases
 # ---------------------------------------------------------------------------
 
-# 7 LOW cases from 3.13 baseline (8.ENV §4.1) — primary OPT-SHARED targets
+# 7 LOW cases from 3.13 baseline — primary optimization targets
 LOW_CASES = [
     ("CN1", "Const"),
     ("HX1", "Hex"),
@@ -72,7 +72,7 @@ LOW_CASES = [
     ("NT1", "NamedTuple"),
 ]
 
-# FE1 build is also LOW but a known limitation (PM decision accepted <10x)
+# FE1 build is also LOW but a known limitation (accepted <10x)
 LOW_BUILD_CASES = [
     ("FE1", "FlagsEnum"),  # build direction
 ]
@@ -90,7 +90,7 @@ NEGATIVE_CONTROLS = [
     ("TM1", "Terminated"),
 ]
 
-# Acceptance criterion (design §3.3)
+# Pass/fail criterion
 TM1_FAILURE_NS = 200  # TM1 rs_ns > 200ns → shared-tax optimization failed
 TM1_TARGET_NS = 180   # TM1 rs_ns ≤ 180ns (shared_tax ≤ 150 + 30 inner)
 
@@ -110,7 +110,7 @@ def main():
 
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 78)
-    print(f"Phase 8 OPT-SHARED Retest (O1-A + O1-B + O2-A) | {ts}")
+    print(f"Shared-node optimization retest | {ts}")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -151,7 +151,7 @@ def main():
     # --- LOW parse cases ---
     print()
     print("=" * 60)
-    print("LOW PARSE CASES (OPT-SHARED primary targets)")
+    print("LOW PARSE CASES (shared-node optimization primary targets)")
     print("=" * 60)
     for case_id, constructor in LOW_CASES:
         print(f"\n  [{case_id}] {constructor} parse:")
@@ -165,7 +165,7 @@ def main():
     # --- LOW build cases (known limitation) ---
     print()
     print("=" * 60)
-    print("LOW BUILD CASES (known limitation — PM decision accepted <10x)")
+    print("LOW BUILD CASES (known limitation — accepted <10x)")
     print("=" * 60)
     for case_id, constructor in LOW_BUILD_CASES:
         print(f"\n  [{case_id}] {constructor} build:")
@@ -179,7 +179,7 @@ def main():
     # --- Summary table ---
     print()
     print("=" * 90)
-    print("SUMMARY (post OPT-SHARED O1-A + O1-B + O2-A)")
+    print("SUMMARY (post shared-node optimizations)")
     print("=" * 90)
     print(f"{'Case':<6} {'Constructor':<16} {'Dir':<7} {'Mean':>8} {'Min':>8} "
           f"{'Max':>8} {'Std':>7} {'rs_mean':>9} {'Cat':<18}")
@@ -193,7 +193,7 @@ def main():
     # --- Shared-tax TM1 verdict ---
     print()
     print("=" * 60)
-    print("SHARED-TAX TM1 VERDICT (design §3.3)")
+    print("SHARED-TAX TM1 VERDICT")
     print("=" * 60)
     tm1 = next((r for r in all_results
                 if r["case_id"] == "TM1" and r["direction"] == "parse"), None)
@@ -210,14 +210,14 @@ def main():
         else:
             verdict = f"[IMPROVED] TM1 rs_mean={tm1_rs:.0f}ns <= {TM1_FAILURE_NS}ns (failure threshold)"
             print(f"  {verdict}")
-            print(f"     -> not failed but above target ({TM1_TARGET_NS}ns); L-09 noise band")
+            print(f"     -> not failed but above target ({TM1_TARGET_NS}ns); measurement noise band")
 
     # Save results
     out_path = _BENCH_DIR / "results" / "bench_opt_shared_retest.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     output = {
         "timestamp": ts,
-        "phase": "8.OPT-SHARED",
+        "phase": "shared-node-retest",
         "config": {
             "number": config.number,
             "iterations": config.iterations,

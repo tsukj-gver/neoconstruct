@@ -1,7 +1,5 @@
 //! BitPaddingNode：bit 级填充节点。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.2（BitPaddingNode 详细设计）、
-//! §9.2（边界条件 BP-1~BP-3）。
 //! Python 参考：`construct/construct/core.py` `Padding`（L4136，bit 域内通过
 //! `Padded._build` 写 `self.pattern * pad`，L4239）；
 //! `construct/construct/lib/binary.py` `BITS2BYTES_CACHE`（L108）。
@@ -11,7 +9,7 @@
 //! BitPaddingNode 在 bit 域内跳过或写入 `length` 个 bit。parse 返回 Python `None`，
 //! build 接受任意对象（忽略），用 `pattern_bit` 填充。
 //!
-//! ## pattern 严格校验（设计 §4.2 P1 修正）
+//! ## pattern 严格校验
 //!
 //! Python `bits2bytes` 通过 `BITS2BYTES_CACHE` 查表，cache 键仅含 `0x00`/`0x01` 序列。
 //! 因此 bit 域 Padding 的 pattern 字节只能是 `0x00`（填 0 bit）或 `0x01`（填 1 bit），
@@ -35,11 +33,11 @@ use super::Construct;
 ///
 /// 详见模块级文档。
 ///
-/// # 错误（§9.2 BP-1~BP-3）
+/// # 错误
 ///
-/// - BP-1：`length == 0` → parse 不推进游标返回 None；build 不写入
-/// - BP-2：流中 bit 数不足 → parse 返回 `Stream` 错误
-/// - BP-3：build 时 obj 为任意值（含 None） → 忽略 obj，写入 pattern bit
+/// - `length == 0` → parse 不推进游标返回 None；build 不写入
+/// - 流中 bit 数不足 → parse 返回 `Stream` 错误
+/// - build 时 obj 为任意值（含 None） → 忽略 obj，写入 pattern bit
 ///
 /// # pattern 合法值
 ///
@@ -67,7 +65,7 @@ impl BitPaddingNode {
     /// - `length`：填充的 bit 数（非负）。
     /// - `pattern`：填充字节值，必须是 `0x00` 或 `0x01`。
     pub fn new(length: usize, pattern: u8) -> Result<Self, ConstructError> {
-        // 严格校验 pattern 合法性（设计 §4.2 P1 修正）。
+        // 严格校验 pattern 合法性。
         // Python 的 BITS2BYTES_CACHE 键仅含 0x00/0x01，其他值会 KeyError。
         if pattern != 0x00 && pattern != 0x01 {
             return Err(ConstructError::Padding {
@@ -205,7 +203,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — BP-1, BP-2
+    // parse
     // ======================================================================
 
     #[test]
@@ -243,7 +241,7 @@ mod tests {
 
     #[test]
     fn parse_zero_length_is_noop() {
-        // BP-1: length=0 不推进游标
+        // length=0 不推进游标
         with_py(|py| {
             let node = BitPaddingNode::new(0, 0x00).expect("zero length");
             let mut stream = ParseStream::new(&[0xFF]);
@@ -259,7 +257,7 @@ mod tests {
 
     #[test]
     fn parse_insufficient_bits_returns_stream_error() {
-        // BP-2: 流中只有 8 bit，请求 12 bit
+        // 流中只有 8 bit，请求 12 bit
         with_py(|py| {
             let node = BitPaddingNode::new(12, 0x00).expect("valid");
             let mut stream = ParseStream::new(&[0xFF]);
@@ -282,7 +280,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — BP-3
+    // build
     // ======================================================================
 
     #[test]
@@ -315,7 +313,7 @@ mod tests {
 
     #[test]
     fn build_ignores_obj_value() {
-        // BP-3: obj 为任意值（非 None）也被忽略
+        // obj 为任意值（非 None）也被忽略
         with_py(|py| {
             let node = BitPaddingNode::new(4, 0x01).expect("valid");
             // 传入字符串对象（不是 None）

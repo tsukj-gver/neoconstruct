@@ -1,8 +1,5 @@
 """construct-rs vs Python construct 2.10.70 表达式场景性能基准测试。
 
-设计依据：``docs/design/模块设计/模块设计-表达式系统.md`` §7.1（验证场景）、§8（性能预测）、
-§8.7（性能假设可证伪性）。
-
 3 个表达式用例（E1-E3），每个用例测量 parse 与 build 两个方向，对照：
 - **construct-rs**：本项目（Rust 内核 + Python 包层）
 - **Python construct 2.10.70**：绝对基线（pip install construct==2.10.70）
@@ -13,14 +10,14 @@
 
 用法::
 
-    python tests/benchmark_expr.py
+    python bench/bench_expr.py
 
 输出：stdout 打印对比表 + 详细日志写 ``bench/results/benchmark_expr_results.txt``。
 
-通过标准（§8.7）：
+通过标准：
 - E1-E3 parse 方向 ≥8x（硬目标）
-- E1-E3 build 方向 ≥7x（CONFIRM-1 决定）
-- 全部 <4x 视为设计失败，暂停后续开发
+- E1-E3 build 方向 ≥7x
+- 全部 <4x 视为设计失败
 """
 
 from __future__ import annotations
@@ -246,9 +243,9 @@ CASE_DESCRIPTIONS = {
     "E3": "Tell + Computed (6 字段: Tell, Bytes(4), Int16ub, Bytes(len), Tell, Computed)",
 }
 
-# 性能门禁标准（§8.7）
+# 性能门禁标准
 GATE_PARSE = 8.0   # parse 方向硬目标 ≥8x
-GATE_BUILD = 7.0   # build 方向 CONFIRM-1 决定 ≥7x
+GATE_BUILD = 7.0   # build 方向 ≥7x
 GATE_FAIL = 4.0    # <4x 视为设计失败
 
 
@@ -320,8 +317,7 @@ def check_gates(results: dict) -> list[str]:
             )
         if sp < GATE_FAIL:
             failures.append(
-                f"设计失败：{case} parse 加速比 {sp:.2f}x < {GATE_FAIL}x "
-                f"（暂停后续开发）"
+                f"设计失败：{case} parse 加速比 {sp:.2f}x < {GATE_FAIL}x"
             )
 
         # build 方向 ≥7x
@@ -352,10 +348,10 @@ def write_results_file(results: dict, table: str, failures: list[str]) -> Path:
     lines.append(f"  repeat (中位数): {REPEAT}")
     lines.append(f"  测量时间       : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
-    lines.append(f"通过标准（§8.7）：")
+    lines.append(f"通过标准：")
     lines.append(f"  - E1-E3 parse ≥{GATE_PARSE}x（硬目标）")
-    lines.append(f"  - E1-E3 build ≥{GATE_BUILD}x（CONFIRM-1 决定）")
-    lines.append(f"  - <{GATE_FAIL}x 视为设计失败，暂停后续开发")
+    lines.append(f"  - E1-E3 build ≥{GATE_BUILD}x")
+    lines.append(f"  - <{GATE_FAIL}x 视为设计失败")
     lines.append("")
     lines.append("对比表：")
     lines.append(table)

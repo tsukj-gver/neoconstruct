@@ -2,7 +2,7 @@
 
 目的
 ----
-方案 B' 实施后 O(N²) 瓶颈已消除，但 Rust 内核每字段 ~234ns 远高于理论估算
+O(N²) 瓶颈消除后，Rust 内核每字段 ~234ns 仍远高于理论估算
 ~85-140ns/field。本脚本通过 6 个测量点的对照分解，推算出每字段的实际开销分布：
 
     1. 完整 parse（基线）       : Flat.parse(data) [Rust 全流程]
@@ -32,7 +32,7 @@
 
 用法::
 
-    python tests/bench_stages.py
+    python bench/bench_stages.py
 """
 
 from __future__ import annotations

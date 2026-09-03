@@ -1,8 +1,5 @@
 """16 种 Int* 格式 + Bytes + GreedyBytes 的 parse/build 往返测试。
 
-设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）、
-``docs/design/基础设施/架构设计.md`` §A.4（类型描述符）。
-
 每个测试用例：
 1. 构造单字段的 StructMixin 子类
 2. build 已知值 → 字节
@@ -195,8 +192,8 @@ def test_bytes_build_rejects_wrong_length():
 def test_bytes_build_accepts_bytearray():
     """Bytes 接受 bytearray（bytes-like）输入。
 
-    注：Phase 1 REV 约束 1 提到 Bytes build 仅接受 bytes，
-    bytearray 若支持应通过，若不支持应给出明确错误。此处验证实际行为。
+    注：Bytes build 基线约定仅接受 bytes；bytearray 若支持应通过，
+    若不支持应给出明确错误。此处验证实际行为。
     """
 
     @dataclass

@@ -1,6 +1,5 @@
 //! ArrayNode：固定次数数组读写。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.1。
 //! Python 参考：`construct/construct/core.py` `Array`（L2493-2567）。
 //!
 //! ## 概述
@@ -15,9 +14,9 @@
 //!
 //! ## 性能要点
 //!
-//! - **4.7 lazy path 迁移**：成功路径不调 `path.push_index/pop`（P0-3 模式推广），
+//! - **lazy path**：成功路径不调 `path.push_index/pop`，
 //!   子节点返回 Err 时通过 `ConstructError::push_path_index(i)` 重建索引段。
-//! - **4.7 PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`，
+//! - **PyList Vec 中转**：用 `Vec<Py<PyAny>>` 收集元素后一次性 `PyList::new_bound`，
 //!   避免 `PyList::append` 慢路径（capacity 检查 + realloc）。
 //! - `ctx.set_index` 是栈字段写入（~1ns），不走 PyDict。
 
@@ -34,8 +33,6 @@ use pyo3::types::PyList;
 // ---------------------------------------------------------------------------
 
 /// Array 的元素数量来源。
-///
-/// 设计依据：`docs/模块设计-Array.md` §2.2 决策 A2。
 #[derive(Debug, Clone)]
 pub enum CountSource {
     /// 编译期常量（如 `Array(5, Byte)`）。
@@ -75,7 +72,7 @@ impl CountSource {
 /// # sizeof 行为
 ///
 /// - `Const(n)` × `inner.sizeof()` 的乘积
-/// - `Expr` count：在 GIL 持有时求值（设计 §4.1.4 / §12.6 决策点 6 选项 A）
+/// - `Expr` count：在 GIL 持有时求值
 #[derive(Debug)]
 pub struct ArrayNode {
     /// 元素子树（递归 Box）。
@@ -134,7 +131,7 @@ impl ArrayNode {
         Ok(count_i64 as usize)
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     pub fn has_expressions(&self) -> bool {
         self.inner.has_expressions() || self.count.is_expr()
     }
@@ -154,18 +151,18 @@ impl super::Construct for ArrayNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         let count = self.eval_count(ctx, py)?;
 
-        // 4.7 PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList，
+        // PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList，
         // 避免 PyList::append 慢路径（CPython list 的 capacity 检查 + 可能 realloc）。
         // Vec::with_capacity 一次性分配，push 是纯 Rust 操作（~1-2ns/elem）。
         let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(count);
 
-        // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
+        // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
 
         for i in 0..count {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
-            // 子节点返回 Err 时通过 push_path_index 重建索引段（P0-3 模式推广）。
+            // lazy path：成功路径不调 path.push_index/pop。
+            // 子节点返回 Err 时通过 push_path_index 重建索引段。
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
                 Err(mut e) => {
@@ -198,12 +195,12 @@ impl super::Construct for ArrayNode {
     ) -> Result<(), ConstructError> {
         let count = self.eval_count(ctx, py)?;
 
-        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        // build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
         // ArrayNode 的 obj_len 需求通过 vec.len() 获取（O(1)）。
         let items = super::common::collect_obj_to_vec(obj, "Array", path)?;
         let obj_len = items.len();
 
-        // AR-3: 长度校验
+        // 长度校验
         if obj_len != count {
             return Err(ConstructError::Range {
                 message: format!("expected {} elements, found {}", count, obj_len),
@@ -215,7 +212,7 @@ impl super::Construct for ArrayNode {
 
         for (i, elem) in items.into_iter().enumerate() {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
             if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 e.push_path_index(i);
@@ -233,7 +230,7 @@ impl super::Construct for ArrayNode {
             CountSource::Const(n) => *n,
             CountSource::Expr(prog) => {
                 // 表达式 count：需在 GIL 持有条件下求值。
-                // 设计 §4.1.4 + §12.6 决策点 6 选项 A：用 with_gil（sizeof 在 GIL 持有
+                // 用 with_gil（sizeof 在 GIL 持有
                 // 线程调用，with_gil 在已持 GIL 时 O(1)）。正确写法（避免借用逃逸）：
                 // 所有需要 py 的逻辑放进闭包内。
                 Python::with_gil(|py| -> Result<usize, ConstructError> {
@@ -264,9 +261,7 @@ impl super::Construct for ArrayNode {
     }
 }
 
-// 恢复 ctx._index 已提升为 `Context::restore_index` 方法（P0-1 整合）。
-// 保留此注释作为 ArrayNode 模式采用声明参考。
-// 设计 §3.2.2 嵌套数组语义：调用 `ctx.restore_index(old_index)` 即可。
+// 嵌套数组语义：恢复外层下标调用 `ctx.restore_index(old_index)` 即可。
 //
 // ---------------------------------------------------------------------------
 // 单元测试
@@ -410,11 +405,11 @@ mod tests {
             let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            // AR-5: 子构造器失败时错误向上传播
+            // 子构造器失败时错误向上传播
             match err {
                 ConstructError::Stream { message, path: p } => {
                     assert!(message.contains("expected 1"), "got: {}", message);
-                    // O1 修复（4.6）：path 应为 "root[2]"——inner.parse 在
+                    // path 应为 "root[2]"——inner.parse 在
                     // path 栈含 Index(2) 时已经把 path 写成 "root[2]"，
                     // ArrayNode 不再补充。验证不出现 "root.[2][2]" 双重标记。
                     assert!(
@@ -430,7 +425,7 @@ mod tests {
 
     #[test]
     fn parse_const_error_path_no_double_index_marker() {
-        // O1 专项测试（4.6）：嵌套场景验证 path 格式无双重 [i] 标记。
+        // 嵌套场景验证 path 格式无双重 [i] 标记。
         // 场景：Array(3, Array(2, Byte)) 解析到不完整流时，
         // 内层 Array 在 i=1 时失败，错误 path 应为 "root[1][1]"。
         with_py(|py| {
@@ -450,7 +445,7 @@ mod tests {
                 .expect_err("should fail on incomplete inner array");
             match err {
                 ConstructError::Stream { path: p, .. } => {
-                    // O1 修复：正确 path 应为 "root[1][1]"，不出现 "root.[1][1].[1][1]" 等。
+                    // 正确 path 应为 "root[1][1]"，不出现 "root.[1][1].[1][1]" 等。
                     assert!(
                         p == "root[1][1]",
                         "nested O1 path format: expected 'root[1][1]', got '{}'",
@@ -480,12 +475,12 @@ mod tests {
     }
 
     // ======================================================================
-    // 4.7 lazy path 嵌套组合测试（设计 §6.2）
+    // lazy path 嵌套组合测试
     // ======================================================================
 
     #[test]
     fn parse_returns_native_list_type() {
-        // 4.7：验证 Vec 中转后返回的仍是原生 list 类型。
+        // 验证 Vec 中转后返回的仍是原生 list 类型。
         with_py(|py| {
             let node = ArrayNode::new(byte_node(), CountSource::Const(3), false);
             let mut stream = ParseStream::new(&[0x01, 0x02, 0x03]);
@@ -503,7 +498,7 @@ mod tests {
 
     #[test]
     fn parse_discard_returns_empty_list_with_vec() {
-        // 4.7：discard=True 时 Vec 不收集元素，但返回空 list（非 None）。
+        // discard=True 时 Vec 不收集元素，但返回空 list（非 None）。
         with_py(|py| {
             let node = ArrayNode::new(byte_node(), CountSource::Const(5), true);
             let mut stream = ParseStream::new(&[0x01, 0x02, 0x03, 0x04, 0x05]);
@@ -521,7 +516,7 @@ mod tests {
 
     #[test]
     fn parse_struct_inside_array_error_path() {
-        // 4.7 设计 §6.2：Array(3, Struct{x: Byte})，Array[1].x EOF → path = "root[1].x"
+        // Array(3, Struct{x: Byte})，Array[1].x EOF → path = "root[1].x"
         // 重建顺序（从叶到根）：
         //   1. leaf FormatField error path = "root"
         //   2. Struct.push_segment("x"): "root" → "root.x"
@@ -565,7 +560,7 @@ mod tests {
 
     #[test]
     fn build_struct_inside_array_error_path() {
-        // 4.7 设计 §6.2：build 方向同上，path = "root[1].x"
+        // build 方向同上，path = "root[1].x"
         // 重建顺序（从叶到根）：
         //   1. leaf FormatField build error path = "root"
         //   2. Struct.push_segment("x"): "root" → "root.x"

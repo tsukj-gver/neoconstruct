@@ -1,6 +1,5 @@
 //! RebuildNode：build 时基于表达式重算字段的节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §1.4。
 //! Python 参考：`construct/construct/core.py` `Rebuild`（L2975-3028）。
 //!
 //! ## 行为概述
@@ -17,9 +16,8 @@
 //!
 //! ## 表达式系统
 //!
-//! `func` 必须是 Phase 2 表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram，
-//! 运行时零 FFI 求值。**不接收 Python lambda/callable**（与 RepeatUntil v5 同脉络，
-//! 不重蹈 ADR-013 → ADR-014 的覆辙，设计 §5.3 RB-callable 差异记录）。
+//! `func` 必须是字段表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram，
+//! 运行时零 FFI 求值。**不接收 Python lambda/callable**。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -41,7 +39,7 @@ use crate::nodes::Node;
 /// - build：忽略传入 obj，求值 func 表达式得到 i64 → 转 PyLong → `inner.build(value)`
 /// - sizeof：`inner.sizeof(ctx)`
 ///
-/// # RO 字段集成（设计 §1.4.3）
+/// # RO 字段集成
 ///
 /// Rebuild 必须作为 `FieldMode::Ro` 字段使用（与 Computed/Tell 同类）。
 /// [`crate::nodes::Node::compute_ro_value`] 对 Rebuild 分支调 `eval_expr_int`，
@@ -52,8 +50,8 @@ use crate::nodes::Node;
 ///
 /// # 表达式约束
 ///
-/// `func` 必须是 Phase 2 表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram，
-/// 运行时零 FFI 求值。**不接收 Python lambda/callable**（与 RepeatUntil v5 同脉络）。
+/// `func` 必须是字段表达式（FieldRef/ExprRef/int 组合），编译为 ExprProgram，
+/// 运行时零 FFI 求值。**不接收 Python lambda/callable**。
 #[derive(Debug)]
 pub struct RebuildNode {
     /// 被包装的子树根。
@@ -95,7 +93,7 @@ impl Construct for RebuildNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // RB-1: parse 转发 inner
+        // parse 转发 inner
         self.inner.parse(py, stream, ctx, path)
     }
 
@@ -113,7 +111,7 @@ impl Construct for RebuildNode {
         // 此处 build 的 obj 是 compute_ro_value 的返回值（PyLong）。
         // 但 Python 语义是"忽略 obj，重算"——为对齐 Python，build 内部仍调
         // 表达式求值（即使 obj 已是 compute_ro_value 计算的值）。
-        // 双重求值的开销：仅一次 ExprProgram::eval（~10ns），可忽略（设计 §1.4.3）。
+        // 双重求值的开销：仅一次 ExprProgram::eval（~10ns），可忽略。
         let value_i64 = eval_expr_int(&self.func, ctx, py)?;
         let value_py = value_i64.into_py(py);
         self.inner.build(py, value_py.bind(py), stream, ctx, path)
@@ -181,7 +179,7 @@ mod tests {
 
     #[test]
     fn parse_forwards_to_inner() {
-        // RB-1: Rebuild(Byte, items.length).parse(b"\x03") → 3
+        // Rebuild(Byte, items.length).parse(b"\x03") → 3
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let func = ExprProgram::new(vec![ExprOp::Const(0)]);
@@ -223,7 +221,7 @@ mod tests {
 
     #[test]
     fn build_uses_expression_value_from_context() {
-        // RB-2: 表达式引用 context 字段
+        // 表达式引用 context 字段
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             // func: items_length（GetInt(0)）
@@ -279,7 +277,7 @@ mod tests {
 
     #[test]
     fn build_propagates_expression_error() {
-        // RB-3: 表达式求值失败（引用不存在的字段）→ 错误向上传播
+        // 表达式求值失败（引用不存在的字段）→ 错误向上传播
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             // GetInt(0) 引用 idx 0，但 placeholder ctx 未 init_expr_values

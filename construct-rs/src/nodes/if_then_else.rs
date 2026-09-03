@@ -1,6 +1,5 @@
 //! IfThenElseNode：双分支条件节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §2。
 //! Python 参考：`construct/construct/core.py` `IfThenElse`（L3944-3987）。
 //!
 //! ## 行为概述
@@ -12,15 +11,14 @@
 //! - build：求值 cond → 选 then/else → 委托 subcon.build
 //! - sizeof：仅常量条件返回确定值；Expr 条件返回 Err（无法在 sizeof 接口求值）
 //!
-//! ## Condition 模式（复用 StopIfCondition，设计 §2.1）
+//! ## Condition 模式（复用 StopIfCondition）
 //!
-//! ARCH 决策：复用 Phase 4 的 [`StopIfCondition`]（不新建 `IfThenElseCondition`）。
-//! 理由：同构类型 + L-04 对策（跨阶段模式未沉淀）。详见设计 §2.1。
+//! 复用 [`StopIfCondition`]（不新建 `IfThenElseCondition`）——两者类型同构。
 //!
 //! ## If macro（Python 用户面）
 //!
 //! `If(cond, sub) = IfThenElse(cond, sub, Pass)`（Python L3935）。
-//! Rust 不新增 IfNode——Python 用户面 macro 完成等价转换（设计 §2.5）。
+//! Rust 不新增 IfNode——Python 用户面 macro 完成等价转换。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -42,7 +40,7 @@ use super::{Construct, Node};
 ///
 /// 求值失败（字段缺失等）错误向上传播（与 Computed/StopIf 同路径）。
 ///
-/// # Condition 模式（复用 StopIfCondition，设计 §2.1）
+/// # Condition 模式（复用 StopIfCondition）
 ///
 /// - [`StopIfCondition::Always`] → 走 then 分支
 /// - [`StopIfCondition::Never`] → 走 else 分支
@@ -53,10 +51,10 @@ use super::{Construct, Node};
 /// Python `If(cond, sub) = IfThenElse(cond, sub, Pass)`（L3935）。
 /// Rust 不新增 IfNode——Python 用户面 macro 完成等价转换。
 ///
-/// [设计质疑]：设计文档 §2.2 标注 `#[derive(Debug, Clone)]`，但 `Node` enum
-/// 整体未实现 `Clone`（含 `Py<PyType>` / `FieldName` 等非 Clone 字段）。删除
-/// `Clone` derive，与 `BitwiseNode` / `TransformNode` 等持有 `Box<Node>` 的
-/// 节点保持一致。如未来需 Clone 能力，应统一为 Node 实现 Clone。
+/// 注：`Node` enum 整体未实现 `Clone`（含 `Py<PyType>` / `FieldName`
+/// 等非 Clone 字段），因此不 derive `Clone`，与 `BitwiseNode` /
+/// `TransformNode` 等持有 `Box<Node>` 的节点保持一致。
+/// 如未来需 Clone 能力，应统一为 Node 实现 Clone。
 #[derive(Debug)]
 pub struct IfThenElseNode {
     /// 条件：常量或表达式（复用 StopIfCondition）。
@@ -107,7 +105,7 @@ impl Construct for IfThenElseNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 求值 cond（复用 eval_condition 公共辅助，设计 §2.3）。
+        // 求值 cond（复用 eval_condition 公共辅助）。
         let take_then = eval_condition(&self.cond, ctx, py)?;
         let sub = if take_then {
             &self.then_sub
@@ -176,7 +174,7 @@ mod tests {
         Python::with_gil(f)
     }
 
-    /// 构造 `GetInt(idx) > const` 表达式程序（IF-3 / IF-4）。
+    /// 构造 `GetInt(idx) > const` 表达式程序。
     fn gt_expr(idx: usize, value: i64) -> ExprProgram {
         ExprProgram::new(vec![ExprOp::GetInt(idx), ExprOp::Const(value), ExprOp::Gt])
     }
@@ -229,12 +227,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IF-1/IF-2：常量条件
+    // 常量条件
     // ======================================================================
 
     #[test]
     fn parse_always_takes_then_branch() {
-        // IF-1: cond=True → Always → 走 then
+        // cond=True → Always → 走 then
         with_py(|py| {
             let node = IfThenElseNode::new(
                 StopIfCondition::Always,
@@ -255,7 +253,7 @@ mod tests {
 
     #[test]
     fn parse_never_takes_else_branch() {
-        // IF-2: cond=False → Never → 走 else
+        // cond=False → Never → 走 else
         with_py(|py| {
             let node = IfThenElseNode::new(
                 StopIfCondition::Never,
@@ -275,12 +273,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IF-3/IF-4：Expr 条件
+    // Expr 条件
     // ======================================================================
 
     #[test]
     fn parse_expr_cond_true_takes_then() {
-        // IF-3: cond = x > 0, x=5 → 真 → then (Int8ub)
+        // cond = x > 0, x=5 → 真 → then (Int8ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let node = IfThenElseNode::new(
@@ -305,7 +303,7 @@ mod tests {
 
     #[test]
     fn parse_expr_cond_false_takes_else() {
-        // IF-4: cond = x > 0, x=0 → 假 → else (Int16ub)
+        // cond = x > 0, x=0 → 假 → else (Int16ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let node = IfThenElseNode::new(
@@ -329,7 +327,7 @@ mod tests {
     }
 
     // ======================================================================
-    // IF-5：Expr 字段缺失 → ExprFieldMissing
+    // Expr 字段缺失 → ExprFieldMissing
     // ======================================================================
 
     #[test]
@@ -393,7 +391,7 @@ mod tests {
     }
 
     // ======================================================================
-    // IF-6/IF-9：sizeof + If macro 等价（Pass else 分支）
+    // sizeof + If macro 等价（Pass else 分支）
     // ======================================================================
 
     #[test]
@@ -424,7 +422,7 @@ mod tests {
 
     #[test]
     fn sizeof_expr_cond_returns_error() {
-        // IF-6: Expr 条件下 sizeof 抛 Generic（SizeofError 等价）
+        // Expr 条件下 sizeof 抛 Generic（SizeofError 等价）
         with_py(|py| {
             let node = IfThenElseNode::new(
                 StopIfCondition::Expr(eq_expr(0, 0)),
@@ -444,7 +442,7 @@ mod tests {
 
     #[test]
     fn if_macro_equivalent_with_pass_else() {
-        // IF-9: If(True, Byte) ≡ IfThenElse(True, Byte, Pass)
+        // If(True, Byte) ≡ IfThenElse(True, Byte, Pass)
         // Pass.parse 返回 None，Pass.build 不写字节
         with_py(|py| {
             let node = IfThenElseNode::new(

@@ -1,7 +1,5 @@
 //! 类型描述符 pyclass：Python 可见的二进制格式声明对象。
 //!
-//! 设计依据：`docs/架构设计.md` §A.4。
-//!
 //! ## 三种描述符形态
 //!
 //! | 描述符 | Python 侧 | Rust 侧 | 用途 |
@@ -36,10 +34,6 @@ use pyo3::prelude::*;
 ///
 /// 用户通过 `field(Int8ub)` 传入，编译器（`compile_schema`）通过 pyo3 `extract`
 /// 识别此类型，读取内部的 `format` 字段构建对应的 `FormatFieldNode`。
-///
-/// # Phase 1
-///
-/// 支持 16 种整数格式（8 种类型 × 2 种字节序）。浮点与布尔推迟到 Phase 2。
 #[pyclass(frozen, name = "FormatFieldDescriptor", module = "construct")]
 #[derive(Debug, Clone, Copy)]
 pub struct FormatFieldDescriptor {
@@ -88,9 +82,9 @@ impl FormatFieldDescriptor {
 /// 编译器读取 `length` 字段，若为 Python int 则构建常量 BytesNode，若为表达式对象
 /// 则结合 `expr_programs` 构建表达式 BytesNode（详见 `compile_schema`）。
 ///
-/// # Phase 2 扩展
+/// # `length` 参数
 ///
-/// `length` 类型从 `usize` 改为 `Py<PyAny>`，可接受：
+/// `length` 类型为 `Py<PyAny>`，可接受：
 /// - Python int（常量长度）→ [`crate::nodes::bytes::BytesNode::new_const`]
 /// - 表达式对象（FieldRef/ExprRef，编译后为 ExprProgram）→
 ///   [`crate::nodes::bytes::BytesNode::new_expr`]
@@ -168,12 +162,12 @@ impl GreedyBytesDescriptor {
 }
 
 // ---------------------------------------------------------------------------
-// BytesIntegerDescriptor (Phase 6.1)
+// BytesIntegerDescriptor
 // ---------------------------------------------------------------------------
 
 /// 任意字节长度整数描述符：对应 Python 侧的 `BytesInteger(length, signed, swapped)`。
 ///
-/// Phase 6.1 新增。Python 用户通过 `BytesInteger(3, signed=True)` 创建实例，
+/// Python 用户通过 `BytesInteger(3, signed=True)` 创建实例，
 /// 编译器读取 `length` / `signed` / `swapped` 字段构建
 /// [`crate::nodes::bytes_integer::BytesIntegerNode`]。
 ///

@@ -1,4 +1,4 @@
-"""Phase 7.2 Streams parity smoke test.
+"""Streams parity smoke test.
 
 All descriptors are wrapped in Struct (construct-rs limitation: standalone
 parse/build on descriptors not supported; only StructMixin subclasses are
@@ -176,12 +176,12 @@ def test_seek_whence_end_in_struct():
 
 
 # ---------------------------------------------------------------------------
-# Phase 7.3 parity 补充（VET 观察 1 / 设计 §7.3 P8）
+# parity 补充：Pointer(stream=) 编译期拒绝
 # ---------------------------------------------------------------------------
 
 
 def test_pointer_stream_non_none_rejected():
-    """Pointer(stream=非 None) 编译期拒绝（设计 §3.3 已知限制 + VET 7.2 观察 1）。
+    """Pointer(stream=非 None) 编译期拒绝（已知限制）。
 
     Python construct 允许 Pointer 换流（stream=context lambda）；
     construct-rs 不支持，编译期抛 CompilationError。

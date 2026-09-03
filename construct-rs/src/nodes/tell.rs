@@ -1,6 +1,5 @@
 //! TellNode：记录当前流位置（不消费字节）。
 //!
-//! 设计依据：`docs/模块设计-表达式系统.md` §4.6.1。
 //! Python 参考：`construct/construct/core.py` `Tell`（L1751-1770）。
 //!
 //! ## 行为概述
@@ -34,7 +33,7 @@ use super::Construct;
 /// sizeof 返回 0（不占字节）。
 ///
 /// build 方向是 no-op：位置记录由 [`crate::nodes::struct_node`] 的
-/// `compute_ro_value` 在 RO 字段处理时完成（设计 §5.3-§5.4）。
+/// `compute_ro_value` 在 RO 字段处理时完成。
 #[derive(Debug)]
 pub struct TellNode;
 

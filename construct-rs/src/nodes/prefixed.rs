@@ -1,4 +1,4 @@
-//! PrefixedNode：长度前缀子流节点（Phase 7.2 §3.4）。
+//! PrefixedNode：长度前缀子流节点。
 //!
 //! Python 参考：`construct/construct/core.py` `Prefixed`（L4862-4918）。
 //!
@@ -8,7 +8,7 @@
 //! parse 读 N 字节作为子流，subcon 在子流上 parse；build 创建 temp BuildStream
 //! 收集 subcon 输出，再写 lengthfield + data 到主流。
 //!
-//! ## 与 PrefixedArrayNode 的关系（设计 §1.3）
+//! ## 与 PrefixedArrayNode 的关系
 //!
 //! 两者独立 Node，不共享代码：
 //! - [`crate::nodes::prefixed_array::PrefixedArrayNode`]：lengthfield 是**元素计数**，
@@ -18,7 +18,7 @@
 //!
 //! Prefixed 是 PrefixedArray 的"字节计数 + 单元素"兄弟。
 //!
-//! ## REV M1：subcon 错误路径不加 push_path_segment
+//! ## subcon 错误路径不加 push_path_segment
 //!
 //! PrefixedNode 的 subcon 在子流上 parse，错误直接传播（不附加 path segment）。
 //! lengthfield 错误时仍加 "lengthfield" segment（与 PrefixedArray 同模式）。
@@ -52,7 +52,7 @@ use crate::nodes::Node;
 /// 见模块级文档。两者独立 Node，不共享代码。PrefixedArray 是元素计数 + 循环；
 /// Prefixed 是字节计数 + 子流。
 ///
-/// # REV M1：subcon 错误路径
+/// # subcon 错误路径
 ///
 /// PrefixedNode 的 subcon 在子流上 parse，错误直接传播（**不附加 path segment**）。
 /// lengthfield 错误时仍加 "lengthfield" segment（与 PrefixedArray 同模式）。
@@ -105,7 +105,7 @@ impl Construct for PrefixedNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 1. 解析 lengthfield 得到 length（对齐 PrefixedArray PA-1/PA-2 错误处理）。
+        // 1. 解析 lengthfield 得到 length（对齐 PrefixedArray 错误处理）。
         let length_obj = self
             .lengthfield
             .parse(py, stream, ctx, path)
@@ -149,7 +149,7 @@ impl Construct for PrefixedNode {
         // 3. 读 length 字节作为子流（对齐 Python BytesIOWithOffsets.from_reading）。
         let slice = stream.read(length, path)?;
         let mut sub_stream = ParseStream::new(slice);
-        // 4. subcon 在子流上 parse（path 不变，子流错误直接传播——REV M1：不加 segment）。
+        // 4. subcon 在子流上 parse（path 不变，子流错误直接传播——不加 segment）。
         //    注意：subcon 未消费完的字节被忽略（对齐 Python "忽略剩余"语义）。
         self.subcon.parse(py, &mut sub_stream, ctx, path)
     }
@@ -164,7 +164,7 @@ impl Construct for PrefixedNode {
     ) -> Result<(), ConstructError> {
         // 1. 创建 temp BuildStream，subcon.build 到 temp（对齐 PrefixedArray build 模式）。
         let mut temp = BuildStream::new();
-        // REV M1：subcon 错误不加 push_path_segment（与 parse 对称）
+        // subcon 错误不加 push_path_segment（与 parse 对称）
         self.subcon.build(py, obj, &mut temp, ctx, path)?;
         let data = temp.into_bytes();
         // 2. 计算 length（+ lengthfield.sizeof if includelength）。
@@ -175,7 +175,7 @@ impl Construct for PrefixedNode {
                 e
             })? as i64;
         }
-        // 3. 先 build lengthfield（写入长度，对齐 PrefixedArray PA-5：溢出由 lengthfield 自报）。
+        // 3. 先 build lengthfield（写入长度，对齐 PrefixedArray：溢出由 lengthfield 自报）。
         let length_py = length.into_py(py);
         if let Err(mut e) = self
             .lengthfield

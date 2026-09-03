@@ -1,6 +1,5 @@
 //! TransformNode：字节级变换节点（BitsSwapped / ByteSwapped）。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.5、§5.2、§9.5、§13.5。
 //! Python 参考：`construct/construct/core.py` `ByteSwapped`（L4817）、
 //! `BitsSwapped`（L4836）、`Transformed`（L5233）；
 //! `construct/construct/lib/binary.py` `swapbytes`（L123）、
@@ -12,13 +11,13 @@
 //! 再喂给 inner 解析（或反向用于 build）。覆盖 Python `ByteSwapped`/`BitsSwapped`
 //! 的定长 subcon 路径。
 //!
-//! ## 已知限制（Phase 3.1，§13.5）
+//! ## 已知限制
 //!
 //! Python `BitsSwapped`/`ByteSwapped` 对变长 subcon 走 `Restreamed` 回退
 //! （encoderunit=1 逐字节变换）。construct-rs 的 TransformNode 统一要求定长 subcon
 //! （step 1 调 `inner.sizeof()`），因此 `BitsSwapped(GreedyBytes)` 等变长用例
-//! 在本阶段返回错误。常见用例（`BitsSwapped(Bitwise(...))`、`ByteSwapped(Bytes(N))`）
-//! subcon 均为定长，Phase 3 覆盖主要场景。
+//! 当前返回错误。常见用例（`BitsSwapped(Bitwise(...))`、`ByteSwapped(Bytes(N))`）
+//! subcon 均为定长。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -30,7 +29,7 @@ use super::Construct;
 use crate::nodes::Node;
 
 // ---------------------------------------------------------------------------
-// BIT_REVERSE_TABLE（§5.2）
+// BIT_REVERSE_TABLE
 // ---------------------------------------------------------------------------
 
 /// 预计算的 bit 反序表：`BIT_REVERSE_TABLE[b] = b` 的 bit 序反序（按 8 位组）。
@@ -61,7 +60,7 @@ const BIT_REVERSE_TABLE: [u8; 256] = {
 // ByteTransform
 // ---------------------------------------------------------------------------
 
-/// 字节级变换种类（设计 §4.5）。
+/// 字节级变换种类。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ByteTransform {
     /// 整体字节反序（`swapbytes`，binary.py L123）。用于 `ByteSwapped`。
@@ -104,9 +103,9 @@ impl ByteTransform {
 /// 字节级变换节点：读取 `inner.sizeof()` 字节，按变换函数处理后喂给 inner。
 ///
 /// 对应 Python `Transformed(subcon, func, size, func, size)`。
-/// 本阶段仅支持两种变换（见 [`ByteTransform`]），覆盖 `BitsSwapped`/`ByteSwapped`。
+/// 当前仅支持两种变换（见 [`ByteTransform`]），覆盖 `BitsSwapped`/`ByteSwapped`。
 ///
-/// # parse 流程（设计 §4.5）
+/// # parse 流程
 ///
 /// 1. `size = inner.sizeof(ctx)?`（定长要求，否则 Err，对齐 ByteSwapped L4832）。
 /// 2. `data = stream.read(size, path)?`（字节级，要求 `bit_pos == 0`）。
@@ -123,12 +122,12 @@ impl ByteTransform {
 ///
 /// `inner.sizeof(ctx)?`（变换不改变长度）。
 ///
-/// # 错误（§9.5 TR-1~TR-4）
+/// # 错误
 ///
-/// - TR-1：inner.sizeof() 返回 Err（变长 subcon）→ 返回错误（Phase 3.1 已知限制）
-/// - TR-2：BitSwap 应用——每字节 bit 反序（查表）
-/// - TR-3：ByteSwap 应用——整体字节反序
-/// - TR-4：inner 是 BitwiseNode → 先变换字节再进入 bit 域
+/// - inner.sizeof() 返回 Err（变长 subcon）→ 返回错误（已知限制）
+/// - BitSwap 应用——每字节 bit 反序（查表）
+/// - ByteSwap 应用——整体字节反序
+/// - inner 是 BitwiseNode → 先变换字节再进入 bit 域
 #[derive(Debug)]
 pub struct TransformNode {
     /// 被包裹的子树根（必须定长）。
@@ -170,14 +169,14 @@ impl Construct for TransformNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // TR-1: inner 必须有定长 sizeof。
+        // inner 必须有定长 sizeof。
         let size = self
             .inner
             .sizeof(ctx)
             .map_err(|e| ConstructError::Generic {
                 message: format!(
                     "Transform (BitsSwapped/ByteSwapped) requires a fixed-sized subcon \
-                     (Phase 3.1 limitation, inner sizeof failed: {})",
+                     (inner sizeof failed: {})",
                     e.full_message()
                 ),
                 path: path.to_string(),
@@ -281,7 +280,7 @@ mod tests {
 
     #[test]
     fn byte_swap_reverses_byte_order() {
-        // TR-3: 整体反序
+        // 整体反序
         let result = ByteTransform::ByteSwap.apply(&[0x01, 0x02, 0x03, 0x04]);
         assert_eq!(result, vec![0x04, 0x03, 0x02, 0x01]);
     }
@@ -300,7 +299,7 @@ mod tests {
 
     #[test]
     fn bit_swap_reverses_each_byte() {
-        // TR-2: 每字节 bit 反序
+        // 每字节 bit 反序
         let result = ByteTransform::BitSwap.apply(&[0xF0, 0x00, 0x01]);
         assert_eq!(result, vec![0x0F, 0x00, 0x80]);
     }
@@ -548,7 +547,7 @@ mod tests {
     }
 
     // ======================================================================
-    // TR-4: Transform 包装 BitwiseNode（先变换字节再进入 bit 域）
+    // Transform 包装 BitwiseNode（先变换字节再进入 bit 域）
     // ======================================================================
 
     #[test]
@@ -585,7 +584,7 @@ mod tests {
     }
 
     // ======================================================================
-    // TR-1: 变长 subcon 错误
+    // 变长 subcon 错误
     // ======================================================================
 
     #[test]

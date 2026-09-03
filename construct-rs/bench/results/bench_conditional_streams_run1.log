@@ -1,5 +1,5 @@
 ==============================================================================
-Phase 7 集成性能基准（Conditional + Streams）
+集成性能基准（Conditional + Streams）
 ==============================================================================
 Python (rs): <opencode-temp>\crs_venv_new\Scripts\python.exe
 Python (py): <opencode-temp>\crs_venv_py_new\Scripts\python.exe
@@ -69,13 +69,13 @@ stderr (tail 2000): Traceback (most recent call last):
   测量 PT3-parse               ... [ERROR] bench ????? impl=py scenario=PT3-parse
 stderr (tail 2000): Traceback (most recent call last):
   File "<string>", line 631, in <module>
-    parse_target, build_target = _make_phase7_case(IMPL, CASE)
+    parse_target, build_target = _make_cond_streams_case(IMPL, CASE)
                                  ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
   File "<string>", line 514, in _make_p
   测量 PT3-build               ... [ERROR] bench ????? impl=py scenario=PT3-build
 stderr (tail 2000): Traceback (most recent call last):
   File "<string>", line 631, in <module>
-    parse_target, build_target = _make_phase7_case(IMPL, CASE)
+    parse_target, build_target = _make_cond_streams_case(IMPL, CASE)
                                  ~~~~~~~~~~~~~~~~~^^^^^^^^^^^^
   File "<string>", line 514, in _make_p
   测量 PT4-parse               ... rs=256ns py=2662ns speedup=10.39x [OK]
@@ -181,5 +181,5 @@ SW5-parse    py    2123.4       2127.3 ± 61.8          2065.3     2228.0
     门禁失败：PT2-parse 加速比 9.37x < 10.0x
     ... 还有 1 项
 
-CSV 数据（待 PM 追加 perf-scenarios.csv）：<legacy-repo>\construct-rs\bench\results\bench_phase7_csv.json
-详细结果：<legacy-repo>\construct-rs\bench\results\bench_phase7.json / .md
+CSV 数据（供追加 perf-scenarios.csv）：<legacy-repo>\construct-rs\bench\results\bench_conditional_streams_csv.json
+详细结果：<legacy-repo>\construct-rs\bench\results\bench_conditional_streams.json / .md

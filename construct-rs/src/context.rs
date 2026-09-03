@@ -1,14 +1,12 @@
 //! 解析/构建上下文。
 //!
-//! 设计依据：`docs/架构设计.md` §C.5、`docs/模块设计-Context-Vec优化.md`。
-//!
 //! ## 用途
 //!
 //! `Context` 用于：
 //! - 字段间引用（如 `Bytes(length)` 中 `length` 引用前序字段）。
 //! - 嵌套层传递（Python construct 的 `_` 指向外层 context）。
 //!
-//! ## Vec 化优化（Phase 2.5）
+//! ## Vec 化优化
 //!
 //! `expr_values_buf` 按编译期字段索引存储 borrowed PyObject 指针，供 GetInt 快速访问
 //! （跳过 PyDict hash 查找）。GetInt 从 ~36ns 降至 ~6ns。
@@ -40,15 +38,15 @@ const MAX_INLINE_FIELDS: usize = 16;
 /// 表示未初始化。仅 `has_expressions=true` 的 Struct 通过 [`Context::init_expr_values`]
 /// 初始化；无表达式的 Struct（placeholder）保持 `len == 0`，零额外开销。
 ///
-/// `fields` 为 `Option`：Phase 1 的 parse/build 入口使用 [`Context::placeholder`]
-/// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；Phase 2 恢复
-/// context 使用时入口改用 [`Context::new_root`]。
+/// `fields` 为 `Option`：无表达式的入口使用 [`Context::placeholder`]
+/// 创建不持有 `PyDict` 的占位 context（零 Python 对象创建）；需要字段存储的
+/// 入口使用 [`Context::new_root`]。
 pub struct Context<'py> {
     /// 当前层字段字典（`PyDict` 引用），按需创建。
     ///
     /// parse 时存入已解析字段；build 时存入从对象读取的字段值。
     /// 同时充当 instance dict（has_expressions 路径）。
-    /// `None` 表示占位 context（Phase 1 入口使用，不分配 `PyDict`）。
+    /// `None` 表示占位 context（不分配 `PyDict`）。
     fields: Option<Bound<'py, PyDict>>,
 
     /// 外层上下文（嵌套 Struct 时指向父 Context），对应 Python construct 的 `_`。
@@ -83,7 +81,7 @@ pub struct Context<'py> {
     /// `> 0` 表示已初始化，`buf[0..len)` 为有效槽位。
     expr_values_len: usize,
 
-    /// Phase 4 新增：当前数组迭代下标（仅 Array 系列节点设置）。
+    /// 当前数组迭代下标（仅 Array 系列节点设置）。
     ///
     /// `None` 表示当前不在数组迭代中（`IndexNode` 读到时返回 `Py_None`）。
     /// 栈分配，零堆开销。
@@ -91,8 +89,6 @@ pub struct Context<'py> {
     /// 嵌套数组语义（Array 内 Array）：内层覆盖外层，循环结束后恢复。
     /// 子 Struct context 通过 [`Context::new_child`] / [`Context::new_child_placeholder`]
     /// 继承父的 `_index`，使 Index 字段在子 Struct 中可读。
-    ///
-    /// 设计依据：`docs/模块设计-Array.md` §3.2 决策 A3。
     _index: Option<usize>,
 }
 
@@ -106,8 +102,8 @@ impl<'py> Context<'py> {
     /// `expr_values_len` 初始化为 `0`——有表达式的 Struct 在 parse/build 入口
     /// 通过 [`Context::init_expr_values`] 按需初始化。
     ///
-    /// Phase 2 恢复 context 使用后，入口改用此方法。Phase 1 入口使用
-    /// [`Context::placeholder`] 以避免白白创建空 dict。
+    /// 需要字段存储的入口使用此方法；无表达式的入口使用
+    /// [`Context::placeholder`] 以避免创建空 dict。
     pub fn new_root(py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
@@ -118,14 +114,14 @@ impl<'py> Context<'py> {
         })
     }
 
-    /// 创建不持有 `PyDict` 的占位 context（Phase 1 parse/build 入口使用）。
+    /// 创建不持有 `PyDict` 的占位 context（无表达式的 parse/build 入口使用）。
     ///
-    /// Phase 1 不读取也不写入 context，每次 parse 创建空 `PyDict` 是纯浪费
-    /// （80-150 ns 固定开销，P0-2 优化）。此方法返回 `fields = None` 的占位
+    /// 无表达式的路径不读取也不写入 context，每次 parse 创建空 `PyDict` 是纯浪费
+    /// （80-150 ns 固定开销）。此方法返回 `fields = None` 的占位
     /// context，[`Context::set_field`] / [`Context::get_field`] 在占位 context 上
     /// 为无操作 / 返回 `None`。
     ///
-    /// Phase 2 恢复 context 使用后，入口改回 [`Context::new_root`]。
+    /// 需要字段存储的入口使用 [`Context::new_root`]。
     pub fn placeholder(_py: Python<'py>) -> Self {
         Self {
             fields: None,
@@ -143,8 +139,7 @@ impl<'py> Context<'py> {
     /// [`Context::init_expr_values`] 按需初始化。
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
     ///
-    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A），嵌套
-    /// Struct 内 Index() 读到的是继承的下标。
+    /// 子 context 继承父的 `_index`，嵌套 Struct 内 Index() 读到的是继承的下标。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
@@ -157,7 +152,7 @@ impl<'py> Context<'py> {
 
     /// 创建不持有 `PyDict` 的嵌套 context（有 parent，无 fields）。
     ///
-    /// 用于 parse 路径优化（R4）：[`crate::nodes::struct_ref::StructRefNode`] 委托
+    /// 用于 parse 路径优化：[`crate::nodes::struct_ref::StructRefNode`] 委托
     /// 内层 [`crate::nodes::struct_node::StructNode`] 的 parse 时，内层 parse 会
     /// 先创建实例并 [`Context::inject_fields`] 实例的 `__dict__` 到此 context。
     /// 相比 [`Context::new_child`]（创建空 `PyDict`），此方法零 `PyDict` 分配。
@@ -171,7 +166,7 @@ impl<'py> Context<'py> {
     /// 不创建任何 Python 对象，零开销。`parent` 仅作为引用存储（不 incref，
     /// 生命周期由 `'py` 保证）。
     ///
-    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A）。
+    /// 子 context 继承父的 `_index`。
     pub fn new_child_placeholder(parent: &'py Context<'py>) -> Self {
         Self {
             fields: None,
@@ -206,7 +201,7 @@ impl<'py> Context<'py> {
 
     /// 按索引写入字段值（同时写 PyDict + expr_values_buf）。
     ///
-    /// 替代原 `set_field_interned`，增加 `idx` 参数用于同步 expr_values_buf。
+    /// `idx` 参数用于同步 expr_values_buf。
     /// 由 StructNode.parse/build 在每个 RW/RO 字段完成后调用。
     ///
     /// # 操作
@@ -249,7 +244,7 @@ impl<'py> Context<'py> {
     }
 
     /// 按索引写入字段值（同时写 PyDict + expr_values_buf），用 KnownHash 跳过
-    /// interned key 的 hash 重算（O1-B，ADR-023 决策 2）。
+    /// interned key 的 hash 重算。
     ///
     /// 与 [`Context::set_field_at`] 区别：调用方提供预先缓存的 hash（如
     /// [`crate::nodes::struct_node::FieldName::cached_hash`]），用
@@ -263,8 +258,8 @@ impl<'py> Context<'py> {
     ///
     /// # 适用范围
     ///
-    /// 仅 StructNode.parse 的 has_expressions 路径使用（Phase 8 共享税热路径）。
-    /// 其他节点的 set_field_at 调用保持原 [`Context::set_field_at`]（不在主瓶颈上）。
+    /// 仅 StructNode.parse 的 has_expressions 路径使用（热路径）。
+    /// 其他节点不在主瓶颈上，继续使用 [`Context::set_field_at`]。
     ///
     /// # 错误
     ///
@@ -279,7 +274,7 @@ impl<'py> Context<'py> {
         py: Python<'_>,
     ) -> PyResult<()> {
         if let Some(fields) = &self.fields {
-            // O1-B：用 KnownHash 跳过运行期 hash 重算。
+            // 用 KnownHash 跳过运行期 hash 重算。
             crate::instance::set_item_knownhash(py, fields, name.bind(py), value, hash)?;
             // 同步 borrowed 指针到 expr_values_buf（与 set_field_at 一致）。
             if idx < self.expr_values_len {
@@ -290,7 +285,7 @@ impl<'py> Context<'py> {
         Ok(())
     }
 
-    /// 仅写入 `expr_values_buf`，不修改 PyDict（v5 RepeatUntil Element 字段借用）。
+    /// 仅写入 `expr_values_buf`，不修改 PyDict（RepeatUntil Element 字段借用）。
     ///
     /// 用于 RepeatUntilNode.parse/build 在迭代时把当前元素借用为 Element 字段
     /// 槽位，终止表达式中的 `GetInt(element_field_idx)` 会从此槽位取值。
@@ -298,8 +293,6 @@ impl<'py> Context<'py> {
     /// StructNode.parse 完成后，Element 字段在实例 `__dict__` 中的值仍是
     /// StructNode 在处理 e 字段时写入的 None（语义正确：Element 字段不持有
     /// 真实数据）。
-    ///
-    /// 设计依据：`docs/模块设计-Array.md` §4.3.2（v5 Element 字段借用模式）。
     ///
     /// # Safety
     ///
@@ -325,9 +318,10 @@ impl<'py> Context<'py> {
     /// `&Bound<'_, PyAny>`，使调用方能直接传 `elems.last()`（borrow from Vec）
     /// 或 `&elem`（仍 owned 的本地变量），无需 clone_ref 维持 Bound 生命周期。
     ///
-    /// # 性能动机（4.5 v5.1）
+    /// # 性能动机
     ///
-    /// 原 `set_expr_value_only(elem.bind(py))` 路径中 `elem` 在 push 后必须
+    /// `&Py<PyAny>` 版本需要维持 `&Py<PyAny>` 引用的生命周期到 `eval_terminator`
+    /// 调用结束。`set_expr_value_only(elem.bind(py))` 用法中 `elem` 在 push 后必须
     /// 存活到 set_expr_value_only 调用，需要 `elems.push(elem.clone_ref(py))`
     /// 维持两份引用（vec 一份 + 本地一份）。clone_ref+drop 各一次 Py_INCREF/
     /// DECREMENT C 调用（~5-10ns/iter），N=10 时累积 50-100ns。
@@ -360,7 +354,7 @@ impl<'py> Context<'py> {
     /// 能在 `elems.push(elem)` 之前先取出 elem 的稳定堆地址，再决定 move/丢弃 elem，
     /// 避开"两份引用需 clone_ref"或"两份代码分支"两种低效模式。
     ///
-    /// # 性能动机（4.5 v5.1）
+    /// # 性能动机
     ///
     /// `&Py<PyAny>` 版本需要维持 `&Py<PyAny>` 引用的生命周期到 `eval_terminator`
     /// 调用结束。在 `if !discard { elems.push(elem); ... } else { ... }` 分支结构中，
@@ -403,7 +397,7 @@ impl<'py> Context<'py> {
     /// 指针与 dict 不同步（GetInt 读取到旧值）。生产路径（has_expressions=true）
     /// 必须使用 [`Context::set_field_at`]。
     ///
-    /// 占位 context（`fields = None`）上为无操作（Phase 1 不写入）。
+    /// 占位 context（`fields = None`）上为无操作。
     pub fn set_field(&self, name: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
         match &self.fields {
             Some(fields) => fields.set_item(name, value),
@@ -437,7 +431,7 @@ impl<'py> Context<'py> {
     /// `PyLong_AsLongLong`（~5ns），跳过 `PyDict_GetItem` hash 查找（~24ns）。
     ///
     /// 完整路径：`buf[idx]`(~1ns) → `PyLong_AsLongLong`(~5ns) = **~6ns**
-    /// （vs 原 `get_int_by_name` ~36ns，节省 ~30ns）。
+    /// （跳过 PyDict hash 查找路径的 ~36ns）。
     ///
     /// # 性能关键
     ///
@@ -492,7 +486,7 @@ impl<'py> Context<'py> {
         Ok(v)
     }
 
-    /// 按编译期字段索引取原始 PyObject（Phase 8.12 ProcessXor XorPad::Expr 路径用）。
+    /// 按编译期字段索引取原始 PyObject（ProcessXor XorPad::Expr 路径用）。
     ///
     /// 与 [`Context::get_int_at`](Self::get_int_at) 同样的快速路径，但返回
     /// 原始 PyObject 引用而非 i64。用于需要保留原对象（bytes/str/任意类型）的场景，
@@ -538,7 +532,7 @@ impl<'py> Context<'py> {
 
     /// 注入一个已存在的 `PyDict` 作为 fields（借用外部 dict）。
     ///
-    /// 用于 parse 路径优化（R4）：先创建实例，取其 `__dict__`，注入 context，
+    /// 用于 parse 路径优化：先创建实例，取其 `__dict__`，注入 context，
     /// 随后的 [`Context::set_field_at`] 直接写实例的 dict。替代
     /// [`Context::new_root`] + [`Context::take_fields`] 的"创建独立 dict 再移出"模式，
     /// 消除中间 dict 创建（节省 ~30-50ns）与 `force_setattr` 整体替换
@@ -570,7 +564,7 @@ impl<'py> Context<'py> {
     /// 仅在 parse/build 结束、ctx 不再使用时调用。
     ///
     /// 用于 build 方向（has_expressions=true 时仍需要独立 dict 作为表达式存储）。
-    /// parse 方向在 R4 优化后改用 [`Context::inject_fields`]，不再调用此方法。
+    /// parse 方向使用 [`Context::inject_fields`]（不经过此方法）。
     #[inline]
     pub fn take_fields(&mut self) -> Option<Bound<'py, PyDict>> {
         self.fields.take()
@@ -584,15 +578,13 @@ impl<'py> Context<'py> {
     }
 
     // -----------------------------------------------------------------------
-    // Phase 4：_index（数组迭代下标）
+    // _index（数组迭代下标）
     // -----------------------------------------------------------------------
 
     /// 设置当前数组迭代下标。
     ///
     /// 由 ArrayNode / GreedyRangeNode / RepeatUntilNode / PrefixedArrayNode 在
     /// 每次迭代前调用。栈字段写入，零开销。
-    ///
-    /// 设计依据：`docs/模块设计-Array.md` §3.2 决策 A3。
     #[inline]
     pub fn set_index(&mut self, index: usize) {
         self._index = Some(index);
@@ -616,11 +608,8 @@ impl<'py> Context<'py> {
 
     /// 恢复 `_index` 到节点入口时的值（嵌套数组支持）。
     ///
-    /// 替代散落在 Array 系列节点的 free function `restore_index`
-    /// （P0-1 整合，`docs/架构审查-重复代码与抽象质量.md` §4）。
-    ///
     /// `Some(idx)` → `set_index(idx)`；`None` → `clear_index`。
-    /// 设计依据：`docs/模块设计-Array.md` §3.2.2 嵌套数组语义。
+    /// 嵌套数组语义：内层覆盖外层，循环结束后恢复。
     #[inline]
     pub fn restore_index(&mut self, old: Option<usize>) {
         match old {
@@ -704,7 +693,7 @@ mod tests {
 
     #[test]
     fn new_child_placeholder_has_parent_but_no_dict() {
-        // R4: new_child_placeholder 有 parent 但 fields=None（零 PyDict 分配）。
+        // new_child_placeholder 有 parent 但 fields=None（零 PyDict 分配）。
         with_python(|py| {
             let root = Context::new_root(py).expect("root");
             let child = Context::new_child_placeholder(&root);
@@ -733,7 +722,7 @@ mod tests {
 
     #[test]
     fn inject_fields_replaces_none_with_dict() {
-        // R4: placeholder context 上 inject_fields 后 fields 可用。
+        // placeholder context 上 inject_fields 后 fields 可用。
         with_python(|py| {
             let mut ctx = Context::placeholder(py);
             assert!(ctx.fields().is_none());
@@ -747,7 +736,7 @@ mod tests {
 
     #[test]
     fn inject_fields_replaces_existing_dict() {
-        // R4: new_root context 上 inject_fields 替换旧 dict（旧 dict drop，引用 -1）。
+        // new_root context 上 inject_fields 替换旧 dict（旧 dict drop，引用 -1）。
         with_python(|py| {
             let mut ctx = Context::new_root(py).expect("root");
             // 旧 dict 有内容
@@ -770,7 +759,7 @@ mod tests {
 
     #[test]
     fn inject_fields_then_set_field_at_works() {
-        // R4: inject_fields 后 set_field_at 正常工作（模拟 has_expressions=true parse 路径）。
+        // inject_fields 后 set_field_at 正常工作（模拟 has_expressions=true parse 路径）。
         with_python(|py| {
             let mut ctx = Context::placeholder(py);
             let dict = PyDict::new_bound(py);
@@ -937,7 +926,7 @@ mod tests {
     }
 
     // ======================================================================
-    // init_expr_values / set_field_at / get_int_at（Phase 2.5 Vec 化）
+    // init_expr_values / set_field_at / get_int_at（Vec 化 API）
     // ======================================================================
 
     #[test]
@@ -1243,7 +1232,7 @@ mod tests {
     }
 
     // ======================================================================
-    // _index（Phase 4 Array 系列支持）
+    // _index（Array 系列支持）
     // ======================================================================
 
     #[test]
@@ -1287,7 +1276,7 @@ mod tests {
 
     #[test]
     fn new_child_inherits_parent_index() {
-        // 设计 §3.2.2 选项 A：子 context 继承父的 _index
+        // 子 context 继承父的 _index
         with_python(|py| {
             let mut root = Context::new_root(py).expect("root");
             root.set_index(7);
@@ -1319,7 +1308,6 @@ mod tests {
     #[test]
     fn nested_array_index_semantics() {
         // 模拟 Array 内 Array 的嵌套语义：外层 set，内层覆盖，结束后恢复
-        // （详见设计 §3.2.2）
         with_python(|py| {
             let mut outer = Context::new_root(py).expect("outer");
             // 外层 i=0

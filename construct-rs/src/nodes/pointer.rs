@@ -1,4 +1,4 @@
-//! PointerNode：绝对偏移读写节点（Phase 7.2 §3.3）。
+//! PointerNode：绝对偏移读写节点。
 //!
 //! Python 参考：`construct/construct/core.py` `Pointer`（L4384-4443）。
 //!
@@ -26,7 +26,7 @@
 //! subcon.parse/build 失败时，必须先 seek 回 fallback 再返回 Err（否则主流位置错乱，
 //! 破坏后续字段）。Rust 用 `match` + 显式 seek（无 finally），与 PeekNode 模式一致。
 //!
-//! ## 已知限制（设计文档化）
+//! ## 已知限制
 //!
 //! - **`stream` 参数（换流）不支持**：Python 允许 `Pointer(offset, subcon, stream=context_lambda)`
 //!   换流；construct-rs 单一流模型不支持。编译期拒绝非 None stream。
@@ -119,7 +119,7 @@ impl PointerNode {
     /// 求值 offset（Const 直接返回，Expr 调 eval_expr_int）。
     ///
     /// Expr 路径失败时 push_path_segment("offset")，对齐 PrefixedArray 的 countfield 错误处理
-    /// （ADR-016 lazy path：错误自带 path，由 push_path_segment 补充字段名段）。
+    /// （lazy path：错误自带 path，由 push_path_segment 补充字段名段）。
     fn eval_offset(&self, ctx: &Context<'_>, py: Python<'_>) -> Result<i64, ConstructError> {
         match &self.offset {
             PointerOffset::Const(n) => Ok(*n),
@@ -286,7 +286,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — P1: 正 offset 绝对定位
+    // parse — 正 offset 绝对定位
     // ======================================================================
 
     #[test]
@@ -307,7 +307,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — P2: 负 offset 从 EOF
+    // parse — 负 offset 从 EOF
     // ======================================================================
 
     #[test]
@@ -328,7 +328,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — P3: relativeOffset=True
+    // parse — relativeOffset=True
     // ======================================================================
 
     #[test]
@@ -352,7 +352,7 @@ mod tests {
     }
 
     // ======================================================================
-    // build — P4: build 零填充
+    // build — 零填充
     // ======================================================================
 
     #[test]
@@ -374,7 +374,7 @@ mod tests {
     }
 
     // ======================================================================
-    // sizeof — P5: 返回 0
+    // sizeof — 返回 0
     // ======================================================================
 
     #[test]
@@ -387,7 +387,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — P6: subcon.parse 失败仍 seek 回
+    // parse — subcon.parse 失败仍 seek 回
     // ======================================================================
 
     #[test]
@@ -416,7 +416,7 @@ mod tests {
     }
 
     // ======================================================================
-    // parse — P7: offset 表达式
+    // parse — offset 表达式
     // ======================================================================
 
     #[test]

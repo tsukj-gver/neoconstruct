@@ -1,6 +1,5 @@
-//! PaddingNode：字节级填充节点（Phase 1 遗留补全）。
+//! PaddingNode：字节级填充节点。
 //!
-//! 设计依据：`docs/模块设计-BitStream.md` §4.6、§9.6。
 //! Python 参考：`construct/construct/core.py` `Padding(length, pattern)`（L4136），
 //! 字节域行为通过 `Padded(length, Pass, pattern)` 实现（L4175）。
 //!
@@ -14,7 +13,7 @@
 //! - 字节域（普通 Struct 内）：使用 [`PaddingNode`]（本节点）。
 //! - bit 域（Bitwise/BitStruct 内）：使用 [`super::bit_padding::BitPaddingNode`]。
 //!
-//! 单位由编译期 `bitwise` 上下文决定（设计 §2.4 决策 B4）：编译管线在
+//! 单位由编译期 `bitwise` 上下文决定：编译管线在
 //! `PaddingDescriptor` 分支根据 `bitwise` 标志选择具体节点。
 
 use crate::context::Context;
@@ -46,17 +45,16 @@ use super::Construct;
 ///
 /// 返回 `length`（字节数）。
 ///
-/// # 错误（§9.6 PD-1~PD-3）
+/// # 错误
 ///
-/// - PD-1：length 表达式求值为负 → 返回 `Padding` 错误（编译期已拒绝，运行时不会触发）
-/// - PD-2：流中字节不足 → parse 返回 `Stream` 错误
-/// - PD-3：length == 0 → 不读写，返回 None
+/// - length 表达式求值为负 → 返回 `Padding` 错误（编译期已拒绝，运行时不会触发）
+/// - 流中字节不足 → parse 返回 `Stream` 错误
+/// - length == 0 → 不读写，返回 None
 ///
-/// # Phase 3.1 范围
+/// # 支持范围
 ///
 /// 仅支持常量 length（编译期校验）。表达式 length 由编译管线在
 /// `build_node_from_descriptor` 中拒绝（返回 `Compilation` 错误）。
-/// `new_expr` 为后续阶段预留。
 #[derive(Debug, Clone, Copy)]
 pub struct PaddingNode {
     /// 字节长度。
@@ -196,7 +194,7 @@ mod tests {
 
     #[test]
     fn parse_zero_length_is_noop() {
-        // PD-3: length=0 不读写
+        // length=0 不读写
         with_py(|py| {
             let node = PaddingNode::new_const(0, 0x00);
             let mut stream = ParseStream::new(b"abc");
@@ -211,7 +209,7 @@ mod tests {
 
     #[test]
     fn parse_insufficient_bytes_returns_stream_error() {
-        // PD-2: 流中只有 2 字节，请求 4 字节
+        // 流中只有 2 字节，请求 4 字节
         with_py(|py| {
             let node = PaddingNode::new_const(4, 0x00);
             let mut stream = ParseStream::new(b"\x01\x02");

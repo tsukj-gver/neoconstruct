@@ -1,32 +1,29 @@
-"""Phase 6 集成性能基准（Primitives 收尾 + Strings + Adapter 核心）。
+"""Primitives / Strings / Adapter 集成性能基准。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §5.2（bench 统一模板）
-- bench/_helpers/runner.py（BenchRunner）
-- plans/phase6-primitives-strings-adapter/总纲.md（PM 决策 1-13）
+组件：bench/_helpers/runner.py（BenchRunner）。
 
 覆盖 24 个独立 Node × 5 场景 × parse/build = 240 测量点：
-- 6.1 Primitives（13）：VarInt / ZigZag / BytesInteger +
+- Primitives（13）：VarInt / ZigZag / BytesInteger +
   Float16b/l + Float32b/l + Float64b/l + Int24ub/ul/sb/sl
-- 6.2 Strings（6）：CString / GreedyString / PaddedString / PascalString /
+- Strings（6）：CString / GreedyString / PaddedString / PascalString /
   NullTerminated / NullStripped
-- 6.3 Adapter（5）：Subconstruct / Peek / RawCopy / Rebuild / Pass
+- Adapter（5）：Subconstruct / Peek / RawCopy / Rebuild / Pass
 
 别名（Byte/Short/Int/Long/Half/Single/Double）是 FormatField / BytesInteger
 的简单别名，不独立 bench（与 Int8ub/Int16ub 等基线一致）。
 
-用户面 Adapter（Adapter/SymmetricAdapter）按 PM 决策 6.3-D1 不设硬门禁，
-不进入本 bench（性能损失用户主动接受）。
+用户面 Adapter（Adapter/SymmetricAdapter）不设硬门禁，不进入本 bench
+（已知折衷：用户面 Adapter 嵌入 Struct 有 2 次 FFI 回调开销）。
 
 门禁：
-- 内置 Adapter / Strings / Primitives：≥10x（Phase 4 硬约束延续）
+- 内置 Adapter / Strings / Primitives：≥10x
 - Pass：no-op，主要测 Struct 包装开销，≥10x 期望但允许边界场景退化
 
 用法::
 
-    python bench/bench_phase6.py
-    python bench/bench_phase6.py --group primitives
-    python bench/bench_phase6.py --case V1 --case C1
+    python bench/bench_primitives_strings_adapter.py
+    python bench/bench_primitives_strings_adapter.py --group primitives
+    python bench/bench_primitives_strings_adapter.py --case V1 --case C1
 """
 
 from __future__ import annotations
@@ -77,7 +74,7 @@ def _resolve_venv(env_var, venv_dir):
 # ---------------------------------------------------------------------------
 # 子进程测量脚本模板
 # ---------------------------------------------------------------------------
-# 设计要点（设计 §5.3 注意点 1）：
+# 设计要点：
 # - 模板用 .format 替换 6 个占位符：impl / case / direction / number / repeat / crs_python_dir
 # - 字面花括号用 {{ }} 转义
 # - case 定义在 _MAKE_CASE 内，按 CASE 标识分发
@@ -126,7 +123,7 @@ _MEASURE_SCRIPT = textwrap.dedent(
 
 
 # ---------------------------------------------------------------------------
-# 6.1 Primitives case 工厂
+# Primitives case 工厂
 # ---------------------------------------------------------------------------
 # 设计：两个 impl 共享同一个 desc 变量名（通过 alias 对齐），case 内只引用统一符号
 _PRIMITIVES_MAKE_CASE = r'''
@@ -295,7 +292,7 @@ def _make_case(impl, case):
 
 
 # ---------------------------------------------------------------------------
-# 6.2 Strings case 工厂
+# Strings case 工厂
 # ---------------------------------------------------------------------------
 _STRINGS_MAKE_CASE = r'''
 def _make_strings_case(impl, case):
@@ -421,7 +418,7 @@ def _make_strings_case(impl, case):
 
 
 # ---------------------------------------------------------------------------
-# 6.3 Adapter case 工厂
+# Adapter case 工厂
 # ---------------------------------------------------------------------------
 _ADAPTER_MAKE_CASE = r'''
 def _make_adapter_case(impl, case):
@@ -782,7 +779,7 @@ for _prefix, (_constructor, _label) in _ADAPTER_DESC.items():
 
 ALL_BENCH_CASES = PRIMITIVES_CASES + STRINGS_CASES + ADAPTER_CASES
 
-# 门禁：所有 Phase 6 构造器硬门禁 ≥10x
+# 门禁：全部构造器硬门禁 ≥10x
 GATES = {case_id: 10.0 for case_id, *_ in ALL_BENCH_CASES}
 
 
@@ -809,7 +806,7 @@ def _resolve_case_dispatcher(group):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="construct-rs Phase 6 性能基准测试")
+    parser = argparse.ArgumentParser(description="construct-rs Primitives/Strings/Adapter 性能基准测试")
     parser.add_argument("--group", action="append",
                         choices=["primitives", "strings", "adapter"],
                         help="仅测量指定分组（可多次指定），默认全部")
@@ -821,7 +818,7 @@ def main():
                         help="每次测量 iteration 数（默认 10）")
     parser.add_argument("--warmup", type=int, default=3, help="预热次数（默认 3）")
     parser.add_argument("--number", type=int, default=5000,
-                        help="timeit number（默认 5000，Phase 6 加速）")
+                         help="timeit number（默认 5000）")
     args = parser.parse_args()
 
     # 过滤 case
@@ -848,7 +845,7 @@ def main():
     runner = BenchRunner(rs_python, py_python, _CRS_PYTHON_DIR, config=config)
 
     print("=" * 78)
-    print("Phase 6 集成性能基准（Primitives + Strings + Adapter）")
+    print("集成性能基准（Primitives + Strings + Adapter）")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -930,22 +927,22 @@ def main():
         if len(gate_failures) > 20:
             print(f"    ... 还有 {len(gate_failures) - 20} 项")
 
-    # 写 CSV 行（供 PM 追加到 perf-scenarios.csv）
-    csv_path = _BENCH_DIR / "results" / "bench_phase6_csv.json"
+    # 写 CSV 行（供追加到 perf-scenarios.csv）
+    csv_path = _BENCH_DIR / "results" / "bench_primitives_strings_adapter_csv.json"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         json.dump(csv_rows, f, ensure_ascii=False, indent=2)
-    print(f"\nCSV 数据（待 PM 追加 perf-scenarios.csv）：{csv_path}")
+    print(f"\nCSV 数据（供追加 perf-scenarios.csv）：{csv_path}")
 
     # 写完整报告
-    report_path = _BENCH_DIR / "results" / "bench_phase6"
+    report_path = _BENCH_DIR / "results" / "bench_primitives_strings_adapter"
     report.write(report_path)
     print(f"详细结果：{report_path}.json / .md")
 
     return 0 if not gate_failures else 2
 
 
-# 占位常量（脚本生成用）— _MEASURE_SCRIPT 模板已废弃，保留 import 顺序，统一用 _build_script
+# 占位常量（脚本生成用；子进程测量脚本统一由 _build_script 生成）
 
 
 def _build_script(impl, case_id, direction, number, repeat, crs_python_dir,

@@ -1,9 +1,6 @@
-"""Phase 6.2 Strings 构造器 Python 行为一致性测试（6.2 VET 指出的缺失补全）。
+"""Strings 构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/模块设计/模块设计-Strings.md v2 §5（边界条件清单）/ §10（parity 模板）
-- docs/design/基础设施/测试框架设计.md §5.1（统一模板）
-- tests/_helpers/parity.py（公共组件）
+组件：tests/_helpers/parity.py（公共组件）。
 
 覆盖范围（6 个 String Node，14 个 case）：
 - CString（4）：utf8 / ascii / utf16-le / utf16-be（含 term 默认 + 字节序对齐）
@@ -13,20 +10,20 @@
 - NullTerminated（2）：GreedyBytes inner / 自定义 term + Byte inner
 - NullStripped（2）：单字节 pad / 多字节 pad（utf16）
 
-BREAKING CHANGE 体现（PM 决策 6.2-D1 + P2b）：
-- P2B-1：``CString("utf16")`` 无后缀编码编译期被拒（construct-rs 侧抛
+BREAKING CHANGE 体现：
+- ``CString("utf16")`` 无后缀编码编译期被拒（construct-rs 侧抛
   ``CompilationError``；Python construct 2.10.70 仍接受 utf16）。
   parity 测试用 try/except 标记，仅验证 rs 端拒绝即可。
 
 差异处理：
-- utf16 raw FFI（设计 §2.2.2 P2a）：BOM 不被消费（byteorder=±1）。
+- utf16 raw FFI：BOM 不被消费（byteorder=±1）。
 - encoding 别名：rs 侧强制 ``utf_16_le`` / ``utf_16_be`` 显式后缀；
   py 侧同样使用显式后缀（避免 BOM 自检测差异）。
 
 用法::
 
-    pytest tests/parity/test_phase6_strings_parity.py -v
-    python tests/parity/test_phase6_strings_parity.py
+    pytest tests/parity/test_strings_parity.py -v
+    python tests/parity/test_strings_parity.py
 """
 
 from __future__ import annotations
@@ -359,10 +356,10 @@ def _make_case_py(case_id):
 
 
 def test_p2b_bare_utf16_rejected_by_rs(venv_pair):
-    """P2b 决策：CString("utf16") 无后缀编码应在编译期被 construct-rs 拒绝。
+    """CString("utf16") 无后缀编码应在编译期被 construct-rs 拒绝。
 
     Python construct 2.10.70 仍接受 utf16（BOM 自检测），但 construct-rs 强制
-    显式 _le / _be 后缀（PM 决策 6.2-D1 + Strings 设计 §2.1.3 P2b）。
+    显式 _le / _be 后缀。
     本测试仅验证 rs 端拒绝（不与 py 对比）。
     """
     # 预期 rs 端抛 RuntimeError（子进程内 CompilationError 上抛为 RuntimeError）
@@ -371,7 +368,7 @@ def test_p2b_bare_utf16_rejected_by_rs(venv_pair):
 
 
 # ---------------------------------------------------------------------------
-# Standalone 模式（python tests/parity/test_phase6_strings_parity.py）
+# Standalone 模式（python tests/parity/test_strings_parity.py）
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":

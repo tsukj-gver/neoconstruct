@@ -1,7 +1,5 @@
 //! 表达式系统 VM 核心：指令集、程序结构与栈式求值器。
 //!
-//! 设计依据：`docs/模块设计-表达式系统.md` §4.1-§4.3。
-//!
 //! ## 概述
 //!
 //! 表达式（如 `Bytes(count + 1)` 中的 `count + 1`）在 `__init_subclass__`
@@ -25,7 +23,7 @@
 //! ## 整数溢出
 //!
 //! 所有算术/位运算使用 `wrapping_*` 语义（如 [`i64::wrapping_add`]），对齐
-//! Python 无溢出异常的行为。编译期不做溢出检查（设计 §11.1）。
+//! Python 无溢出异常的行为。编译期不做溢出检查。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -152,7 +150,7 @@ impl ExprProgram {
         self.max_stack
     }
 
-    /// 终止表达式快速求值（4.5 v5.1 性能优化）。
+    /// 终止表达式快速求值（性能优化）。
     ///
     /// 为 RepeatUntilNode 热路径提供常见终止表达式模式的内联求值，避免
     /// [`eval_expr_int`] 的函数调用 + stack_buf 分配 + match dispatch 开销
@@ -384,7 +382,7 @@ pub fn eval_expr_int(
             ExprOp::BitAnd => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a & b)?,
             ExprOp::BitOr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a | b)?,
             ExprOp::BitXor => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a ^ b)?,
-            // SF-1 修复：Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
+            // Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
             ExprOp::Shl => {
                 let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
                 if b < 0 {
@@ -443,7 +441,7 @@ pub fn eval_expr_int(
     Ok(stack_buf[stack_len])
 }
 
-/// 求值表达式为布尔值（Phase 8.1 Check 节点用）。
+/// 求值表达式为布尔值（Check 节点用）。
 ///
 /// 与 [`eval_expr_int`] 同栈式求值，仅将最终 i64 转为 bool
 /// （非零即真，对齐 Python `if not passed` 语义）。
@@ -460,7 +458,7 @@ pub fn eval_expr_bool(
     Ok(v != 0)
 }
 
-/// 求值表达式为任意 Python 对象（Phase 8.12 ProcessXor XorPad::Expr 路径用）。
+/// 求值表达式为任意 Python 对象（ProcessXor XorPad::Expr 路径用）。
 ///
 /// 与 [`eval_expr_int`] 同栈式求值，但最终值通过 `PyObject_*` API 取出原始 PyObject
 /// 而非 i64。用于需要返回 bytes / str / 任意 Python 对象的场景（如 ProcessXor 的
@@ -648,7 +646,7 @@ mod tests {
 
     /// 构造一个含若干整数字段的 `Context`，用于表达式求值测试。
     ///
-    /// 使用新 Vec 化 API：`init_expr_values` + `set_field_at`。
+    /// 使用 `init_expr_values` + `set_field_at`（按索引缓冲的 expr_values API）。
     /// 返回的 `Context` 为 `new_root`，持有填充好的 `PyDict` 和 `expr_values`。
     fn make_context<'py>(py: Python<'py>, entries: &[(&str, i64)]) -> Context<'py> {
         let mut ctx = Context::new_root(py).expect("new_root");
@@ -1165,7 +1163,7 @@ mod tests {
 
     #[test]
     fn eval_shl_negative_shift_count_returns_error() {
-        // SF-1 修复：Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
+        // Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
         with_python(|py| {
             let ctx = Context::placeholder(py);
             // 1 << -1 → error
@@ -1183,7 +1181,7 @@ mod tests {
 
     #[test]
     fn eval_shr_negative_shift_count_returns_error() {
-        // SF-1 修复：Python `a >> b` 当 b < 0 时抛 ValueError，此处对齐行为。
+        // Python `a >> b` 当 b < 0 时抛 ValueError，此处对齐行为。
         with_python(|py| {
             let ctx = Context::placeholder(py);
             // 256 >> -1 → error

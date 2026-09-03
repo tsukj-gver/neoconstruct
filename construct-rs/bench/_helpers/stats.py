@@ -1,8 +1,4 @@
-"""bench 统计函数（设计 §2.6）。
-
-设计依据：
-- docs/design/基础设施/测试框架设计.md §2.6
-- 复用 experiments/E01_O1_ab_stats.py line 26-45 的 mean/stdev_sample/welch_t 实现
+"""bench 统计函数。
 
 公开 API：
     - mean(xs) / stdev_sample(xs) / median(xs)
@@ -44,7 +40,6 @@ def median(xs):
 def welch_t(x1, x2):
     """Welch's t-statistic（描述性，不查 t 分布表）。
 
-    参考：experiments/E01_O1_ab_stats.py line 37-45。
     若分母 se == 0：返回 inf（m1 != m2）或 0.0（m1 == m2）。
     """
     m1, m2 = mean(x1), mean(x2)

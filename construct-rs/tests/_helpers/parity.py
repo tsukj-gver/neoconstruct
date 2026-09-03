@@ -1,10 +1,6 @@
 """parity 测试公共组件：子进程隔离 + 比对 + 断言。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §2.2（parity helper API 契约）
-- 提取自原 tests/test_phase4_parity.py 与 test_bitstream_parity.py 的共享模板
-
-公开 API（设计 §2.2.2，DEV 实施时签名不可改）：
+公开 API：
     - ``PARITY_SCRIPT_TEMPLATE``：子进程脚本模板常量（模块顶部）
     - ``run_parity_case(impl, case_id, case_definitions, rs_python, py_python,
         crs_python_dir, *, extra_imports="")``：运行单个 parity case
@@ -12,7 +8,7 @@
     - ``assert_fidelity(result, case_id, *, desc="")``
     - ``make_parity_results_fixture(all_cases, case_definitions, *, scope="module")``
 
-case 定义约定（设计 §2.2.1）：``case_definitions`` 字符串必须定义两个函数：
+case 定义约定：``case_definitions`` 字符串必须定义两个函数：
     - ``_make_case_rs(case_id)`` → ``(cls, parse_data, build_factory, extract)``
     - ``_make_case_py(case_id)`` → ``(fmt, parse_data, build_input)``
 子进程模板执行段写死 ``_make_case_rs(CASE)`` / ``_make_case_py(CASE)``（参数化）。
@@ -29,13 +25,13 @@ from .normalize import normalize
 
 
 # ---------------------------------------------------------------------------
-# 子进程脚本模板（设计 §2.2.1）
+# 子进程脚本模板
 # ---------------------------------------------------------------------------
 #
 # 模板用 ``.format()`` 替换 5 个占位符：impl / case / crs_python_dir /
 # normalize_src / case_definitions。
 #
-# 转义规则（设计 §5.3 注意点 1）：模板内**字面**花括号必须转义为 ``{{`` ``}}``
+# 转义规则：模板内**字面**花括号必须转义为 ``{{`` ``}}``
 # （因 .format 解析整个模板）；占位符用单花括号。normalize_src 与 case_definitions
 # 作为字符串值注入，其内部的花括号不会被 .format 二次解析（.format 仅替换模板
 # 自身的占位符），故 case 定义代码可自由使用 ``{`` ``}``。
@@ -277,7 +273,6 @@ def make_parity_results_fixture(all_cases, case_definitions, *, scope="module"):
         }
 
     用途：消除每个 parity 测试文件都要手写一遍 parity_results fixture 的重复。
-    用法见设计文档 §5.1.1 范例。
     """
     import pytest
 

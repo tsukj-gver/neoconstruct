@@ -1,4 +1,4 @@
-//! NullTerminatedNode：null 终止包装器（Phase 6.2 §3.2）。
+//! NullTerminatedNode：null 终止包装器。
 //!
 //! Python 参考：`construct/construct/core.py` `NullTerminated`（L5050-5115）。
 //!

@@ -1,8 +1,5 @@
 """错误场景测试。
 
-设计依据：``plans/phase1-foundation/总纲.md`` S-FUNC（功能覆盖）与
-``docs/design/基础设施/架构设计.md`` §B.8（错误映射）。
-
 覆盖：
 - StreamError：字节不足、流读/写失败
 - FormatFieldError：值类型错误、值超范围
@@ -161,7 +158,7 @@ def test_format_field_error_path_includes_field_name():
 # FieldLengthError：Bytes(n) — build 校验长度（对齐 Python construct stream_write）
 #
 # Python construct 的 stream_write 校验 len(data) == length，不匹配时抛 StreamError。
-# construct-rs 将该错误映射为 FieldLengthError。SF-3 恢复了该长度校验。
+# construct-rs 将该错误映射为 FieldLengthError，build 侧执行长度校验。
 # 以下测试验证：build 长度不匹配时抛 FieldLengthError，且 path 包含字段名。
 # ---------------------------------------------------------------------------
 
@@ -266,7 +263,7 @@ def test_stream_error_is_construct_error_subclass():
 
 
 def test_each_error_has_message_and_path_attributes():
-    """StreamError 实例应携带 message 与 path 属性（§B.8）。"""
+    """StreamError 实例应携带 message 与 path 属性。"""
 
     @dataclass
     class M(StructMixin):

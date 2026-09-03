@@ -1,4 +1,4 @@
-//! NullStrippedNode：null 剥离包装器（Phase 6.2 §3.3）。
+//! NullStrippedNode：null 剥离包装器。
 //!
 //! Python 参考：`construct/construct/core.py` `NullStripped`（L5123-5178）。
 //!
@@ -27,7 +27,7 @@ use pyo3::prelude::*;
 /// # build 行为
 ///
 /// 直接调 `inner.build(obj)`，不追加 pad（与 Python NullStripped._build 一致；
-/// pad 补全由外层 PaddedStringNode 内联实现，设计 §3.5）。
+/// pad 补全由外层 PaddedStringNode 内联实现）。
 ///
 /// # sizeof
 ///

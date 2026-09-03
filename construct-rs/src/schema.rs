@@ -1,20 +1,18 @@
 //! 编译产物 [`CompiledSchema`]：不可变的执行树，关联到用户类。
 //!
-//! 设计依据：`docs/架构设计.md` §B.6。
-//!
 //! ## 职责
 //!
-//! [`CompiledSchema`] 是编译入口（`compile_schema`，子任务 1.5）的输出，
-//! parse/build 入口（`_parse_raw` / `_build_raw`，子任务 1.5）的载体。
+//! [`CompiledSchema`] 是编译入口（`compile_schema`）的输出，
+//! parse/build 入口（`_parse_raw` / `_build_raw`）的载体。
 //! 它在 `__init_subclass__` 中一次性创建，存为类属性 `cls._construct_compiled`，
 //! 之后每次 parse/build 通过类属性查找零开销地访问。
 //!
-//! ## Phase 1.4-1.6 范围
+//! ## 组成
 //!
-//! - **1.4**：定义结构体与 Rust 内部访问方法（[`CompiledSchema::new`]、
+//! - Rust 内部访问方法（[`CompiledSchema::new`]、
 //!   [`CompiledSchema::root`]、[`CompiledSchema::cls`]）。
-//! - **1.5-1.6**：添加 Python 可见的 parse/build 方法（`_parse_raw` / `_build_raw`）
-//!   作为 `#[pymethods]` 块，提供 parse/build 的 FFI 执行入口。
+//! - Python 可见的 parse/build 方法（`_parse_raw` / `_build_raw`）作为
+//!   `#[pymethods]` 块，提供 parse/build 的 FFI 执行入口。
 
 // pyo3 0.22 的 #[pymethods] 宏在展开返回 PyResult<T> 的包装代码时，
 // 会生成 `PyErr.into()` 形式的冗余转换，触发 clippy::useless_conversion。
@@ -35,8 +33,8 @@ use pyo3::types::{PyAny, PyBytes, PyType};
 /// `#[pyclass(frozen)]` 使 Python 侧无法修改其属性。Rust 侧 `root`（[`Node`]）
 /// 与 `cls` 不可变，运行时不允许增删节点或修改参数。
 ///
-/// parse 入口（[`CompiledSchema::_parse_raw`]）直接返回用户类实例（R4，
-/// Rust 内部 create_class + 借用 `__dict__` 构造，不返回 dict 到 Python）。
+/// parse 入口（[`CompiledSchema::_parse_raw`]）直接返回用户类实例（Rust
+/// 内部 create_class + 借用 `__dict__` 构造，不返回 dict 到 Python）。
 /// 嵌套字段的实例化由 [`crate::nodes::struct_node::StructNode`] 与
 /// [`crate::nodes::struct_ref::StructRefNode`] 在 Rust 内部递归完成，
 /// 全程无 Python 回调。
@@ -53,12 +51,12 @@ pub struct CompiledSchema {
     /// 用户类的 Python 引用（`StructMixin` 子类）。
     ///
     /// 用于：调试与错误信息中报告类名。Rust 内部由 StructNode 持有独立的
-    /// `cls` 引用（详见设计修订 §3.2 根节点关系说明），此字段为元数据。
+    /// `cls` 引用，此字段为元数据。
     cls: Py<PyType>,
     /// 缓存：根 StructNode 是否含表达式（创建时计算一次）。
     ///
     /// 决定 `_build_raw` 入口使用 `Context::new_root`（有表达式）还是
-    /// `Context::placeholder`（无表达式）。`_parse_raw` 在 R4 后统一使用
+    /// `Context::placeholder`（无表达式）。`_parse_raw` 统一使用
     /// `placeholder`（StructNode.parse 内部自行管理 dict）。缓存避免每次
     /// build 重新 match。
     has_expressions: bool,
@@ -112,8 +110,8 @@ impl CompiledSchema {
     /// 判断根节点（StructNode）是否含有表达式字段。
     ///
     /// 决定 `_build_raw` 入口使用 `Context::new_root`（有表达式）还是
-    /// `Context::placeholder`（无表达式，Phase 1 性能优化保留）。`_parse_raw`
-    /// 在 R4 后统一使用 `placeholder`，不再调用此方法。
+    /// `Context::placeholder`（无表达式，性能优化保留）。调用方仅 `_build_raw`；
+    /// `_parse_raw` 统一使用 `placeholder`（不经过此方法）。
     ///
     /// 非 Struct 根节点视为无表达式。
     ///
@@ -136,7 +134,7 @@ impl CompiledSchema {
     /// _parse_raw(self, data: bytes) -> Any
     /// ```
     ///
-    /// # 内部流程（R4：借用实例 `__dict__`）
+    /// # 内部流程（借用实例 `__dict__）
     ///
     /// 1. 从 `PyBytes` 提取 `&[u8]`，创建 `ParseStream`（纯 Rust）。
     /// 2. 统一使用 `Context::placeholder`（不分配 `PyDict`）——StructNode.parse
@@ -144,16 +142,14 @@ impl CompiledSchema {
     /// 3. 调用 `self.root.parse(...)`——进入执行树遍历。
     /// 4. StructNode.parse 内部完整构造用户类实例（create_class → getattr
     ///    `__dict__` → 填充 dict → 可选 `__post_init__`），无需 `force_setattr`。
-    /// 5. 直接返回实例（不再跨 FFI 返回 dict 到 Python）。
-    ///
-    /// 详见 `docs/设计修订-parse路径优化-借用实例dict.md` §3.5。
+    /// 5. 直接返回实例（不跨 FFI 返回 dict）。
     #[pyo3(signature = (data))]
     pub fn _parse_raw<'py>(
         &self,
         py: Python<'py>,
         data: &Bound<'py, PyBytes>,
     ) -> PyResult<Py<PyAny>> {
-        // O2-A.1（ADR-023 决策 3）：直接访问 PyBytesObject.ob_sval 字段，绕过
+        // 直接访问 PyBytesObject.ob_sval 字段，绕过
         // `PyBytes_AsStringAndSize` 函数调用 + 内部 type check。data 类型由 pyo3
         // 参数签名 &Bound<PyBytes> 在入口处保证（成功才进入此函数）。
         //
@@ -169,7 +165,7 @@ impl CompiledSchema {
         //
         // ABI 依赖：[CPython Internal Struct] PyBytesObject.ob_sval + ob_base.ob_size
         // 由 pyo3 0.22 cpython 子模块暴露（`pyo3-ffi-0.22.6/src/cpython/bytesobject.rs`
-        // L8-14）。项目非 abi3 模式（8.ENV 验证），cpython 子模块可用。
+        // L8-14）。项目非 abi3 模式，cpython 子模块可用。
         let bytes: &[u8] = unsafe {
             use pyo3::ffi::PyBytesObject;
             // data.as_ptr() 返回 *mut ffi::PyObject；cast 为 *const PyBytesObject
@@ -181,19 +177,19 @@ impl CompiledSchema {
         };
 
         let mut stream = ParseStream::new(bytes);
-        // R4：统一使用 placeholder。StructNode.parse 内部根据 has_expressions
+        // 统一使用 placeholder。StructNode.parse 内部根据 has_expressions
         // 自行创建实例并 inject dict（has_expressions=true 时）或直接操作实例
-        // dict（has_expressions=false 时）。不再需要入口处判断 has_expressions。
+        // dict（has_expressions=false 时）。入口处无需判断 has_expressions。
         let mut ctx = Context::placeholder(py);
         let mut path = Path::new();
-        // Phase 8.10：顶层 catch CancelParsing（对齐 Python core.py L416-419）。
+        // 顶层 catch CancelParsing（对齐 Python core.py L416-419）。
         // 用户主动 raise CancelParsing → ConstructError::CancelParsing → 返回 None。
         // 其他错误正常转 PyErr 向上传播。
         let parse_result = self.root.parse(py, &mut stream, &mut ctx, &mut path);
         match parse_result {
-            // O2-A.2：返回类型从 Bound<PyAny> 改为 Py<PyAny>，省去 pyo3 wrap 阶段
+            // 返回类型为 Py<PyAny>，省去 pyo3 wrap 阶段
             // 的一次 Bound 构造（~1-2ns）。pyo3 0.22 #[pymethods] 接受 Py<PyAny>
-            // 返回类型（DEV §7 #10 已验证）。
+            // 返回类型。
             Ok(result) => Ok(result),
             Err(ConstructError::CancelParsing { .. }) => {
                 // 用户主动取消，返回 None（对齐 Python `except CancelParsing: pass`）。
@@ -221,7 +217,7 @@ impl CompiledSchema {
         py: Python<'py>,
         obj: &Bound<'py, PyAny>,
     ) -> PyResult<Bound<'py, PyBytes>> {
-        // PERF-1 优化：对无表达式的结构（sizeof 可计算），预分配 BuildStream 容量
+        // 对无表达式的结构（sizeof 可计算），预分配 BuildStream 容量
         // 避免 Vec 扩容 realloc。`static_size` 在创建时缓存（一次 sizeof 调用），
         // 消除每次 build 的 sizeof 递归遍历。含表达式结构 static_size 为 None，
         // 直接用 new()。
@@ -229,8 +225,8 @@ impl CompiledSchema {
             Some(cap) => BuildStream::with_capacity(cap),
             None => BuildStream::new(),
         };
-        // 根据 root 是否含表达式选择 context 模式（build 方向，设计 §5.5.1）。
-        // 注意：parse 方向（R4）统一用 placeholder，build 方向仍需区分。
+        // 根据 root 是否含表达式选择 context 模式（build 方向）。
+        // 注意：parse 方向统一用 placeholder，build 方向仍需区分。
         let has_expr = self.root_has_expressions();
         let mut ctx = if has_expr {
             Context::new_root(py)?
@@ -343,13 +339,11 @@ mod tests {
         });
     }
 
-    /// Phase 8 P0 VET 驳回修复（D-P0-3）：验证 Aligned 字段 sizeof 修复后
-    /// Struct static_size 预分配恢复。
+    /// 验证 Aligned 字段 sizeof 支持编译期常量 modulus：含 Aligned 字段的
+    /// Struct static_size 预分配可用。
     ///
-    /// 修复前：Aligned.sizeof 统一返回 Err → 含 Aligned 字段的 Struct
-    /// static_size 永远为 None → BuildStream 退化为无预分配模式（每次 build 走 realloc）。
-    ///
-    /// 修复后：Aligned(4, Int16ub) 编译期常量 modulus sizeof 成功 → static_size=Some(4)。
+    /// Aligned.sizeof 对编译期常量 modulus 返回 Ok → 含 Aligned 字段的 Struct
+    /// static_size = Some(n)，BuildStream 走预分配模式（避免每次 build realloc）。
     #[test]
     fn static_size_restored_when_aligned_has_const_modulus() {
         use crate::expr::{ExprOp, ExprProgram};
@@ -376,8 +370,8 @@ mod tests {
                 .expect("extract");
             let schema = CompiledSchema::new(root, cls, py);
 
-            // 修复后：static_size 应为 Some(4)（Int16ub=2 + pad=2）。
-            // 修复前：Aligned.sizeof 返回 Err → static_size 为 None。
+            // static_size 应为 Some(4)（Int16ub=2 + pad=2）；
+            // 若 sizeof 失败则为 None（对照下一测试）。
             assert_eq!(
                 schema.static_size,
                 Some(4),
@@ -386,8 +380,8 @@ mod tests {
         });
     }
 
-    /// 对照测试：Aligned 字段含运行期 modulus 表达式时，static_size 仍为 None
-    /// （D-P0-3：运行期表达式 sizeof 返回 Err，对齐 Python SizeofError）。
+    /// 对照测试：Aligned 字段含运行期 modulus 表达式时，static_size 为 None
+    /// （运行期表达式 sizeof 返回 Err，对齐 Python SizeofError）。
     #[test]
     fn static_size_none_when_aligned_has_runtime_modulus() {
         use crate::expr::{ExprOp, ExprProgram};
@@ -422,11 +416,11 @@ mod tests {
     }
 
     // ======================================================================
-    // Phase 8 OPT-SHARED（ADR-023）：_parse_raw O2-A 路径
+    // _parse_raw 优化路径（ob_sval 直接访问 + Py<PyAny> 返回）
     // ======================================================================
 
-    /// O2-A.1 验证：直接访问 PyBytesObject.ob_sval 字段得到的 bytes slice
-    /// 与 data.as_bytes() 内容一致（设计 §4.1.1 测试 `test_ob_sval_direct_access_matches_as_bytes`）。
+    /// 验证：直接访问 PyBytesObject.ob_sval 字段得到的 bytes slice
+    /// 与 data.as_bytes() 内容一致。
     #[test]
     fn parse_raw_ob_sval_direct_access_matches_as_bytes() {
         use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
@@ -455,8 +449,7 @@ mod tests {
         });
     }
 
-    /// O2-A.2 验证：返回类型为 Py<PyAny>，且 CancelParsing 仍返回 None
-    /// （Phase 8.10 顶层 catch 不破坏）。
+    /// 验证：返回类型为 Py<PyAny>，且顶层 CancelParsing catch 行为不变。
     #[test]
     fn parse_raw_cancel_parsing_returns_none_after_o2a() {
         with_py(|py| {
@@ -470,7 +463,7 @@ mod tests {
             let schema = CompiledSchema::new(root, cls, py);
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse ok");
-            // 空 schema 返回实例（不是 None），验证 O2-A 返回路径正常
+            // 空 schema 返回实例（不是 None），验证返回路径正常
             assert!(
                 !result.is_none(py),
                 "empty struct should return instance, not None"
@@ -478,7 +471,7 @@ mod tests {
         });
     }
 
-    /// O2-A 边界：空 bytes 输入。
+    /// 边界：空 bytes 输入。
     #[test]
     fn parse_raw_empty_bytes_o2a_works() {
         with_py(|py| {

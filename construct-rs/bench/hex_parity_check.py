@@ -1,7 +1,7 @@
-"""Quick parity check for HX1/HX2/HD1 after Plan A+B optimization.
+"""Quick parity check for HX1/HX2/HD1 display objects.
 
-Verifies that the display objects produced by optimized parse are behaviorally
-identical to the pre-optimization version (str, repr, fmtstr attribute, type).
+Verifies that the display objects produced by parse are behaviorally
+correct (str, repr, fmtstr attribute, type) and build round-trips.
 """
 
 from dataclasses import dataclass

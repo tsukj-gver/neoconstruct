@@ -1,40 +1,35 @@
-"""Phase 7 集成性能基准（Conditional + Streams）。
+"""Conditional / Streams 集成性能基准。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §5.2（bench 统一模板）
-- bench/_helpers/runner.py（BenchRunner）
-- plans/phase7-conditional-streams/总纲.md（PM 决策 1-3）
+组件：bench/_helpers/runner.py（BenchRunner）。
 
 覆盖 7 个构造器 × 5 场景 × parse/build = 70 测量点：
 
-7.1 Conditional（4 个，If 是 Python macro 不独立 bench）：
+Conditional（4 个，If 是 Python macro 不独立 bench）：
 - IfThenElse（ITE1-5）：常量 cond / Expr cond / 嵌套 / 多字段
 - Switch（SW1-5）：int 常量 key / 多 cases / default / 嵌套 / 大 subcon
 - Select（SL1-5）：候选成功 / 第 2 个成功 / 3 候选 / CString / 多字段
 - FocusedSeq（FS1-5）：基础 / 倒序 / 大 subcon / 3 字段 / 多字段
 
-7.2 Streams（3 个）：
+Streams（3 个）：
 - Seek（SK1-5）：whence=0/1/2 / Expr at / 大 buffer
 - Pointer（PT1-5）：正 / 负 / relative / Int32ub / 多字段
 - Prefixed（PF1-5）：Byte/Int16ub/VarInt lengthfield / 大数据 / includelength
 
 门禁：
-- 全部 ≥10x（与 Phase 4/6 一致的硬约束）
+- 全部 ≥10x
 
-**Switch str key 说明（PM 任务书要求"int+str"）**：
-PM 决策 1 推荐 A+B 混合（int ExprProgram 零 FFI + str FieldRef 少量 FFI）。
-DEV 7.1 [设计质疑] 2 + VET 观察 O-1 确认：**Python 用户面 str-key 路径不可达**
+**Switch str key 说明**：Python 用户面 str-key 路径当前不可达
 （_FieldDescriptor 不携带类型元数据，所有 field 引用走 IntExpr 路径）。
-str-key FieldRef 路径仅通过 Rust API 直接构造（switch.rs 单元测试 SW-5/SW-6/SW-12 覆盖）。
+str-key FieldRef 路径仅通过 Rust API 直接构造（Rust 侧单元测试覆盖）。
 bench 测量 Python 端可达的 const int key 场景（≥10x 预期）；
 str-key 性能数据由 Rust 单元测试覆盖，不独立 bench。
 
 用法::
 
-    python bench/bench_phase7.py
-    python bench/bench_phase7.py --group conditional
-    python bench/bench_phase7.py --group streams
-    python bench/bench_phase7.py --case ITE1 --case PF3
+    python bench/bench_conditional_streams.py
+    python bench/bench_conditional_streams.py --group conditional
+    python bench/bench_conditional_streams.py --group streams
+    python bench/bench_conditional_streams.py --case ITE1 --case PF3
 """
 
 from __future__ import annotations
@@ -62,7 +57,7 @@ from _helpers.runner import BenchConfig, BenchRunner
 from _helpers.stats import speedup_ratio
 
 # ---------------------------------------------------------------------------
-# venv 解析（与 bench_phase6.py 一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
+# venv 解析（与 bench_primitives_strings_adapter.py 一致：环境变量 > 项目内 .venv/.venv-pc > sys.executable）
 # ---------------------------------------------------------------------------
 _PROJECT_ROOT = _BENCH_DIR.parent  # construct-rs/
 _DEFAULT_RS_PYTHON = _PROJECT_ROOT / ".venv"     # construct-rs 扩展 venv
@@ -83,10 +78,10 @@ def _resolve_venv(env_var, venv_dir):
 
 
 # ---------------------------------------------------------------------------
-# 子进程测量脚本模板（与 bench_phase6.py 一致）
+# 子进程测量脚本模板（与 bench_primitives_strings_adapter.py 一致）
 # ---------------------------------------------------------------------------
-_PHASE7_MAKE_CASE = r'''
-def _make_phase7_case(impl, case):
+_COND_STREAMS_MAKE_CASE = r'''
+def _make_cond_streams_case(impl, case):
     from dataclasses import dataclass
     if impl == 'rs':
         from construct import (
@@ -366,7 +361,7 @@ def _make_phase7_case(impl, case):
     # ===== FocusedSeq (FS1-5) =====
     if C == 'FS1':
         # 基础：FocusedSeq("num", Pass, Renamed("num", Int8ub))
-        # 非 focus 字段用 Pass 占位（VET O-2 / 7.1-7.2 联合验证修复 2-B）
+        # 非 focus 字段用 Pass 占位
         if impl == 'rs':
             @dataclass
             class P(StructMixin):
@@ -444,9 +439,9 @@ def _make_phase7_case(impl, case):
             obj_d = dict(v=0xFF)
             return (lambda: s.parse(data)), (lambda: s.build(obj_d))
 
-    # ===== Seek (SK1-5) — 包装在 Struct 内（Sequence 未实现，7.2 DEV 报告 §3）=====
+    # ===== Seek (SK1-5) — 包装在 Struct 内（Sequence 未实现）=====
     # 注意：Seek 用 field 包装（非 rfield）—— Seek 的 build 接受任意值（flagbuildnone=True），
-    # 不作为 RO 字段（设计 §3.5；VET §3 compute_ro_value 未追加 Seek）。
+    # 不作为 RO 字段。
     if C == 'SK1':
         # Seek(5, whence=0=Start)
         if impl == 'rs':
@@ -695,7 +690,7 @@ def _make_phase7_case(impl, case):
 
 
 # ---------------------------------------------------------------------------
-# 场景清单：Phase 7（7 个构造器 × 5 场景 = 35 case）
+# 场景清单（7 个构造器 × 5 场景 = 35 case）
 # ---------------------------------------------------------------------------
 # (case_id, constructor, group, desc, path_type, scale)
 CONDITIONAL_CASES = [
@@ -749,12 +744,12 @@ STREAMS_CASES = [
 
 ALL_BENCH_CASES = CONDITIONAL_CASES + STREAMS_CASES
 
-# 门禁：所有 Phase 7 构造器硬门禁 ≥10x
+# 门禁：全部构造器硬门禁 ≥10x
 GATES = {case_id: 10.0 for case_id, *_ in ALL_BENCH_CASES}
 
 
 def _build_script(impl, case_id, direction, number, repeat, crs_python_dir):
-    """生成完整的子进程测量脚本（与 bench_phase6 同模板）。"""
+    """生成完整的子进程测量脚本（与 bench_primitives_strings_adapter 同模板）。"""
     full = f'''
 import json
 import sys
@@ -777,9 +772,9 @@ for k in list(sys.modules):
     if k == 'construct' or k.startswith('construct.'):
         del sys.modules[k]
 
-{_PHASE7_MAKE_CASE}
+{_COND_STREAMS_MAKE_CASE}
 
-parse_target, build_target = _make_phase7_case(IMPL, CASE)
+parse_target, build_target = _make_cond_streams_case(IMPL, CASE)
 target = parse_target if DIRECTION == 'parse' else build_target
 
 timer = timeit.Timer(target)
@@ -797,7 +792,7 @@ print(json.dumps({{
 
 
 def main():
-    parser = argparse.ArgumentParser(description="construct-rs Phase 7 性能基准测试")
+    parser = argparse.ArgumentParser(description="construct-rs Conditional/Streams 性能基准测试")
     parser.add_argument("--group", action="append",
                         choices=["conditional", "streams"],
                         help="仅测量指定分组（可多次指定），默认全部")
@@ -809,7 +804,7 @@ def main():
                         help="每次测量 iteration 数（默认 10）")
     parser.add_argument("--warmup", type=int, default=3, help="预热次数（默认 3）")
     parser.add_argument("--number", type=int, default=5000,
-                        help="timeit number（默认 5000，与 Phase 6 一致）")
+                         help="timeit number（默认 5000）")
     args = parser.parse_args()
 
     selected = ALL_BENCH_CASES
@@ -835,7 +830,7 @@ def main():
     runner = BenchRunner(rs_python, py_python, _CRS_PYTHON_DIR, config=config)
 
     print("=" * 78)
-    print("Phase 7 集成性能基准（Conditional + Streams）")
+    print("集成性能基准（Conditional + Streams）")
     print("=" * 78)
     print(f"Python (rs): {rs_python}")
     print(f"Python (py): {py_python}")
@@ -914,15 +909,15 @@ def main():
         if len(gate_failures) > 20:
             print(f"    ... 还有 {len(gate_failures) - 20} 项")
 
-    # 写 CSV 行（供 PM 追加到 perf-scenarios.csv）
-    csv_path = _BENCH_DIR / "results" / "bench_phase7_csv.json"
+    # 写 CSV 行（供追加到 perf-scenarios.csv）
+    csv_path = _BENCH_DIR / "results" / "bench_conditional_streams_csv.json"
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     with csv_path.open("w", encoding="utf-8") as f:
         json.dump(csv_rows, f, ensure_ascii=False, indent=2)
-    print(f"\nCSV 数据（待 PM 追加 perf-scenarios.csv）：{csv_path}")
+    print(f"\nCSV 数据（供追加 perf-scenarios.csv）：{csv_path}")
 
     # 写完整报告
-    report_path = _BENCH_DIR / "results" / "bench_phase7"
+    report_path = _BENCH_DIR / "results" / "bench_conditional_streams"
     report.write(report_path)
     print(f"详细结果：{report_path}.json / .md")
 

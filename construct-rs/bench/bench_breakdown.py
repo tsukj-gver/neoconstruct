@@ -2,13 +2,12 @@
 
 目的
 ----
-1.8 基准测试结果：大扁平结构（B3=50字段、B4=100字段）parse 加速比仅 1.07x-1.62x。
-原根因：``cls(**dict)`` kwargs unpacking 引入 O(N²) 开销。
-本脚本验证方案 B'（Rust 内构造实例）消除该瓶颈后的性能。
+「Rust 内构造实例」消除大扁平结构（B3=50字段、B4=100字段）
+``cls(**dict)`` kwargs unpacking 的 O(N²) 瓶颈，本脚本分阶段计时验证其性能。
 
 测量的阶段
 ----------
-对于 ``Flat.parse(data)``，方案 B' 下：
+对于 ``Flat.parse(data)``，当前实现为：
 
     return schema._parse_raw(data)   # Rust 内完整构造实例并返回
 
@@ -18,8 +17,8 @@
 2. **Rust _parse_raw**：``schema._parse_raw(data)`` —— 仅 Rust 内核（实例已在 Rust 内构造）
 3. **Python construct 基线**：``pc.Struct(...).parse(data)``
 
-注意：方案 B' 后，``_parse_raw`` 直接返回实例（不是 dict），不再有
-``Flat(**raw_fields)`` 步骤。Full parse ≈ Rust _parse_raw。
+注意：``_parse_raw`` 直接返回实例（不是 dict），无 ``Flat(**raw_fields)``
+步骤。Full parse ≈ Rust _parse_raw。
 
 隔离策略
 --------
@@ -29,7 +28,7 @@
 
 用法::
 
-    python tests/bench_breakdown.py
+    python bench/bench_breakdown.py
 
 """
 
@@ -45,7 +44,7 @@ import textwrap
 import time
 from pathlib import Path
 
-# timeit 参数（按任务要求）
+# timeit 参数
 NUMBER = 50_000
 REPEAT = 5
 
@@ -103,7 +102,7 @@ _RS_SCRIPT = textwrap.dedent(
     # 预解析一次实例，用于后续验证字段读取
     pre_parsed = schema._parse_raw(data)
 
-    # 校验：方案 B' 下 _parse_raw 返回实例（不是 dict）
+    # 校验：_parse_raw 返回实例（不是 dict）
     assert isinstance(pre_parsed, Flat), (
         '_parse_raw should return Flat instance, got {{}}'.format(type(pre_parsed))
     )
@@ -133,9 +132,9 @@ _RS_SCRIPT = textwrap.dedent(
         'n': N,
         'full_parse_ns': full_ns,
         'parse_raw_ns': raw_ns,
-        'dataclass_init_ns': 0.0,           # 兼容字段，方案 B' 下不再分离
+        'dataclass_init_ns': 0.0,           # 兼容字段，当前不再分离
         'dataclass_init_positional_ns': 0.0,  # 兼容字段
-        'raw_then_init_ns': raw_ns,         # 方案 B'：raw == full
+        'raw_then_init_ns': raw_ns,         # raw == full
     }}))
     """
 )
@@ -237,7 +236,7 @@ def _run_py(n: int) -> dict:
 
 
 def format_report(results: list[dict]) -> str:
-    """格式化完整测量报告（方案 B' 后简化版）。"""
+    """格式化完整测量报告。"""
     lines = []
 
     # ---- 逐用例详细 ----
@@ -254,7 +253,7 @@ def format_report(results: list[dict]) -> str:
         lines.append(f"=== {case} ({n} fields) ===")
         lines.append(f"Full parse (Flat.parse):      {full:>10.1f} ns")
         lines.append(f"Rust _parse_raw:              {raw:>10.1f} ns  "
-                      f"(方案 B'：raw == full，实例在 Rust 内构造)")
+                      f"(raw == full，实例在 Rust 内构造)")
         lines.append(f"Python construct:             {py:>10.1f} ns")
         lines.append(f"Full 加速比:                  {full_speedup:>5.2f}x")
         lines.append(f"Rust-only 加速比:             {raw_speedup:>5.2f}x")
@@ -327,7 +326,7 @@ def write_results_file(report: str, results: list[dict]) -> Path:
     lines.append(f"  repeat (中位数): {REPEAT}")
     lines.append(f"  测量时间       : {time.strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("")
-    lines.append("测量阶段（方案 B'）：")
+    lines.append("测量阶段：")
     lines.append("  - Full parse           : Flat.parse(data) [Rust 内完整构造实例]")
     lines.append("  - Rust _parse_raw      : schema._parse_raw(data) [直接返回实例]")
     lines.append("  - Python construct     : pc.Struct(...).parse(data) [绝对基线]")

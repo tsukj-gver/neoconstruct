@@ -1,14 +1,12 @@
 //! StructNode：字段序列根节点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.4、`docs/设计修订-parse路径优化.md` §3.2（方案 B'）、
-//! `docs/设计修订-parse路径优化-借用实例dict.md`（R4 优化）。
 //! Python 参考：`construct/construct/core.py` `Struct._parse` / `_build`（L2162-2268）。
 //!
 //! ## 行为概述
 //!
 //! StructNode 是 StructMixin 子类执行树的根节点：按顺序解析/构建一组命名字段。
 //!
-//! - **parse（R4：借用实例 `__dict__`）**：Rust 内完整构造用户类实例——
+//! - **parse（借用实例 `__dict__`）**：Rust 内完整构造用户类实例——
 //!   [`crate::instance::create_class`] 创建空实例（实例自带空 `__dict__`）→
 //!   `instance.getattr("__dict__")` 借用实例的 dict → 逐字段解析并直接 `set_item`
 //!   写入实例 dict（不经过 `tp_setattro`，天然绕过 frozen 拦截）→ 可选调用
@@ -17,14 +15,14 @@
 //! - **build**：逐字段从 Python 对象 `getattr` 取值，递归子节点构建，写入 stream。
 //! - **sizeof**：累加所有字段 sizeof；任一字段返回 Err 则整体返回 Err。
 //!
-//! ## R4 与方案 B' 的关系
+//! ## 实例 dict 的来源
 //!
-//! R4 是方案 B' 的增量优化：语义不变（parse 返回用户类实例、兼容 frozen dataclass、
-//! 绕过自定义 `__setattr__`），仅改变实例 dict 的来源——从"新建独立 dict +
-//! `force_setattr` 整体替换"改为"借用实例自带 `__dict__`"，消除中间 dict 创建
-//! 与 `force_setattr` 固定开销（合计 ~62-98ns/parse）。
+//! parse 借用实例自带的 `__dict__`（而非新建独立 dict 后整体替换）：
+//! 语义不变（parse 返回用户类实例、兼容 frozen dataclass、绕过自定义
+//! `__setattr__`），并消除中间 dict 创建与 `force_setattr` 固定开销
+//! （合计 ~62-98ns/parse）。
 //!
-//! ## 路径追踪（P0-3 优化：成功路径零成本）
+//! ## 路径追踪（成功路径零成本）
 //!
 //! 成功路径**不**调用 `path.push_field`/`path.pop`（消除每字段 `String` 堆分配）。
 //! 子节点返回 `Err` 时，通过 [`ConstructError::push_path_segment`] 将当前字段名
@@ -33,7 +31,7 @@
 //!
 //! ## 关于 Context 的嵌套
 //!
-//! parse 路径中 StructNode 自行管理 dict（R4）：先创建实例，inject 实例 `__dict__`
+//! parse 路径中 StructNode 自行管理 dict：先创建实例，inject 实例 `__dict__`
 //! 到 ctx（has_expressions=true 时），随后 `set_field_at` 同时写 dict 与
 //! expr_values_buf。无表达式的 Struct 不读写 ctx（直接操作实例 dict）。
 //!
@@ -55,13 +53,11 @@ use super::{Construct, Node};
 /// 编译期缓存的字段名：包含 interned PyString（C API 快速比较）、Rust 侧 String、
 /// 以及 interned key 的 PyObject_Hash 缓存值。
 ///
-/// 设计依据：设计修订 §3.2 + ADR-023 决策 2（O1-B KnownHash 优化）。
-///
 /// - `py_name`：interned `Py<PyString>`，parse 时作为 dict key（避免每次创建 str
 ///   + 计算 hash）、build 时作为 `getattr` 参数（interned 可命中 method cache）。
 /// - `rust_name`：Rust 侧字符串副本，用于 path 追踪与错误信息。
 /// - `cached_hash`：编译期一次性 `PyObject_Hash` 计算并缓存的 hash 值。interned
-///   PyString 的 hash 在其生命周期内不变（CPython 强约束），用于 O1-B
+///   PyString 的 hash 在其生命周期内不变（CPython 强约束），用于
 ///   `_PyDict_SetItem_KnownHash` 跳过运行期 hash 重算。
 #[derive(Debug)]
 pub struct FieldName {
@@ -85,7 +81,7 @@ impl FieldName {
     /// - `py`：GIL token。
     /// - `name`：字段名字符串。
     ///
-    /// # Panic（NB-4 修复）
+    /// # Panic
     ///
     /// `PyObject_Hash` 返回 -1 时 panic（构造期错误，比运行期退化更明确——
     /// 避免缓存 -1 hash 传给 `_PyDict_SetItem_KnownHash` 触发 dict 内部
@@ -98,8 +94,8 @@ impl FieldName {
         // SAFETY: py_name 是有效的 PyString 指针，PyObject_Hash 是 CPython Stable ABI。
         // interned PyString hash 在其生命周期内不变（CPython 强约束）。
         let cached_hash = unsafe { ffi::PyObject_Hash(py_name.as_ptr()) };
-        // NB-4 修复（REV 检视建议 + ADR-023 决策 2）：PyObject_Hash 返回 -1 表示失败
-        // （异常已挂起）。interned PyString 理论不会失败，但若发生则 panic（构造期错误）。
+        // PyObject_Hash 返回 -1 表示失败（异常已挂起）。
+        // interned PyString 理论不会失败，但若发生则 panic（构造期错误）。
         if cached_hash == -1 {
             let err = PyErr::fetch(py);
             panic!(
@@ -134,11 +130,8 @@ impl FieldName {
 
 /// 字段模式：RW（读写）、RO（只读）、WO（只写）。
 ///
-/// 设计依据：`docs/模块设计-表达式系统.md` §5.2。
-///
 /// - `Rw`：读写——build 从实例取值，parse 存入实例。
 /// - `Ro`：只读——build 自动计算（不从实例取值），parse 存入实例。
-///   （RO 节点 Tell/Computed 在子任务 2.6 实现。）
 /// - `Wo`：只写——build 从实例取值，parse 不存入实例（丢弃）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FieldMode {
@@ -152,10 +145,7 @@ pub enum FieldMode {
 
 /// StructNode 的单个字段：携带模式信息。
 ///
-/// 设计依据：`docs/模块设计-表达式系统.md` §5.2。
-///
-/// 将 Phase 1 的 `(FieldName, Node)` 元组扩展为携带 `mode`（RW/RO/WO）的结构体，
-/// 供 parse/build 路径按模式分支处理。
+/// 携带 `mode`（RW/RO/WO），供 parse/build 路径按模式分支处理。
 #[derive(Debug)]
 pub struct StructField {
     /// 字段名（interned PyString + Rust String）。
@@ -170,7 +160,7 @@ pub struct StructField {
 ///
 /// 对应 Python construct 的 `Struct`。
 ///
-/// # parse 行为（R4：借用实例 `__dict__`）
+/// # parse 行为（借用实例 `__dict__`）
 ///
 /// 1. [`create_class`]：`tp_new(cls, (), NULL)` 创建空实例（实例自带空 `__dict__`）。
 /// 2. `instance.getattr(interned "__dict__")`：借用实例自带的 `__dict__`（非新建），
@@ -192,7 +182,7 @@ pub struct StructField {
 /// `PyDict_SetItem` 直接操作 dict 的内部哈希表，不触发 `tp_setattro`（即不调用
 /// `__setattr__`），因此天然绕过 frozen dataclass 的 `FrozenInstanceError` 拦截。
 ///
-/// 成功路径**不维护 Path**（P0-3 优化，零 String 分配）。
+/// 成功路径**不维护 Path**（零 String 分配）。
 ///
 /// parse **不要求消费全部输入**：多余字节被忽略（对齐 Python construct Struct 语义）。
 ///
@@ -220,13 +210,13 @@ pub struct StructNode {
     has_post_init: bool,
     /// 该 Struct 是否含有表达式（决定 parse/build 入口用 `new_root` 还是 `placeholder`）。
     ///
-    /// - `false` → `placeholder`（Phase 1 性能优化保留）
+    /// - `false` → `placeholder`（性能优化）
     /// - `true` → `new_root`（恢复 context 使用）
     has_expressions: bool,
-    /// R4 新增：interned `"__dict__"`（getattr fallback 路径复用）。
+    /// interned `"__dict__"`（getattr fallback 路径复用）。
     ///
-    /// O1-A 后主路径改用 `dict_via_generic_getdict`，此字段仅供 GenericGetDict
-    /// 失败时的 fallback getattr 路径使用（设计 §1.1.5 退化路径）。
+    /// 主路径改用 `dict_via_generic_getdict`，此字段仅供 GenericGetDict
+    /// 失败时的 fallback getattr 路径使用。
     /// 由于 `"__dict__"` 是 CPython 内部高频使用的字符串，实际开销接近零
     /// （命中 interned 池，仅一次指针比较）。
     dict_attr_name: Py<PyString>,
@@ -262,7 +252,7 @@ impl StructNode {
     ///
     /// 自动 intern 传入的字段名，并创建一个最小 Python `object` 子类作为 `cls`，
     /// `has_post_init = false`，`has_expressions = false`，所有字段 `mode = Rw`。
-    /// 供单元测试无需手工构造 `Py<PyType>` 与 `FieldName`（设计修订 §5.7.2 N6-R3 建议）。
+    /// 供单元测试无需手工构造 `Py<PyType>` 与 `FieldName`。
     ///
     /// # 参数
     ///
@@ -293,7 +283,7 @@ impl StructNode {
 
     /// 是否为空结构体（无字段）。
     ///
-    /// 空结构体合法：parse(b'') → {}，build({}) → b''（见 §A.6）。
+    /// 空结构体合法：parse(b'') → {}，build({}) → b''。
     pub fn is_empty(&self) -> bool {
         self.fields.is_empty()
     }
@@ -322,25 +312,25 @@ impl Construct for StructNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // R4 步骤 1：先创建实例（tp_new，实例自带空 __dict__）。
+        // 步骤 1：先创建实例（tp_new，实例自带空 __dict__）。
         // 错误路径：实例创建失败时无 dict 需清理，Rust RAII 保证安全。
         let instance = create_class(self.cls.bind(py)).map_err(|e| ConstructError::Generic {
             message: format!("failed to create instance via tp_new: {}", e),
             path: path.to_string(),
         })?;
 
-        // R4 步骤 2：获取实例的 __dict__（借用实例自带的空 dict，非新建）。
-        // O1-A 优化（ADR-023 决策 1）：直接调 PyObject_GenericGetDict，绕过 pyo3
+        // 步骤 2：获取实例的 __dict__（借用实例自带的空 dict，非新建）。
+        // 直接调 PyObject_GenericGetDict，绕过 pyo3
         // getattr 包装（MRO + 描述符 dispatch + Bound 构造 + downcast）。
         // GenericGetDict 是 CPython Stable ABI（since 3.10），正确处理 Python 3.13
         // managed dict + lazy materialize。
         //
-        // 退化路径（设计 §1.1.5）：GenericGetDict 失败（NULL / 非 PyDict / slots class）
-        // 时 fallback 到原 R4 getattr 路径，保留明确错误信息。
+        // 退化路径：GenericGetDict 失败（NULL / 非 PyDict / slots class）
+        // 时 fallback 到 getattr 路径，保留明确错误信息。
         let dict_bound = match dict_via_generic_getdict(py, &instance) {
             Ok(d) => d,
             Err(_) => {
-                // Fallback：保留 R4 getattr 路径（slots class / __dict__ override /
+                // Fallback：保留 getattr 路径（slots class / __dict__ override /
                 // GenericGetDict 抛 Python 异常等异常场景）。
                 instance
                     .getattr(self.dict_attr_name.bind(py))
@@ -362,9 +352,9 @@ impl Construct for StructNode {
             }
         };
 
-        // R4 步骤 3：根据 has_expressions 选择填充路径。
+        // 步骤 3：根据 has_expressions 选择填充路径。
         if self.has_expressions {
-            // Phase 2 表达式路径：将实例 dict 注入 ctx，通过 set_field_at 同步
+            // 表达式路径：将实例 dict 注入 ctx，通过 set_field_at 同步
             // expr_values_buf（供 GetInt 按索引快速取值）。
             ctx.inject_fields(dict_bound);
             ctx.init_expr_values(self.fields.len());
@@ -372,7 +362,7 @@ impl Construct for StructNode {
             for (idx, field) in self.fields.iter().enumerate() {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
-                    // Phase 4 StopField 捕获（设计 §4.7）：StopIf 在 Struct 字段中触发时，
+                    // StopField 捕获：StopIf 在 Struct 字段中触发时，
                     // 停止后续字段，正常返回当前实例（已解析字段在 dict 中，
                     // 未解析字段不写入——对齐 Python Struct._parse 的 except StopFieldError）。
                     Err(ConstructError::StopField { .. }) => break,
@@ -384,7 +374,7 @@ impl Construct for StructNode {
                 match field.mode {
                     FieldMode::Rw | FieldMode::Ro => {
                         // 写入 ctx 的 fields（即实例 dict）+ expr_values_buf。
-                        // O1-B 优化（ADR-023 决策 2）：用 KnownHash 跳过 hash 重算。
+                        // 用 KnownHash 跳过 hash 重算。
                         ctx.set_field_at_knownhash(
                             idx,
                             field.name.py_name(),
@@ -400,16 +390,16 @@ impl Construct for StructNode {
                     }
                 }
             }
-            // dict 已在 ctx.fields 中，随 ctx 存活。无需 take_fields（R4 消除）。
+            // dict 已在 ctx.fields 中，随 ctx 存活，无需 take_fields。
         } else {
-            // Phase 1 无表达式路径：直接操作 dict（不经过 ctx）。
+            // 无表达式路径：直接操作 dict（不经过 ctx）。
             // PyDict_SetItem 不触发 __setattr__，天然绕过 frozen dataclass 拦截。
-            // O1-B 优化（ADR-023 决策 2）：用 _PyDict_SetItem_KnownHash 跳过
+            // 用 _PyDict_SetItem_KnownHash 跳过
             // interned key 的运行期 hash 重算。FieldName::new 已缓存 PyObject_Hash。
             for field in &self.fields {
                 let value = match field.node.parse(py, stream, ctx, path) {
                     Ok(v) => v,
-                    // Phase 4 StopField 捕获（设计 §4.7）：停止后续字段。
+                    // StopField 捕获：停止后续字段。
                     Err(ConstructError::StopField { .. }) => break,
                     Err(mut e) => {
                         e.push_path_segment(field.name.rust_name());
@@ -433,7 +423,7 @@ impl Construct for StructNode {
             }
         }
 
-        // R4 步骤 4：可选 __post_init__（在 dict 填充之后，与 R3 时序语义等价）。
+        // 步骤 4：可选 __post_init__（在 dict 填充之后）。
         if self.has_post_init {
             instance
                 .call_method0("__post_init__")
@@ -443,7 +433,7 @@ impl Construct for StructNode {
                 })?;
         }
 
-        // R4 步骤 5：返回实例（无需 force_setattr——dict 本就是实例的 __dict__）。
+        // 步骤 5：返回实例（无需 force_setattr——dict 本就是实例的 __dict__）。
         Ok(instance.unbind())
     }
 
@@ -464,7 +454,7 @@ impl Construct for StructNode {
                 FieldMode::Rw | FieldMode::Wo => {
                     // RW/WO：从实例 getattr 取值，递归 build。
                     // 区别仅在于 RW 在 has_expressions 时额外写入 context（供后续表达式引用）。
-                    // WO 不写入 context（编译期已禁止表达式引用 WO 字段，§3.4.4）。
+                    // WO 不写入 context（编译期已禁止表达式引用 WO 字段）。
                     let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
                         ConstructError::Generic {
                             message: format!(
@@ -479,10 +469,10 @@ impl Construct for StructNode {
                     if matches!(field.mode, FieldMode::Rw) && self.has_expressions {
                         ctx.set_field_at(idx, field.name.py_name(), &value, py)?;
                     }
-                    // P0-3：成功路径不 push/pop；子节点 Err 时重建路径。
+                    // 成功路径不 push/pop；子节点 Err 时重建路径。
                     match field.node.build(py, &value, stream, ctx, path) {
                         Ok(()) => {}
-                        // Phase 4 StopField 捕获（设计 §4.7）：StopIf 在 build 方向
+                        // StopField 捕获：StopIf 在 build 方向
                         // 同样停止后续字段。对齐 Python Struct._build 的 except StopFieldError。
                         Err(ConstructError::StopField { .. }) => break,
                         Err(mut e) => {
@@ -505,7 +495,7 @@ impl Construct for StructNode {
                     // 其他可能写字节，仍递归调用以处理）
                     match field.node.build(py, value_bound, stream, ctx, path) {
                         Ok(()) => {}
-                        // Phase 4 StopField 捕获：RO 路径同样支持（虽然 StopIf 通常不用 RO）。
+                        // StopField 捕获：RO 路径同样支持（虽然 StopIf 通常不用 RO）。
                         Err(ConstructError::StopField { .. }) => break,
                         Err(mut e) => {
                             e.push_path_segment(field.name.rust_name());
@@ -848,7 +838,7 @@ mod tests {
     fn nested_struct_parse_returns_nested_instance() {
         with_py(|py| {
             // 外层 { len: Int8ub, inner: Struct { value: Int8ub } }
-            // 内层 StructNode 也走方案 B' 流程，构造内层实例
+            // 内层 StructNode 同样构造内层实例
             let inner = Node::Struct(StructNode::new_for_test(
                 py,
                 vec![("value".to_string(), u8_node())],
@@ -1101,12 +1091,12 @@ mod tests {
     }
 
     // ======================================================================
-    // 方案 B' 新增测试
+    // parse 返回用户类实例
     // ======================================================================
 
     #[test]
     fn parse_returns_instance_of_user_class() {
-        // 方案 B' 核心断言：parse 返回用户类实例（不是 dict）。
+        // 核心断言：parse 返回用户类实例（不是 dict）。
         with_py(|py| {
             let node = StructNode::new_for_test(py, vec![("x".to_string(), u8_node())]);
             let mut stream = ParseStream::new(&[0x05]);
@@ -1127,7 +1117,7 @@ mod tests {
 
     #[test]
     fn parse_dict_keys_match_field_names() {
-        // 验证写入 __dict__ 的 key 与编译期字段名一致（设计修订 §5.6.4 第 8 条）。
+        // 验证写入 __dict__ 的 key 与编译期字段名一致。
         with_py(|py| {
             let node = StructNode::new_for_test(
                 py,
@@ -1156,7 +1146,6 @@ mod tests {
     #[test]
     fn parse_dict_keys_are_interned_identity() {
         // 验证 __dict__ 的 key 是 interned（与 field_name.py_name 同一对象）。
-        // 设计修订 §5.6.5 第 10 条。
         with_py(|py| {
             let node = StructNode::new_for_test(py, vec![("count".to_string(), u8_node())]);
             // 提取 field_name 的 py_name 用于后续比较
@@ -1181,7 +1170,7 @@ mod tests {
 
     #[test]
     fn parse_invokes_post_init_when_flag_set() {
-        // 验证 has_post_init 标志触发 __post_init__ 调用（§5.6.3 第 5 条）。
+        // 验证 has_post_init 标志触发 __post_init__ 调用。
         with_py(|py| {
             // 定义带 __post_init__ 的类
             let code = concat!(
@@ -1258,9 +1247,9 @@ mod tests {
 
     #[test]
     fn parse_frozen_dataclass_does_not_raise() {
-        // R4 验证：frozen dataclass 可正常 parse。
+        // 验证：frozen dataclass 可正常 parse。
         // PyDict_SetItem 直接操作 dict，不经过 tp_setattro（即不触发 __setattr__），
-        // 天然绕过 frozen dataclass 的 FrozenInstanceError 拦截（§2.2）。
+        // 天然绕过 frozen dataclass 的 FrozenInstanceError 拦截。
         with_py(|py| {
             let code = concat!(
                 "from dataclasses import dataclass\n",
@@ -1306,7 +1295,7 @@ mod tests {
 
     #[test]
     fn parse_slots_class_returns_error_mentioning_dict_or_slots() {
-        // R4（§8.1）：slots 类无 __dict__，getattr("__dict__") 失败 → 返回错误。
+        // slots 类无 __dict__，getattr("__dict__") 失败 → 返回错误。
         // 错误消息应提示 __dict__ 或 slots，便于用户定位问题。
         with_py(|py| {
             let code = "class WithSlots:\n    __slots__ = ('x',)\n";
@@ -1342,7 +1331,7 @@ mod tests {
     }
 
     // ======================================================================
-    // FieldMode 分支测试（Phase 2 子任务 2.4）
+    // FieldMode 分支测试
     // ======================================================================
 
     /// 构造 WO StructField 的便捷函数（测试专用）。
@@ -1423,7 +1412,7 @@ mod tests {
     #[test]
     fn ro_field_build_with_unsupported_node_returns_error() {
         // RO 字段使用不支持的节点（FormatField）→ compute_ro_value 返回 Generic error。
-        // 编译期校验（§5.6）应保证 RO 只用 Tell/Computed/Const/ContextParam，
+        // 编译期校验应保证 RO 只用 Tell/Computed/Const/ContextParam，
         // 此测试模拟运行时兜底场景。
         with_py(|py| {
             let fields = vec![
@@ -1455,7 +1444,7 @@ mod tests {
 
     #[test]
     fn ro_terminated_field_build_is_noop() {
-        // TM1 修复：Terminated 作为 RO 字段时 compute_ro_value 返回 Py_None，
+        // Terminated 作为 RO 字段时 compute_ro_value 返回 Py_None，
         // 随后 TerminatedNode.build 是 no-op（不写字节，不从 obj 取值）。
         with_py(|py| {
             let terminated_node = Node::Terminated(crate::nodes::terminated::TerminatedNode::new());
@@ -1480,7 +1469,7 @@ mod tests {
 
     #[test]
     fn ro_default_field_build_uses_constant_value() {
-        // DF2 修复：Default(Byte, 0) 作为 RO 字段时 compute_ro_value 求值
+        // Default(Byte, 0) 作为 RO 字段时 compute_ro_value 求值
         // value 表达式（Const(0) → PyLong(0)），随后 DefaultNode.build 转发 inner。
         with_py(|py| {
             let inner = u8_node();
@@ -1540,14 +1529,14 @@ mod tests {
 
     #[test]
     fn has_expressions_true_injects_instance_dict_into_context() {
-        // R4：has_expressions=true 时，parse 先创建实例，借用实例 __dict__ 注入 ctx。
+        // has_expressions=true 时，parse 先创建实例，借用实例 __dict__ 注入 ctx。
         // parse 后 ctx.fields() 为 Some（持有实例 __dict__ 的引用），不再 take。
         // 验证：实例属性正确 + ctx.fields() 为 Some + ctx dict 与实例 __dict__ 同一对象。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), rw_field(py, "b", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, true);
             let mut stream = ParseStream::new(&[0x01, 0x02]);
-            // R4：统一用 placeholder（生产路径 _parse_raw 也用 placeholder）
+            // 统一用 placeholder（生产路径 _parse_raw 也用 placeholder）
             let mut ctx = Context::placeholder(py);
             let mut path = Path::new();
             let result = node
@@ -1559,12 +1548,12 @@ mod tests {
             let b: i64 = inst.getattr("b").unwrap().extract().unwrap();
             assert_eq!(a, 0x01);
             assert_eq!(b, 0x02);
-            // R4：inject 后 ctx.fields() 为 Some（不再 take_fields）
+            // inject 后 ctx.fields() 为 Some（不再 take_fields）
             let ctx_dict = ctx
                 .fields()
                 .expect("ctx should hold instance dict after inject_fields");
             assert_eq!(ctx_dict.len(), 2);
-            // 验证 ctx 的 dict 就是实例的 __dict__（同一对象，R4 借用语义）
+            // 验证 ctx 的 dict 就是实例的 __dict__（同一对象，借用语义）
             let inst_dict = inst.getattr("__dict__").unwrap();
             assert!(
                 ctx_dict.as_ptr() == inst_dict.as_ptr(),
@@ -1575,7 +1564,7 @@ mod tests {
 
     #[test]
     fn has_expressions_true_with_wo_field_skips_context_write() {
-        // R4：has_expressions=true + WO 字段：WO 不写入实例 dict（不 set_field_at）。
+        // has_expressions=true + WO 字段：WO 不写入实例 dict（不 set_field_at）。
         // dict 被 inject 到 ctx，parse 后 ctx.fields() 为 Some（实例 __dict__），
         // 通过实例 __dict__ 验证 WO 字段不存在。
         with_py(|py| {
@@ -1669,7 +1658,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RO 字段 build（Tell/Computed）：compute_ro_value 路径（Phase 2.6）
+    // RO 字段 build（Tell/Computed）：compute_ro_value 路径
     // ======================================================================
 
     /// 构造 Tell 节点的便捷函数。
@@ -1876,7 +1865,7 @@ mod tests {
     }
 
     // ======================================================================
-    // Phase 4 StopField 捕获（设计 §4.7 / §6.4）
+    // StopField 捕获
     // ======================================================================
 
     /// 构造 StopIfNode（常量 Always）的便捷函数。
@@ -1904,8 +1893,8 @@ mod tests {
 
     #[test]
     fn parse_stop_if_always_stops_subsequent_fields_no_expr_path() {
-        // SI-1 在 Struct 内：StopIf(Always) 触发 → 后续字段不解析
-        // has_expressions=false 路径（设计 §4.7）
+        // Struct 内：StopIf(Always) 触发 → 后续字段不解析
+        // has_expressions=false 路径
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -1937,7 +1926,7 @@ mod tests {
 
     #[test]
     fn parse_stop_if_always_stops_subsequent_fields_expr_path() {
-        // 同上，has_expressions=true 路径（设计 §4.7）
+        // 同上，has_expressions=true 路径
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -1965,7 +1954,7 @@ mod tests {
 
     #[test]
     fn parse_stop_if_never_does_not_stop() {
-        // SI-6: StopIf(Never) 不停止，后续字段正常解析
+        // StopIf(Never) 不停止，后续字段正常解析
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -2018,7 +2007,7 @@ mod tests {
     #[test]
     fn build_stop_if_always_stops_subsequent_fields() {
         // build 方向：StopIf(Always) 停止后续字段写入
-        // StopIf 作为 RO 字段，不从实例 getattr 'stop'（设计偏离说明：见 §6.1.2）
+        // StopIf 作为 RO 字段，不从实例 getattr 'stop'
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "a", u8_node()),
@@ -2129,7 +2118,7 @@ mod tests {
     }
 
     // ======================================================================
-    // Phase 8 OPT-SHARED（ADR-023）：FieldName cached_hash + O1-A/O1-B 路径
+    // FieldName cached_hash + GenericGetDict / KnownHash 路径
     // ======================================================================
 
     #[test]
@@ -2178,7 +2167,7 @@ mod tests {
         });
     }
 
-    /// O1-B KnownHash 路径验证：parse 后实例 dict 中的 (key, value) 通过
+    /// KnownHash 写入路径验证：parse 后实例 dict 中的 (key, value) 通过
     /// Python attribute access 正常读取（写入正确性）。
     #[test]
     fn parse_o1b_knownhash_writes_dict_correctly_no_expr_path() {
@@ -2199,7 +2188,7 @@ mod tests {
         });
     }
 
-    /// O1-B KnownHash 路径验证：has_expressions 路径（set_field_at_knownhash）。
+    /// KnownHash 写入路径验证：has_expressions 路径（set_field_at_knownhash）。
     #[test]
     fn parse_o1b_knownhash_writes_dict_correctly_expr_path() {
         with_py(|py| {
@@ -2219,7 +2208,7 @@ mod tests {
         });
     }
 
-    /// O1-A GenericGetDict 路径验证：parse 后通过 getattr("__dict__") 得到的 dict
+    /// GenericGetDict 路径验证：parse 后通过 getattr("__dict__") 得到的 dict
     /// 与 GenericGetDict 路径返回的是同一对象（identity）。
     #[test]
     fn parse_o1a_generic_getdict_dict_is_instance_dict() {
@@ -2246,7 +2235,7 @@ mod tests {
         });
     }
 
-    /// O1-A + O1-B 联合验证：slots class 仍走 fallback getattr 路径并返回明确错误。
+    /// GenericGetDict + KnownHash 联合验证：slots class 仍走 fallback getattr 路径并返回明确错误。
     #[test]
     fn parse_o1a_slots_class_falls_back_to_getattr_error() {
         with_py(|py| {

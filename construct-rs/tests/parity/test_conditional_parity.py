@@ -1,11 +1,9 @@
-"""Phase 7.1 Conditional 构造器 Python 行为一致性测试。
+"""Conditional 构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/模块设计/模块设计-Conditional.md §11 parity 测试模板
-- _helpers/parity.py（公共组件）
+组件：_helpers/parity.py（公共组件）。
 
 测试策略（子进程隔离）：每个用例 × impl 在独立子进程中运行，通过 JSON 输出
-结果，主进程比对。与 Phase 4 / 6 同模式。
+结果，主进程比对。与其他 parity 文件同模式。
 
 覆盖范围（9 case）：
 - IfThenElse（I1-I3）：常量 cond=True / 常量 cond=False / If 宏
@@ -13,14 +11,12 @@
 - Select（SL1-SL2）：第 1 候选成功 / 第 1 失败第 2 成功
 - FocusedSeq（F1）：基础场景（parsebuildfrom="num"）
 
-注（v0.1.1-2 P7 订正）：本文件历史头注释声称覆盖 "Switch: Expr key"、
-"IfThenElse: Expr cond"，实际 case 不存在（表达式 key/cond 的端到端
-用例此前缺失，即 v0.1.1 BUG-1 用例遗漏的一部分）。Expr 端到端回归用例
-现补于 ``tests/integration/test_v0_1_1_regressions.py``。
+注：本文件 case 均为常量 cond/key；表达式 key/cond 的端到端回归用例见
+``tests/integration/test_v0_1_1_regressions.py``。
 
 用法::
 
-    pytest tests/parity/test_phase7_conditional_parity.py -v
+    pytest tests/parity/test_conditional_parity.py -v
 """
 
 from __future__ import annotations
@@ -152,7 +148,7 @@ def _make_case_rs(case_id):
         # FocusedSeq 基础场景：parsebuildfrom="num"
         # 非 focus 字段用 Pass（Python/construct-rs 的 FocusedSeq 对非 focus 字段
         # build 时传 None；裸 Bytes build(None) 两端都会失败，故用 Pass 占位
-        # 以验证 focus 提取 + 完整往返。匿名消费字节的场景留 Phase 7.3 补充。）
+        # 以验证 focus 提取 + 完整往返。）
         @dataclass
         class P(StructMixin):
             v: int = field(FocusedSeq("num",
@@ -275,11 +271,11 @@ def test_fidelity_py(parity_results, case_id, desc):
 
 
 # ---------------------------------------------------------------------------
-# Standalone 模式：python tests/parity/test_phase7_conditional_parity.py
+# Standalone 模式：python tests/parity/test_conditional_parity.py
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("=" * 70)
-    print("Phase 7.1 Conditional parity test (standalone mode)")
+    print("Conditional parity test (standalone mode)")
     print("=" * 70)
     for case_id, desc in ALL_CASES:
         print(f"\n[{case_id}] {desc}")

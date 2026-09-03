@@ -1,13 +1,10 @@
 //! ChecksumNode：校验和节点（双轨方案：Rust 内置 hashfunc + Python callable 兼容）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §3.5。
 //! Python 参考：`construct/construct/core.py` `Checksum`（L5532-5600）。
 //!
-//! ## L-14 教训工程化
+//! ## 双轨设计
 //!
-//! 本节点是 `docs/design/queries/质疑-能否不用RawCopy.md §7` 修正结论的工程化落地。
-//! ARCH 承认原 §1.4 把"hashfunc 是 Python callable → 跨 FFI 必须拷贝"当硬约束存在盲点，
-//! 漏了 Rust 内置 hashfunc 零拷贝路径。本节点正式确认双轨方案：
+//! hashfunc 支持两类实现（Rust 内置路径避免跨 FFI 拷贝字节序列）：
 //!
 //! - 路径 A（兼容）：Python callable hashfunc + ContextBytes / StreamRange bytes_source
 //! - 路径 B（零拷贝推荐）：Rust 内置 hashfunc + StreamRange bytes_source
@@ -16,10 +13,10 @@
 //!
 //! | 路径 | hashfunc | bytes_source | 拷贝次数 |
 //! |------|---------|-------------|---------|
-//! | B1（最优） | Rust 内置 | StreamRange | 0 次 |
-//! | B2 | Rust 内置 | ContextBytes | 0 次（借用 PyBytes） |
-//! | A1 | Python callable | StreamRange | 1 次 |
-//! | A2（Python 原版等价） | Python callable | ContextBytes | 0 次额外 |
+//! | 内置 + StreamRange（最优） | Rust 内置 | StreamRange | 0 次 |
+//! | 内置 + ContextBytes | Rust 内置 | ContextBytes | 0 次（借用 PyBytes） |
+//! | callable + StreamRange | Python callable | StreamRange | 1 次 |
+//! | callable + ContextBytes（Python 原版等价） | Python callable | ContextBytes | 0 次额外 |
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -84,14 +81,14 @@ pub enum BytesSource {
 ///
 /// 对应 Python construct `Checksum(checksumfield, hashfunc, bytesfunc)`
 /// （core.py L5532）。construct-rs 扩展支持两种 hashfunc 类型与两种
-/// bytes_source 类型，组合出 4 条路径（详见 §3.5.4 路径矩阵）。
+/// bytes_source 类型，组合出 4 条路径（详见模块级路径矩阵）。
 ///
-/// # 双轨方案（PM 决策 D-1 接受）
+/// # 双轨方案
 ///
 /// - **路径 A**（parity 兼容）：Python callable hashfunc + ContextBytes
-///   bytes_source——对齐 Python 原版，1 次拷贝（CPython 硬约束）
+///   bytes_source——对齐 Python 原版，1 次拷贝（CPython 要求 bytes 对象）
 /// - **路径 B**（零拷贝扩展）：Rust 内置 hashfunc + StreamRange bytes_source
-///   ——construct-rs 扩展，全程零拷贝（L-14 教训触发）
+///   ——construct-rs 扩展，全程零拷贝
 #[derive(Debug)]
 pub struct ChecksumNode {
     /// 校验字段节点（通常 Bytes(32)/Bytes(64)）。
@@ -274,7 +271,7 @@ impl Construct for ChecksumNode {
             }
         };
 
-        // 3. 比较 hash1 / computed（CS-12：长度不等先报错）
+        // 3. 比较 hash1 / computed（长度不等先报错）
         if hash1_bytes.len() != computed.len() {
             return Err(ConstructError::Checksum {
                 message: format!(
@@ -308,7 +305,7 @@ impl Construct for ChecksumNode {
         // build：计算 hash2 → checksumfield.build(hash2)
         // 注：build 时 bytes_source 通常需要先记录位置（Tell）。
         // StreamRange 模式下 start/end 已求值，但 BuildStream 不能 slice 历史字节。
-        // 实际方案：build 时通过 stream.tell() 取当前位置（B1 模式）。
+        // 实际方案：build 时通过 stream.tell() 取当前位置。
         //
         // 简化实现：对 StreamRange，build 时从 BuildStream 的 buf 中取 [start, end) 切片。
         // 对 ContextBytes，从 ctx 取字段值。
@@ -533,12 +530,12 @@ mod tests {
     }
 
     // ======================================================================
-    // ChecksumNode parse — B1 路径
+    // ChecksumNode parse — 内置 hashfunc + StreamRange 路径
     // ======================================================================
 
     #[test]
     fn parse_builtin_sha256_streamrange_match() {
-        // CS-1: 路径 B1，hash 匹配
+        // 内置 hashfunc + StreamRange，hash 匹配
         // stream 布局：[data(5字节) + digest(32字节)]，checksumfield 读 32 字节 digest
         // StreamRange start=0, end=5 切片 data 部分
         with_py(|py| {
@@ -584,7 +581,7 @@ mod tests {
 
     #[test]
     fn parse_builtin_sha256_streamrange_mismatch_raises() {
-        // CS-2: 路径 B1，hash 不匹配
+        // 内置 hashfunc + StreamRange，hash 不匹配
         with_py(|py| {
             let data = b"hello";
             let mut wrong_digest = compute_builtin_hash(BuiltinHash::Sha256, data);
@@ -615,7 +612,7 @@ mod tests {
 
     #[test]
     fn parse_builtin_sha256_streamrange_out_of_bounds_raises() {
-        // CS-3: slice 越界
+        // slice 越界
         with_py(|py| {
             let data = b"hi";
             let digest = compute_builtin_hash(BuiltinHash::Sha256, data);
@@ -651,12 +648,12 @@ mod tests {
     }
 
     // ======================================================================
-    // ChecksumNode parse — A2 路径（Python callable + ContextBytes）
+    // ChecksumNode parse — Python callable + ContextBytes 路径
     // ======================================================================
 
     #[test]
     fn parse_python_callable_context_bytes_match() {
-        // CS-5/CS-6: 路径 A2，Python callable hashfunc + ContextBytes
+        // Python callable hashfunc + ContextBytes
         with_py(|py| {
             let data = b"world";
             let expected_digest = compute_builtin_hash(BuiltinHash::Sha256, data);
@@ -708,12 +705,12 @@ mod tests {
     }
 
     // ======================================================================
-    // ChecksumNode build — B1 路径
+    // ChecksumNode build — 内置 hashfunc + StreamRange 路径
     // ======================================================================
 
     #[test]
     fn build_builtin_sha256_streamrange_computes_hash() {
-        // CS-8: build 时计算 SHA-256 → checksumfield.build(digest)
+        // build 时计算 SHA-256 → checksumfield.build(digest)
         with_py(|py| {
             // 准备：先写入 5 字节 "hello" 到 BuildStream，然后用 start=0, end=5 计算 checksum
             let mut prep_stream = BuildStream::new();

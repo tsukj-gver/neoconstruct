@@ -1,35 +1,35 @@
-//! RepeatUntilNode：终止表达式数组读写（v5 重写）。
+//! RepeatUntilNode：终止表达式数组读写。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.3（v5 完全重写）+ §2.5 决策 A5。
 //! Python 参考：`construct/construct/core.py` `RepeatUntil`（L2637-2704）。
 //!
-//! ## v5 概述
+//! ## 概述
 //!
 //! `RepeatUntil(terminator, subcon, discard)` 解析元素到 list 直到终止表达式
 //! 求值非零（最后元素被包含），或从 list 构建字节序列直到某元素满足终止表达式。
 //!
-//! ## v5 关键变更（vs v4）
+//! ## 关键设计
 //!
-//! - **删除 PyCallable 路径**：不再接收 Python lambda/callable（违反"一次 FFI"
+//! - **仅接收编译期表达式**：不接收 Python lambda/callable（保持"一次 FFI"
 //!   核心原则 + "白名单+兜底"二分设计）
-//! - **终止表达式 = Phase 2 ExprProgram**：编译期从用户面表达式编译，运行时
+//! - **终止表达式 = ExprProgram**：编译期从用户面表达式编译，运行时
 //!   Rust 内部栈式 VM 求值（零 FFI）
 //! - **Element 字段借用模式**：用户声明 `e: int = rfield(Element())`，RepeatUntil
 //!   在迭代时 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, elem)` 借用
 //!   Element 字段槽位，终止表达式中的 `GetInt(element_field_idx)` 即取到此值
-//! - **不引入 ExprOp::GetElem / _current_elem_ptr**（v4 删除，v5 不恢复）
+//! - **不引入 ExprOp::GetElem / _current_elem_ptr**：统一通过 Element 字段槽位
+//!   引用当前元素
 //!
 //! ## parse 流程（对齐 Python L2670-2682）
 //!
-//! 1. 创建空 Vec（4.7 PyList Vec 中转模式）
-//! 2. 保存外层 `ctx._index`（嵌套数组支持，设计 §3.2.2）
+//! 1. 创建空 Vec（PyList Vec 中转模式）
+//! 2. 保存外层 `ctx._index`（嵌套数组支持）
 //! 3. `loop`：
-//!    - 设置 `ctx._index = i`（4.7 lazy path：成功路径不调 path.push_index/pop）
-//!    - inner.parse → elem（失败直接上抛，RU-1，不像 GreedyRange 回退）
+//!    - 设置 `ctx._index = i`（lazy path：成功路径不调 path.push_index/pop）
+//!    - inner.parse → elem（失败直接上抛，不像 GreedyRange 回退）
 //!    - 若 `!discard`，push elem 到 Vec
 //!    - `ctx.set_expr_value_raw(element_field_idx, elem)` 借用 Element 字段槽位
 //!    - 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
-//!    - 非零 → 终止（最后元素已包含在 Vec 中，RU-2）；零 → 继续迭代
+//!    - 非零 → 终止（最后元素已包含在 Vec 中）；零 → 继续迭代
 //! 4. 一次性 `PyList::new_bound` + 恢复 `ctx._index`
 //!
 //! ## build 流程（对齐 Python L2684-2701）
@@ -39,20 +39,11 @@
 //!    - inner.build(e) 写入 stream
 //!    - `ctx.set_expr_value_py(element_field_idx, e)` 借用 Element 字段槽位
 //!    - 求值终止表达式：非零 → matched=true，break
-//! 3. 若 !matched → `Repeat` 错误（RU-3）
+//! 3. 若 !matched → `Repeat` 错误
 //!
 //! ## sizeof
 //!
 //! 永远返回 `Err`（对齐 Python L2703-2704）。
-//!
-//! ## 模式采用声明（强制）
-//!
-//! 本节点（RepeatUntilNode）采用以下跨阶段已验证模式：
-//! - ✅ P0-3 lazy path 错误传播（成功路径不维护 Path）
-//! - ✅ _index save/restore 配对（调 `ctx.restore_index(old)`）
-//! - ✅ Vec 中转 PyList（一次性 `PyList::new_bound`）
-//!
-//! 已查阅共享层：`nodes/common.rs` 的 `collect_obj_to_vec` / `obj_type_name`。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -64,27 +55,27 @@ use pyo3::types::PyList;
 use pyo3::types::PyString;
 
 // ---------------------------------------------------------------------------
-// RepeatUntilNode（v5 数据结构）
+// RepeatUntilNode
 // ---------------------------------------------------------------------------
 
-/// 终止表达式数组节点（v5 重写）。
+/// 终止表达式数组节点。
 ///
 /// 对应 Python construct `RepeatUntil(terminator, subcon, discard)`。
 ///
-/// construct-rs 用户面 API（v5）：
+/// construct-rs 用户面 API：
 /// ```python
 /// RepeatUntil(terminator, subcon, discard=False)
 /// ```
-/// `terminator` 是 Phase 2 表达式（引用 Element 字段），编译期翻译为 ExprProgram。
+/// `terminator` 是用户面表达式（引用 Element 字段），编译期翻译为 ExprProgram。
 ///
 /// # 工作原理
 ///
 /// 每次迭代：
-/// 1. inner.parse → elem（失败直接上抛，RU-1）
+/// 1. inner.parse → elem（失败直接上抛）
 /// 2. `ctx.set_expr_value_raw(element_field_idx, elem)` 把当前元素借用为
 ///    Element 字段槽位
 /// 3. 求值终止表达式（GetInt(element_field_idx) 从 expr_values_buf 取到 elem）
-/// 4. 表达式非零 → 终止（最后元素包含在内，RU-2）；零 → 继续迭代
+/// 4. 表达式非零 → 终止（最后元素包含在内）；零 → 继续迭代
 ///
 /// 终止表达式求值全程在 Rust 内部栈式 VM 执行，零 FFI。
 ///
@@ -94,11 +85,9 @@ use pyo3::types::PyString;
 /// RepeatUntilNode 会在每次迭代时通过 `set_expr_value_only` 把当前 `ctx._index`
 /// 值同步到 Index 字段槽位。这使 Index 字段在终止表达式中能取到当前迭代下标。
 ///
-/// 设计依据：`docs/模块设计-Array.md` §3.2.2 / §4.3.2 / §4.4。
-///
 /// # parse 行为
 ///
-/// 对齐 Python `RepeatUntil._parse`（core.py L2670-2682），但终止条件用 Phase 2
+/// 对齐 Python `RepeatUntil._parse`（core.py L2670-2682），但终止条件用编译期
 /// 表达式（零 FFI）。详见模块级文档。
 ///
 /// # build 行为
@@ -112,19 +101,18 @@ use pyo3::types::PyString;
 pub struct RepeatUntilNode {
     /// 元素子树（递归 Box）。
     inner: Box<crate::nodes::Node>,
-    /// 终止表达式（Phase 2 ExprProgram，编译期从用户面表达式编译）。
+    /// 终止表达式（编译期从用户面表达式编译的 ExprProgram）。
     /// 求值结果非零即终止。
     terminator: ExprProgram,
     /// Element 字段在当前 Struct 的 `expr_values_buf` 中的索引（编译期确定）。
     /// RepeatUntil 每次迭代调 `ctx.set_expr_value_raw/set_expr_value_py(element_field_idx, ...)`
     /// 把当前元素写入该槽位，终止表达式中的 GetInt(element_field_idx) 即取到此值。
     element_field_idx: usize,
-    /// Element 字段名（interned PyString，供调试/自省；v5.1 起按 idx 写槽位，不再作 key）。
+    /// Element 字段名（interned PyString，供调试/自省；按 idx 写槽位，不作 key）。
     element_field_name: Py<PyString>,
     /// Index 字段索引列表（编译期从终止表达式中提取的 Index 字段索引，
     /// 不含 element_field_idx）。RepeatUntil 每次迭代把这些槽位同步为当前
     /// `ctx._index` 值，使终止表达式中引用的 Index 字段能取到当前下标。
-    /// 设计依据：§4.3.2 Index 字段在 RepeatUntil 内的支持。
     index_field_indices: Vec<usize>,
     /// 是否丢弃解析结果（仍消耗流）。
     discard: bool,
@@ -136,7 +124,7 @@ impl RepeatUntilNode {
     /// # 参数
     ///
     /// - `inner`：元素子树（递归 Box 由调用方 `Box::new`）。
-    /// - `terminator`：终止表达式（Phase 2 ExprProgram）。
+    /// - `terminator`：终止表达式（ExprProgram）。
     /// - `element_field_idx`：Element 字段在 Struct 中的索引。
     /// - `element_field_name`：Element 字段名（interned PyString）。
     /// - `index_field_indices`：Index 字段索引列表（终止表达式中引用的 Index 字段，
@@ -190,13 +178,13 @@ impl RepeatUntilNode {
         self.discard
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     ///
-    /// **始终返回 true**（v5）：终止表达式始终引用 Element 字段，需要外层 Struct
+    /// **始终返回 true**：终止表达式始终引用 Element 字段，需要外层 Struct
     /// 通过 `init_expr_values` 初始化 `expr_values_buf`，使 `set_expr_value_*` 可用。
     ///
-    /// 此外，inner 子树可能含表达式（虽 Phase 4 暂不支持 inner 表达式，但
-    /// 防御性返回 true 避免未来扩展时遗漏 init）。
+    /// 此外，inner 子树可能含表达式（当前暂不支持 inner 表达式，但
+    /// 防御性返回 true 避免扩展时遗漏 init）。
     pub fn has_expressions(&self) -> bool {
         true
     }
@@ -204,7 +192,6 @@ impl RepeatUntilNode {
     /// 把当前迭代下标同步到 Index 字段槽位（仅写 expr_values_buf，不写 PyDict）。
     ///
     /// 使终止表达式中引用的 Index 字段能取到当前下标。
-    /// 设计依据：§4.3.2 Index 字段在 RepeatUntil 内的支持。
     #[inline]
     fn sync_index_fields(&self, ctx: &mut Context<'_>, py: Python<'_>, i: usize) {
         if self.index_field_indices.is_empty() {
@@ -217,7 +204,7 @@ impl RepeatUntilNode {
         }
     }
 
-    /// 求值终止表达式（4.5 v5.1：快速路径 + 通用路径兜底）。
+    /// 求值终止表达式（快速路径 + 通用路径兜底）。
     ///
     /// 先尝试 `try_eval_simple_cmp` 命中常见模式（`e > K` / `e > threshold` 等 3-op
     /// 单/双字段比较），命中则内联求值（避免函数调用 + stack_buf 分配，每迭代省 ~10ns）。
@@ -248,32 +235,32 @@ impl super::Construct for RepeatUntilNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 4.7 PyList Vec 中转：count 未知（终止条件运行时求值）。
-        // 4.5 v5.1：初始容量 16，避免小 N（N≤15）时的 realloc 开销。
+        // PyList Vec 中转：count 未知（终止条件运行时求值）。
+        // 初始容量 16，避免小 N（N≤15）时的 realloc 开销。
         //   N=10 场景：cap=0/8 时 1-3 次 realloc（~30-50ns/次），cap=16 时零 realloc。
         //   稳态场景 N=100+ 由 Rust Vec doubling 接管，初始 cap 影响可忽略。
         //   16 × 8 字节 = 128 字节 upfront 分配，相对 CPython list 节省 ~60 次 realloc。
         let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(16);
 
-        // 保存外层 _index（嵌套数组支持，设计 §3.2.2）。
+        // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
 
         let mut i: usize = 0;
         loop {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
 
             let elem = match self.inner.parse(py, stream, ctx, path) {
                 Ok(v) => v,
                 Err(mut e) => {
-                    // RU-1: 失败直接上抛（不像 GreedyRange 回退）。
+                    // 失败直接上抛（不像 GreedyRange 回退）。
                     e.push_path_index(i);
                     ctx.restore_index(old_index);
                     return Err(e);
                 }
             };
 
-            // 4.5 v5.1：避免 clone_ref（Py_INCREF+Py_DECREF 各一次 C 调用，~5-10ns/iter）
+            // 避免 clone_ref（Py_INCREF+Py_DECREF 各一次 C 调用，~5-10ns/iter）
             // + 单一代码路径（无 if/else 重复 sync_index_fields + eval_terminator）。
             //
             // 取 elem 的 PyObject 指针（稳定堆地址，与 Py<PyAny> 包装无关）后，
@@ -293,8 +280,8 @@ impl super::Construct for RepeatUntilNode {
             // 同步 Index 字段槽位（使终止表达式中引用的 Index 字段取到当前下标）。
             self.sync_index_fields(ctx, py, i);
 
-            // 求值终止表达式（4.5 v5.1：快速路径优先，通用路径兜底）。
-            // 表达式非零即终止（最后元素已包含在 Vec 中，RU-2）。
+            // 求值终止表达式（快速路径优先，通用路径兜底）。
+            // 表达式非零即终止（最后元素已包含在 Vec 中）。
             if self.eval_terminator(ctx, py)? != 0 {
                 break;
             }
@@ -317,9 +304,9 @@ impl super::Construct for RepeatUntilNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 4.7 P1-1 整合：build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
-        // 注：与 v4 不同，v5 必须物化到 Vec——终止表达式求值需要 owned elem
-        // 引用写入 expr_values_buf。可优化为惰性迭代（性能不达标再优化）。
+        // build 路径统一调 collect_obj_to_vec 收集 obj 到 Vec。
+        // 注：必须物化到 Vec——终止表达式求值需要 owned elem
+        // 引用写入 expr_values_buf。
         let items = super::common::collect_obj_to_vec(obj, "RepeatUntil", path)?;
 
         // 保存外层 _index（嵌套数组支持）。
@@ -328,7 +315,7 @@ impl super::Construct for RepeatUntilNode {
         let mut matched = false;
         for (i, elem) in items.iter().enumerate() {
             ctx.set_index(i);
-            // 4.7 lazy path：成功路径不调 path.push_index/pop。
+            // lazy path：成功路径不调 path.push_index/pop。
             let elem_bound = elem.bind(py);
             if let Err(mut e) = self.inner.build(py, elem_bound, stream, ctx, path) {
                 e.push_path_index(i);
@@ -337,7 +324,7 @@ impl super::Construct for RepeatUntilNode {
             }
 
             // 把当前元素借用为 Element 字段槽位（与 parse 同模式，仅写 expr_values_buf）。
-            // 4.5 v5.1：用 set_expr_value_py 避免 elem.bind(py) 重复构造 Bound。
+            // 用 set_expr_value_py 避免 elem.bind(py) 重复构造 Bound。
             ctx.set_expr_value_py(self.element_field_idx, elem);
 
             // 同步 Index 字段槽位（与 parse 同模式）。
@@ -353,7 +340,7 @@ impl super::Construct for RepeatUntilNode {
         ctx.restore_index(old_index);
 
         if !matched {
-            // RU-3: 无元素满足终止表达式。
+            // 无元素满足终止表达式。
             return Err(ConstructError::Repeat {
                 message: "expected any item to match terminator, when building".to_string(),
                 path: path.to_string(),
@@ -372,7 +359,7 @@ impl super::Construct for RepeatUntilNode {
 }
 
 // ---------------------------------------------------------------------------
-// 单元测试（v5 重写：参考设计 §7.3 RU-v5-1 ~ RU-v5-15）
+// 单元测试
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
@@ -470,7 +457,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RU-v5-1 / RU-2：parse 终止表达式求值非零时终止
+    // parse：终止表达式求值非零时终止
     // ======================================================================
 
     #[test]
@@ -516,7 +503,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RU-v5-3：parse 终止表达式含多种 Phase 2 表达式类型
+    // parse：终止表达式含多种表达式类型
     // ======================================================================
 
     #[test]
@@ -615,7 +602,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RU-v5-5：discard 模式
+    // discard 模式
     // ======================================================================
 
     #[test]
@@ -640,12 +627,12 @@ mod tests {
     }
 
     // ======================================================================
-    // RU-v5-1 边界：inner 失败错误传播（lazy path）
+    // inner 失败错误传播（lazy path）
     // ======================================================================
 
     #[test]
     fn parse_inner_failure_propagates_error() {
-        // RU-1: 子构造器解析失败 → 错误直接上抛（不像 GreedyRange 回退）
+        // 子构造器解析失败 → 错误直接上抛（不像 GreedyRange 回退）
         // 用 Int16ub（2 字节）作为 inner，流只 1 字节 → 第一次解析就失败
         with_py(|py| {
             let node = make_ru_gt(int16ub_node(), 255, 0);
@@ -685,7 +672,7 @@ mod tests {
 
     #[test]
     fn build_no_match_returns_repeat_error() {
-        // RU-3: 无元素满足终止表达式 → Repeat 错误
+        // 无元素满足终止表达式 → Repeat 错误
         with_py(|py| {
             let node = make_ru_gt(byte_node(), 100, 0);
             let obj = py.eval_bound("[1, 2, 3]", None, None).expect("obj");
@@ -752,7 +739,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RU-v5-7：parse ↔ build 往返
+    // parse ↔ build 往返
     // ======================================================================
 
     #[test]
@@ -789,7 +776,7 @@ mod tests {
 
     #[test]
     fn sizeof_always_returns_error() {
-        // RU-6: sizeof 永远 Err
+        // sizeof 永远 Err
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
             let node = make_ru_gt(byte_node(), 5, 0);

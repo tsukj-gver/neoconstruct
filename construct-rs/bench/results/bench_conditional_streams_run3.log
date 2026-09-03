@@ -1,5 +1,5 @@
 ==============================================================================
-Phase 7 集成性能基准（Conditional + Streams）
+集成性能基准（Conditional + Streams）
 ==============================================================================
 Python (rs): <opencode-temp>\crs_venv_new\Scripts\python.exe
 Python (py): <opencode-temp>\crs_venv_py_new\Scripts\python.exe
@@ -165,5 +165,5 @@ SW5-parse    py    2142.6       2151.3 ± 63.2          2079.7     2265.9
     门禁失败：SK5-parse 加速比 9.17x < 10.0x
     ... 还有 9 项
 
-CSV 数据（待 PM 追加 perf-scenarios.csv）：<legacy-repo>\construct-rs\bench\results\bench_phase7_csv.json
-详细结果：<legacy-repo>\construct-rs\bench\results\bench_phase7.json / .md
+CSV 数据（供追加 perf-scenarios.csv）：<legacy-repo>\construct-rs\bench\results\bench_conditional_streams_csv.json
+详细结果：<legacy-repo>\construct-rs\bench\results\bench_conditional_streams.json / .md

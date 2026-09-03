@@ -1,24 +1,22 @@
 //! EnumNode：枚举映射节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §1.3.1。
 //! Python 参考：`construct/construct/core.py` `Enum`（L1920-2005）。
 //!
 //! ## 行为概述
 //!
 //! `Enum(subcon, *merge, **mapping)` 把 subcon 返回的整数映射为 label 字符串
-//! （int-convertible）。在 construct-rs 中实现为 Rust Node（非 AdapterCallbackNode，
-//! 详见设计 §1.2 §0.2 判据应用）。
+//! （int-convertible）。在 construct-rs 中实现为 Rust Node（非 AdapterCallbackNode）。
 //!
 //! - parse：inner.parse → decmapping 查 label；命中返回 label（EnumIntegerString），
 //!   未命中返回 EnumInteger(obj)（int 子类，**不报错**，对齐 Python L1982）
 //! - build：obj 是 int → 直接用；否则查 encmapping；命中 inner.build(raw)，未命中 MappingError
 //! - sizeof：转发 inner.sizeof
 //!
-//! ## 编译期物化（§0.2 判据）
+//! ## 编译期物化
 //!
 //! `decmapping` / `encmapping` 在编译期由 Python 描述符构造为普通 Python dict，
 //! 再由 compile.rs 物化为 `Py<PyDict>` 引用存入 Node。运行时通过 `PyDict_GetItem`
-//! 查询（C API，不计额外 FFI，§0.2 判据 2）。
+//! 查询（C API，不计额外 FFI）。
 //!
 //! ## EnumInteger / EnumIntegerString
 //!
@@ -125,7 +123,7 @@ impl Construct for EnumNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // C-6 边界：Python bool 是 int 子类（True == 1, False == 0）。
+        // 边界：Python bool 是 int 子类（True == 1, False == 0）。
         // is_instance_of::<PyLong> 对 bool 也返回 true，因此 bool 会走 int 直接用路径，
         // 与 Python construct L1986 `isinstance(obj, int): return obj` 一致。
         let raw: Py<PyAny> = if obj.is_instance_of::<PyLong>() {

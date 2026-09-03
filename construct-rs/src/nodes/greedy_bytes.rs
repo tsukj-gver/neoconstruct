@@ -1,6 +1,5 @@
 //! GreedyBytesNode：剩余字节读写。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.3。
 //! Python 参考：`construct/construct/core.py` `GreedyBytes`（L993-1018）。
 //!
 //! ## 行为
@@ -9,9 +8,9 @@
 //! - build：从 `bytes` 对象提取数据，写入流（不校验长度）。
 //! - sizeof：返回 `Err`（大小未知，对应 Python construct 的 `SizeofError`）。
 //!
-//! ## REV 约束
+//! ## build 输入约束
 //!
-//! 与 `BytesNode` 一致，build 时仅接受 `bytes` 输入（bytearray/int 转换推迟到 Phase 2）。
+//! 与 `BytesNode` 一致，build 时仅接受 `bytes` 输入。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -75,7 +74,7 @@ impl super::Construct for GreedyBytesNode {
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // REV 约束：仅接受 bytes（bytearray/int 转换推迟到 Phase 2）
+        // 仅接受 bytes 输入（对齐 BytesNode 约束）
         let py_bytes = obj
             .downcast::<PyBytes>()
             .map_err(|_| ConstructError::Generic {

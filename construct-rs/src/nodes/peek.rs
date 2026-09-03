@@ -1,18 +1,17 @@
 //! PeekNode：预读不消费流的节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §1.2。
 //! Python 参考：`construct/construct/core.py` `Peek`（L4486-4545）。
 //!
 //! ## 行为概述
 //!
 //! Peek 在 parse 时执行 inner.parse，结束后无论成功/失败都 seek 回入口位置
 //! （不消费字节）。Python 用 try/except/finally 实现此语义；construct-rs 用
-//! `ParseStream::seek` + Result 匹配（§0 #8 Stream 抽象纯 Rust 内部）。
+//! `ParseStream::seek` + Result 匹配（Stream 抽象纯 Rust 内部）。
 //!
-//! ## ExplicitError 处理（设计 §5.3 PE-3，Phase 7 升级）
+//! ## ExplicitError 处理
 //!
 //! Python `Peek` 在 inner.parse 抛 `ExplicitError` 时**不吞掉**（向上传播）。
-//! Phase 7 引入 `ConstructError::Explicit` 变体后，[`is_explicit_error`] 已升级为
+//! construct-rs 以 `ConstructError::Explicit` 变体表达该错误，[`is_explicit_error`]
 //! 真实分类（`matches!(e, ConstructError::Explicit { .. })`），Explicit 错误向上传播。
 
 use crate::context::Context;
@@ -36,9 +35,9 @@ use crate::nodes::Node;
 /// - build：no-op（对齐 Python `return obj`，但 construct-rs build 不返回值）
 /// - sizeof：返回 0
 ///
-/// # ExplicitError 处理（设计 §5.3 PE-3，Phase 7 升级）
+/// # ExplicitError 处理
 ///
-/// Phase 7 起 [`is_explicit_error`] 真实分类：`ConstructError::Explicit` 变体
+/// [`is_explicit_error`] 真实分类：`ConstructError::Explicit` 变体
 /// 不被 Peek 吞掉，直接向上传播（对齐 Python `except ExplicitError: raise`）。
 #[derive(Debug)]
 pub struct PeekNode {
@@ -62,8 +61,8 @@ impl PeekNode {
 
 /// 判断错误是否为"ExplicitError 等价物"（不被 Peek 吞掉）。
 ///
-/// Phase 7 升级（设计 §1.4 / §5.3 PE-3 收尾）：`ConstructError::Explicit` 变体
-/// 已引入，本函数返回 `true` 表示该错误属于 Explicit 类，Peek 不吞掉、直接传播。
+/// `ConstructError::Explicit` 变体已引入，本函数返回 `true` 表示该错误属于
+/// Explicit 类，Peek 不吞掉、直接传播。
 fn is_explicit_error(e: &ConstructError) -> bool {
     matches!(e, ConstructError::Explicit { .. })
 }
@@ -307,12 +306,12 @@ mod tests {
     }
 
     // ======================================================================
-    // is_explicit_error（Phase 7 升级为真实分类）
+    // is_explicit_error（真实分类）
     // ======================================================================
 
     #[test]
     fn is_explicit_error_detects_explicit_variant() {
-        // Phase 7 升级：ConstructError::Explicit 不被 Peek 吞掉。
+        // ConstructError::Explicit 不被 Peek 吞掉。
         let explicit = ConstructError::Explicit {
             message: "user-raised".to_string(),
             path: "root".to_string(),

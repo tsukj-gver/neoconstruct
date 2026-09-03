@@ -1,6 +1,5 @@
 //! StopIfNode：早停信号节点。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.5。
 //! Python 参考：`construct/construct/core.py` `StopIf`（L4079-4131）。
 //!
 //! ## 概述
@@ -9,22 +8,21 @@
 //! 哨兵由外层的 [`crate::nodes::struct_node::StructNode`] /
 //! [`crate::nodes::greedy_range::GreedyRangeNode`] 捕获，正常停止后续字段/迭代。
 //!
-//! - sizeof 永远返回 `Err`（对齐 Python `StopIf._sizeof`，SI-7）
+//! - sizeof 永远返回 `Err`（对齐 Python `StopIf._sizeof`）
 //! - parse 与 build 行为对称（都评估条件）
 //! - 不写字节、不消耗流（哨兵错误）
 //!
 //! ## 条件来源
 //!
-//! 设计 §4.5.1：条件有三种编译期分类：
+//! 条件有三种编译期分类：
 //! - [`StopIfCondition::Always`]：常量 true（永远停止，主要用于调试）
 //! - [`StopIfCondition::Never`]：常量 false（永远不停止，主要用于调试）
 //! - [`StopIfCondition::Expr`]：表达式（如 `x == 0`，编译为 `[GetInt(idx), Const(0), Eq]`）
 //!
-//! ## 在 Struct 中的捕获（设计 §4.7）
+//! ## 在 Struct 中的捕获
 //!
 //! StructNode.parse/build 在子字段返回 [`ConstructError::StopField`] 时停止后续字段，
-//! 正常返回当前实例（已解析字段写入，未解析字段不写入）。这是 StructNode 在 Phase 4
-//! 的小修改（新增分支，不破坏现有行为）。
+//! 正常返回当前实例（已解析字段写入，未解析字段不写入）。
 //!
 //! Python 等价：`Struct._parse` 用 `except StopFieldError` 捕获（core.py L2200 附近）。
 
@@ -39,7 +37,7 @@ use pyo3::prelude::*;
 // StopIfCondition
 // ---------------------------------------------------------------------------
 
-/// StopIf 的条件来源（设计 §4.5.1）。
+/// StopIf 的条件来源。
 ///
 /// 编译期对条件分类：
 /// - `Always` / `Never`：常量路径，零运行时求值开销
@@ -87,7 +85,7 @@ impl StopIfCondition {
 ///
 /// # sizeof 行为
 ///
-/// 永远返回 `Err`（对齐 Python `StopIf._sizeof` L4113-4114，SI-7）。
+/// 永远返回 `Err`（对齐 Python `StopIf._sizeof` L4113-4114）。
 #[derive(Debug, Clone)]
 pub struct StopIfNode {
     /// 条件：常量或表达式。
@@ -105,18 +103,18 @@ impl StopIfNode {
         &self.cond
     }
 
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     ///
     /// **关键**：`StopIf(Expr)` 中的表达式（如 `x == 0`）**确实引用 Struct 字段**
     /// （此例中的 `x`）。`has_expressions()` 必须返回 true，触发 StructNode 创建
-    /// child context 并 init_expr_values（设计 §6.1.1 P1 关键说明）。
+    /// child context 并 init_expr_values。
     ///
     /// `StopIf(Always)` / `StopIf(Never)` 不引用字段（编译期常量），返回 false。
     pub fn has_expressions(&self) -> bool {
         self.cond.is_expr()
     }
 
-    /// 求值条件（设计 §4.5.2 + §16.1.3-O1 fast-path）。
+    /// 求值条件。
     ///
     /// - `Always` → `true`
     /// - `Never` → `false`
@@ -124,9 +122,9 @@ impl StopIfNode {
     ///   fast-path（命中 3-op 单/双字段比较模式时内联求值，省 ~10ns/调用），
     ///   未命中走通用 [`eval_expr_int`]（5-op `(e&0xFF)==0` / 复合表达式等）。
     ///   fast-path 范式与 [`crate::nodes::repeat_until::RepeatUntilNode::eval_terminator`]
-    ///   一致（4.5 v5.1 已验证）。
+    ///   一致。
     ///
-    /// Phase 7 重构：转发到 [`eval_condition`] 公共辅助函数（设计 §2.3），
+    /// 转发到 [`eval_condition`] 公共辅助函数，
     /// 与 [`crate::nodes::if_then_else::IfThenElseNode`] 共用同一份求值逻辑。
     fn eval_cond(&self, ctx: &Context<'_>, py: Python<'_>) -> Result<bool, ConstructError> {
         eval_condition(&self.cond, ctx, py)
@@ -134,17 +132,17 @@ impl StopIfNode {
 }
 
 // ---------------------------------------------------------------------------
-// 公共辅助：eval_condition（Phase 7 提取，IfThenElse / StopIf 共用）
+// 公共辅助：eval_condition（IfThenElse / StopIf 共用）
 // ---------------------------------------------------------------------------
 
-/// 求值条件（StopIf / IfThenElse 共用，设计 §2.3）。
+/// 求值条件（StopIf / IfThenElse 共用）。
 ///
 /// - [`StopIfCondition::Always`] → `true`
 /// - [`StopIfCondition::Never`] → `false`
 /// - [`StopIfCondition::Expr`] → fast-path `try_eval_simple_cmp` / 通用
 ///   [`eval_expr_int`]，非零为真（对齐 Python truthy 语义）。
 ///
-/// # 性能（设计 §8.1）
+/// # 性能
 ///
 /// - `Always` / `Never`：编译期常量分支，零运行时求值。
 /// - `Expr`：先尝试 fast-path（3-op 比较模式内联求值，省 ~10ns/调用），
@@ -163,7 +161,7 @@ pub(crate) fn eval_condition(
         StopIfCondition::Always => Ok(true),
         StopIfCondition::Never => Ok(false),
         StopIfCondition::Expr(prog) => {
-            // O1 fast-path（设计 §16.1.3-O1）：命中常见 3-op 比较模式时内联求值。
+            // fast-path：命中常见 3-op 比较模式时内联求值。
             let v = if let Some(fast) = prog.try_eval_simple_cmp(ctx, py) {
                 fast?
             } else {
@@ -188,7 +186,7 @@ impl super::Construct for StopIfNode {
     ) -> Result<Py<PyAny>, ConstructError> {
         let stop = self.eval_cond(ctx, py)?;
         if stop {
-            // 抛出早停哨兵（被外层 Struct / GreedyRange 捕获，设计 §2.4 决策 A4）。
+            // 抛出早停哨兵（被外层 Struct / GreedyRange 捕获）。
             Err(ConstructError::StopField {
                 path: path.to_string(),
             })
@@ -217,7 +215,7 @@ impl super::Construct for StopIfNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 对齐 Python `StopIf._sizeof` L4113-4114：永远 SizeofError（SI-7）。
+        // 对齐 Python `StopIf._sizeof` L4113-4114：永远 SizeofError。
         Err(ConstructError::Generic {
             message: "StopIf size is undefined".to_string(),
             path: String::new(),
@@ -299,12 +297,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SI-6：常量 false（Never）不停止
+    // 常量 false（Never）不停止
     // ======================================================================
 
     #[test]
     fn parse_never_returns_none() {
-        // SI-6: 条件为 false → 不停止，返回 Py_None
+        // 条件为 false → 不停止，返回 Py_None
         with_py(|py| {
             let node = StopIfNode::new(StopIfCondition::Never);
             let mut stream = ParseStream::new(b"");
@@ -332,12 +330,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SI-1/SI-2：常量 true（Always）抛出 StopField
+    // 常量 true（Always）抛出 StopField
     // ======================================================================
 
     #[test]
     fn parse_always_returns_stop_field() {
-        // SI-1 直接形式：Always → StopField 哨兵
+        // 直接形式：Always → StopField 哨兵
         with_py(|py| {
             let node = StopIfNode::new(StopIfCondition::Always);
             let mut stream = ParseStream::new(b"");
@@ -559,12 +557,12 @@ mod tests {
     }
 
     // ======================================================================
-    // SI-7：sizeof 永远 Err
+    // sizeof 永远 Err
     // ======================================================================
 
     #[test]
     fn sizeof_always_returns_error() {
-        // SI-7: sizeof 永远 Err
+        // sizeof 永远 Err
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
             let always = StopIfNode::new(StopIfCondition::Always);

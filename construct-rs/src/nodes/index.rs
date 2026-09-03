@@ -1,6 +1,5 @@
 //! IndexNode：取当前数组迭代下标。
 //!
-//! 设计依据：`docs/模块设计-Array.md` §4.4（v3 决策：直接调 `ctx.index()`）。
 //! Python 参考：`construct/construct/core.py` `Index`（L2934-2972）。
 //!
 //! ## 概述
@@ -11,19 +10,19 @@
 //!
 //! - sizeof = 0（不消耗流）
 //! - build 是 no-op（不写字节）
-//! - 不走 ExprProgram（v3 决策删除 ExprOp::GetIndex，§3.3）
+//! - 不走 ExprProgram（不引入 ExprOp::GetIndex）
 //!
-//! ## 用户访问下标的机制（设计 §3.3 v3 决策）
+//! ## 用户访问下标的机制
 //!
 //! | 用户需求 | construct-rs 写法 | 编译结果 |
 //! |---------|------------------|---------|
 //! | 取当前下标值（作为字段） | `i: int = rfield(Index())` | IndexNode.parse 读 `ctx.index()` |
 //! | 在表达式中引用下标 | 先声明 Index 字段，再用字段名引用 | `[GetInt(idx_of_i), ...]` |
 //!
-//! v3 决策：不扩展 ExprOp（不引入 GetIndex）。用户在表达式中引用下标时，
+//! 不扩展 ExprOp（不引入 GetIndex）。用户在表达式中引用下标时，
 //! 先用 Index 字段声明（如 `i: int = rfield(Index())`），再用字段名 `i`
 //! 参与表达式（如 `Bytes(i + 1)`），编译为 `[GetInt(0), Const(1), Add]`。
-//! 这与 Phase 2「字段名即引用」的设计一致。
+//! 这与「字段名即引用」的设计一致。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -39,7 +38,7 @@ use pyo3::prelude::*;
 ///
 /// 对应 Python construct `Index`（core.py L2934）。
 ///
-/// construct-rs 中 IndexNode 是用户访问数组下标的唯一机制（v3 决策，§3.3）。
+/// construct-rs 中 IndexNode 是用户访问数组下标的唯一机制。
 /// 直接调 [`Context::index`] 读取，不走 ExprProgram。
 ///
 /// # parse 行为
@@ -102,15 +101,15 @@ impl super::Construct for IndexNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 对齐 Python `Index._sizeof` 返回 0（IX-3）。
+        // 对齐 Python `Index._sizeof` 返回 0。
         Ok(0)
     }
 }
 
 impl IndexNode {
-    /// has_expressions 判断（设计 §6.1.1）。
+    /// has_expressions 判断。
     ///
-    /// IndexNode 仅读 `ctx._index`（v3：不走 ExprProgram），不引用 Struct 字段。
+    /// IndexNode 仅读 `ctx._index`（不走 ExprProgram），不引用 Struct 字段。
     /// 返回 `false`——不需要触发 StructNode 的 init_expr_values 路径。
     pub fn has_expressions(&self) -> bool {
         false
@@ -162,12 +161,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IX-1：在 Array 内返回当前下标
+    // parse：在 Array 内返回当前下标
     // ======================================================================
 
     #[test]
     fn parse_returns_index_when_set() {
-        // IX-1: ctx.index() = Some(i) → 返回 PyLong(i)
+        // ctx.index() = Some(i) → 返回 PyLong(i)
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -185,7 +184,7 @@ mod tests {
 
     #[test]
     fn parse_returns_zero_index() {
-        // IX-1 边界：index = 0 也是合法值（不与 None 混淆）
+        // 边界：index = 0 也是合法值（不与 None 混淆）
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -208,7 +207,7 @@ mod tests {
 
     #[test]
     fn parse_returns_large_index() {
-        // IX-1 边界：大下标（PyLong）
+        // 边界：大下标（PyLong）
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -225,12 +224,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IX-2：不在 Array 内返回 Py_None
+    // parse：不在 Array 内返回 Py_None
     // ======================================================================
 
     #[test]
     fn parse_returns_none_when_not_in_array() {
-        // IX-2: ctx.index() = None → 返回 Py_None（对齐 Python `context.get("_index", None)`）
+        // ctx.index() = None → 返回 Py_None（对齐 Python `context.get("_index", None)`）
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -249,7 +248,7 @@ mod tests {
 
     #[test]
     fn parse_returns_none_after_clear_index() {
-        // IX-2: clear_index 后返回 None
+        // clear_index 后返回 None
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -267,7 +266,7 @@ mod tests {
 
     #[test]
     fn parse_returns_none_on_placeholder_context() {
-        // IX-2: placeholder context 也没有 _index
+        // placeholder context 也没有 _index
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -282,12 +281,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IX-3：sizeof 返回 0
+    // sizeof 返回 0
     // ======================================================================
 
     #[test]
     fn sizeof_returns_zero() {
-        // IX-3: sizeof = 0
+        // sizeof = 0
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
             let node = IndexNode::new();
@@ -305,12 +304,12 @@ mod tests {
     }
 
     // ======================================================================
-    // IX-4：build 是 no-op
+    // build 是 no-op
     // ======================================================================
 
     #[test]
     fn build_is_noop() {
-        // IX-4: build 不写字节，不消费 obj
+        // build 不写字节，不消费 obj
         with_py(|py| {
             let node = IndexNode::new();
             let obj = py.eval_bound("None", None, None).expect("None");
@@ -329,7 +328,7 @@ mod tests {
 
     #[test]
     fn build_ignores_obj_value() {
-        // IX-4: build 忽略 obj 内容（对齐 Python `Index._build`：返回 _index 但不写字节）
+        // build 忽略 obj 内容（对齐 Python `Index._build`：返回 _index 但不写字节）
         with_py(|py| {
             let node = IndexNode::new();
             // 即使 obj 是任意值，build 也不写字节
@@ -346,7 +345,7 @@ mod tests {
 
     #[test]
     fn build_does_not_require_index_in_context() {
-        // IX-4 边界：build 时即使 ctx._index 为 None 也不报错
+        // 边界：build 时即使 ctx._index 为 None 也不报错
         with_py(|py| {
             let node = IndexNode::new();
             let obj = py.eval_bound("None", None, None).expect("None");
@@ -492,7 +491,7 @@ mod tests {
     #[test]
     fn parse_in_child_context_inherits_parent_index() {
         // 模拟 Array 内 Struct 字段：子 context 通过 new_child 继承父的 _index
-        // 对应设计 §3.2.2 选项 A
+        // （子 context 继承方案）
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");

@@ -1,29 +1,28 @@
 //! AdapterCallbackNode：用户面 Adapter 嵌入 Struct 字段时的最小钩子。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §4.5。
 //! Python 参考：`construct/construct/core.py` `Adapter`（L813-834）。
 //!
 //! ## 角色定位
 //!
-//! AdapterCallbackNode 是 PM 决策 6.3-D1 接受的"最小通用钩子"。
+//! AdapterCallbackNode 是"最小通用钩子"。
 //! 仅用于用户面 Adapter / SymmetricAdapter 嵌入 Struct 字段的场景。
 //!
 //! 用户单独使用 Adapter（如 `HexAdapter(Int8ub).parse(b)`）不经过此节点——
 //! 直接走 Python 层 Adapter.parse（adapter.py 实现）。
 //!
-//! ## FFI 边界（设计 §4.3）
+//! ## FFI 边界
 //!
 //! 嵌入 Struct 时，subcon 部分在 Rust 内执行（零 FFI），
 //! 但 `_decode` / `_encode` 是用户 Python 方法，需 Rust→Python 回调（1 次额外 FFI）。
 //! 总计 2 次 FFI 穿越（parse 入口 + _decode 回调）。
 //!
-//! 用户主动继承 Adapter = 显式接受此性能折衷（PM 决策 2）。
-//! 用户面 Adapter 不设硬性能门禁（设计 §0.2 表）。
+//! 用户主动继承 Adapter = 显式接受此性能折衷。
+//! 用户面 Adapter 不设硬性能门禁。
 //!
-//! ## §0 合规性（设计 §4.4）
+//! ## 架构原则合规性
 //!
 //! AdapterCallbackNode 在执行树内（Node enum 变体），2 次 FFI 是用户主动选择的
-//! 后处理开销，不属于 §0 #1 禁止的"中间表示层"（中间表示层指 Rust 端临时数据类型
+//! 后处理开销，不属于"中间表示层"（中间表示层指 Rust 端临时数据类型
 //! 再转换，非用户 Python 回调）。
 
 use crate::context::Context;
@@ -43,7 +42,7 @@ use crate::nodes::Node;
 /// （如 `HexAdapter(Int8ub).parse(b)`）不经过此节点（直接走 Python 层
 /// `Adapter.parse`）。
 ///
-/// 此节点是 PM 决策 6.3-D1 接受的"最小通用钩子"——它不引入"通用用户回调"机制，
+/// 此节点是"最小通用钩子"——它不引入"通用用户回调"机制，
 /// 仅在 Struct 字段编译期把"Adapter 包装"翻译为"subcon Rust Node + 回调引用"。
 ///
 /// # 三方法行为
@@ -101,7 +100,7 @@ impl Construct for AdapterCallbackNode {
         ctx: &mut Context<'py>,
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // AC-1: subcon.parse → 回调 _decode(obj, ctx, path)
+        // parse：subcon.parse → 回调 _decode(obj, ctx, path)
         let inner_value = self.subcon.parse(py, stream, ctx, path)?;
 
         // 构造 _decode 调用参数：(obj, context, path)
@@ -138,7 +137,7 @@ impl Construct for AdapterCallbackNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // AC-2: 回调 _encode(obj, ctx, path) → subcon.build(result)
+        // build：回调 _encode(obj, ctx, path) → subcon.build(result)
         let path_str = path.to_string();
         let path_py = pyo3::types::PyString::new_bound(py, &path_str);
         let ctx_view: Py<PyAny> = match ctx.fields() {
@@ -234,7 +233,7 @@ class HexAdapter:
 
     #[test]
     fn parse_calls_decode_after_inner_parse() {
-        // AC-1: field(HexAdapter(Int8ub)) parse b"\x10" → Int8ub.parse → 16
+        // field(HexAdapter(Int8ub)) parse b"\x10" → Int8ub.parse → 16
         //        → _decode(16) → "0x10"
         with_py(|py| {
             let subcon = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
@@ -258,7 +257,7 @@ class HexAdapter:
 
     #[test]
     fn build_calls_encode_before_inner_build() {
-        // AC-2: field(HexAdapter(Int8ub)) build "0xff" → _encode("0xff") → 255
+        // field(HexAdapter(Int8ub)) build "0xff" → _encode("0xff") → 255
         //        → Int8ub.build(255) → b"\xff"
         with_py(|py| {
             let subcon = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
@@ -327,7 +326,7 @@ class HexAdapter:
 
     #[test]
     fn parse_decode_raises_python_exception_returns_generic_error() {
-        // AC-3: _decode 抛 Python 异常 → 跨 FFI 转 ConstructError::Generic
+        // _decode 抛 Python 异常 → 跨 FFI 转 ConstructError::Generic
         with_py(|py| {
             let code = r#"
 class FailingAdapter:

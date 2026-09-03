@@ -1,8 +1,6 @@
 """construct-rs vs Python construct 2.10.70 Struct 性能基准测试（B1-B7）。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §5.2（bench 统一模板）
-- bench/_helpers/runner.py（BenchRunner）
+组件：bench/_helpers/runner.py（BenchRunner）。
 
 7 个用例（B1-B7），每个测 parse + build，对照 construct-rs vs Python construct 2.10.70。
 
@@ -12,7 +10,7 @@
     python bench/bench_struct.py --case B1 --case B2
     python bench/bench_struct.py --iterations 10
 
-通过标准（与原 tests/benchmark.py 一致）：
+通过标准：
     - B1-B5 ≥ 4x（硬目标）
     - B6 深嵌套 ≥ 2x（已知退化）
     - B7 功能性（不要求加速比）
@@ -41,7 +39,7 @@ from _helpers.report import (
 from _helpers.runner import BenchConfig, BenchRunner
 
 # ---------------------------------------------------------------------------
-# venv 解析（三级，与 conftest.py 一致 —— REV 新-改进-5）
+# venv 解析（三级，与 conftest.py 一致）
 # 现行约定（详见 README「测试环境变量」）：
 #   环境变量 CRS_PYTHON / PC_PYTHON > 项目内 .venv / .venv-pc > sys.executable
 # ---------------------------------------------------------------------------
@@ -68,8 +66,8 @@ def _resolve_venv(env_var, venv_dir):
 
 
 # ---------------------------------------------------------------------------
-# 子进程测量脚本模板（保留原 benchmark.py _MEASURE_SCRIPT 全部 case 逻辑，
-# 改测量段：输出 per_call_ns list 而非 median，REPEAT = warmup + iterations）
+# 子进程测量脚本模板（测量段输出 per_call_ns list 而非 median，
+# REPEAT = warmup + iterations）
 # ---------------------------------------------------------------------------
 # 模板占位符：{impl!r} {case!r} {direction!r} {number!r} {repeat!r} {crs_python_dir!r}
 # 字面花括号用 {{ }} 转义（.format 解析）。
@@ -263,7 +261,7 @@ CASE_DESCRIPTIONS = {
     "B7": "空 Struct (0 字段)",
 }
 
-# 性能门禁（与原 benchmark.py check_gates 一致）
+# 性能门禁
 GATES = {
     "B1": 4.0, "B2": 4.0, "B3": 4.0, "B4": 4.0, "B5": 4.0,
     "B6": 2.0,

@@ -1,6 +1,6 @@
 {
   "timestamp": "2026-07-31 21:12:01",
-  "optimization": "Plan A+B (call1+setattr + intern fmtstr)",
+  "optimization": "setattr + intern fmtstr",
   "config": {
     "number": 5000,
     "iterations": 10,

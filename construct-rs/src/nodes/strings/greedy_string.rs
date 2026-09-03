@@ -1,9 +1,9 @@
-//! GreedyStringNode：读到流结束并解码（Phase 6.2 §3.4）。
+//! GreedyStringNode：读到流结束并解码。
 //!
 //! Python 参考：`construct/construct/core.py` `GreedyString`（L1837-1858）。
 //!
-//! Python 原版是 `StringEncoded(GreedyBytes, encoding)` macro 嵌套；本设计独立实现
-//! （PM 决策 1 方案 A）：直接 `read_remaining` + `Encoding::decode`。
+//! Python 原版是 `StringEncoded(GreedyBytes, encoding)` macro 嵌套；construct-rs 独立实现：
+//! 直接 `read_remaining` + `Encoding::decode`。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -251,7 +251,7 @@ mod tests {
 
     #[test]
     fn parse_utf16_le_does_not_consume_bom() {
-        // P2a 验证：byteorder=-1 不扫描 BOM。
+        // 验证：byteorder=-1 不扫描 BOM。
         // 数据流开头恰好是 \xff\xfe（LE BOM 字节序列），应保留为数据。
         // "h" + LE BOM 字节 = b'\xff\xfeh\x00'，
         // UTF-16 LE 解码 b'\xff\xfe' = U+FEFF (BOM 字符) + b'h\x00' = U+0068 (h)

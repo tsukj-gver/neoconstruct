@@ -1,6 +1,4 @@
-"""Bytes 表达式长度端到端测试（Phase 2.5）。
-
-设计依据：``docs/design/模块设计/模块设计-表达式系统.md`` §3.7.3、§4.2-§4.3、§4.7。
+"""Bytes 表达式长度端到端测试。
 
 覆盖：
 - ``field(Bytes(count))``：简单字段引用
@@ -188,7 +186,7 @@ class TestMultiplicationExpression:
 
 
 class TestConstBackwardCompat:
-    """``Bytes(4)`` — 常量长度（Phase 1 兼容）。"""
+    """``Bytes(4)`` — 常量长度（早期用法兼容）。"""
 
     def test_parse_const_length(self):
         """常量长度 4 → 读取 4 字节。"""

@@ -1,7 +1,5 @@
 //! 编译入口：`compile_schema` FFI 函数与描述符→节点构建逻辑。
 //!
-//! 设计依据：`docs/架构设计.md` §B.2（编译入口）、§E.3-E.4（编译管线）。
-//!
 //! ## 一次 FFI 穿越
 //!
 //! `compile_schema` 是 Python→Rust 的编译期 FFI 入口，在 `__init_subclass__`
@@ -25,7 +23,7 @@
 //!
 //! 当描述符是 StructMixin 子类但尚未完成编译（延迟桩），编译器仍构建
 //! [`Node::StructRef`](crate::nodes::struct_ref::StructRefNode)（存类引用）。
-//! 运行时通过 `cls._construct_compiled` 动态解析（详见架构设计 §C.3.5、§E.5）。
+//! 运行时通过 `cls._construct_compiled` 动态解析。
 // pyo3 0.22 的 #[pyfunction] 宏在展开返回 PyResult<T> 的包装代码时，
 // 会生成 `PyErr.into()` 形式的冗余转换，触发 clippy::useless_conversion。
 // 这是宏的已知行为（不是用户代码问题），在此模块级别抑制该 lint。
@@ -107,7 +105,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 
 /// 编译 Schema 为执行树（一次 FFI 穿越）。
 ///
-/// Python 可见签名（Phase 3.2 扩展，向后兼容）：
+/// Python 可见签名（向后兼容）：
 ///
 /// ```python
 /// compile_schema(
@@ -116,7 +114,7 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 ///     descriptors: list,
 ///     modes: list[str] | None = None,             # ["rw", "ro", "wo", ...]
 ///     expr_programs: list[dict | None] | None = None,  # 每字段的表达式程序
-///     bitwise: bool = False,                       # Phase 3.2：BitStructMixin 传 True
+///     bitwise: bool = False,                       # BitStructMixin 传 True
 /// ) -> CompiledSchema
 /// ```
 ///
@@ -126,11 +124,10 @@ const STRUCTMIXIN_COMPILED_ATTR: &str = "_construct_compiled";
 /// - `field_names`：字段名列表，按字段声明顺序排列。
 /// - `descriptors`：字段描述符列表，与 `field_names` 按位置对应。
 /// - `modes`：可选的字段模式列表（`"rw"` / `"ro"` / `"wo"`）。`None` 时所有字段
-///   默认为 `"rw"`（Phase 1 兼容）。
+///   默认为 `"rw"`。
 /// - `expr_programs`：可选的每字段表达式程序列表。长度与 `field_names` 一致，
 ///   每个元素为 `None`（该字段无表达式）或 Python dict（`{param_name: [expr_ops]}`）。
-///   当前 2.3 阶段仅用于计算 `has_expressions` 标志，具体程序解析推迟到 2.5/2.6。
-/// - `bitwise`：Phase 3.2 新增。`true` 时根 `StructNode` 被包入 `BitwiseNode`
+/// - `bitwise`：`true` 时根 `StructNode` 被包入 `BitwiseNode`
 ///   （对应 Python `BitStructMixin`，等价于 `Bitwise(Struct(...))`）。
 ///   字段树在 `bitwise=true` 上下文下编译（影响 `Padding` 描述符的选择，
 ///   详见 [`build_node_from_descriptor`]）。
@@ -166,7 +163,7 @@ pub fn compile_schema(
         .into());
     }
 
-    // 1b. 解析 modes：None → 全 Rw（Phase 1 兼容）；Some → 逐字段解析为 FieldMode。
+    // 1b. 解析 modes：None → 全 Rw；Some → 逐字段解析为 FieldMode。
     //     长度必须与 field_names 一致。
     let modes_resolved: Vec<FieldMode> = match &modes {
         None => vec![FieldMode::Rw; field_names.len()],
@@ -195,7 +192,6 @@ pub fn compile_schema(
     };
 
     // 1c. 计算 has_expressions：expr_programs 中任一字段为 Some → true。
-    //     当前 2.3 阶段不解析表达式内容，仅设置标志（具体解析在 2.5/2.6）。
     //     RepeatUntil 终止表达式引用 Element/Index 字段，需要外层 Struct
     //     init_expr_values，此处先按 expr_programs 初步判断，节点树构建后再次提升
     //     （详见步骤 4 之后的二次扫描）。
@@ -204,7 +200,7 @@ pub fn compile_schema(
         .map(|progs| progs.iter().any(|p| p.is_some()))
         .unwrap_or(false);
 
-    // 2. 检测 __slots__（设计修订 §3.6 + §5.7.1 N4-R3 + R4 §8.1）
+    // 2. 检测 __slots__
     //    手写 __slots__ 在 __init_subclass__ 时已可见，编译期报错（fail fast）。
     //    @dataclass(slots=True) 的 __slots__ 在 __init_subclass__ 后才生成，
     //    可能漏检，由 parse 时 getattr("__dict__") 失败兜底（struct_node.rs
@@ -216,7 +212,7 @@ pub fn compile_schema(
             .unwrap_or_else(|_| "<unknown>".to_string());
         return Err(ConstructError::Compilation {
             message: format!(
-                "类 {} 使用了 __slots__，Phase 1 不支持 slots dataclass（无 __dict__）。\
+                "类 {} 使用了 __slots__，不支持 slots dataclass（无 __dict__）。\
                  请移除 __slots__ 或使用普通 @dataclass。",
                 cls_name
             ),
@@ -224,7 +220,7 @@ pub fn compile_schema(
         .into());
     }
 
-    // 3. 编译期检测 __post_init__（设计修订 §3.2）
+    // 3. 编译期检测 __post_init__
     let has_post_init = check_has_post_init(cls);
 
     // 4. 逐字段构建节点（FieldName 含 interned PyString）
@@ -243,7 +239,7 @@ pub fn compile_schema(
         )
         .map_err(|e| with_field_context(e, name))?;
         // FieldName::new 创建 interned PyString 缓存。
-        // mode 从解析后的 modes_resolved 取（Phase 2 扩展）。
+        // mode 从解析后的 modes_resolved 取。
         let field = StructField {
             name: crate::nodes::struct_node::FieldName::new(py, name.clone()),
             node,
@@ -253,7 +249,7 @@ pub fn compile_schema(
     }
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
-    //    v4 V-1 修正：has_expressions 由两部分组合——
+    //    has_expressions 由两部分组合——
     //    (1) Python 侧 expr_programs 检测（字段表达式：Bytes(m)、Computed(...) 等）
     //    (2) Rust 侧节点树扫描（RepeatUntil 终止表达式引用 Element/Index 字段
     //        需要外层 Struct init_expr_values，否则 expr_values_buf 未初始化）。
@@ -270,7 +266,7 @@ pub fn compile_schema(
         has_expressions,
     ));
 
-    // 6. Phase 3.2：bitwise=true 时，根 StructNode 被包入 BitwiseNode
+    // 6. bitwise=true 时，根 StructNode 被包入 BitwiseNode
     //    （对应 Python BitStructMixin → Bitwise(Struct(...))）。
     let root = if bitwise {
         Node::Bitwise(BitwiseNode::new(struct_root))
@@ -284,7 +280,7 @@ pub fn compile_schema(
 
 /// 检查类是否定义了 `__slots__`（含 MRO 查找）。
 ///
-/// 设计修订 §5.5：编译期检测，命中返回 true。
+/// 编译期检测，命中返回 true。
 ///
 /// # 错误
 ///
@@ -298,7 +294,7 @@ fn check_has_slots(cls: &Bound<'_, PyType>) -> Result<bool, ConstructError> {
 
 /// 检查类是否定义了 `__post_init__`（含 MRO 查找）。
 ///
-/// 设计修订 §5.5：编译期检测，决定 StructNode.parse 是否在构造实例后调用
+/// 编译期检测，决定 StructNode.parse 是否在构造实例后调用
 /// `instance.__post_init__()`。
 fn check_has_post_init(cls: &Bound<'_, PyType>) -> bool {
     cls.getattr("__post_init__").is_ok()
@@ -314,11 +310,10 @@ fn check_has_post_init(cls: &Bound<'_, PyType>) -> bool {
 /// - `desc`：描述符的 Python 引用
 /// - `field_index`：当前字段在 fields 列表中的索引（用于从 `expr_programs` 取表达式）
 /// - `expr_programs`：每字段的表达式程序切片（与字段数等长，None 表示无表达式）
-/// - `bitwise`：当前编译上下文是否在 bit 域内（设计 §7.2 递归 `bitwise` 上下文传播）。
+/// - `bitwise`：当前编译上下文是否在 bit 域内（递归 `bitwise` 上下文传播）。
 ///
-///   Phase 3.2：此参数仅用于向递归调用传播（`BitwiseDescriptor` 内部递归传 `true`）。
-///   Phase 3.3 将在 `PaddingDescriptor` 分支使用此参数选择 `BitPaddingNode`（bit 域）
-///   或 `PaddingNode`（字节域）。当前为前向兼容保留。
+///   `BitwiseDescriptor` 内部递归传 `true`；`PaddingDescriptor` 分支使用此参数
+///   选择 `BitPaddingNode`（bit 域）或 `PaddingNode`（字节域）。
 fn build_node_from_descriptor(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -338,7 +333,7 @@ fn build_node_from_descriptor(
         let b_ref = b.bind(py).get();
         let length_obj = b_ref.length.bind(py);
 
-        // 尝试 extract 为 usize（常量长度，向后兼容 Phase 1）
+        // 尝试 extract 为 usize（常量长度）
         if let Ok(n) = length_obj.extract::<usize>() {
             return Ok(Node::Bytes(BytesNode::new_const(n)));
         }
@@ -382,7 +377,7 @@ fn build_node_from_descriptor(
         return Ok(Node::GreedyBytes(GreedyBytesNode::new()));
     }
 
-    // 3.5. BytesIntegerDescriptor → Node::BytesInteger (Phase 6.1)
+    // 3.5. BytesIntegerDescriptor → Node::BytesInteger
     if let Ok(b) = desc.extract::<Py<BytesIntegerDescriptor>>() {
         let b_ref = b.bind(py).get();
         return Ok(Node::BytesInteger(BytesIntegerNode::new(
@@ -403,7 +398,7 @@ fn build_node_from_descriptor(
         }
     }
 
-    // 5. 纯 Python 描述符（按类型名识别，§3.7.4-§3.7.5）。
+    // 5. 纯 Python 描述符（按类型名识别）。
     //    这些描述符定义在 Python 侧（_mixin.py 或 _constructors.py），
     //    不需要 Rust pyclass，通过 duck typing（type name）识别。
     let type_name = desc
@@ -465,7 +460,7 @@ fn build_node_from_descriptor(
             let program = ExprProgram::new(ops);
             return Ok(Node::Computed(ComputedNode::new(program)));
         }
-        // BitsIntegerDescriptor（Phase 3.1）→ BitsIntegerNode。
+        // BitsIntegerDescriptor → BitsIntegerNode。
         // 仅支持常量 length（int）。表达式 length（FieldRef/ExprRef）编译期拒绝。
         // Python 侧 BitsInteger(length, signed, swapped) / Bit() / Nibble() / Octet()
         // 都映射到此描述符（Bit/Nibble/Octet 是 BitsInteger 的语法糖）。
@@ -477,9 +472,8 @@ fn build_node_from_descriptor(
                 path_for_field(field_index),
             )?));
         }
-        // BitwiseDescriptor（Phase 3.2）→ BitwiseNode（递归编译内部 subcon，bitwise=true）。
+        // BitwiseDescriptor → BitwiseNode（递归编译内部 subcon，bitwise=true）。
         // 对应 Python `Bitwise(subcon)`。内部 subcon 在 bit 域上下文编译。
-        // 设计 §7.2：进入 BitwiseDescriptor 后，内部递归调用传 bitwise=true。
         "BitwiseDescriptor" => {
             let inner_desc = desc
                 .getattr("subcon")
@@ -499,13 +493,13 @@ fn build_node_from_descriptor(
             )?;
             return Ok(Node::Bitwise(BitwiseNode::new(inner_node)));
         }
-        // PaddingDescriptor（Phase 3.3）→ 根据 bitwise 上下文选择 BitPaddingNode（bit 域）
-        // 或 PaddingNode（字节域）。设计 §4.2 / §4.6 / §7.2。
+        // PaddingDescriptor → 根据 bitwise 上下文选择 BitPaddingNode（bit 域）
+        // 或 PaddingNode（字节域）。
         "PaddingDescriptor" => {
             return build_padding_node(py, desc, field_index, bitwise);
         }
-        // BytewiseDescriptor（Phase 3.3）→ BytewiseNode（递归编译内部 subcon，bitwise=false）。
-        // 内部 subcon 重建字节域（设计 §7.2 递归 bitwise 上下文传播）。
+        // BytewiseDescriptor → BytewiseNode（递归编译内部 subcon，bitwise=false）。
+        // 内部 subcon 重建字节域（递归 bitwise 上下文传播）。
         "BytewiseDescriptor" => {
             let inner_desc = desc
                 .getattr("subcon")
@@ -526,7 +520,7 @@ fn build_node_from_descriptor(
             )?;
             return Ok(Node::Bytewise(BytewiseNode::new(inner_node)));
         }
-        // BitsSwappedDescriptor（Phase 3.3）→ TransformNode(BitSwap)。
+        // BitsSwappedDescriptor → TransformNode(BitSwap)。
         // 内部 subcon 在字节域编译（变换后仍是字节，bitwise=false）。
         "BitsSwappedDescriptor" => {
             let inner_desc = desc
@@ -550,7 +544,7 @@ fn build_node_from_descriptor(
                 ByteTransform::BitSwap,
             )));
         }
-        // ByteSwappedDescriptor（Phase 3.3）→ TransformNode(ByteSwap)。
+        // ByteSwappedDescriptor → TransformNode(ByteSwap)。
         "ByteSwappedDescriptor" => {
             let inner_desc = desc
                 .getattr("subcon")
@@ -573,15 +567,14 @@ fn build_node_from_descriptor(
                 ByteTransform::ByteSwap,
             )));
         }
-        // ArrayDescriptor（Phase 4）→ ArrayNode。
-        // 完整编译路径参照 BytesDescriptor 表达式长度路径（compile.rs L266-308）：
+        // ArrayDescriptor → ArrayNode。
+        // 编译路径与 BytesDescriptor 表达式长度路径同模式：
         // - count 为 int → CountSource::Const
         // - count 为 FieldRef/ExprRef → 从 expr_programs[field_index]["count"] 取 ExprOp 列表
-        // 设计依据：`docs/模块设计-Array.md` §6.2.2。
         //
-        // v0.1.1 起嵌套描述符的表达式参数递归收集（方案 C 扁平键 + 同名冲突
+        // v0.1.1 起嵌套描述符的表达式参数递归收集（扁平键 + 同名冲突
         // 检测），inner subcon 含表达式（如 Array(N, Bytes(m))）可用；同字段内
-        // 同名参数不同表达式报 Compilation（诚实限制）。
+        // 同名参数不同表达式报 Compilation。
         "ArrayDescriptor" => {
             return Ok(Node::Array(build_array_node(
                 py,
@@ -591,10 +584,9 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // GreedyRangeDescriptor（Phase 4）→ GreedyRangeNode。
+        // GreedyRangeDescriptor → GreedyRangeNode。
         // 对应 Python `GreedyRange(subcon, discard)`。无 count（读到流结束），
         // 无表达式参数（GreedyRangeDescriptor._expr_params = {}）。
-        // 设计依据：`docs/模块设计-Array.md` §6.2.3。
         "GreedyRangeDescriptor" => {
             return Ok(Node::GreedyRange(build_greedy_range_node(
                 py,
@@ -604,9 +596,8 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // PrefixedArrayDescriptor（Phase 4）→ PrefixedArrayNode。
+        // PrefixedArrayDescriptor → PrefixedArrayNode。
         // 对应 Python `PrefixedArray(countfield, subcon)`。
-        // 设计依据：`docs/模块设计-Array.md` §4.6 / §6.2.3。
         //
         // 编译路径：递归编译 countfield 与 subcon，二者均沿用同一 field_index
         // 和 expr_programs 切片（与 BitwiseDescriptor / ArrayDescriptor 同模式）。
@@ -623,23 +614,21 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // IndexDescriptor（Phase 4）→ IndexNode。
+        // IndexDescriptor → IndexNode。
         // 对应 Python construct `Index`（core.py L2934）。
-        // IndexNode 直接调 ctx.index() 读取，不走 ExprProgram（v3 决策，§3.3）。
+        // IndexNode 直接调 ctx.index() 读取，不走 ExprProgram。
         // IndexDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
         "IndexDescriptor" => return Ok(Node::Index(IndexNode::new())),
-        // ElementDescriptor（Phase 4.5 v5 新增）→ ElementNode。
+        // ElementDescriptor → ElementNode。
         // construct-rs 新增（Python construct 无对应物）。Element 字段为 RepeatUntil
         // 终止表达式提供"当前元素"引用入口，parse 返回 None（值由 RepeatUntilNode
         // 借用设置），build 是 no-op，sizeof=0。
-        // 设计依据：`docs/模块设计-Array.md` §4.7。
         // ElementDescriptor 无参数（_expr_params = {}），expr_programs 对应位置为 None。
         "ElementDescriptor" => return Ok(Node::Element(ElementNode::new())),
-        // RepeatUntilDescriptor（Phase 4.5 v5 重写）→ RepeatUntilNode。
+        // RepeatUntilDescriptor → RepeatUntilNode。
         // 对应 Python construct `RepeatUntil(terminator, subcon, discard)`（core.py L2637）。
-        // v5：terminator 必须是 Phase 2 表达式（引用 Element 字段），编译为 ExprProgram，
-        // 运行时零 FFI 求值。不接收 Python lambda/callable（用户硬约束 #1）。
-        // 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3.1。
+        // terminator 必须是表达式（FieldRef/ExprRef/int，引用 Element 字段），编译为 ExprProgram，
+        // 运行时零 FFI 求值。不接收 Python lambda/callable。
         "RepeatUntilDescriptor" => {
             return Ok(Node::RepeatUntil(build_repeat_until_node(
                 py,
@@ -649,9 +638,9 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // StopIfDescriptor（Phase 4）→ StopIfNode。
+        // StopIfDescriptor → StopIfNode。
         // 对应 Python construct `StopIf(condfunc)`（core.py L4079）。
-        // 条件分类（设计 §4.5.1）：
+        // 条件分类：
         //   - Python bool 常量（True / False）→ StopIfCondition::Always / Never
         //   - FieldRef/ExprRef → StopIfCondition::Expr，从 expr_programs[field_index]["cond"]
         //     取 ExprOp 列表（与 ComputedDescriptor 的 "func" 同模式）。
@@ -663,8 +652,7 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
-        // Phase 6.3：内置 Adapter 系列（Subconstruct/Peek/RawCopy/Rebuild/Pass）。
-        // 设计 §6.3 / compile.rs §6.3。
+        // 内置 Adapter 系列（Subconstruct/Peek/RawCopy/Rebuild/Pass）。
         //
         // SubconstructDescriptor → SubstructNode（纯转发）。
         // 递归编译 inner subcon（沿用 field_index，与 BitwiseDescriptor 同模式）。
@@ -740,17 +728,17 @@ fn build_node_from_descriptor(
         }
         // PassDescriptor → PassNode（no-op）。
         "PassDescriptor" => return Ok(Node::Pass(PassNode::new())),
-        // Phase 6.1：VarIntDescriptor → VarIntNode（LEB128 无符号变长整数）。
+        // VarIntDescriptor → VarIntNode（LEB128 无符号变长整数）。
         // 纯 Python 描述符（无 Rust pyclass），按 type name 识别。
         "VarIntDescriptor" => return Ok(Node::VarInt(VarIntNode::new())),
-        // Phase 6.1：ZigZagDescriptor → ZigZagNode（有符号变长整数）。
+        // ZigZagDescriptor → ZigZagNode（有符号变长整数）。
         "ZigZagDescriptor" => return Ok(Node::ZigZag(ZigZagNode::new())),
-        // Phase 6.2：CStringDescriptor → CStringNode（C 风格 null 终止字符串）。
-        // 编码字符串在编译期调 Encoding::from_user_str 解析（P2b 拒绝无后缀编码）。
+        // CStringDescriptor → CStringNode（C 风格 null 终止字符串）。
+        // 编码字符串在编译期调 Encoding::from_user_str 解析（拒绝无后缀编码）。
         "CStringDescriptor" => {
             return Ok(Node::CString(build_cstring_node(py, desc, field_index)?));
         }
-        // Phase 6.2：GreedyStringDescriptor → GreedyStringNode（读到 EOF + decode）。
+        // GreedyStringDescriptor → GreedyStringNode（读到 EOF + decode）。
         "GreedyStringDescriptor" => {
             return Ok(Node::GreedyString(build_greedy_string_node(
                 py,
@@ -758,7 +746,7 @@ fn build_node_from_descriptor(
                 field_index,
             )?));
         }
-        // Phase 6.2：PaddedStringDescriptor → PaddedStringNode（固定长度填充字符串）。
+        // PaddedStringDescriptor → PaddedStringNode（固定长度填充字符串）。
         // length 可为 int 常量或表达式（与 BytesDescriptor 同模式）。
         "PaddedStringDescriptor" => {
             return Ok(Node::PaddedString(build_padded_string_node(
@@ -768,7 +756,7 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
-        // Phase 6.2：PascalStringDescriptor → PascalStringNode（长度前缀字符串）。
+        // PascalStringDescriptor → PascalStringNode（长度前缀字符串）。
         // 递归编译 lengthfield（沿用 field_index，与 BitwiseDescriptor 同模式）。
         "PascalStringDescriptor" => {
             return Ok(Node::PascalString(build_pascal_string_node(
@@ -779,7 +767,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // Phase 6.2：NullTerminatedDescriptor → NullTerminatedNode（null 终止包装器）。
+        // NullTerminatedDescriptor → NullTerminatedNode（null 终止包装器）。
         // 递归编译 inner subcon（沿用 field_index）。
         "NullTerminatedDescriptor" => {
             return Ok(Node::NullTerminated(build_null_terminated_node(
@@ -790,7 +778,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // Phase 6.2：NullStrippedDescriptor → NullStrippedNode（null 剥离包装器）。
+        // NullStrippedDescriptor → NullStrippedNode（null 剥离包装器）。
         // 递归编译 inner subcon（沿用 field_index）。
         "NullStrippedDescriptor" => {
             return Ok(Node::NullStripped(build_null_stripped_node(
@@ -802,7 +790,7 @@ fn build_node_from_descriptor(
             )?));
         }
         // AdapterDescriptor → AdapterCallbackNode（用户面 Adapter 嵌入 Struct 钩子）。
-        // PM 决策 6.3-D1 接受。subcon 在 Rust 内执行，_decode/_encode 通过 Py<PyAny> 引用回调。
+        // subcon 在 Rust 内执行，_decode/_encode 通过 Py<PyAny> 引用回调。
         //
         // 识别方式（双重）：
         // 1. type name == "AdapterDescriptor"（直接匹配，用户用 AdapterDescriptor 基类）
@@ -818,7 +806,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 7.1 Conditional（4 个新分支）===
+        // === Conditional ===
         // IfThenElseDescriptor → IfThenElseNode（双分支条件）。
         // condfunc 编译期分类（与 StopIfDescriptor 同模式）：
         //   - Python bool → StopIfCondition::Always / Never
@@ -833,7 +821,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // SwitchDescriptor → SwitchNode（多分支条件，PM 决策 1：A+B 混合）。
+        // SwitchDescriptor → SwitchNode（多分支条件）。
         // keyfunc 编译期分类（ConstInt / IntExpr / FieldRef / 复杂表达式拒绝）。
         // cases 是 Python dict，编译期展开为 Vec<SwitchCase>。
         // default 递归编译（None → Pass，对齐 Python L4032）。
@@ -880,7 +868,7 @@ fn build_node_from_descriptor(
             }
             return Ok(Node::Select(SelectNode::new(nodes)));
         }
-        // FocusedSeqDescriptor → FocusedSeqNode（聚焦字段序列，设计 §5）。
+        // FocusedSeqDescriptor → FocusedSeqNode（聚焦字段序列）。
         // parsebuildfrom 在编译期解析为 focus_idx。
         // subcons 是 Python list（Renamed 包装或匿名 subcon）。
         "FocusedSeqDescriptor" => {
@@ -892,7 +880,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 7.2 Streams（3 个新分支） ===
+        // === Streams ===
         // SeekDescriptor → SeekNode（流定位）。
         // at 可为 int 常量或 FieldRef/ExprRef 表达式（与 StopIf condfunc 同模式）。
         // whence 是 int 0/1/2，编译期翻译为 Whence enum。
@@ -908,7 +896,7 @@ fn build_node_from_descriptor(
         // offset 可为 int 或 FieldRef/ExprRef（与 Seek at 同模式）。
         // relativeOffset 是 bool。
         // stream 参数非 None 时编译期拒绝（已知限制：换流不支持）。
-        // subcon 递归编译（沿用 field_index，与 BitwiseDescriptor 同模式；P3.1 限制：
+        // subcon 递归编译（沿用 field_index，与 BitwiseDescriptor 同模式；已知限制：
         // subcon 不支持含表达式的子描述符）。
         "PointerDescriptor" => {
             return Ok(Node::Pointer(build_pointer_node(
@@ -931,7 +919,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 8 P0 批次 ===
+        // === Const / Default / Check ===
         // ConstDescriptor → ConstNode（常量校验 + 值匹配）。
         // value 是任意 Python 对象；subcon 由 Python 层在缺省时推断为 Bytes(len)。
         // 递归编译 subcon（沿用 field_index，与 Subconstruct 同模式）。
@@ -967,7 +955,7 @@ fn build_node_from_descriptor(
                 expr_programs,
             )?));
         }
-        // === Phase 8.9 ===
+        // === Terminated / Probe ===
         // TerminatedDescriptor → TerminatedNode（singleton，无参数）。
         // 对应 Python construct `Terminated`（core.py L4727）。
         // _expr_params 协议返回空 dict，expr_programs 对应位置为 None。
@@ -977,7 +965,7 @@ fn build_node_from_descriptor(
         "ProbeDescriptor" => {
             return Ok(Node::Probe(build_probe_node(py, desc, field_index)?));
         }
-        // === Phase 8.8 ===
+        // === Aligned ===
         // AlignedDescriptor → AlignedNode（对齐包装）。
         // modulus 可为 int 常量或 FieldRef/ExprRef 表达式（与 SeekDescriptor at 同模式）。
         // pattern 是 1 字节 bytes，编译期提取为 u8。
@@ -991,10 +979,10 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 8.4 ===
+        // === Hex / HexDump ===
         // HexDescriptor → HexNode（Hex 显示包装，Rust Node 非 AdapterCallback）。
         // 递归编译 subcon + 编译期物化 3 个 Hex 显示类（load_hex_display_classes）。
-        // fmtstr 编译期预算并 intern 为 Py<PyString>（方案 B）。
+        // fmtstr 编译期预算并 intern 为 Py<PyString>。
         "HexDescriptor" => {
             return Ok(Node::Hex(build_hex_node(
                 py,
@@ -1014,8 +1002,8 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 8.5 ===
-        // ChecksumDescriptor → ChecksumNode（双轨方案）。
+        // === Checksum ===
+        // ChecksumDescriptor → ChecksumNode。
         // hashfunc 识别：HashAlgo enum 值 → BuiltinHash；Python callable → PythonCallable。
         // bytes_source 识别：start/end 表达式 → StreamRange；field_name → ContextBytes。
         "ChecksumDescriptor" => {
@@ -1027,8 +1015,8 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // === Phase 8 P1+P2 批次 ===
-        // EnumDescriptor → EnumNode（Rust Node，详见设计 §1.2）。
+        // === Enum / Mapping / Union / Sequence / Process 系列 / NamedTuple ===
+        // EnumDescriptor → EnumNode（Rust Node）。
         // decmapping/encmapping 在 Python 描述符中已构造，编译期直接物化 Py<PyDict>。
         // EnumInteger 类从 construct._internals 加载（fallback 路径用）。
         "EnumDescriptor" => {
@@ -1049,7 +1037,7 @@ fn build_node_from_descriptor(
                 field_names,
             )?));
         }
-        // MappingDescriptor → MappingNode（C-4：TypeError 捕获在 Node 内实现）。
+        // MappingDescriptor → MappingNode（TypeError 捕获在 Node 内实现）。
         "MappingDescriptor" => {
             return Ok(Node::Mapping(build_mapping_node(
                 py,
@@ -1129,7 +1117,7 @@ fn build_node_from_descriptor(
             )?));
         }
         _ => {
-            // Phase 6.3 Adapter duck typing 分支：识别用户继承的 Adapter 子类
+            // Adapter duck typing 分支：识别用户继承的 Adapter 子类
             // （type name 非 "AdapterDescriptor"）。通过 hasattr 检查 _decode/_encode。
             if is_adapter_like(desc) {
                 return Ok(Node::AdapterCallback(build_adapter_callback_node(
@@ -1156,36 +1144,34 @@ fn build_node_from_descriptor(
 
 /// 构造编译期错误使用的字段路径字符串（"field {index}"）。
 ///
-/// Phase 3.1 中 BitsInteger 编译期错误使用此路径（不含父 Struct 字段名上下文，
+/// BitsInteger 编译期错误使用此路径（不含父 Struct 字段名上下文，
 /// 后者由 `with_field_context` 在上层附加）。
 fn path_for_field(field_index: usize) -> String {
     format!("field {}", field_index)
 }
 
 // ---------------------------------------------------------------------------
-// Phase 6.2 Strings：Descriptor → Node 编译辅助函数
-//
-// 设计依据：`docs/design/模块设计/模块设计-Strings.md` v2 §4.4 / §10.2。
+// Strings：Descriptor → Node 编译辅助函数
 //
 // 共同模式：
-// - encoding 字符串在编译期调 `Encoding::from_user_str` 解析（PM 决策 6.2-D1）。
-//   失败返回 `ConstructError::Compilation`（携带 P2b/P8 引导文本，由 Rust 侧
+// - encoding 字符串在编译期调 `Encoding::from_user_str` 解析。
+//   失败返回 `ConstructError::Compilation`（携带编码引导文本，由 Rust 侧
 //   `Encoding::from_user_str` 生成）。Python 侧 `__init_subclass__` 会将其映射为
 //   `CompilationError`。
 // - term / pad / include / consume / require 等参数从 Python 描述符对象读取。
 // - 含 inner / lengthfield 的 Node（NullTerminated / NullStripped / PascalString）
 //   递归编译（沿用同一个 field_index 和 expr_programs 切片，与 BitwiseDescriptor /
-//   ArrayDescriptor 同模式；P3.1 限制：inner 不支持含表达式的子描述符）。
+//   ArrayDescriptor 同模式；已知限制：inner 不支持含表达式的子描述符）。
 // ---------------------------------------------------------------------------
 
 /// 从 Python 描述符对象读取 `encoding` 属性并解析为 [`Encoding`]。
 ///
-/// 编译期一次调用，运行时零开销（设计 D-1）。
+/// 编译期一次调用，运行时零开销。
 ///
 /// # 错误
 ///
 /// [`ConstructError::Compilation`]：encoding 缺失、非字符串、或 [`Encoding::from_user_str`]
-/// 失败（未识别 / 无后缀编码，携带 P2b/P8 引导文本）。
+/// 失败（未识别 / 无后缀编码，携带编码引导文本）。
 fn parse_encoding_attr(
     desc: &Bound<'_, PyAny>,
     field_index: usize,
@@ -1298,15 +1284,14 @@ fn parse_bool_attr(
     }
 }
 
-/// 从 `CStringDescriptor` 构建 [`CStringNode`]（Phase 6.2 §3.1）。
+/// 从 `CStringDescriptor` 构建 [`CStringNode`]。
 ///
 /// 编译路径：
 /// 1. 解析 `encoding` → [`Encoding`]（编译期一次）。
 /// 2. 解析 `term`（None → encoding 默认 term）。
 /// 3. 解析 `include` / `require`（默认 false / true）。
 ///
-/// `consume` 参数当前被 Rust [`CStringNode`] 忽略（与 Python ``CString`` 实际行为一致，
-/// 详见 Strings 设计 §3.1）。
+/// `consume` 参数当前被 Rust [`CStringNode`] 忽略（与 Python ``CString`` 实际行为一致）。
 fn build_cstring_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1320,7 +1305,7 @@ fn build_cstring_node(
     Ok(CStringNode::with_options(encoding, term, include, require))
 }
 
-/// 从 `GreedyStringDescriptor` 构建 [`GreedyStringNode`]（Phase 6.2 §3.4）。
+/// 从 `GreedyStringDescriptor` 构建 [`GreedyStringNode`]。
 fn build_greedy_string_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1331,7 +1316,7 @@ fn build_greedy_string_node(
     Ok(GreedyStringNode::new(encoding))
 }
 
-/// 从 `PaddedStringDescriptor` 构建 [`PaddedStringNode`]（Phase 6.2 §3.5）。
+/// 从 `PaddedStringDescriptor` 构建 [`PaddedStringNode`]。
 ///
 /// 编译路径（参照 [`build_node_from_descriptor`] 的 BytesDescriptor 分支）：
 /// 1. 解析 `encoding` → [`Encoding`]。
@@ -1410,7 +1395,7 @@ fn build_padded_string_node(
     Ok(PaddedStringNode::new(length, encoding))
 }
 
-/// 从 `PascalStringDescriptor` 构建 [`PascalStringNode`]（Phase 6.2 §3.6）。
+/// 从 `PascalStringDescriptor` 构建 [`PascalStringNode`]。
 ///
 /// 编译路径：
 /// 1. 递归编译 lengthfield（沿用 field_index；与 BitwiseDescriptor 同模式）。
@@ -1447,14 +1432,14 @@ fn build_pascal_string_node(
     Ok(PascalStringNode::new(lengthfield_node, encoding))
 }
 
-/// 从 `NullTerminatedDescriptor` 构建 [`NullTerminatedNode`]（Phase 6.2 §3.2）。
+/// 从 `NullTerminatedDescriptor` 构建 [`NullTerminatedNode`]。
 ///
 /// 编译路径：
 /// 1. 递归编译 inner subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
 /// 2. 解析 `term`（None → `b"\x00"` 默认；非 None → 用户传入字节串）。
 /// 3. 解析 `include` / `consume` / `require`（默认 false / true / true）。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 限制（同 ArrayDescriptor）
 ///
 /// inner subcon 不支持含表达式的子描述符。
 fn build_null_terminated_node(
@@ -1514,13 +1499,13 @@ fn build_null_terminated_node(
     ))
 }
 
-/// 从 `NullStrippedDescriptor` 构建 [`NullStrippedNode`]（Phase 6.2 §3.3）。
+/// 从 `NullStrippedDescriptor` 构建 [`NullStrippedNode`]。
 ///
 /// 编译路径：
 /// 1. 递归编译 inner subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
 /// 2. 解析 `pad`（默认 `b"\x00"`）。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 限制（同 ArrayDescriptor）
 ///
 /// inner subcon 不支持含表达式的子描述符。
 fn build_null_stripped_node(
@@ -1552,16 +1537,16 @@ fn build_null_stripped_node(
 
 /// 从 `BitsIntegerDescriptor` 构建 `BitsIntegerNode`，编译期完成所有 length 校验。
 ///
-/// Phase 3.1 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
-/// 返回 `Compilation` 错误，闭环设计 §7.2 / §8.2 表达式 length 路径（P4）。
+/// 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
+/// 返回 `Compilation` 错误。
 ///
 /// # 编译期校验（fail-fast，比 Python 提前暴露）
 ///
-/// - 表达式 length → `Compilation`（"BitsInteger expression length not supported in Phase 3.1"）
-/// - length 为负 → `Compilation`（"length must be non-negative"，避免 usize 回绕，P6）
-/// - length > MAX_BITS_INTEGER (64) → `Compilation`（"exceeds 64-bit limit"，P5/BI-3）
+/// - 表达式 length → `Compilation`（"BitsInteger expression length not supported"）
+/// - length 为负 → `Compilation`（"length must be non-negative"，避免 usize 回绕）
+/// - length > MAX_BITS_INTEGER (64) → `Compilation`（"exceeds 64-bit limit"）
 ///
-/// `path` 参数已并入编译期错误信息（3.1 P4 修复）：
+/// `path` 参数已并入编译期错误信息：
 /// 编译期错误本来没有 path（Compilation 无 path 字段），但 message 中可包含
 /// field_index 与 path_for_field 上下文，便于在上层 `with_field_context`
 /// 附加父字段名后定位。
@@ -1580,16 +1565,16 @@ fn build_bits_integer_node(
             ),
         })?;
 
-    // Phase 3.1：仅支持常量 length（Python int）。
+    // 仅支持常量 length（Python int）。
     // 尝试 extract 为 i64。失败表示是表达式（FieldRef/ExprRef）或其他非 int 类型。
     let length_i64: i64 = match length_obj.extract::<i64>() {
         Ok(v) => v,
         Err(_) => {
             // 检查是否是表达式（FieldRef/ExprRef/其他描述符）。即使是其他类型，
-            // Phase 3.1 也不支持，统一返回 Compilation。
+            // 也不支持，统一返回 Compilation。
             return Err(ConstructError::Compilation {
                 message: format!(
-                    "BitsInteger expression length not supported in Phase 3.1 \
+                    "BitsInteger expression length not supported \
                      (use a constant integer length) (field index {}, path {})",
                     field_index, path
                 ),
@@ -1597,7 +1582,7 @@ fn build_bits_integer_node(
         }
     };
 
-    // P6: 编译期检测负 length（避免 i64 负数 as usize 回绕为巨大值）
+    // 编译期检测负 length（避免 i64 负数 as usize 回绕为巨大值）
     if length_i64 < 0 {
         return Err(ConstructError::Compilation {
             message: format!(
@@ -1609,7 +1594,7 @@ fn build_bits_integer_node(
 
     let length = length_i64 as usize;
 
-    // P5 / BI-3: length > 64 提前暴露（避免运行时报错）
+    // length > 64 提前暴露（避免运行时报错）
     if length > MAX_BITS_INTEGER {
         return Err(ConstructError::Compilation {
             message: format!(
@@ -1655,17 +1640,17 @@ fn build_bits_integer_node(
     Ok(BitsIntegerNode::new(length, signed, swapped))
 }
 
-/// 从 `PaddingDescriptor` 构建 bit 域或字节域 Padding 节点（设计 §4.2 / §4.6 / §7.2）。
+/// 从 `PaddingDescriptor` 构建 bit 域或字节域 Padding 节点。
 ///
 /// `bitwise` 参数决定选择 [`BitPaddingNode`]（bit 域，pattern 严格 0x00/0x01）
 /// 还是 [`PaddingNode`]（字节域，pattern 任意 0-255）。
 ///
-/// Phase 3.1 / 3.3 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
-/// 返回 `Compilation` 错误（设计 §7.2 P4）。
+/// 仅支持常量 length（Python int）。表达式 length（FieldRef/ExprRef）
+/// 返回 `Compilation` 错误。
 ///
 /// # 编译期校验
 ///
-/// - 表达式 length → `Compilation`（"Padding expression length not supported in Phase 3.1"）
+/// - 表达式 length → `Compilation`（"Padding expression length not supported"）
 /// - length 为负 → `Compilation`（"length must be non-negative"）
 /// - bit 域 pattern 非 {0x00, 0x01} → `Padding`（由 BitPaddingNode::new 触发）
 fn build_padding_node(
@@ -1683,13 +1668,13 @@ fn build_padding_node(
             ),
         })?;
 
-    // Phase 3.1：仅支持常量 length（Python int）。
+    // 仅支持常量 length（Python int）。
     let length_i64: i64 = match length_obj.extract::<i64>() {
         Ok(v) => v,
         Err(_) => {
             return Err(ConstructError::Compilation {
                 message: format!(
-                    "Padding expression length not supported in Phase 3.1 \
+                    "Padding expression length not supported \
                      (use a constant integer length) (field index {})",
                     field_index
                 ),
@@ -1697,7 +1682,7 @@ fn build_padding_node(
         }
     };
 
-    // P6: 编译期检测负 length
+    // 编译期检测负 length
     if length_i64 < 0 {
         return Err(ConstructError::Compilation {
             message: format!(
@@ -1729,7 +1714,7 @@ fn build_padding_node(
     let _ = py;
     if bitwise {
         // bit 域：BitPaddingNode::new 严格校验 pattern ∈ {0x00, 0x01}，
-        // 非法 pattern 返回 Padding 错误（设计 §4.2 P1 修正）。
+        // 非法 pattern 返回 Padding 错误。
         Ok(Node::BitPadding(BitPaddingNode::new(length, pattern)?))
     } else {
         // 字节域：PaddingNode 接受任意 pattern 字节
@@ -1737,9 +1722,9 @@ fn build_padding_node(
     }
 }
 
-/// 从 `ArrayDescriptor` 构建 `ArrayNode`（设计 §6.2.2）。
+/// 从 `ArrayDescriptor` 构建 `ArrayNode`。
 ///
-/// 编译路径参照 [`build_node_from_descriptor`] 的 BytesDescriptor 分支（compile.rs L266-308）：
+/// 编译路径参照 [`build_node_from_descriptor`] 的 BytesDescriptor 分支：
 ///
 /// 1. 从 desc 读取 count / subcon / discard。
 /// 2. count 分类：
@@ -1752,7 +1737,7 @@ fn build_padding_node(
 /// # 嵌套表达式（v0.1.1 起）
 ///
 /// inner subcon 支持含表达式的子描述符（如 `Array(N, Bytes(m))`）：Python 侧
-/// 递归收集嵌套描述符的表达式参数（方案 C 扁平键），Rust 侧递归编译 inner 时
+/// 递归收集嵌套描述符的表达式参数（扁平键），Rust 侧递归编译 inner 时
 /// 从同一 expr_programs 切片取。同字段内同名参数不同表达式报 Compilation。
 fn build_array_node(
     py: Python<'_>,
@@ -1851,7 +1836,7 @@ fn build_array_node(
     Ok(ArrayNode::new(inner_node, count, discard))
 }
 
-/// 从 `GreedyRangeDescriptor` 构建 `GreedyRangeNode`（设计 §6.2.3 / §4.2）。
+/// 从 `GreedyRangeDescriptor` 构建 `GreedyRangeNode`。
 ///
 /// 编译路径：
 ///
@@ -1897,7 +1882,7 @@ fn build_greedy_range_node(
     Ok(GreedyRangeNode::new(inner_node, discard))
 }
 
-/// 从 `PrefixedArrayDescriptor` 构建 `PrefixedArrayNode`（设计 §4.6 / §6.2.3）。
+/// 从 `PrefixedArrayDescriptor` 构建 `PrefixedArrayNode`。
 ///
 /// 编译路径：
 ///
@@ -1957,7 +1942,7 @@ fn build_prefixed_array_node(
     Ok(PrefixedArrayNode::new(countfield_node, inner_node))
 }
 
-/// 从 `StopIfDescriptor` 构建 `StopIfNode`（设计 §4.5 / §6.2.2）。
+/// 从 `StopIfDescriptor` 构建 `StopIfNode`。
 ///
 /// 编译路径（参照 ComputedDescriptor 的 "func" 模式）：
 ///
@@ -2043,9 +2028,7 @@ fn build_stop_if_node(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7.1 Conditional：Descriptor → Node 编译辅助函数
-//
-// 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §2.4 / §3.6 / §5.4。
+// Conditional：Descriptor → Node 编译辅助函数
 //
 // 共同模式：
 // - condfunc / keyfunc 在编译期分类（常量 / 表达式），与 StopIfDescriptor 同源
@@ -2119,7 +2102,7 @@ fn classify_condfunc(
     Ok(StopIfCondition::Expr(ExprProgram::new(ops)))
 }
 
-/// 从 `IfThenElseDescriptor` 构建 `IfThenElseNode`（设计 §2.4）。
+/// 从 `IfThenElseDescriptor` 构建 `IfThenElseNode`。
 fn build_if_then_else_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2181,7 +2164,7 @@ fn build_if_then_else_node(
     Ok(IfThenElseNode::new(cond, then_node, else_node))
 }
 
-/// 从 `SwitchDescriptor` 构建 `SwitchNode`（设计 §3.6，PM 决策 1：A+B 混合）。
+/// 从 `SwitchDescriptor` 构建 `SwitchNode`。
 fn build_switch_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2229,7 +2212,7 @@ fn build_switch_node(
             })?;
 
         if let Ok(Some(key_ops)) = field_exprs_dict.get_item("key") {
-            // 路线 A：IntExpr
+            // 表达式 → IntExpr
             let ops = parse_expr_ops_from_py(&key_ops)?;
             SwitchKey::IntExpr(ExprProgram::new(ops))
         } else {
@@ -2314,7 +2297,7 @@ fn build_switch_node(
     Ok(SwitchNode::new(key, cases, default_node))
 }
 
-/// 从 `FocusedSeqDescriptor` 构建 `FocusedSeqNode`（设计 §5.4）。
+/// 从 `FocusedSeqDescriptor` 构建 `FocusedSeqNode`。
 fn build_focused_seq_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2409,7 +2392,7 @@ fn build_focused_seq_node(
         // 检查 focus_name 匹配
         if let Some(ref n) = name_opt {
             if n == &focus_name && focus_idx.is_none() {
-                // FS-8: 重复字段名 → 取第一个匹配（与 Python finalret 覆盖语义一致）
+                // 重复字段名 → 取第一个匹配（与 Python finalret 覆盖语义一致）
                 focus_idx = Some(fields.len());
             }
             fields.push(FocusedSeqField::new_named(
@@ -2421,7 +2404,7 @@ fn build_focused_seq_node(
         }
     }
 
-    // FS-2/FS-4: focus 字段必须存在且为命名字段
+    // focus 字段必须存在且为命名字段
     let focus_idx = focus_idx.ok_or_else(|| ConstructError::Compilation {
         message: format!(
             "FocusedSeq parsebuildfrom='{}' does not match any named field in subcons \
@@ -2437,15 +2420,9 @@ fn build_focused_seq_node(
     Ok(FocusedSeqNode::new(fields, focus_idx, has_expressions))
 }
 
-/// 从 `RepeatUntilDescriptor` 构建 `RepeatUntilNode`（v5 阶段 6 完全重写）。
+/// 从 `RepeatUntilDescriptor` 构建 `RepeatUntilNode`。
 ///
-/// **阶段 1 临时占位**：v5 重写RepeatUntilNode 数据结构与编译逻辑，
-/// 详见 `docs/模块设计-Array.md` §4.3 / §6.3。完整实现将在阶段 6 引入。
-/// 编译 `RepeatUntilDescriptor` → `RepeatUntilNode`（v5 完全重写）。
-///
-/// 设计依据：`docs/模块设计-Array.md` §4.3 / §6.3.1。
-///
-/// # v5 编译路径
+/// # 编译路径
 ///
 /// 1. 从 desc 读取 terminator / subcon / discard
 /// 2. 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式）
@@ -2453,10 +2430,8 @@ fn build_focused_seq_node(
 /// 4. 从 `expr_programs[field_index]["element_field_idx"]` 取 Element 字段索引
 /// 5. 从 `field_names[element_field_idx]` 取 Element 字段名（intern PyString）
 ///
-/// # v5 关键变更（vs v4）
-///
-/// - 不再从 `self.predicate` 读取 callable（v4 路径已删）
-/// - 终止表达式编译完全在 Python 侧 `_compile_expr_tree` 完成（与其他表达式字段同模式）
+/// 不接收 callable predicate；终止表达式编译在 Python 侧 `_compile_expr_tree`
+/// 完成（与其他表达式字段同模式）。
 fn build_repeat_until_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2603,7 +2578,7 @@ fn build_repeat_until_node(
     ))
 }
 
-/// 从 `RebuildDescriptor` 构建 `RebuildNode`（Phase 6.3）。
+/// 从 `RebuildDescriptor` 构建 `RebuildNode`。
 ///
 /// 对应 Python construct `Rebuild(subcon, func)`（core.py L2975）。
 ///
@@ -2616,10 +2591,10 @@ fn build_repeat_until_node(
 ///
 /// subcon 支持含表达式的子描述符（递归收集）。
 ///
-/// # 差异记录（设计 §5.3 RB-callable）
+/// # 已知差异
 ///
-/// Python Rebuild.func 可以是任意 callable lambda。construct-rs 收窄为仅 Phase 2 表达式
-/// （与 ADR-014 RepeatUntil v5 同脉络）。字段包装：RO 用 `rfield(Rebuild(...))`；
+/// Python Rebuild.func 可以是任意 callable lambda。construct-rs 收窄为仅表达式
+/// （FieldRef/ExprRef/int，与 RepeatUntil 同约束）。字段包装：RO 用 `rfield(Rebuild(...))`；
 /// v0.1.1 起 `field(Rebuild(...))`（RW）也允许（隐式 default=None，build 用表达式值）。
 fn build_rebuild_node(
     py: Python<'_>,
@@ -2655,8 +2630,8 @@ fn build_rebuild_node(
             message: format!(
                 "Rebuild field has no expression program (field index {}); \
                  'func' expression is required. \
-                 Note: Rebuild func must be a Phase 2 expression (FieldRef/ExprRef/int), \
-                 Python callable (lambda) is not supported (same constraint as RepeatUntil v5).",
+                 Note: Rebuild func must be an expression (FieldRef/ExprRef/int), \
+                 Python callable (lambda) is not supported (same constraint as RepeatUntil).",
                 field_index
             ),
         })?;
@@ -2687,7 +2662,7 @@ fn build_rebuild_node(
     Ok(RebuildNode::new(inner_node, func))
 }
 
-/// 从 `AdapterDescriptor` 构建 `AdapterCallbackNode`（Phase 6.3，PM 决策 6.3-D1 接受）。
+/// 从 `AdapterDescriptor` 构建 `AdapterCallbackNode`。
 ///
 /// 对应 Python construct `Adapter(subcon)` 基类的嵌入用法（core.py L813）。
 ///
@@ -2696,10 +2671,10 @@ fn build_rebuild_node(
 /// 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
 /// 2. 取 AdapterDescriptor 的 `_decode` / `_encode` bound method 引用。
 ///
-/// # §0 合规性（设计 §4.4）
+/// # FFI 开销
 ///
 /// AdapterCallbackNode 在执行树内，2 次 FFI（parse 入口 + _decode 回调）。
-/// 用户主动继承 Adapter = 显式接受折衷（PM 决策 2）。不违反 §0 #1。
+/// 用户主动继承 Adapter = 显式接受该折衷。
 fn build_adapter_callback_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2753,9 +2728,7 @@ fn build_adapter_callback_node(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 7.2 Streams：Seek / Pointer / Prefixed 编译辅助函数
-//
-// 设计依据：`docs/design/模块设计/模块设计-Streams.md` §3.6。
+// Streams：Seek / Pointer / Prefixed 编译辅助函数
 //
 // 共同模式：
 // - SeekDescriptor / PointerDescriptor 的 at / offset 可为 int 常量或 FieldRef/ExprRef
@@ -2842,7 +2815,7 @@ fn build_seek_or_pointer_offset(
     }
 }
 
-/// 从 `SeekDescriptor` 构建 [`SeekNode`]（Phase 7.2 §3.6.2）。
+/// 从 `SeekDescriptor` 构建 [`SeekNode`]。
 ///
 /// 编译路径（参照 StopIfDescriptor 的 "condfunc" 模式 + BytesDescriptor 的 length 模式）：
 /// 1. 从 desc 读取 `at`：
@@ -2892,7 +2865,7 @@ fn build_seek_node(
     Ok(SeekNode::new(at, whence))
 }
 
-/// 从 `PointerDescriptor` 构建 [`PointerNode`]`（Phase 7.2 §3.6.2）。
+/// 从 `PointerDescriptor` 构建 [`PointerNode`]`。
 ///
 /// 编译路径（参照 PascalStringDescriptor lengthfield 递归 + StopIf condfunc 表达式）：
 /// 1. 从 desc 读取 `offset`：常量 → Const；表达式 → 从 expr_programs[field_index]["offset"] 取
@@ -2968,7 +2941,7 @@ fn build_pointer_node(
     Ok(PointerNode::new(offset, relative, subcon_node))
 }
 
-/// 从 `PrefixedDescriptor` 构建 [`PrefixedNode`]`（Phase 7.2 §3.6.2）。
+/// 从 `PrefixedDescriptor` 构建 [`PrefixedNode`]`。
 ///
 /// 编译路径（参照 PascalStringDescriptor，双重子描述符递归）：
 /// 1. 递归编译 `lengthfield`（沿用 field_index，与 PascalString 同模式）
@@ -3161,7 +3134,7 @@ fn is_structmixin_subclass(cls: &Bound<'_, PyType>) -> Result<bool, ConstructErr
         })
 }
 
-/// 判断描述符是否"看起来像 Adapter"（Phase 6.3 duck typing 识别）。
+/// 判断描述符是否"看起来像 Adapter"（duck typing 识别）。
 ///
 /// 用于识别用户继承的 Adapter 子类（type name 非 "AdapterDescriptor"）。
 /// 通过同时具备可调用的 `_decode` 和 `_encode` 方法判定。
@@ -3215,19 +3188,17 @@ fn with_field_context(err: ConstructError, field_name: &str) -> ConstructError {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 8 P0：Const / Default / Check 编译辅助函数
-//
-// 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §1。
+// Const / Default / Check 编译辅助函数
 //
 // 共同模式：
-// - 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式；P3.1 限制：
+// - 递归编译 subcon（沿用 field_index，与 BitwiseDescriptor 同模式；已知限制：
 //   subcon 不支持含表达式的子描述符）。
 // - ConstDescriptor.value 是任意 Python 对象（int/bytes/str 等），直接 clone 引用。
 // - DefaultDescriptor.value 是 FieldRef/ExprRef/int：编译为 ExprProgram（与 Rebuild func 同模式）。
 // - CheckDescriptor.func 同 DefaultDescriptor.value（表达式 → ExprProgram）。
 // ---------------------------------------------------------------------------
 
-/// 从 `ConstDescriptor` 构建 `ConstNode`（设计 §1.2.1）。
+/// 从 `ConstDescriptor` 构建 `ConstNode`。
 ///
 /// ConstDescriptor 字段：subcon（描述符）+ value（任意 Python 对象）。
 /// Python 层在缺省 subcon 时已自动推断为 Bytes(len(value))（针对 bytes value）。
@@ -3271,7 +3242,7 @@ fn build_const_node(
     Ok(ConstNode::new(inner_node, value))
 }
 
-/// 从 `DefaultDescriptor` 构建 `DefaultNode`（设计 §1.2.2）。
+/// 从 `DefaultDescriptor` 构建 `DefaultNode`。
 ///
 /// DefaultDescriptor 字段：subcon（描述符）+ value（FieldRef/ExprRef/int）。
 /// value 编译为 ExprProgram（从 expr_programs[field_index]["value"] 取，与 Rebuild 同模式）。
@@ -3308,7 +3279,7 @@ fn build_default_node(
         .ok_or_else(|| ConstructError::Compilation {
             message: format!(
                 "DefaultDescriptor has no expression program for 'value' (field index {}). \
-                 Note: value must be a Phase 2 expression (FieldRef/ExprRef/int), \
+                 Note: value must be an expression (FieldRef/ExprRef/int), \
                  Python callable (lambda) is not supported (same constraint as Rebuild).",
                 field_index
             ),
@@ -3340,7 +3311,7 @@ fn build_default_node(
     Ok(DefaultNode::new(inner_node, value_program))
 }
 
-/// 从 `CheckDescriptor` 构建 `CheckNode`（设计 §1.2.3）。
+/// 从 `CheckDescriptor` 构建 `CheckNode`。
 ///
 /// CheckDescriptor 字段：func（FieldRef/ExprRef/int）。
 /// func 编译为 ExprProgram（从 expr_programs[field_index]["func"] 取）。
@@ -3358,7 +3329,7 @@ fn build_check_node(
         .ok_or_else(|| ConstructError::Compilation {
             message: format!(
                 "CheckDescriptor has no expression program for 'func' (field index {}). \
-                 Note: func must be a Phase 2 expression (FieldRef/ExprRef/int), \
+                 Note: func must be an expression (FieldRef/ExprRef/int), \
                  Python callable (lambda) is not supported.",
                 field_index
             ),
@@ -3390,11 +3361,11 @@ fn build_check_node(
     Ok(CheckNode::new(func_program))
 }
 
-/// 从 `ProbeDescriptor` 构建 `ProbeNode`（设计 §5.2.2）。
+/// 从 `ProbeDescriptor` 构建 `ProbeNode`。
 ///
 /// ProbeDescriptor 字段：into（None 或字段名字符串）+ lookahead（None 或 usize）。
 ///
-/// [设计质疑] into 用 FieldName 代替 ExprProgram（详见 probe.rs 模块级注释）。
+/// into 用 `FieldName`（而非 ExprProgram）承载，详见 probe.rs 模块级注释。
 fn build_probe_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -3447,7 +3418,7 @@ fn build_probe_node(
     Ok(ProbeNode::new(into, lookahead))
 }
 
-/// 从 `AlignedDescriptor` 构建 `AlignedNode`（设计 §4.3）。
+/// 从 `AlignedDescriptor` 构建 `AlignedNode`。
 ///
 /// AlignedDescriptor 字段：modulus（int 或 FieldRef/ExprRef）+ subcon + pattern（bytes len 1）。
 fn build_aligned_node(
@@ -3488,7 +3459,7 @@ fn build_aligned_node(
         })?;
     let modulus_program: ExprProgram = match modulus_obj.extract::<i64>() {
         Ok(n) => {
-            // AL-6/AL-7/AL-8：modulus < 2 编译期拒绝（PaddingError 等价）。
+            // modulus < 2 编译期拒绝（PaddingError 等价）。
             if n < 2 {
                 return Err(ConstructError::Compilation {
                     message: format!(
@@ -3554,7 +3525,7 @@ fn build_aligned_node(
             ),
         })?;
     if pattern_bytes.len() != 1 {
-        // AL-11/AL-12：pattern len != 1 编译期 PaddingError。
+        // pattern len != 1 编译期 PaddingError。
         return Err(ConstructError::Compilation {
             message: format!(
                 "AlignedDescriptor 'pattern' must be exactly 1 byte, got {} bytes (field index {})",
@@ -3568,10 +3539,10 @@ fn build_aligned_node(
     Ok(AlignedNode::new(inner_node, modulus_program, pattern))
 }
 
-/// 从 `HexDescriptor` 构建 `HexNode`（设计 §2.3.1）。
+/// 从 `HexDescriptor` 构建 `HexNode`。
 ///
 /// HexDescriptor 字段：subcon。display_classes 与 fmtstr 在编译期物化/预算。
-/// fmtstr 编译期 intern 为 `Py<PyString>`（方案 B），parse 时直接借用。
+/// fmtstr 编译期 intern 为 `Py<PyString>`，parse 时直接借用。
 fn build_hex_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -3601,7 +3572,7 @@ fn build_hex_node(
     let classes = load_hex_display_classes(py)?;
 
     // 3. fmtstr 编译期预算（若 inner sizeof 静态可计算）。
-    //    方案 B：编译期 intern 为 Py<PyString>，parse 时直接借用（消除每次 PyString::new）。
+    //    编译期 intern 为 Py<PyString>，parse 时直接借用（消除每次 PyString::new）。
     //    使用 placeholder ctx 调 sizeof（无表达式时可成功）。
     let placeholder_ctx = crate::context::Context::placeholder(py);
     let fmtstr: Option<Py<PyString>> = match inner_node.sizeof(&placeholder_ctx) {
@@ -3615,7 +3586,7 @@ fn build_hex_node(
     Ok(HexNode::new(inner_node, classes, fmtstr))
 }
 
-/// 从 `HexDumpDescriptor` 构建 `HexDumpNode`（设计 §2.3.1）。
+/// 从 `HexDumpDescriptor` 构建 `HexDumpNode`。
 ///
 /// HexDumpDescriptor 字段：subcon。display_classes 在编译期物化（2 个 HexDump 显示类）。
 fn build_hexdump_node(
@@ -3649,7 +3620,7 @@ fn build_hexdump_node(
     Ok(HexDumpNode::new(inner_node, classes))
 }
 
-/// 从 `ChecksumDescriptor` 构建 `ChecksumNode`（设计 §3.5）。
+/// 从 `ChecksumDescriptor` 构建 `ChecksumNode`。
 ///
 /// ChecksumDescriptor 字段：
 /// - checksumfield（描述符）
@@ -3696,7 +3667,7 @@ fn build_checksum_node(
         })?;
 
     let hashfunc: HashFunc = if hashfunc_obj.is_callable() {
-        // Python callable 路径（A1/A2）
+        // Python callable 路径
         HashFunc::PythonCallable(hashfunc_obj.unbind())
     } else {
         // 检查是否是 HashAlgo enum 实例
@@ -3713,7 +3684,7 @@ fn build_checksum_node(
                 message: format!("hashfunc type name not UTF-8: {}", e),
             })?;
         if type_str == "HashAlgo" {
-            // BuiltinHash 路径（B1/B2）：取 .name 属性识别算法
+            // BuiltinHash 路径：取 .name 属性识别算法
             let name_obj =
                 hashfunc_obj
                     .getattr("name")
@@ -4229,7 +4200,7 @@ class {name}:
             )
             .expect("compile");
 
-            // _parse_raw 现在返回用户类实例（方案 B'）
+            // _parse_raw 返回用户类实例
             let data = PyBytes::new_bound(py, &[0x42u8]);
             let instance = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             // 验证是 cls 的实例
@@ -4407,7 +4378,7 @@ class {name}:
             let built_bytes = built.as_bytes().to_vec();
             assert_eq!(built_bytes, vec![0x01, 0x02, 0x03, 0x04, 0x05]);
 
-            // parse 回来（方案 B'：返回实例）
+            // parse 回来（返回实例）
             let data = PyBytes::new_bound(py, &built_bytes);
             let parsed = schema._parse_raw(py, &data).expect("parse").into_bound(py);
             let a: i64 = parsed.getattr("a").unwrap().extract().unwrap();
@@ -4433,7 +4404,7 @@ class {name}:
 
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse").into_bound(py);
-            // 方案 B'：返回 cls 的空实例
+            // 返回 cls 的空实例
             assert!(
                 result.is_instance(&cls).expect("is_instance"),
                 "should be instance of cls"
@@ -4580,7 +4551,7 @@ class {name}:
             .expect("compile outer");
 
             // parse b'\xAA\x05' → Outer 实例（tag=0xAA, inner=Inner(x=5)）
-            // 方案 B'：parse 返回 Outer 类实例（不是 dict）
+            // parse 返回 Outer 类实例（不是 dict）
             let data = PyBytes::new_bound(py, &[0xAA, 0x05]);
             let parsed = outer_schema
                 ._parse_raw(py, &data)
@@ -4649,7 +4620,7 @@ class {name}:
     }
 
     // ======================================================================
-    // __slots__ 编译期检测（设计修订 §3.6 + §5.6.2 第 3 条）
+    // __slots__ 编译期检测
     // ======================================================================
 
     #[test]
@@ -4698,7 +4669,7 @@ class {name}:
     }
 
     // ======================================================================
-    // __post_init__ 编译期检测（设计修订 §3.2 + §5.6.3 第 5 条）
+    // __post_init__ 编译期检测
     // ======================================================================
 
     #[test]
@@ -4781,13 +4752,12 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 2 子任务 2.3：modes 参数（FieldMode 解析）
+    // modes 参数（FieldMode 解析）
     // ======================================================================
 
     /// 创建一个 Python dict，模拟表达式程序 `{param_name: [(op_tuple), ...]}`。
     fn make_expr_program(py: Python<'_>) -> Py<PyAny> {
-        // 创建一个简单的 Python dict 模拟表达式程序。
-        // 内容不重要（2.3 阶段 Rust 仅检查是否 Some），但用合法结构以便后续扩展。
+        // 创建一个简单的 Python dict，结构与真实表达式程序一致。
         let code = "{'length': [('getint', 0), ('const', 2), ('mul',)]}";
         py.eval_bound(code, None, None)
             .expect("eval expr program")
@@ -4796,7 +4766,7 @@ class {name}:
 
     #[test]
     fn compile_modes_none_defaults_all_rw() {
-        // modes=None 时所有字段默认 Rw（Phase 1 兼容）。
+        // modes=None 时所有字段默认 Rw。
         with_py(|py| {
             let cls = make_dummy_class(py, "DefaultRw");
             let int8ub = Py::new(
@@ -4933,12 +4903,12 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 2 子任务 2.3：expr_programs 参数（has_expressions 计算）
+    // expr_programs 参数（has_expressions 计算）
     // ======================================================================
 
     #[test]
     fn compile_expr_programs_none_has_expressions_false() {
-        // expr_programs=None → has_expressions=false（Phase 1 兼容）。
+        // expr_programs=None → has_expressions=false。
         with_py(|py| {
             let cls = make_dummy_class(py, "NoExpr");
             let desc = Py::new(
@@ -5077,7 +5047,7 @@ class {name}:
 
     #[test]
     fn compile_backward_compatible_with_none_none() {
-        // Phase 1 兼容：传入 None, None 等价于 Phase 1 行为。
+        // 向后兼容：传入 None, None 时全部字段 Rw 且无表达式。
         with_py(|py| {
             let cls = make_dummy_class(py, "BackCompat");
             let desc = Py::new(
@@ -5108,7 +5078,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 2 子任务 2.5：parse_expr_ops_from_py
+    // parse_expr_ops_from_py
     // ======================================================================
 
     fn make_ops_list<'py>(py: Python<'py>, code: &str) -> Bound<'py, PyAny> {
@@ -5280,7 +5250,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 2 子任务 2.5：compile_schema 表达式 Bytes 集成
+    // compile_schema 表达式 Bytes 集成
     // ======================================================================
 
     /// 创建一个非 int 的 Py<PyAny>，用于模拟表达式对象。
@@ -5505,7 +5475,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 2 子任务 2.6：TellDescriptor / ComputedDescriptor 识别
+    // TellDescriptor / ComputedDescriptor 识别
     // ======================================================================
 
     /// 创建一个 TellDescriptor Python 实例（模拟 Python 侧 Tell()）。
@@ -5758,7 +5728,7 @@ class {name}:
     #[test]
     fn compile_tell_descriptor_in_rw_mode_still_compiles() {
         // Tell 字段理论上应使用 RO 模式，但编译器不强制拒绝其他模式。
-        // （mode 校验推迟到 Phase 3 的 validate_field_combinations）
+        // （mode 与描述符类型的组合校验不在编译期强制）
         with_py(|py| {
             let cls = make_dummy_class(py, "TellRw");
             let tell_desc = make_tell_descriptor(py).into_any();
@@ -5782,7 +5752,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 3.1 子任务：BitsIntegerDescriptor 识别与编译期校验
+    // BitsIntegerDescriptor 识别与编译期校验
     // ======================================================================
 
     /// 创建一个 BitsIntegerDescriptor Python 实例（模拟 Python 侧 BitsInteger()）。
@@ -5959,7 +5929,7 @@ class {name}:
 
     #[test]
     fn compile_bits_integer_descriptor_max_length_64_succeeds() {
-        // BI-3 边界：length=64 应编译成功
+        // 边界：length=64 应编译成功
         with_py(|py| {
             let cls = make_dummy_class(py, "MaxLen");
             let desc = make_bits_integer_descriptor(py, 64, false, false).into_any();
@@ -5987,7 +5957,7 @@ class {name}:
 
     #[test]
     fn compile_bits_integer_descriptor_length_exceeds_64_returns_compilation_error() {
-        // BI-3: length > 64 → Compilation error
+        // length > 64 → Compilation error
         with_py(|py| {
             let cls = make_dummy_class(py, "TooLong");
             let desc = make_bits_integer_descriptor(py, 65, false, false).into_any();
@@ -6012,7 +5982,7 @@ class {name}:
 
     #[test]
     fn compile_bits_integer_descriptor_negative_length_returns_compilation_error() {
-        // BI-2: length < 0 → Compilation error
+        // length < 0 → Compilation error
         with_py(|py| {
             let cls = make_dummy_class(py, "Negative");
             let desc = make_bits_integer_descriptor(py, -1, false, false).into_any();
@@ -6037,10 +6007,8 @@ class {name}:
 
     #[test]
     fn compile_bits_integer_descriptor_zero_length_compiles_succeeds() {
-        // 长度为 0：编译成功（编译期不拒绝），运行时 parse/build 时返回 FormatField 错误（BI-1）
-        // 设计 §9.1 BI-1 明确 length==0 在 parse/build 时报错，不延后到编译期。
-        // 但本测试仅验证编译期能通过——实际行为以 BI-1 运行时错误为准。
-        // 注意：当前实现允许编译，但 parse/build 时返回 FormatField 错误。
+        // 长度为 0：编译成功（编译期不拒绝），运行时 parse/build 时返回 FormatField 错误。
+        // 本测试仅验证编译期能通过。
         with_py(|py| {
             let cls = make_dummy_class(py, "Zero");
             let desc = make_bits_integer_descriptor(py, 0, false, false).into_any();
@@ -6060,7 +6028,7 @@ class {name}:
 
     #[test]
     fn compile_bits_integer_descriptor_expression_length_returns_compilation_error() {
-        // P4: 表达式 length（非 int）→ Compilation error（Phase 3.1 不支持）
+        // 表达式 length（非 int）→ Compilation error
         with_py(|py| {
             let cls = make_dummy_class(py, "ExprLen");
             let desc = make_bits_integer_expr_length_descriptor(py).into_any();
@@ -6084,7 +6052,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 3.2 子任务：BitwiseDescriptor 识别 + bitwise 根包装
+    // BitwiseDescriptor 识别 + bitwise 根包装
     // ======================================================================
 
     /// 创建一个 BitwiseDescriptor Python 实例（模拟 Python 侧 `Bitwise(subcon)`）。
@@ -6349,7 +6317,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 3.3 子任务：PaddingDescriptor / BytewiseDescriptor /
+    // PaddingDescriptor / BytewiseDescriptor /
     // BitsSwappedDescriptor / ByteSwappedDescriptor 识别
     // ======================================================================
 
@@ -6497,7 +6465,7 @@ class {name}:
 
     #[test]
     fn compile_padding_descriptor_bit_domain_invalid_pattern_returns_error() {
-        // P1 修复：bit 域 Padding pattern 非 {0x00, 0x01} → Padding 错误
+        // bit 域 Padding pattern 非 {0x00, 0x01} → Padding 错误
         with_py(|py| {
             let cls = make_dummy_class(py, "BadPattern");
             let desc = make_padding_descriptor(py, 4, 0x80).into_any();
@@ -6856,7 +6824,7 @@ class {name}:
     }
 
     // ======================================================================
-    // Phase 4 子任务 4.2：GreedyRangeDescriptor 识别与编译
+    // GreedyRangeDescriptor 识别与编译
     // ======================================================================
 
     /// 创建一个 GreedyRangeDescriptor Python 实例（模拟 Python 侧 `GreedyRange(subcon, discard)`）。
@@ -7056,7 +7024,7 @@ class {name}:
     #[test]
     fn compile_greedy_range_end_to_end_partial_fallback() {
         // 端到端：GreedyRange(Int16ub) 解析 5 字节 → 前 2 个元素（4 字节），第 5 字节回退
-        // 验证 GR-3 边界：第 N 个元素失败回退
+        // 验证边界：第 N 个元素失败回退
         with_py(|py| {
             let cls = make_structmixin_class_with_init(py, "GreedyRangeFallback");
             let inner = make_int16ub_descriptor(py);
@@ -7119,17 +7087,15 @@ class {name}:
 }
 
 // ===========================================================================
-// Phase 8 P1+P2: build_*_node 辅助函数
-//
-// 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §1-§6。
+// build_*_node 辅助函数
 //
 // 共通模式：
-// - 递归编译 subcon（沿用 field_index，与 P0 同模式）
+// - 递归编译 subcon（沿用 field_index）
 // - 编译期物化 Python 对象为 Py<PyDict>/Py<PyFrozenSet>/Py<PyType>
 // - 表达式参数从 expr_programs[field_index]["param"] 取
 // ===========================================================================
 
-/// 从 `EnumDescriptor` 构建 `EnumNode`（设计 §1.3.1）。
+/// 从 `EnumDescriptor` 构建 `EnumNode`。
 ///
 /// `EnumDescriptor` 字段：`subcon` + `decmapping`（dict int→EnumIntegerString）
 /// 与 `encmapping`（dict str→int）。`EnumInteger` 类从 `construct._internals` 加载。
@@ -7193,7 +7159,7 @@ fn build_enum_node(
     ))
 }
 
-/// 从 `FlagsEnumDescriptor` 构建 `FlagsEnumNode`（设计 §1.3.2）。
+/// 从 `FlagsEnumDescriptor` 构建 `FlagsEnumNode`。
 fn build_flags_enum_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -7244,7 +7210,7 @@ fn build_flags_enum_node(
     Ok(FlagsEnumNode::new(inner_node, flags, encmapping))
 }
 
-/// 从 `MappingDescriptor` 构建 `MappingNode`（设计 §1.3.3，C-4 TypeError 捕获）。
+/// 从 `MappingDescriptor` 构建 `MappingNode`（TypeError 捕获在 Node 内实现）。
 fn build_mapping_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -7363,7 +7329,7 @@ fn build_none_of_node(
     Ok(NoneOfNode::new(inner_node, invalids_frozen))
 }
 
-/// 从 `UnionDescriptor` 构建 `UnionNode`（设计 §3）。
+/// 从 `UnionDescriptor` 构建 `UnionNode`。
 /// parsefrom 编译期分类：None / int Index / str Name（编译期 name→index 解析）/
 /// 表达式 Expr（编译为 ExprProgram）。
 fn build_union_node(
@@ -7469,7 +7435,7 @@ fn build_union_node(
     Ok(UnionNode::new(subcons, parsefrom, has_expressions))
 }
 
-/// 从 `SequenceDescriptor` 构建 `SequenceNode`（设计 §4，C-1 RO 字段不从 list 取值）。
+/// 从 `SequenceDescriptor` 构建 `SequenceNode`（RO 字段不从 list 取值）。
 fn build_sequence_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -7537,7 +7503,7 @@ fn build_sequence_node(
     Ok(SequenceNode::new(fields, has_expressions))
 }
 
-/// 从 `ProcessXorDescriptor` 构建 `ProcessXorNode`（设计 §5.3）。
+/// 从 `ProcessXorDescriptor` 构建 `ProcessXorNode`。
 fn build_process_xor_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -7583,7 +7549,7 @@ fn build_process_xor_node(
     Ok(ProcessXorNode::new(inner_node, pad))
 }
 
-/// 从 `ProcessRotateLeftDescriptor` 构建 `ProcessRotateLeftNode`（设计 §5.5）。
+/// 从 `ProcessRotateLeftDescriptor` 构建 `ProcessRotateLeftNode`。
 fn build_process_rotate_left_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -7617,7 +7583,7 @@ fn build_process_rotate_left_node(
     ))
 }
 
-/// 从 `NamedTupleDescriptor` 构建 `NamedTupleNode`（设计 §6.1）。
+/// 从 `NamedTupleDescriptor` 构建 `NamedTupleNode`。
 fn build_named_tuple_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,

@@ -1,6 +1,5 @@
 //! SelectNode：多分支尝试节点（首个成功者胜出）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Conditional.md` §4。
 //! Python 参考：`construct/construct/core.py` `Select`（L3830-3884）。
 //!
 //! ## 行为概述
@@ -13,12 +12,12 @@
 //!   全部失败抛 `ConstructError::Select`。
 //! - sizeof：永远返回 `Err`（对齐 Python 无 `_sizeof` 方法定义）。
 //!
-//! ## ExplicitError 集成（PM 决策 2 / 设计 §4.1）
+//! ## ExplicitError 集成
 //!
 //! `ConstructError::Explicit` 不被 Select 吞掉，直接向上传播
 //! （对齐 Python `except ExplicitError: raise`）。
 //!
-//! ## 已知差异（设计 §12-D6）
+//! ## 已知差异
 //!
 //! Python `Select._build` 在 inner build 抛非 Explicit 错误时**不回退 stream**
 //! （因为 build 到 temp BytesIO，失败时 temp 丢弃即可）。construct-rs 行为一致。
@@ -61,7 +60,7 @@ use crate::nodes::Node;
 /// 永远返回 `Err`（对齐 Python `Select._sizeof` 抛 SizeofError——Python 未定义
 /// `_sizeof` 时默认 raise SizeofError）。
 ///
-/// # ExplicitError 集成（PM 决策 2）
+/// # ExplicitError 集成
 ///
 /// `ConstructError::Explicit` 不被 Select 吞掉，直接向上传播
 /// （Python `except ExplicitError: raise`）。
@@ -199,7 +198,7 @@ mod tests {
 
     #[test]
     fn new_empty_subcons_allowed() {
-        // SL-1：空 Select 允许构造（parse/build 时立即抛 SelectError）。
+        // 空 Select 允许构造（parse/build 时立即抛 SelectError）。
         let node = SelectNode::new(vec![]);
         assert_eq!(node.subcons().len(), 0);
     }
@@ -217,7 +216,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SL-2: parse 第 1 个成功 → 短路返回
+    // parse 第 1 个成功 → 短路返回
     // ======================================================================
 
     #[test]
@@ -241,7 +240,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SL-3: parse 第 1 个失败 + 第 2 个成功 → seek 回退后第 2 个成功
+    // parse 第 1 个失败 + 第 2 个成功 → seek 回退后第 2 个成功
     // ======================================================================
 
     #[test]
@@ -266,7 +265,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SL-5: 全部失败 → Select error
+    // 全部失败 → Select error
     // ======================================================================
 
     #[test]
@@ -291,7 +290,7 @@ mod tests {
     }
 
     // ======================================================================
-    // SL-1: parse 空 Select → Select error
+    // parse 空 Select → Select error
     // ======================================================================
 
     #[test]
@@ -309,17 +308,15 @@ mod tests {
     }
 
     // ======================================================================
-    // SL-4: parse Explicit 错误 → 立即传播（不 seek 回退，不尝试后续）
+    // parse Explicit 错误 → 立即传播（不 seek 回退，不尝试后续）
     // ======================================================================
 
     #[test]
     fn parse_propagates_explicit_error() {
-        // SL-4: Explicit 错误立即传播（不 seek 回退，不尝试后续）。
-        // 设计 §1.5 D1：Phase 7 范围内 Rust 不主动构造 Explicit 变体
-        // （仅供 Select/Peek 识别用），用户 Python 路径完整 parity 待 Phase 8+。
+        // Explicit 错误立即传播（不 seek 回退，不尝试后续）。
+        // 当前 Rust 不主动构造 Explicit 变体（仅供 Select/Peek 识别用）；
         // 此处验证 SelectNode 的源码分支 `matches!(e, ConstructError::Explicit { .. })`
-        // 已实现（编译期保证），运行时 Explicit 集成测试见 Python parity
-        // （Phase 8+ 修复 From<PyErr> 后）。
+        // 已实现（编译期保证），运行时 Explicit 集成测试见 Python parity 测试。
         let _ = SelectNode::new(vec![fmt_node(PythonFormat::UnsignedInt8Big)]);
     }
 
@@ -388,7 +385,7 @@ mod tests {
     }
 
     // ======================================================================
-    // sizeof 永远 Err（SL-8）
+    // sizeof 永远 Err
     // ======================================================================
 
     #[test]
@@ -407,7 +404,7 @@ mod tests {
     }
 
     // ======================================================================
-    // Optional macro 等价（SL-9）：Select(subcon, Pass) 总成功
+    // Optional macro 等价：Select(subcon, Pass) 总成功
     // ======================================================================
 
     #[test]

@@ -1,6 +1,5 @@
 //! PassNode：no-op 节点（不消费字节、不写字节）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Adapter核心.md` §2。
 //! Python 参考：`construct/construct/core.py` `Pass`（L4687-4714）。
 //!
 //! ## 行为概述
@@ -8,13 +7,11 @@
 //! Pass 是单元节点：parse 返回 `Py_None`（不消费字节）；
 //! build 不写字节；sizeof 恒为 0。
 //!
-//! ## Phase 7 依赖
+//! ## 用作默认值
 //!
-//! Pass 是 Phase 7 `If`/`Switch` 默认值的依赖：
+//! Pass 是 `If`/`Switch` 默认值的依赖：
 //! - `If(cond, then)` ≡ `IfThenElse(cond, then, Pass)`
 //! - `Switch(key, cases, default=Pass)`
-//!
-//! 作为 Phase 6.3 的"附带品"实现（< 100 行 Rust，含测试）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -35,9 +32,9 @@ use super::Construct;
 /// - build：no-op（不写字节）
 /// - sizeof：返回 0
 ///
-/// # Phase 7 依赖
+/// # 用作默认值
 ///
-/// Pass 是 Phase 7 `If`/`Switch` 默认值的依赖：
+/// Pass 是 `If`/`Switch` 默认值的依赖：
 /// - `If(cond, then)` ≡ `IfThenElse(cond, then, Pass)`
 /// - `Switch(key, cases, default=Pass)`
 #[derive(Debug, Default)]
@@ -187,7 +184,7 @@ mod tests {
 
     #[test]
     fn build_arbitrary_obj_is_noop() {
-        // build 接受任意 obj（对齐 Python，PA-4：忽略 obj）
+        // build 接受任意 obj（对齐 Python：忽略 obj）
         with_py(|py| {
             let node = PassNode::new();
             let obj = py.eval_bound("42", None, None).expect("obj");

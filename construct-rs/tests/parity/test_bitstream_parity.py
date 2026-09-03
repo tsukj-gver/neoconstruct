@@ -1,9 +1,6 @@
-"""Phase 3 BitStream 构造器 Python 行为一致性测试。
+"""BitStream 构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §5.1（统一模板）
-- docs/design/模块设计/模块设计-BitStream.md §9 边界条件
-- _helpers/parity.py（公共组件）
+组件：_helpers/parity.py（公共组件）。
 
 测试策略（子进程隔离）：两个同名包（construct-rs 与 Python construct 2.10.70）
 无法在同一进程中导入，每个用例 × impl 在独立子进程中运行，通过 JSON 输出
@@ -14,8 +11,8 @@ BitsSwapped+ByteSwapped（P8-P10）/ BitPadding（P11）/ swapped（P12）/ 复�
 
 用法::
 
-    pytest tests/parity/test_phase3_bitstream_parity.py -v
-    python tests/parity/test_phase3_bitstream_parity.py
+    pytest tests/parity/test_bitstream_parity.py -v
+    python tests/parity/test_bitstream_parity.py
 """
 
 from __future__ import annotations
@@ -67,7 +64,7 @@ _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 # ---------------------------------------------------------------------------
 # case 定义（子进程脚本片段，定义 _make_case_rs / _make_case_py）
 # ---------------------------------------------------------------------------
-# 注意（设计 §5.3 注意点 1 + v2 改进-2）：
+# 注意：
 # - _make_case_rs / _make_case_py 参数化（case_id 入参），函数体内 ``C = case_id``。
 # - 本字符串通过 ``{case_definitions}`` 注入 PARITY_SCRIPT_TEMPLATE.format()，
 #   .format 不二次解析本字符串内部花括号，故 case 定义代码用单花括号。
@@ -271,7 +268,7 @@ ALL_CASES = [
 # ---------------------------------------------------------------------------
 # parity_results fixture（容错版：失败 case 记录 error，不崩溃）
 # ---------------------------------------------------------------------------
-# 同 test_phase4_array_parity.py 的工程处理：BitStream 各 case 在当前 construct-rs
+# 工程处理：BitStream 各 case 在当前 construct-rs
 # 应全部支持，但保留容错以防个别 case 的 impl 差异。
 
 @pytest.fixture(scope="module")
@@ -364,9 +361,9 @@ def test_parity_roundtrip_fidelity(parity_results, case_id: str, desc: str):
 # ---------------------------------------------------------------------------
 
 def _run_standalone():
-    """直接执行（python tests/parity/test_phase3_bitstream_parity.py）时的入口。"""
+    """直接执行（python tests/parity/test_bitstream_parity.py）时的入口。"""
     print("=" * 78)
-    print("Phase 3 BitStream 构造器 Python 行为一致性测试")
+    print("BitStream 构造器 Python 行为一致性测试")
     print("=" * 78)
     print(f"Python (rs): {_RS_PYTHON_EXE}")
     print(f"Python (py): {_PY_PYTHON_EXE}")

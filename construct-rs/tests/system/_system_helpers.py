@@ -1,8 +1,6 @@
 """系统测试共享工具：协议 CRC 计算、子进程 parity runner。
 
-设计依据：
-- Phase 9 总纲（集成测试，不引入新构造器）
-- 已有 parity helper 在 tests/_helpers/parity.py（通用框架，本模块提供更轻量的封装）
+通用 parity helper 在 tests/_helpers/parity.py（本模块提供更轻量的封装）。
 
 本模块直接被各 test_*.py 导入，无 pytest 依赖（pure functions）。
 """
@@ -47,7 +45,7 @@ _PY_PYTHON = _venv_python(".venv-pc")  # 原版参考 construct==2.10.70
 def get_rs_python() -> str:
     """CRS venv python.exe（含 construct-rs wheel）。
 
-    解析顺序（与 tests/conftest.py 的 ``rs_python`` fixture 一致，P8 修复）：
+    解析顺序（与 tests/conftest.py 的 ``rs_python`` fixture 一致）：
       1. 环境变量 CRS_PYTHON（路径存在时优先）
       2. 项目内 venv construct-rs/.venv
       3. sys.executable（最后手段，可能两个 construct 冲突）

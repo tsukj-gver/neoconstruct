@@ -1,6 +1,5 @@
 //! ZigZagNode：有符号变长整数（Google Protocol Buffers ZigZag 编码）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Primitives收尾.md` §1.4.2。
 //! Python 参考：`construct/construct/core.py:1651-1686`（ZigZag 类）。
 //!
 //! ## 编码规则
@@ -13,7 +12,7 @@
 //! ## 设计选择
 //!
 //! 不通过组合 VarIntNode 实现（避免 Box<Node> 间接），而是直接复用 VarIntNode
-//! 的 parse/build 方法（设计 §1.4.2）。ZigZag 仅多一次 XOR + shift，组合 Node
+//! 的 parse/build 方法。ZigZag 仅多一次 XOR + shift，组合 Node
 //! 会引入额外 dispatch 开销。
 
 use crate::context::Context;
@@ -79,8 +78,8 @@ impl super::Construct for ZigZagNode {
         let val: i64 = obj.extract::<i64>().map_err(|_| {
             // Python ZigZag 仅检查 isinstance(obj, int)（core.py:1679），不检查范围
             // （Python int 无限精度，ZigZag 调 VarInt 处理任意大小）。Rust 限 i64
-            // （§1.4.2 i64 范围决策）：非 int 或超 i64 都归 IntegerError，与 Python
-            // IntegerError 对齐（P1 v2 修正：v1 误用 FormatField 已改）。
+            // （i64 范围决策）：非 int 或超 i64 都归 IntegerError，与 Python
+            // IntegerError 对齐。
             ConstructError::Integer {
                 message: format!("value {} is not an integer or out of i64 range", obj),
                 path: path.to_string(),
@@ -97,7 +96,7 @@ impl super::Construct for ZigZagNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 变长字段。与 VarIntNode 同（[设计质疑] 见 varint.rs 注释）。
+        // 变长字段。与 VarIntNode 同（见 varint.rs 注释）。
         Err(ConstructError::Generic {
             message: "ZigZag has variable size".into(),
             path: String::new(),

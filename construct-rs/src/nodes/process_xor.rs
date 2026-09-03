@@ -1,6 +1,5 @@
 //! ProcessXorNode：XOR 字节变换节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §5.3-5.4。
 //! Python 参考：`construct/construct/core.py` `ProcessXor`（L5357-5421）。
 //!
 //! ## 行为概述

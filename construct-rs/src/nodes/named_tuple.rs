@@ -1,6 +1,5 @@
 //! NamedTupleNode：NamedTuple 包装节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §6.1。
 //! Python 参考：`construct/construct/core.py` `NamedTuple`（L3381-3446）。
 //!
 //! ## 行为概述
@@ -13,11 +12,11 @@
 //!   - Sequence 模式：list 解包 → factory(*args)
 //! - build：namedtuple 实例 → 按模式提取 → inner.build
 //!
-//! ## C-2：NamedTuple over Struct 的多余字段差异（设计 §6.1.6 NT-10）
+//! ## NamedTuple over Struct 的多余字段差异（parity 已知差异）
 //!
 //! Python `factory(**obj)`（core.py L3416）传 Container 所有字段，多余字段触发 TypeError。
 //! construct-rs 只传 tuplefields 命名的字段（按 tuplefields getattr），**忽略**额外字段
-//! （更宽松，与 Python 不对齐，详见 §7.5）。
+//! （更宽松，与 Python 不对齐）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -105,7 +104,7 @@ impl Construct for NamedTupleNode {
         let named = match self.mode {
             NamedTupleMode::Struct => {
                 // Struct 返回实例：按 field_names getattr → kwargs dict → factory(**kwargs)
-                // C-2：只取 tuplefields 名字（忽略额外字段，更宽松）。
+                // 只取 tuplefields 名字（忽略额外字段，更宽松）。
                 let kwargs = PyDict::new_bound(py);
                 for name in &self.field_names {
                     let val = obj.bind(py).getattr(name.bind(py)).map_err(|e| {
@@ -165,13 +164,13 @@ impl Construct for NamedTupleNode {
     ) -> Result<(), ConstructError> {
         let build_obj: Py<PyAny> = match self.mode {
             NamedTupleMode::Struct => {
-                // [设计质疑 AD-P1-5]：设计 §6.1.4 说"按名字 getattr → 构造 dict → inner.build(dict)"，
-                // 但 StructNode.build 内部对 obj 调 getattr（期望实例），传 dict 会失败。
-                // 实际实现：直接传 namedtuple 实例给 inner.build（namedtuple 支持 getattr，
-                // StructNode.build 可正常工作）。这与 Python `factory(**obj)` 不对齐——
-                // Python 把 Container 所有字段（含 _io）传给 factory（多字段 TypeError），
-                // construct-rs 让 StructNode 自己 getattr tuplefields 命名的字段
-                // （忽略实例 __dict__ 中其他字段，C-2 修正的"宽松"行为）。
+                // 直接传 namedtuple 实例给 inner.build：StructNode.build 内部对 obj
+                // 调 getattr（期望实例），namedtuple 支持 getattr，可正常工作。
+                // （构造中间 dict 再传 inner.build 反而会失败。）
+                // 这与 Python `factory(**obj)` 不对齐——Python 把 Container 所有字段
+                // （含 _io）传给 factory（多字段 TypeError），construct-rs 让 StructNode
+                // 自己 getattr tuplefields 命名的字段（忽略实例 __dict__ 中其他字段，
+                // "宽松"行为）。
                 obj.clone().unbind()
             }
             NamedTupleMode::Sequence => {
@@ -240,7 +239,7 @@ mod tests {
 
     #[test]
     fn parse_struct_mode_returns_namedtuple() {
-        // NT-2: NamedTuple("coord", "x y", Struct{x:Int8ub, y:Int8ub}).parse(b'\x01\x02')
+        // NamedTuple("coord", "x y", Struct{x:Int8ub, y:Int8ub}).parse(b'\x01\x02')
         //      → coord(x=1, y=2)
         with_py(|py| {
             let struct_node = StructNode::new(
@@ -294,7 +293,7 @@ mod tests {
 
     #[test]
     fn build_struct_mode() {
-        // NT-7: NamedTuple("coord", "x y", Struct).build(coord(x=1, y=2)) → b'\x01\x02'
+        // NamedTuple("coord", "x y", Struct).build(coord(x=1, y=2)) → b'\x01\x02'
         with_py(|py| {
             let struct_node = StructNode::new(
                 py,
@@ -346,7 +345,6 @@ mod tests {
 
     #[test]
     fn sizeof_forwards_to_inner() {
-        // NT-8
         with_py(|py| {
             let inner = Node::Bytes(BytesNode::new_const(2));
             let factory = make_factory(py, "c", &["a", "b"]);

@@ -1,6 +1,5 @@
 //! MappingNode：通用对象映射节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §1.3.3。
 //! Python 参考：`construct/construct/core.py` `Mapping`（L2112-2156）。
 //!
 //! ## 行为概述
@@ -8,7 +7,7 @@
 //! `Mapping(subcon, mapping)` 与 EnumNode 结构同，但 key/value 任意（非限定 int/str），
 //! 且**无映射时报错**（与 EnumNode 的"无映射返回 EnumInteger"不同）。
 //!
-//! ## C-4：TypeError 捕获
+//! ## TypeError 捕获
 //!
 //! Python `decmapping[obj]` / `encmapping[obj]` 对**不可哈希的 key**（如 list/dict）
 //! 抛 TypeError，core.py L2129-2131 捕获后转为 MappingError。construct-rs 的
@@ -76,7 +75,7 @@ impl Construct for MappingNode {
         path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
         let obj = self.inner.parse(py, stream, ctx, path)?;
-        // C-4：捕获 TypeError（不可哈希 key）→ MappingError，对齐 Python core.py L2129。
+        // 捕获 TypeError（不可哈希 key）→ MappingError，对齐 Python core.py L2129。
         let val_opt = self
             .decmapping
             .bind(py)
@@ -108,7 +107,7 @@ impl Construct for MappingNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // C-4：同 parse 路径，捕获 TypeError → MappingError。
+        // 同 parse 路径，捕获 TypeError → MappingError。
         let val_opt =
             self.encmapping
                 .bind(py)

@@ -12,17 +12,17 @@ construct-rs vs Python construct 2.10.70 BitStream 性能测试结果
   repeat (中位数) : 5
   测量时间        : 2026-06-29 13:31:48
 
-测量口径（performance-gate/SKILL.md）：
+测量口径：
   - construct-rs：maturin develop 安装到 venv，Python timeit 调用
     用户面 API（Packet.parse / packet.build）。一次 FFI 穿越。
   - Python construct 2.10.70：pip install 安装到 venv，Python timeit
     调用等效 API（fmt.parse / fmt.build）。
   - 子进程隔离：两个同名 construct 包在独立进程中运行，避免 sys.path 冲突。
   - 相同 timeit 参数（NUMBER/REPEAT），取相同统计量（中位数）。
-  - 公平口径修订（3.4）：所有场景 Python 侧均用 BitStruct/Struct 包裹，
+  - 公平口径：所有场景 Python 侧均用 BitStruct/Struct 包裹，
     与 Rust 侧 BitStructMixin/StructMixin 创建容器/实例对等。
 
-通过标准（Phase 3 总纲 S-PERF）：
+通过标准：
   - 几何平均 ≥10.0x（parse 和 build 两个方向）
   - 单点 <4.0x 视为门禁失败
 
@@ -56,7 +56,7 @@ BW4    build  244.2        3222.3         13.19     x [PASS]
   全部       : 14.41x
 
 ==============================================================================
-派生指标（performance-gate/SKILL.md S-PERF 输出要求）
+派生指标
 ==============================================================================
 
 1) parse/build 比率（build_ns / parse_ns，>1 = build 较慢）：
@@ -99,15 +99,15 @@ BW4    build  244.2        3222.3         13.19     x [PASS]
   [WARN] BS2: Rust build/parse=0.79 vs Py build/parse=1.11
 
 场景说明：
-  -- Phase 3.1 --
+  -- BitsInteger --
   B1: BitStruct(v=BitsInteger(8))
   B2: BitStruct(v=BitsInteger(16))
   B3: BitStruct(v=BitsInteger(32))
   B4: BitStruct(v=BitsInteger(8, signed=True))
-  -- Phase 3.2 --
+  -- BitStruct --
   BS1: BitStruct(Nibble, BitsInteger(10), Padding(2))
   BS2: BitStruct(Bit, Nibble, Octet, Padding(3))
-  -- Phase 3.3 --
+  -- ByteSwap --
   BW1: BitStruct(Nibble, Bytewise(Int16ub), Nibble)
   BW2: Struct(v=BitsSwapped(Bytes(4)))
   BW3: Struct(v=ByteSwapped(Int32ub))

@@ -1,6 +1,6 @@
-"""Phase 8.5 Checksum 零拷贝路径性能验证（DEV 自检临时脚本）。
+"""Checksum 零拷贝路径性能验证（开发自检脚本）。
 
-设计文档 §3.7.2 要求：B1 路径（Rust 内置 hashfunc + StreamRange）相比 Python
+性能要求：B1 路径（Rust 内置 hashfunc + StreamRange）相比 Python
 原版（RawCopy + callable）应至少 ≥1.3x 加速比。
 
 本脚本对比：
@@ -43,7 +43,7 @@ class PacketA2(StructMixin):
     """路径 A2：Python callable hashfunc + ContextBytes（直接 bytes 字段）。
 
     注：construct-rs ContextBytes 仅支持直接 bytes 字段（不支持 RawCopy dict.data
-    嵌套引用，与设计 §3.5.4 路径 A2 表述的"用户坚持 callable"场景对齐）。
+    嵌套引用，与 Python callable 兼容场景对齐）。
     """
 
     data: bytes = field(Bytes(64))
@@ -110,12 +110,12 @@ def main() -> None:
     print()
     print("结论：")
     if speedup_b1_vs_a2 >= 1.3:
-        print(f"  [PASS] 达到设计 §3.7.2 预测（>=1.3x）：B1 比 A2 快 %.2fx" % speedup_b1_vs_a2)
+        print(f"  [PASS] 达到预测（>=1.3x）：B1 比 A2 快 %.2fx" % speedup_b1_vs_a2)
     elif speedup_b1_vs_a2 >= 1.1:
         print(f"  [WARN] 接近预测但未达标（>=1.3x）：B1 比 A2 快 %.2fx" % speedup_b1_vs_a2)
     else:
         print(f"  [INFO] B1 vs A2 加速比 %.2fx（A2 占优）" % speedup_b1_vs_a2)
-        print("  注：设计 §3.7.2 的 >=1.3x 预测基于 Python 原版 RawCopy + callable 场景")
+        print("      注：>=1.3x 预测基于 Python 原版 RawCopy + callable 场景")
         print("      A2 在 construct-rs 中因不用 RawCopy（避免 dict 构造），性能反超 B1")
         print("      B1 仍优于 Python 原版 RawCopy 路径（消除 dict + FFI 回调）")
 

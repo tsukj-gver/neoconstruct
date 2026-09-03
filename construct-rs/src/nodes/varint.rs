@@ -1,6 +1,5 @@
 //! VarIntNode：LEB128 无符号变长整数（Google Protocol Buffers 编码）。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Primitives收尾.md` §1.4.1。
 //! Python 参考：`construct/construct/core.py:1601-1647`（VarInt 类）。
 //!
 //! ## 编码规则
@@ -124,8 +123,8 @@ impl super::Construct for VarIntNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 变长字段，无法预知大小。设计 §1.4.1 D-5 要求返回 Err(SizeofError)。
-        // [设计质疑] error.rs 无 Sizeof 变体，项目惯例（GreedyRange / PrefixedArray）
+        // 变长字段，无法预知大小，返回 Err(SizeofError)。
+        // error.rs 无 Sizeof 变体，项目惯例（GreedyRange / PrefixedArray）
         // 用 ConstructError::Generic。Python 端 SizeofError 是 ConstructError 子类，
         // 此处 Generic 经 select_exception_class 映射到 GenericConstructError，
         // Python 用户面 `except ConstructError` 仍可捕获（SizeofError 同为子类）。
@@ -142,8 +141,8 @@ impl super::Construct for VarIntNode {
 
 /// LEB128 fast-path helper：编码 u64 到给定 10 字节缓冲区，返回写入字节数。
 ///
-/// VarIntNode（§1.4.1）与 ZigZagNode（§1.4.2，经 ZigZag 正变换后）共用此 helper，
-/// 避免两处重复字节编解码逻辑（ZigZag 设计 §1.4.2 已声明"提取为 varint_encode_bytes"）。
+/// VarIntNode 与 ZigZagNode（经 ZigZag 正变换后）共用此 helper，
+/// 避免两处重复字节编解码逻辑。
 pub(crate) fn varint_encode_u64(mut x: u64, buf: &mut [u8; U64_VARINT_MAX_BYTES]) -> usize {
     let mut len = 0;
     while x > 0x7F {
@@ -157,7 +156,7 @@ pub(crate) fn varint_encode_u64(mut x: u64, buf: &mut [u8; U64_VARINT_MAX_BYTES]
 
 /// 缓存编译后的 VarInt 大整数编码函数（Python 层 `_varint_encode`）。
 ///
-/// P3 v2 修正：改为首次调用编译并缓存函数引用，后续 slow-path 仅 1 次 `call1` 跨 FFI
+/// 首次调用编译并缓存函数引用，后续 slow-path 仅 1 次 `call1` 跨 FFI
 /// （与 BytesInteger slow-path 同模式，与 error.rs 的 `EXCEPTIONS` 异常类缓存同模式）。
 static VARINT_ENCODER: pyo3::sync::GILOnceCell<Py<PyAny>> = pyo3::sync::GILOnceCell::new();
 
@@ -190,11 +189,11 @@ def _varint_encode(x):
 
 /// VarInt 大整数（> 2^64）slow-path：调用缓存的 Python `_varint_encode` 函数。
 ///
-/// 与 BytesInteger D-2 决策一致：罕见路径走 Python callable，无 unsafe，无中间类型。
+/// 罕见路径走 Python callable，无 unsafe，无中间类型。
 ///
 /// **不能与 BytesInteger slow-path（`call_method("to_bytes")`）统一**：
 /// VarInt 是 LEB128 编码（每 7 位 + MSB 续位），`int.to_bytes(length, 'big')` 是
-/// 直接转 N 字节大端，两者编码逻辑完全不同（详见设计 §9.3 v2 修正）。
+/// 直接转 N 字节大端，两者编码逻辑完全不同。
 fn build_varint_bigint(
     py: Python<'_>,
     obj: &Bound<'_, PyAny>,
@@ -400,7 +399,7 @@ mod tests {
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
             let err = VarIntNode::new().sizeof(&ctx).expect_err("should err");
-            // 项目惯例：变长字段 sizeof 返回 Generic（[设计质疑] error.rs 无 Sizeof 变体）
+            // 项目惯例：变长字段 sizeof 返回 Generic（error.rs 无 Sizeof 变体）
             assert!(matches!(err, ConstructError::Generic { .. }));
         });
     }

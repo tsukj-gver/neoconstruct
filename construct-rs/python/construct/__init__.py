@@ -18,8 +18,6 @@
 
     # parse：从字节构造实例
     parsed = MyMsg.parse(built)
-
-设计依据：``docs/design/基础设施/架构设计.md`` §A（Python 接口设计）、§D.3（Python 包结构）。
 """
 
 from ._errors import (
@@ -92,16 +90,16 @@ try:
         Int64sl,
         Int64ub,
         Int64ul,
-        # Phase 3.1: bit 域描述符
+        # bit 域描述符
         Bit,
         BitsInteger,
         BitsIntegerDescriptor,
         Nibble,
         Octet,
-        # Phase 3.2: Bitwise
+        # Bitwise
         Bitwise,
         BitwiseDescriptor,
-        # Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped
+        # Padding / Bytewise / BitsSwapped / ByteSwapped
         Padding,
         PaddingDescriptor,
         Bytewise,
@@ -110,24 +108,24 @@ try:
         BitsSwappedDescriptor,
         ByteSwapped,
         ByteSwappedDescriptor,
-        # Phase 4: Array / GreedyRange / PrefixedArray
+        # Array / GreedyRange / PrefixedArray
         Array,
         ArrayDescriptor,
         GreedyRange,
         GreedyRangeDescriptor,
         PrefixedArray,
         PrefixedArrayDescriptor,
-        # Phase 4: Index / StopIf / RepeatUntil
+        # Index / StopIf / RepeatUntil
         Index,
         IndexDescriptor,
         StopIf,
         StopIfDescriptor,
         RepeatUntil,
         RepeatUntilDescriptor,
-        # Phase 4.5 v5: Element
+        # Element
         Element,
         ElementDescriptor,
-        # Phase 6.1: Primitives 收尾
+        # Primitives 补充与别名
         BytesInteger,
         BytesIntegerDescriptor,
         Float16b,
@@ -151,7 +149,7 @@ try:
         Half,
         Single,
         Double,
-        # Phase 6.2: Strings
+        # Strings
         CString,
         CStringDescriptor,
         GreedyString,
@@ -164,7 +162,7 @@ try:
         NullTerminatedDescriptor,
         NullStripped,
         NullStrippedDescriptor,
-        # Phase 6.3: 内置 Adapter
+        # 内置 Adapter
         Subconstruct,
         SubconstructDescriptor,
         Peek,
@@ -175,37 +173,37 @@ try:
         RebuildDescriptor,
         Pass,
         PassDescriptor,
-        # Phase 7.2: Streams (Seek / Pointer / Prefixed)
+        # Streams (Seek / Pointer / Prefixed)
         Seek,
         SeekDescriptor,
         Pointer,
         PointerDescriptor,
         Prefixed,
         PrefixedDescriptor,
-        # Phase 8 P0: Const / Default / Check
+        # Const / Default / Check
         Const,
         ConstDescriptor,
         Default,
         DefaultDescriptor,
         Check,
         CheckDescriptor,
-        # Phase 8 P0: Terminated / Probe
+        # Terminated / Probe
         Terminated,
         TerminatedDescriptor,
         Probe,
         ProbeDescriptor,
-        # Phase 8 P0: Aligned
+        # Aligned
         Aligned,
         AlignedDescriptor,
-        # Phase 8 P0: Hex / HexDump
+        # Hex / HexDump
         Hex,
         HexDescriptor,
         HexDump,
         HexDumpDescriptor,
-        # Phase 8 P0: Checksum
+        # Checksum
         Checksum,
         ChecksumDescriptor,
-        # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+        # Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
         # / ProcessXor / ProcessRotateLeft / NamedTuple
         Enum,
         EnumDescriptor,
@@ -231,25 +229,25 @@ try:
 except ImportError:  # pragma: no cover - 仅在扩展未构建时触发
     pass
 
-# Phase 8.8: AlignedStruct 宏（不依赖 Rust 扩展）。
+# AlignedStruct / Timestamp 宏（不依赖 Rust 扩展）。
 try:
     from ._macros import AlignedStruct, Timestamp
 except ImportError:  # pragma: no cover
     pass
 
-# Phase 8.5: HashAlgo Python enum（不依赖 Rust 扩展）。
+# HashAlgo Python enum（不依赖 Rust 扩展）。
 try:
     from ._hashalgo import HashAlgo
 except ImportError:  # pragma: no cover
     pass
 
-# Phase 6.3: 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
+# 用户面 Adapter 基类（Python 层，不依赖 Rust 扩展）。
 try:
     from ._adapters import Adapter, AdapterDescriptor, SymmetricAdapter, Validator
 except ImportError:  # pragma: no cover
     pass
 
-# Phase 7.1: Conditional 构造器（If / IfThenElse / Switch / Select / FocusedSeq）。
+# Conditional 构造器（If / IfThenElse / Switch / Select / FocusedSeq）。
 # Python 用户面 + Descriptor 类（不依赖 Rust pyclass，通过 type name 识别）。
 try:
     from ._conditional import (
@@ -307,16 +305,16 @@ __all__ = [
     "FormatFieldDescriptor",
     "BytesDescriptor",
     "GreedyBytesDescriptor",
-    # Phase 3.1: bit 域描述符
+    # bit 域描述符
     "Bit",
     "Nibble",
     "Octet",
     "BitsInteger",
     "BitsIntegerDescriptor",
-    # Phase 3.2: Bitwise
+    # Bitwise
     "Bitwise",
     "BitwiseDescriptor",
-    # Phase 3.3: Padding / Bytewise / BitsSwapped / ByteSwapped
+    # Padding / Bytewise / BitsSwapped / ByteSwapped
     "Padding",
     "PaddingDescriptor",
     "Bytewise",
@@ -325,24 +323,24 @@ __all__ = [
     "BitsSwappedDescriptor",
     "ByteSwapped",
     "ByteSwappedDescriptor",
-    # Phase 4: Array / GreedyRange / PrefixedArray
+    # Array / GreedyRange / PrefixedArray
     "Array",
     "ArrayDescriptor",
     "GreedyRange",
     "GreedyRangeDescriptor",
     "PrefixedArray",
     "PrefixedArrayDescriptor",
-    # Phase 4: Index / StopIf / RepeatUntil
+    # Index / StopIf / RepeatUntil
     "Index",
     "IndexDescriptor",
     "StopIf",
     "StopIfDescriptor",
     "RepeatUntil",
     "RepeatUntilDescriptor",
-    # Phase 4.5 v5: Element
+    # Element
     "Element",
     "ElementDescriptor",
-    # Phase 6.1: Primitives 收尾
+    # Primitives 补充与别名
     "BytesInteger",
     "BytesIntegerDescriptor",
     "Float16b",
@@ -366,7 +364,7 @@ __all__ = [
     "Half",
     "Single",
     "Double",
-    # Phase 6.2: Strings
+    # Strings
     "CString",
     "CStringDescriptor",
     "GreedyString",
@@ -379,7 +377,7 @@ __all__ = [
     "NullTerminatedDescriptor",
     "NullStripped",
     "NullStrippedDescriptor",
-    # Phase 6.3: 内置 Adapter
+    # 内置 Adapter
     "Subconstruct",
     "SubconstructDescriptor",
     "Peek",
@@ -390,40 +388,40 @@ __all__ = [
     "RebuildDescriptor",
     "Pass",
     "PassDescriptor",
-    # Phase 7.2: Streams
+    # Streams
     "Seek",
     "SeekDescriptor",
     "Pointer",
     "PointerDescriptor",
     "Prefixed",
     "PrefixedDescriptor",
-    # Phase 8 P0: Const / Default / Check
+    # Const / Default / Check
     "Const",
     "ConstDescriptor",
     "Default",
     "DefaultDescriptor",
     "Check",
     "CheckDescriptor",
-    # Phase 8 P0: Terminated / Probe
+    # Terminated / Probe
     "Terminated",
     "TerminatedDescriptor",
     "Probe",
     "ProbeDescriptor",
-    # Phase 8 P0: Aligned / AlignedStruct
+    # Aligned / AlignedStruct
     "Aligned",
     "AlignedDescriptor",
     "AlignedStruct",
     "Timestamp",
-    # Phase 8 P0: Hex / HexDump
+    # Hex / HexDump
     "Hex",
     "HexDescriptor",
     "HexDump",
     "HexDumpDescriptor",
-    # Phase 8 P0: Checksum / HashAlgo
+    # Checksum / HashAlgo
     "Checksum",
     "ChecksumDescriptor",
     "HashAlgo",
-    # Phase 8 P1+P2: Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
+    # Enum / FlagsEnum / Mapping / OneOf / NoneOf / Union / Sequence
     # / ProcessXor / ProcessRotateLeft / NamedTuple
     "Enum",
     "EnumDescriptor",
@@ -445,12 +443,12 @@ __all__ = [
     "ProcessRotateLeftDescriptor",
     "NamedTuple",
     "NamedTupleDescriptor",
-    # Phase 6.3: 用户面 Adapter 基类
+    # 用户面 Adapter 基类
     "Adapter",
     "AdapterDescriptor",
     "SymmetricAdapter",
     "Validator",
-    # Phase 7.1: Conditional 构造器
+    # Conditional 构造器
     "If",
     "IfThenElse",
     "IfThenElseDescriptor",
@@ -482,13 +480,11 @@ __all__ = [
     "ExplicitError",
     "SelectError",
     "StringEncoded",
-    # Phase 8 P0 新增异常。
     "ConstError",
     "CheckError",
     "ChecksumError",
     "TerminatedError",
     "CancelParsing",
-    # Phase 8 P1+P2 新增异常。
     "MappingError",
     "ValidationError",
     "UnionError",

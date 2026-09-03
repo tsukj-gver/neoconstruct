@@ -1,19 +1,16 @@
-"""Phase 7.1 Conditional 构造器（If / IfThenElse / Switch / Select / FocusedSeq）。
-
-设计依据：``docs/design/模块设计/模块设计-Conditional.md``。
+"""Conditional 构造器（If / IfThenElse / Switch / Select / FocusedSeq）。
 
 本模块提供 5 个 Conditional 构造器的 Python 用户面 + Descriptor 类。
 Rust 侧通过 type name 识别 Descriptor，构建对应的 Node。
 
 **If macro**：Python macro（不新增 Rust Node），等价 IfThenElse(cond, sub, Pass)。
 
-PM 决策 1（Switch keyfunc = A+B 混合，v0.1.1 按 P10 实测行为订正）：keyfunc
-接受 int 常量或字段名表达式（``_FieldDescriptor`` / ``_ExprRef``，含 ``x + 1``
-等算术组合），编译为 ExprProgram 运行时零 FFI 求值（复杂 int 表达式按功能
-保留）。v0.1.1 起 Switch/IfThenElse 可嵌套于包装器内（Prefixed 等），
+Switch keyfunc 接受 int 常量或字段名表达式（``_FieldDescriptor`` / ``_ExprRef``，
+含 ``x + 1`` 等算术组合），编译为 ExprProgram 运行时零 FFI 求值（复杂 int
+表达式按功能保留）。v0.1.1 起 Switch/IfThenElse 可嵌套于包装器内（Prefixed 等），
 表达式引用同 Struct 前序字段。
 
-PM 决策 2（引入 ExplicitError 变体）：Select / Peek 不吞 ExplicitError，直接传播。
+Select / Peek 不吞 ExplicitError，直接传播。
 """
 
 from ._errors import CompilationError
@@ -102,7 +99,7 @@ def If(condfunc, subcon):
     """``If`` macro：等价 ``IfThenElse(condfunc, subcon, Pass)``。
 
     对应 Python construct 的 ``If``（core.py L3912）。
-    Rust 不新增 IfNode——Python 用户面 macro 完成等价转换（设计 §2.5）。
+    Rust 不新增 IfNode——Python 用户面 macro 完成等价转换。
 
     使用方式（``x`` 必须是同 Struct 内已声明的 int 字段）::
 
@@ -138,7 +135,7 @@ class SwitchDescriptor:
 
     对应 Python construct 的 ``Switch``（core.py L4002）。
 
-    PM 决策 1（keyfunc = A+B 混合，v0.1.1 按 P10 实测行为订正）：
+    keyfunc 接受的形态：
     - int/bool 常量 → ``SwitchKey::ConstInt``
     - 字段名 int 表达式（``n`` 直接引用，或 ``x + 1`` 等算术组合）→
       ``SwitchKey::IntExpr``（零 FFI，复杂 int 表达式同样编译为 IntExpr，
@@ -167,10 +164,10 @@ class SwitchDescriptor:
         :param cases: dict，{key: subcon}。
         :param default: 默认 subcon（None 时设为 Pass）。
         """
-        # callable 检查（与 RepeatUntil v5 同模式）：拒绝 Python lambda。
+        # callable 检查（与 RepeatUntil 同模式）：拒绝 Python lambda。
         if callable(keyfunc) and not isinstance(keyfunc, (_FieldDescriptor, _ExprRef)):
             raise CompilationError(
-                "Switch keyfunc must be int/bool constant or Phase 2 expression "
+                "Switch keyfunc must be int/bool constant or a field expression "
                 "(_FieldDescriptor / _ExprRef), not a Python callable. "
                 "Example: Switch(n, {1: Byte, 2: Short}) where 'n' is a field "
                 "in the same Struct; arithmetic like (x + 1) is also supported."
@@ -361,7 +358,7 @@ class FocusedSeqDescriptor:
 def FocusedSeq(parsebuildfrom, *subcons):
     """创建一个 FocusedSeq 描述符。
 
-    使用方式（设计 §11.4）::
+    使用方式::
 
         d = FocusedSeq("num",
             Const(b"SIG"),          # 匿名字段

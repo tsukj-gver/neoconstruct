@@ -1,9 +1,6 @@
-"""Phase 4 Array 系列构造器 Python 行为一致性测试。
+"""Array 系列构造器 Python 行为一致性测试。
 
-设计依据：
-- docs/design/基础设施/测试框架设计.md §5.1（统一模板）
-- docs/design/模块设计/模块设计-Array.md §7 边界条件 / §9.5 已知行为差异
-- _helpers/parity.py（公共组件）
+组件：_helpers/parity.py（公共组件）。
 
 测试策略（子进程隔离）：两个同名包（construct-rs 与 Python construct 2.10.70）
 无法在同一进程中导入，每个用例 × impl 在独立子进程中运行，通过 JSON 输出
@@ -14,8 +11,8 @@ RepeatUntil（R1-R3）/ Index（I1-I3）/ StopIf（S1-S3）/ 嵌套组合（N1-N
 
 用法::
 
-    pytest tests/parity/test_phase4_array_parity.py -v
-    python tests/parity/test_phase4_array_parity.py
+    pytest tests/parity/test_array_parity.py -v
+    python tests/parity/test_array_parity.py
 """
 
 from __future__ import annotations
@@ -67,13 +64,13 @@ _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 # ---------------------------------------------------------------------------
 # case 定义（子进程脚本片段，定义 _make_case_rs / _make_case_py）
 # ---------------------------------------------------------------------------
-# 注意（设计 §5.3 注意点 1 + v2 改进-2）：
+# 注意：
 # - _make_case_rs / _make_case_py 必须参数化（case_id 入参），函数体内
 #   ``C = case_id`` 替代旧 ``C = CASE`` 闭包（PARITY_SCRIPT_TEMPLATE 执行段
 #   写死 ``_make_case_rs(CASE)`` 调用，case 函数必须接受 case_id 参数）。
 # - 本字符串通过 ``{case_definitions}`` 注入 PARITY_SCRIPT_TEMPLATE.format()，
 #   .format 不二次解析本字符串内部花括号，故 case 定义代码用单花括号 ``{`` ``}``。
-# - phase4 case 全部用 ``bytes([...])`` 构造数据，无 bytes 字面量，转义简单。
+# - 本文件 case 全部用 ``bytes([...])`` 构造数据，无 bytes 字面量，转义简单。
 _CASE_DEFINITIONS = '''
 def _make_case_rs(case_id):
     from dataclasses import dataclass
@@ -531,13 +528,10 @@ ALL_CASES = [
 # ---------------------------------------------------------------------------
 # 自动生成 parity_results fixture（预跑全部 case × impl 缓存）
 # ---------------------------------------------------------------------------
-# **工程处理（偏离设计 §5.1 模板的严格 make_parity_results_fixture）**：
-# Phase 4 的 R1/R2/R3 case 在当前 construct-rs 版本下 broken——ADR-014 删除了
-# RepeatUntil 的 PyCallable 路径，而 R1/R2/R3 的 terminator 用了 lambda
-# （原 test_phase4_parity.py 同样 broken，其 parity_results fixture 在 R1 处崩溃
-# 致 pytest 全 error）。6.0 是框架重构，不修复 case；此处用容错 fixture 让
-# broken case 显示为 skip（而非让整个 fixture 崩溃），其余 24 case 正常验证。
-# R1/R2/R3 的修复（改用 Expr 路径，R2 因依赖 lst 可能需 Adapter）建议 PM 单独任务处理。
+# **工程处理**：
+# R1/R2/R3 的 terminator 用了 lambda（PyCallable 路径已删除），当前 construct-rs
+# 下 broken。此处用容错 fixture 让 broken case 显示为 skip（而非让整个 fixture
+# 崩溃），其余 24 case 正常验证。R2 依赖 lst 内容，修复需 Adapter 类机制。
 @pytest.fixture(scope="module")
 def parity_results(venv_pair):
     """预跑全部 case × impl，失败 case 记录 error（不崩溃）。"""
@@ -628,9 +622,9 @@ def test_parity_roundtrip_fidelity(parity_results, case_id: str, desc: str):
 # ---------------------------------------------------------------------------
 
 def _run_standalone():
-    """直接执行（python tests/parity/test_phase4_array_parity.py）时的入口。"""
+    """直接执行（python tests/parity/test_array_parity.py）时的入口。"""
     print("=" * 78)
-    print("Phase 4 Array 系列 构造器 Python 行为一致性测试")
+    print("Array 系列 构造器 Python 行为一致性测试")
     print("=" * 78)
     print(f"Python (rs): {_RS_PYTHON_EXE}")
     print(f"Python (py): {_PY_PYTHON_EXE}")

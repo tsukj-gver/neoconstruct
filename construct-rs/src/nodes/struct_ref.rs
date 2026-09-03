@@ -1,7 +1,5 @@
 //! StructRefNode：嵌套引用节点。
 //!
-//! 设计依据：`docs/架构设计.md` §C.3.5、§B.7、`docs/设计修订-parse路径优化.md` §3.4。
-//!
 //! ## 用途
 //!
 //! 引用另一个 `StructMixin` 子类的执行树，用于嵌套结构（`Outer.inner: Inner`）。
@@ -18,10 +16,10 @@
 //!   [`StructRefNode::resolve_schema`] 通过 `cls._construct_compiled` 获取 NodeB 产物。
 //! - **缓存**：`OnceLock` 首次解析后缓存，后续调用零查找开销。
 //!
-//! ## parse 委托（R4，§3.4）
+//! ## parse 委托
 //!
 //! StructRefNode.parse 直接委托对方 root StructNode.parse——对方 root 内部已通过
-//! R4 流程构造实例（create_class → getattr `__dict__` → 填充 dict）。无需 Rust→Python 回调。
+//! 借用实例 `__dict__` 流程构造实例（create_class → getattr `__dict__` → 填充 dict）。无需 Rust→Python 回调。
 //! 内层含表达式时创建 `new_child_placeholder`（零 PyDict 分配），内层 parse
 //! 自行 inject 实例 dict。
 
@@ -41,7 +39,7 @@ use super::Construct;
 /// 存储类引用（`Py<PyType>`），运行时通过 `cls._construct_compiled` 动态获取对方的
 /// [`CompiledSchema`]。首次解析后缓存到 `schema_cache`，后续调用零查找开销。
 ///
-/// # parse 行为（R4 §3.4）
+/// # parse 行为
 ///
 /// 1. [`StructRefNode::resolve_schema`] 获取对方执行树。
 /// 2. 委托对方 `root.parse(...)`——对方 StructNode.parse 内部已构造实例
@@ -61,9 +59,9 @@ use super::Construct;
 ///
 /// # sizeof
 ///
-/// `[设计质疑]` 当前 [`Construct`] trait 的 sizeof 签名不含 `Python` 参数，
-/// 无法在 sizeof 中获取 GIL 来解析引用。StructRefNode 的 sizeof 返回 Err。
-/// 若需支持嵌套 sizeof，需在后续子任务修改 trait 签名（给 sizeof 加 py 参数）。
+/// 当前 [`Construct`] trait 的 sizeof 签名不含 `Python` 参数，
+/// 无法在 sizeof 中获取 GIL 来解析引用，因此 StructRefNode 的 sizeof 返回 Err
+/// （嵌套 sizeof 暂不支持）。
 #[derive(Debug)]
 pub struct StructRefNode {
     /// 对方类的 Python 引用（`StructMixin` 子类）。
@@ -162,10 +160,10 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // MF-2 修复：当内层结构含表达式时，创建 child context 隔离 dict/expr_values，
+        // 当内层结构含表达式时，创建 child context 隔离 dict/expr_values，
         // 避免内层表达式污染外层的 context（expr_values、PyDict 字段）。
         //
-        // R4 优化：child_ctx 用 new_child_placeholder（零 PyDict 分配），内层
+        // child_ctx 用 new_child_placeholder（零 PyDict 分配），内层
         // StructNode.parse 会先创建实例并 inject 实例 dict 到 child_ctx。
         // parent 链保持正确（用于嵌套 `_` 引用）。
         let inner_has_expr = root.has_expressions();
@@ -190,7 +188,7 @@ impl Construct for StructRefNode {
         let schema_bound = schema.bind(py);
         let root = schema_bound.get().root();
 
-        // MF-2 修复：同 parse 方向，内层含表达式时创建 child context。
+        // 同 parse 方向，内层含表达式时创建 child context。
         let inner_has_expr = root.has_expressions();
         if inner_has_expr {
             let mut child_ctx =
@@ -205,7 +203,7 @@ impl Construct for StructRefNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // [设计质疑] sizeof 签名无 py 参数，无法解析引用获取对方 schema。
+        // sizeof 签名无 py 参数，无法解析引用获取对方 schema。
         // 对应 Python construct 的 SizeofError（嵌套引用大小未知）。
         Err(ConstructError::Generic {
             message: "StructRefNode size cannot be determined without resolving the reference"
@@ -479,7 +477,7 @@ class {name}:
             install_schema_for_class(py, &inner_cls, vec![("x".to_string(), u8_node())]);
 
             // Outer: { tag: Int8ub, inner: Inner }
-            // Outer 是用户类实例：parse 产出 Outer 实例（方案 B'）
+            // Outer 是用户类实例：parse 产出 Outer 实例
             let outer_cls = define_test_class(py, "Outer", &["tag", "inner"]);
             let outer_fields = vec![
                 ("tag".to_string(), u8_node()),
@@ -502,7 +500,7 @@ class {name}:
             let result = root_node
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
-            // 方案 B'：parse 返回 Outer 类实例（不是 dict）
+            // parse 返回 Outer 类实例（不是 dict）
             let inst = result.bind(py);
             assert!(
                 inst.is_instance(outer_cls.bind(py)).expect("is_instance"),

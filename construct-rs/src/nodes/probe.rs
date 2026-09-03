@@ -1,6 +1,5 @@
 //! ProbeNode：调试探针节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P0.md` §5.2.2。
 //! Python 参考：`construct/construct/debug.py` `Probe`（L6-95）。
 //!
 //! ## 行为概述
@@ -8,19 +7,15 @@
 //! Probe 在 parse/build/sizeof 时调用 `printout`：输出分隔线 + path +
 //! 可选 stream peek + 可选 context dump，然后返回 Py_None（parse）/ no-op（build）。
 //!
-//! ## [设计质疑] into 字段类型：FieldName 代替 ExprProgram
+//! ## into 字段类型：FieldName 代替 ExprProgram
 //!
-//! 设计文档 §5.2.2 原文为 `into: Option<ExprProgram>`，但 ExprProgram 仅支持 i64
-//! 求值（要支持任意 Python 对象需新增 ~30 行 `eval_expr_any`）。
+//! `into` 用 `Option<FieldName>` 而非 `Option<ExprProgram>`：ExprProgram 仅支持 i64
+//! 求值，而 Probe.into 的实际用例是"调试打印某字段的值"（任意类型），与 Switch
+//! FieldRef 同模式（`ctx.get_field(name)` → PyObject），FieldName 更直接地满足
+//! 用例且无需扩展 expr.rs。
 //!
-//! Probe.into 的实际用例是"调试打印某字段的值"（任意类型），与 Switch FieldRef 同模式
-//! （`ctx.get_field(name)` → PyObject）。
-//!
-//! 改用 `Option<FieldName>` 更直接地满足用例，避免扩展 expr.rs。设计文档 D-P0-2
-//! "推荐扩展"的动机仅是"ExprProgram 限 i64 限制 Probe 可用性"——FieldName 已无此限制。
-//!
-//! Parity 影响：Probe(lambda ctx: complex_expr) 不支持（与 ADR-014 一致，所有
-//! "动态值"位置不接 callable）。Probe(some_field) 完全支持，且支持任意类型字段。
+//! Parity 影响：Probe(lambda ctx: complex_expr) 不支持（所有"动态值"位置不接
+//! callable）。Probe(some_field) 完全支持，且支持任意类型字段。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -44,7 +39,7 @@ use super::Construct;
 /// # 字段说明
 ///
 /// - `into`：可选字段名（任意类型字段引用），求值后 repr 打印。None 表示打印整个 context。
-///   （[设计质疑] 用 `FieldName` 而非 `ExprProgram`，详见模块级注释）
+///   （用 `FieldName` 而非 `ExprProgram`，详见模块级注释）
 /// - `lookahead`：可选 peek 字节数。None 表示不 peek。
 #[derive(Debug)]
 pub struct ProbeNode {

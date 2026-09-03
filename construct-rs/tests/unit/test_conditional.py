@@ -1,6 +1,4 @@
-"""Phase 7.1 Conditional 构造器 Python 用户面单元测试。
-
-设计依据：docs/design/模块设计/模块设计-Conditional.md §10.2 / §11
+"""Conditional 构造器 Python 用户面单元测试。
 
 测试范围：
 1. Descriptor 构造器属性
@@ -47,15 +45,15 @@ requires_rust = pytest.mark.skipif(
 
 
 # ============================================================================
-# 异常类导出（设计 §1 / _errors.py 更新）
+# 异常类导出
 # ============================================================================
 
 
 class TestExplicitSelectError:
-    """ExplicitError / SelectError 异常类导出（REV P1 硬前置）。"""
+    """ExplicitError / SelectError 异常类导出。"""
 
     def test_explicit_error_class_exists(self):
-        """_errors.py 含 ExplicitError 类定义（REV P1）。"""
+        """_errors.py 含 ExplicitError 类定义。"""
         assert ExplicitError.__name__ == "ExplicitError"
         # 继承自 ConstructError
         from construct import ConstructError
@@ -63,7 +61,7 @@ class TestExplicitSelectError:
         assert issubclass(ExplicitError, ConstructError)
 
     def test_select_error_class_exists(self):
-        """_errors.py 含 SelectError 类定义（REV P1）。"""
+        """_errors.py 含 SelectError 类定义。"""
         assert SelectError.__name__ == "SelectError"
         from construct import ConstructError
 
@@ -153,7 +151,7 @@ class TestSwitchDescriptor:
         assert desc.default is Int8ub
 
     def test_constructor_rejects_callable(self):
-        """callable keyfunc（lambda）→ CompilationError（PM 决策 1）。"""
+        """callable keyfunc（lambda）→ CompilationError。"""
         from construct import CompilationError
 
         with pytest.raises(CompilationError):

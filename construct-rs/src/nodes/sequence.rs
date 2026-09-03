@@ -1,6 +1,5 @@
 //! SequenceNode：位置序字段序列节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §4。
 //! Python 参考：`construct/construct/core.py` `Sequence`（L2329-2487）。
 //!
 //! ## 行为概述
@@ -11,11 +10,11 @@
 //! - parse：context nesting；空 PyList；遍历 fields：field.parse → append；
 //!   命名字段写入 child_ctx；StopField 哨兵捕获 break；返回 PyList
 //! - build：context nesting；obj 是 list；遍历 fields：next(iter) 取元素；
-//!   命名字段前置写入；RO 字段走 compute_ro_value（不从 list 取，C-1）；
+//!   命名字段前置写入；RO 字段走 compute_ro_value（不从 list 取值）；
 //!   StopField 哨兵捕获 break
 //! - sizeof：sum 字段 sizeof（context nesting 仅影响字段引用，sizeof 用父 ctx）
 //!
-//! ## C-1：RO 字段不从 list 取值（parity 差异，设计 §4.8 SQ-7）
+//! ## RO 字段不从 list 取值（parity 差异）
 //!
 //! Python core.py L2410 对所有 subcons 都 `next(objiter)`，含 RO 字段（Check/Computed
 //! 等），故 Python 用户需传 `[1, None, 2]`（list 含 RO 字段占位 None）。
@@ -41,7 +40,7 @@ pub struct SequenceField {
     pub node: Node,
     /// 字段模式（ro/rw；与 StructNode FieldMode 同脉络，仅 Rw/Ro 使用）。
     /// RO 字段（Check/Computed/Tell/Rebuild 等）在 build 时不从 list 取值，
-    /// 走 compute_ro_value（C-1）。
+    /// 走 compute_ro_value。
     pub field_kind: FieldMode,
 }
 
@@ -176,7 +175,7 @@ impl Construct for SequenceNode {
 
         let mut iter = obj_list.iter().peekable();
         for (idx, field) in self.fields.iter().enumerate() {
-            // C-1：RO 字段不从 list 取值（走 compute_ro_value），list 不含占位。
+            // RO 字段不从 list 取值（走 compute_ro_value），list 不含占位。
             let build_obj: Py<PyAny> = if field.field_kind == FieldMode::Ro {
                 field.node.compute_ro_value(py, stream, &child_ctx, path)?
             } else {
@@ -261,7 +260,7 @@ mod tests {
 
     #[test]
     fn parse_returns_list() {
-        // SQ-1: Sequence(Byte, Byte).parse(b'\x01\x02') → [1, 2]
+        // Sequence(Byte, Byte).parse(b'\x01\x02') → [1, 2]
         with_py(|py| {
             let node = make_simple_sequence(py);
             let mut stream = ParseStream::new(&[0x01, 0x02]);
@@ -279,7 +278,7 @@ mod tests {
 
     #[test]
     fn build_from_list() {
-        // SQ-2: Sequence(Byte, Byte).build([1, 2]) → b'\x01\x02'
+        // Sequence(Byte, Byte).build([1, 2]) → b'\x01\x02'
         with_py(|py| {
             let node = make_simple_sequence(py);
             let obj = py.eval_bound("[1, 2]", None, None).expect("list");
@@ -294,7 +293,7 @@ mod tests {
 
     #[test]
     fn build_short_list_raises() {
-        // SQ-8: Sequence(Byte, Byte).build([1]) → 错误
+        // Sequence(Byte, Byte).build([1]) → 错误
         with_py(|py| {
             let node = make_simple_sequence(py);
             let obj = py.eval_bound("[1]", None, None).expect("list");
@@ -310,7 +309,7 @@ mod tests {
 
     #[test]
     fn build_long_list_uses_prefix() {
-        // SQ-9: Sequence(Byte, Byte).build([1, 2, 3]) → b'\x01\x02'（多余忽略）
+        // Sequence(Byte, Byte).build([1, 2, 3]) → b'\x01\x02'（多余忽略）
         with_py(|py| {
             let node = make_simple_sequence(py);
             let obj = py.eval_bound("[1, 2, 3]", None, None).expect("list");
@@ -325,7 +324,7 @@ mod tests {
 
     #[test]
     fn build_non_list_raises() {
-        // SQ-10: build(None) → 错误
+        // build(None) → 错误
         with_py(|py| {
             let node = make_simple_sequence(py);
             let obj = py.eval_bound("None", None, None).expect("None");
@@ -341,7 +340,7 @@ mod tests {
 
     #[test]
     fn sizeof_returns_sum() {
-        // SQ-11: Sequence(Byte, Byte).sizeof() → 2
+        // Sequence(Byte, Byte).sizeof() → 2
         with_py(|py| {
             let node = make_simple_sequence(py);
             let ctx = Context::placeholder(py);
@@ -351,7 +350,7 @@ mod tests {
 
     #[test]
     fn build_with_named_field_writes_context() {
-        // SQ-3: Sequence("count"/Byte, Byte).build([3, 99])
+        // Sequence("count"/Byte, Byte).build([3, 99])
         // 这里第二个字段用 Bytes(count) 表达式会触发 has_expressions=true，
         // 但简化测试仅验证命名字段不破坏 build 流程。
         with_py(|py| {

@@ -1,6 +1,5 @@
 //! FlagsEnumNode：标志位枚举节点。
 //!
-//! 设计依据：`docs/design/模块设计/模块设计-Phase8-P1P2.md` §1.3.2。
 //! Python 参考：`construct/construct/core.py` `FlagsEnum`（L2018-2109）。
 //!
 //! ## 行为概述
@@ -108,7 +107,7 @@ impl Construct for FlagsEnumNode {
         path: &mut Path,
     ) -> Result<(), ConstructError> {
         let int_val: i64 = if obj.is_instance_of::<PyLong>() {
-            // int 直接用（含 bool：Python bool 是 int 子类，C-6 同 Enum 处理）。
+            // int 直接用（含 bool：Python bool 是 int 子类，同 Enum 处理）。
             obj.extract().map_err(|_| ConstructError::Generic {
                 message: "FlagsEnum build: int obj extract failed".to_string(),
                 path: path.to_string(),
