@@ -830,7 +830,10 @@ p = StringPacket.parse(b"hello\x00world")
 **做什么**：在父 Struct 中嵌入子 Struct（包括 BitStruct），并访问子 Struct 的字段。
 
 **已知限制**：`Computed` / `Switch` 的表达式**不能跨层引用子 BitStruct/Struct 字段**。
-表达式只能引用同 Struct 内的兄弟字段（siblings）。
+表达式只能引用同 Struct 内的兄弟字段（siblings）。此外，嵌套 `StructMixin` 子类的
+类体也无法引用外层字段名（Python 类体作用域，报 `NameError`）——跨层引用整体
+不支持，请在同层预计算（`Computed`）或 parse 后在 Python 层运算。
+`field(..., context=...)` 参数当前未实现（保留位），请勿依赖。
 
 **错误示例**（编译失败）：
 

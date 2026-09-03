@@ -52,6 +52,7 @@ PENDING → DESIGNING → DESIGN_REVIEW → CODING → CODE_REVIEW → ACCEPTED 
 - **§0 不可违反**：parse 返回 dict 跨 FFI / build 接收 dict 跨 FFI / 引入输入输出 trait 抽象层 → 立即驳回（详见 `harness/experiences.md §L-01`）
 - **质量门禁**（每次出口必须通过）：`cargo build` + `cargo clippy`（零 warning）+ `cargo fmt --check` + `cargo test`（全 PASS）。详见 `developer.md §自检清单`
 - **Rust 编码红线**：禁止 `unwrap()`/`expect()`/panic 在非测试代码 / 禁止 `TODO`/`FIXME` / 禁止硬编码魔法数字 / 所有 `pub` 项必须有 `///` 文档注释 / parse/build 对称。详见 `developer.md §Rust 编码红线`
+- **权限执行红线**：禁止用 bash/终端绕过 edit/write 工具的权限白名单（拦截即停止并上报 PM）；REV/VET/AUDITOR 不编写任何代码（含探针/验证脚本——需要时移交 PM 分派 DEV）；项目产物与环境依赖禁止放工作区外临时目录。详见 `harness/experiences.md §L-15`
 - **跨阶段决策**：所有新功能设计不可违反 `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）
 - **阶段依赖**：依赖阶段未完成验收时禁止开始后续阶段子任务
 - **Git 禁止**：所有角色禁止 `git push`；REV/VET/AUDITOR 禁止任何 git 写操作（详见 `pm.md §提交规范`）

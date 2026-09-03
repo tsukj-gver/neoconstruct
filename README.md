@@ -83,6 +83,13 @@ maturin develop --release
 
 > 完整状态见 `docs/constructors-inventory.csv`。
 
+## 已知限制
+
+- **跨层引用**：嵌套 `StructMixin` 子类的类体在 Python 类体作用域求值，无法引用外层字段名（报 `NameError`）——construct-rs 不支持跨层字段引用，与原版 construct 的嵌套 `this` 语义同样隔离。变通：把所需字段提升到同一层，或在外层用 `Computed(...)` 预计算，或 parse 后在 Python 层做属性运算。注意：`field(..., context=...)` 参数当前未实现（保留位），请勿依赖。
+- v0.1.1 起 `Switch` / `If` / `IfThenElse` / `Computed` / `Bytes(len)` / `Array(count)` 等表达式消费者**可嵌套于包装器内**（`Prefixed` / `PrefixedArray` / `Bitwise` / `Hex` / `Select` 等），表达式引用同 Struct 前序字段。例外：`Union` 内的表达式引用外层字段暂不可用（Union 解析使用隔离 context，属已知边界）。
+- `Select` 的 `default=Pass` 分支命中时提前返回 `None`（与原版行为一致，非缺陷）。
+- 值提供型构造器（`Const` / `Default` / `Rebuild` / `Computed` / `Padding`）作为 `field()`/`wfield()` 时，v0.1.1 起自动获得隐式 `default=None` + `kw_only=True`（实例化不再强制实参；build 由节点层补值）。mypy/pyright strict 下与 `int` 注解会有告警，可显式传 `default=` 或注解写 `int | None`。
+
 ## 文档
 
 ### 用户面（用 construct-rs 实现协议）
@@ -100,7 +107,7 @@ maturin develop --release
 |------|------|
 | `AGENTS.md` | 项目级 System Rules（最高优先级，全员必读） |
 | `harness/MEMORY.md` | 长期记忆 L0 索引（项目定位 / 阶段索引 / 教训索引 / 性能快照） |
-| `harness/experiences.md` | L1 教训（L-01~L-14 模式化失败，决策前对照） |
+| `harness/experiences.md` | L1 教训（L-01~L-15 模式化失败，决策前对照） |
 | `docs/decisions/` | L2 决策记录（ADR-001~ADR-NNN） |
 | `docs/design/` | 设计文档（模块设计 + 基础设施） |
 | `plans/phaseN/总纲.md` | 各阶段单一事实源 |
@@ -114,7 +121,6 @@ construct-rs/     # Rust 内核 + Python 包源码（交付物）
   ├── python/     # Python 用户面包（import construct 入口）
   ├── tests/      # Rust 单元测试 + Python 集成测试
   └── bench/      # 性能基准
-construct/        # Python construct 原版参考仓库（只读）
 docs/             # 设计 / 决策 / 审查 / 规范 / CSV 清单
 plans/            # 阶段总纲 + 过程记录
 harness/          # LTM（MEMORY / experiences / manifests / extensions）
@@ -122,6 +128,8 @@ testing/          # CI 门禁脚本（L1 质量 / L2 功能 / L3 性能 / L4 一
 experiments/      # 实验代码（性能调查 / SKILL 验证）
 .opencode/        # agents + skills 配置
 ```
+
+> parity 测试的原版参考实现是 `PC_PYTHON` 指向的 venv 中 pip 安装的 `construct==2.10.70`（工作区内无原版仓库 checkout）。
 
 ## 质量门禁
 
@@ -132,6 +140,17 @@ cargo build && cargo clippy --all-targets -- -D warnings && cargo fmt --check &&
 ```
 
 详见 `testing/ci/`（L1 质量 / L2 功能 / L3 性能 / L4 一致性）。
+
+### 测试环境变量
+
+parity / system 测试需要两个 Python 解释器，通过环境变量指定：
+
+| 变量 | 指向 | 用途 |
+|------|------|------|
+| `PC_PYTHON` | 安装了 `construct==2.10.70` 的 venv 的 python.exe | parity 测试的原版参考实现（推荐 `construct-rs/.venv-pc`） |
+| `CRS_PYTHON` | 安装了 construct-rs 扩展的 venv 的 python.exe | system 测试的 construct-rs 实现（推荐 `construct-rs/.venv`） |
+
+未设置时回退 `sys.executable`（仅当该解释器已装对应包时可用）。换机运行测试前必须设置，否则 system parity 会因找不到原版 construct 而失败。
 
 ## 项目状态
 

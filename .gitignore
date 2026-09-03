@@ -28,3 +28,4 @@ __pycache__/
 
 # Windows debug symbols
 *.pdb
+.venv-pc/
