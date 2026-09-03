@@ -437,9 +437,9 @@ DEV 实施时确认 Python 用户面导出 `If` 名字（与原版 API 一致）
 |---|------|---------|
 | IF-1 | `cond = True`（常量）| 编译期分类为 `Always`，运行时零求值，直接走 then |
 | IF-2 | `cond = False`（常量）| 编译期分类为 `Never`，运行时零求值，直接走 else |
-| IF-3 | `cond = this.x > 0`，x=5 | Expr 求值=1 → 走 then |
-| IF-4 | `cond = this.x > 0`，x=0 | Expr 求值=0 → 走 else |
-| IF-5 | `cond = this.x > 0`，x 字段缺失 | `ExprFieldMissing`（与 Computed/StopIf 同路径） |
+| IF-3 | `cond = x > 0`，x=5 | Expr 求值=1 → 走 then |
+| IF-4 | `cond = x > 0`，x=0 | Expr 求值=0 → 走 else |
+| IF-5 | `cond = x > 0`，x 字段缺失 | `ExprFieldMissing`（与 Computed/StopIf 同路径） |
 | IF-6 | `cond` 是 Expr，调 sizeof | 返回 `Generic`（SizeofError 等价）—— 无法在 sizeof 接口求值 |
 | IF-7 | then_sub 与 else_sub sizeof 不一致 | 由 cond 决定运行时选谁；sizeof 仅常量路径返回确定值 |
 | IF-8 | then_sub.parse 失败 | 错误向上传播（含 path，由 StructNode 重建） |
@@ -455,15 +455,15 @@ keyfunc 返回值类型决定实现路线。三条候选路线（分析报告 §
 
 | 路线 | keyfunc 形态 | cases 匹配方式 | FFI | 用户面兼容 |
 |------|-------------|---------------|-----|----------|
-| **A（ExprProgram i64）** | `this.n`（int 字段）/ int 常量 | Rust 内 i64 == | 零 | 仅 int key |
-| **B（FieldRef + PyObject）** | `this.fieldname`（任意类型） | PyObject `__eq__` | N 次（N=cases） | int/str/bytes |
+| **A（ExprProgram i64）** | `n`（int 字段）/ int 常量 | Rust 内 i64 == | 零 | 仅 int key |
+| **B（FieldRef + PyObject）** | `fieldname`（任意类型） | PyObject `__eq__` | N 次（N=cases） | int/str/bytes |
 | **C（PyCallable）** | 任意 lambda | Rust→Python 回调 | 1+ 次 | 完全兼容 |
 
 **PM 决策 1**：接受 A+B 混合，拒绝 C。理由（分析报告 §C.1）：
 - ADR-014/022 脉络（RepeatUntil v5 删 PyCallable / AdapterCallback 拒绝任意 callable）
 - 路线 A 覆盖 int key 主流场景（最常见用法）
 - 路线 B 扩展 str/bytes key，cases 通常 ≤5 个，FFI 开销可接受
-- 复杂表达式（`this.x + 1`）编译期拒绝，引导用户用 Computed 预计算
+- 复杂表达式（`x + 1`）编译期拒绝，引导用户用 Computed 预计算
 
 ### 3.2 编译期 keyfunc 分类
 
@@ -473,12 +473,12 @@ Python 用户面：`Switch(keyfunc, cases, default=Pass)`。`keyfunc` 在 `__ini
 | keyfunc 形式 | 编译期分类 | expr_programs 提供的形态 | Rust 路线 |
 |-------------|-----------|------------------------|----------|
 | `1`（int 常量）/ `True`/`False` | 常量 | `None`（无表达式） | `SwitchKey::ConstInt(i64)` |
-| `this.n`（单字段引用，n 是 int 字段） | 单字段 int 表达式 | `{"key": [GetInt(idx)]}` | `SwitchKey::IntExpr(ExprProgram)` |
-| `this.tag`（单字段引用，tag 是 str/bytes 字段） | 单字段 ref（非 int 表达式） | `{"key_field": "tag"}` 字符串 | `SwitchKey::FieldRef(FieldName)` |
-| `this.x + 1` / `this.tag.lower()` / 任意 lambda | 复杂表达式 | 编译期拒绝 | — |
+| `n`（单字段引用，n 是 int 字段） | 单字段 int 表达式 | `{"key": [GetInt(idx)]}` | `SwitchKey::IntExpr(ExprProgram)` |
+| `tag`（单字段引用，tag 是 str/bytes 字段） | 单字段 ref（非 int 表达式） | `{"key_field": "tag"}` 字符串 | `SwitchKey::FieldRef(FieldName)` |
+| `x + 1` / `tag.lower()` / 任意 lambda | 复杂表达式 | 编译期拒绝 | — |
 
 **编译期拒绝逻辑**：Python 侧识别 keyfunc 不是常量、不是单 FieldRef、不是单 int ExprRef 时，
-抛 `CompilationError`，引导用户用 `"key" / Computed(this.x + 1)` 预计算后再 `Switch(this.key, ...)`。
+抛 `CompilationError`，引导用户用 `"key" / Computed(x + 1)` 预计算后再 `Switch(key, ...)`。
 此约束与 ADR-014 强制表达式的硬约束同脉络（构造器内部决策不背 PyCallable 包袱）。
 
 ### 3.3 struct 定义
@@ -488,10 +488,10 @@ Python 用户面：`Switch(keyfunc, cases, default=Pass)`。`keyfunc` 在 `__ini
 ///
 /// 编译期从用户面 keyfunc 分类：
 /// - `ConstInt(k)`：常量 int key（罕见，主要用于调试）
-/// - `IntExpr(prog)`：单字段 int 表达式（`this.n`，n 是 int 字段）→ 路线 A（零 FFI）
-/// - `FieldRef(name)`：单字段引用（`this.tag`，tag 是 str/bytes 字段）→ 路线 B（PyObject __eq__）
+/// - `IntExpr(prog)`：单字段 int 表达式（`n`，n 是 int 字段）→ 路线 A（零 FFI）
+/// - `FieldRef(name)`：单字段引用（`tag`，tag 是 str/bytes 字段）→ 路线 B（PyObject __eq__）
 ///
-/// 复杂表达式（`this.x + 1`）编译期拒绝（引导用户用 Computed 预计算）。
+/// 复杂表达式（`x + 1`）编译期拒绝（引导用户用 Computed 预计算）。
 #[derive(Debug, Clone)]
 pub enum SwitchKey {
     /// 常量 int key（编译期已知）。
@@ -760,11 +760,11 @@ Rust 收到的 `desc.default` 已是 `PassDescriptor` 或其他 Node Descriptor�
 | # | 场景 | 预期行为 |
 |---|------|---------|
 | SW-1 | `cases = {}`（空）+ `default=Pass` | 任意 key 都走 default（Pass） |
-| SW-2 | `keyfunc = this.n`，n=2，cases={1:A, 2:B} | IntExpr 求值=2 → 快速路径匹配 B |
-| SW-3 | `keyfunc = this.n`，n=99，cases={1:A, 2:B} | 快速路径全部未命中 → default |
-| SW-4 | `keyfunc = this.n`，n 字段缺失 | `ExprFieldMissing` |
-| SW-5 | `keyfunc = this.tag`，tag="foo"，cases={"foo":A, "bar":B} | FieldRef 读 PyObject → 慢路径 `__eq__` 匹配 A |
-| SW-6 | `keyfunc = this.tag`，tag="x"，cases={"foo":A} | 慢路径 `__eq__` 全部 false → default |
+| SW-2 | `keyfunc = n`，n=2，cases={1:A, 2:B} | IntExpr 求值=2 → 快速路径匹配 B |
+| SW-3 | `keyfunc = n`，n=99，cases={1:A, 2:B} | 快速路径全部未命中 → default |
+| SW-4 | `keyfunc = n`，n 字段缺失 | `ExprFieldMissing` |
+| SW-5 | `keyfunc = tag`，tag="foo"，cases={"foo":A, "bar":B} | FieldRef 读 PyObject → 慢路径 `__eq__` 匹配 A |
+| SW-6 | `keyfunc = tag`，tag="x"，cases={"foo":A} | 慢路径 `__eq__` 全部 false → default |
 | SW-7 | cases key 类型与 keyfunc 返回不匹配（int keyfunc, str cases） | 快速路径 i64 != None（cases.key_int 全 None）→ 慢路径（key_py=None 不走）→ default |
 | SW-8 | `default=Error`（Python） | **Phase 7 不支持**——Error 构造器未实现。文档化为已知限制 |
 | SW-9 | IntExpr 路径 sizeof 调用 | 返回 `Generic`（无法求值） |
@@ -1162,7 +1162,7 @@ impl Construct for FocusedSeqNode {
         // sizeof 接口无 py token，无法 new_child（new_child 需要 py 创建 PyDict）。
         // 替代：直接在父 ctx 上 sum sizeof（context nesting 仅影响字段间引用，
         // 不影响静态 sizeof——Python L3265 也是 sum(sc._sizeof for sc in subcons)）。
-        // 字段间引用的 sizeof（如 Padding(lambda this: this.count)）通过 ExprProgram 求值，
+        // 字段间引用的 sizeof（如 `Padding(count)`）通过 ExprProgram 求值，
         // 但 ExprProgram 求值需要 py——sizeof 接口的限制使此类场景返回 Err（与 Python 一致：
         // Python L3266-3267 except (KeyError, AttributeError) → SizeofError）。
         let mut total = 0usize;
@@ -1585,7 +1585,7 @@ assert d2.build(4) == b"\x04\x00\x00\x00"
 |---|------|------|------|
 | D1 | Python 用户 Adapter 回调抛 ExplicitError → Rust 侧 `From<PyErr>` 转 Generic → Select/Peek 吞掉 | `From<PyErr> for ConstructError`（error.rs L942）统一转 Generic，丢失类型信息 | Phase 7 不修复（影响小）；文档化；未来 Phase 8+ 修复 `From<PyErr>` 保留 Python 异常类映射 |
 | D2 | `Switch default=Error` 不支持 | Python `Error` 构造器 core.py 未定义类，Phase 7 不实现 | 文档化；default 仅接 Pass 或已实现 Node |
-| D3 | `Switch keyfunc = this.x + 1`（复杂表达式）编译期拒绝 | PM 决策 1：拒绝 PyCallable，引导用户用 Computed 预计算 | 编译期 `CompilationError` + 错误消息引导 |
+| D3 | `Switch keyfunc = x + 1`（复杂表达式）编译期拒绝 | PM 决策 1：拒绝 PyCallable，引导用户用 Computed 预计算 | 编译期 `CompilationError` + 错误消息引导 |
 | D4 | FocusedSeq sizeof 不做 context nesting | sizeof 接口无 py token，无法 new_child | 字段大小依赖嵌套 ctx 时返回 Err（对齐 Python SizeofError） |
 | D5 | Pointer `stream` 参数（换流）不支持 | （Phase 7.2 范围，本设计不涉及） | 7.2 文档化 |
 | D6 | Select build 在 temp BuildStream 上尝试（无 sub-stream seek） | construct-rs BuildStream 是 Vec<u8>，temp 失败即丢弃 | 与 Python temp BytesIO 行为等价 |

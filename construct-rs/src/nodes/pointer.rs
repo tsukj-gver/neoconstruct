@@ -82,7 +82,7 @@ pub struct PointerNode {
 pub enum PointerOffset {
     /// 编译期常量（如 `Pointer(8, Bytes(1))`）。
     Const(i64),
-    /// 表达式（如 `Pointer(this.off, Bytes(1))`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
+    /// 表达式（如 `Pointer(off, Bytes(1))`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
     Expr(ExprProgram),
 }
 

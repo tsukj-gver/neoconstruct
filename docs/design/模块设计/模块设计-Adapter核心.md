@@ -304,7 +304,7 @@ impl Construct for RawCopyNode {
 ///
 /// Rebuild 的本质是"build 值不来自用户输入，而来自表达式求值"——与 `Computed`
 /// 同类（[`crate::nodes::computed::ComputedNode`]）。**Rebuild 必须作为 `FieldMode::Ro`
-/// 字段使用**（用户写 `count: int = rfield(Rebuild(Byte, this.items.length))`）。
+/// 字段使用**（用户写 `count: int = rfield(Rebuild(Byte, items.length))`）。
 ///
 /// 编译期校验：`RebuildDescriptor` 在 `_field_kind` 返回 `"ro"`（与 Computed/Tell 一致），
 /// 若用户用 `field(...)`（rw）或 `wfield(...)`（wo）包装，编译期拒绝。
@@ -660,9 +660,9 @@ pub struct AdapterCallbackNode {
 | RC-5 | `RawCopy(Int8ub).build({"unknown": 1})` | ConstructError::Generic（"both data and value keys are missing"） |
 | RC-6 | `RawCopy(Int8ub).build({})` | 同 RC-5 |
 | RC-build-1 | `RawCopy(Int8ub).build({"value": 255})` 返回值 | construct-rs build 不返回值，用户无法拿到 build 出的 raw bytes。**已知差异**（Python 返回 Container(data=...)）。记入 §5.3 |
-| RB-1 | `Rebuild(Byte, this.items.length).parse(b"\\x03")` | 返回 PyLong(3)（转发 inner.parse） |
-| RB-2 | `Rebuild(Byte, this.items.length)` 作为 RO 字段 build | 求值 items.length → 写入 context → inner.build(value) |
-| RB-3 | `Rebuild(Byte, this.items.length)` 表达式求值失败 | ExprFieldMissing 错误向上传播 |
+| RB-1 | `Rebuild(Byte, items.length).parse(b"\\x03")` | 返回 PyLong(3)（转发 inner.parse） |
+| RB-2 | `Rebuild(Byte, items.length)` 作为 RO 字段 build | 求值 items.length → 写入 context → inner.build(value) |
+| RB-3 | `Rebuild(Byte, items.length)` 表达式求值失败 | ExprFieldMissing 错误向上传播 |
 | RB-4 | 用户用 `field(Rebuild(...))`（RW 模式） | **编译期拒绝**（_field_kind 返回 "ro"） |
 | RB-5 | Rebuild 表达式含 lambda/callable | **编译期拒绝**（与 RepeatUntil v5 同硬约束，不接收 callable） |
 | PA-1 | `Pass.parse(b"")` | 返回 None |

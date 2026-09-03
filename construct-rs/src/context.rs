@@ -5,7 +5,7 @@
 //! ## 用途
 //!
 //! `Context` 用于：
-//! - 字段间引用（如 `Bytes(this.length)` 中 `this.length` 引用前序字段）。
+//! - 字段间引用（如 `Bytes(length)` 中 `length` 引用前序字段）。
 //! - 嵌套层传递（Python construct 的 `_` 指向外层 context）。
 //!
 //! ## Vec 化优化（Phase 2.5）
@@ -143,8 +143,8 @@ impl<'py> Context<'py> {
     /// [`Context::init_expr_values`] 按需初始化。
     /// 嵌套层可通过 `parent` 访问外层字段（对应 Python construct 的 `_`）。
     ///
-    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A），使
-    /// `this._index` 在嵌套 Struct 字段表达式中可读。
+    /// Phase 4：子 context 继承父的 `_index`（设计 §3.2.2 选项 A），嵌套
+    /// Struct 内 Index() 读到的是继承的下标。
     pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
         Ok(Self {
             fields: Some(PyDict::new_bound(py)),
@@ -411,7 +411,7 @@ impl<'py> Context<'py> {
         }
     }
 
-    /// 读取当前层字段（Phase 2 的 this.xxx 引用使用）。
+    /// 读取当前层字段（表达式字段引用使用）。
     ///
     /// 返回 `None` 表示当前层无此字段。注意：此方法**不**递归查找 parent。
     /// 读取父层字段应通过 `parent()` 显式获取父 context 后调用。
@@ -496,7 +496,7 @@ impl<'py> Context<'py> {
     ///
     /// 与 [`Context::get_int_at`](Self::get_int_at) 同样的快速路径，但返回
     /// 原始 PyObject 引用而非 i64。用于需要保留原对象（bytes/str/任意类型）的场景，
-    /// 如 ProcessXor 的 pad 表达式 `this.pad_field`（pad_field 可能是 int 或 bytes）。
+    /// 如 ProcessXor 的 pad 表达式 `pad_field`（pad_field 可能是 int 或 bytes）。
     ///
     /// # 性能
     ///

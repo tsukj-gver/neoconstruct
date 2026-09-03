@@ -1460,7 +1460,6 @@ def test_sequence_named_field_in_context():
 
 def test_sequence_with_stopif():
     # Sequence(Byte, StopIf(this[0]==1), Byte) → StopIf 触发时仅返回 [1]
-    # 注：construct-rs this[0] 语法用字段名/索引引用
     assert_parity_case("""
     from construct import Sequence, Byte, StopIf
     obj = Sequence(Byte, StopIf(lambda this: this[0]==1), Byte).parse(b'\\x01\\x02')

@@ -399,7 +399,7 @@ class TestIEC104ConstFields:
 class TestIEC104Parity:
     """parity vs Python construct 2.10.70（子进程隔离）。
 
-    Python 原版可用 ``this.cf1`` 表达式 + Switch 实现等价逻辑。
+    Python 原版可用 cf1 字段表达式 + Switch 实现等价逻辑。
     本测试仅对比 APCI 字段（start / apdu_length / frame_type / control_field 字段）。
     """
 

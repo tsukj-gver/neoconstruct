@@ -11,10 +11,11 @@
 //! ## 路线 A+B 混合（PM 决策 1）
 //!
 //! - 路线 A（[`SwitchKey::ConstInt`] / [`SwitchKey::IntExpr`]）：i64 key，
-//!   Rust 内 `==` 匹配（零 FFI）
+//!   Rust 内 `==` 匹配（零 FFI）；keyfunc 支持 int/bool 常量与字段名表达式
+//!   （含算术，如 `n + 1`）
 //! - 路线 B（[`SwitchKey::FieldRef`]）：PyObject key，`PyObject_RichCompare` 匹配
-//!   （每比较 1 FFI，N=cases 数）
-//! - 复杂表达式（`this.x + 1`）编译期拒绝（引导用户用 Computed 预计算）
+//!   （每比较 1 FFI，N=cases 数）；保留变体，当前编译路径仅产出路线 A
+//! - keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）
 //!
 //! ## sizeof 实现（设计 §3.5 注解）
 //!
@@ -40,10 +41,11 @@ use super::{Construct, Node};
 ///
 /// 编译期从用户面 keyfunc 分类：
 /// - `ConstInt(k)`：常量 int key（罕见，主要用于调试）
-/// - `IntExpr(prog)`：单字段 int 表达式（`this.n`，n 是 int 字段）→ 路线 A（零 FFI）
-/// - `FieldRef(name)`：单字段引用（`this.tag`，tag 是 str/bytes 字段）→ 路线 B（PyObject __eq__）
+/// - `IntExpr(prog)`：字段名 int 表达式（`n` 是 int 字段，含算术如 `n + 1`）→ 路线 A（零 FFI）
+/// - `FieldRef(name)`：单字段引用（`tag` 是 str/bytes 字段）→ 路线 B（PyObject __eq__）；
+///   保留变体，当前编译路径仅产出 ConstInt / IntExpr
 ///
-/// 复杂表达式（`this.x + 1`）编译期拒绝（引导用户用 Computed 预计算）。
+/// keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）。
 ///
 /// [设计质疑]：设计文档 §3.3 标注 `#[derive(Debug, Clone)]`，但 `FieldName`
 /// 未实现 `Clone`。删除 `Clone` derive，与 `IfThenElseNode` 等持有非 Clone
@@ -135,10 +137,10 @@ impl SwitchCase {
 ///    用 `PyObject_RichCompare` 求 `__eq__`（每比较 1 FFI）
 /// 3. **default 兜底**：全部未命中，委托 default subcon
 ///
-/// # 已知限制（与 Python 不完全 parity，设计 §12-D2/D3）
+/// # 已知限制（与 Python 不完全 parity，设计 §12-D2）
 ///
 /// - `default=Error` 不支持：Python 的 `Error` 构造器 Phase 7 不实现
-/// - `keyfunc = this.x + 1`（复杂表达式）编译期拒绝（引导用户用 Computed 预计算）
+/// - keyfunc 不接收 Python callable/lambda（ADR-014 硬约束）
 #[derive(Debug)]
 pub struct SwitchNode {
     /// keyfunc 编译期分类。
@@ -463,7 +465,7 @@ mod tests {
 
     #[test]
     fn parse_int_expr_key_matches_case() {
-        // SW-2: keyfunc=this.n, n=2, cases={1:A, 2:B} → 匹配 B (Int16ub)
+        // SW-2: keyfunc=n, n=2, cases={1:A, 2:B} → 匹配 B (Int16ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -493,7 +495,7 @@ mod tests {
 
     #[test]
     fn parse_int_expr_key_no_match_falls_to_default() {
-        // SW-3: keyfunc=this.n, n=99, cases={1:A, 2:B} → default (Pass)
+        // SW-3: keyfunc=n, n=99, cases={1:A, 2:B} → default (Pass)
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -549,7 +551,7 @@ mod tests {
 
     #[test]
     fn parse_field_ref_str_key_matches_case() {
-        // SW-5: keyfunc=this.tag, tag="foo", cases={"foo":A, "bar":B} → 匹配 A
+        // SW-5: keyfunc=tag, tag="foo", cases={"foo":A, "bar":B} → 匹配 A
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![
@@ -576,7 +578,7 @@ mod tests {
 
     #[test]
     fn parse_field_ref_no_match_falls_to_default() {
-        // SW-6: keyfunc=this.tag, tag="x", cases={"foo":A} → default
+        // SW-6: keyfunc=tag, tag="x", cases={"foo":A} → default
         with_py(|py| {
             use pyo3::types::PyString;
             let cases = vec![str_case(py, "foo", fmt_node(PythonFormat::UnsignedInt8Big))];

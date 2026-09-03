@@ -9,7 +9,7 @@
 //! 或从 list 构建 `count` 个元素的字节序列。
 //!
 //! - `count` 可以是编译期常量（[`CountSource::Const`]）或表达式程序
-//!   （[`CountSource::Expr`]`，如 `Array(this.length, Byte)`）。
+//!   （[`CountSource::Expr`]`，如 `Array(length, Byte)`）。
 //! - `discard=True` 时仍消耗流但不收集结果（返回空 list）。
 //! - 嵌套数组（Array 内 Array）：内层 `_index` 覆盖外层，循环结束后恢复。
 //!
@@ -40,7 +40,7 @@ use pyo3::types::PyList;
 pub enum CountSource {
     /// 编译期常量（如 `Array(5, Byte)`）。
     Const(usize),
-    /// 表达式程序（如 `Array(this.length, Byte)`，复用现有 ExprProgram）。
+    /// 表达式程序（如 `Array(length, Byte)`，复用现有 ExprProgram）。
     Expr(ExprProgram),
 }
 
@@ -674,7 +674,7 @@ mod tests {
 
     #[test]
     fn parse_expr_count_from_field() {
-        // Array(this.count, Byte) → count=3 → 读 3 字节
+        // Array(count, Byte) → count=3 → 读 3 字节
         with_py(|py| {
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
             let node = ArrayNode::new(byte_node(), CountSource::Expr(prog), false);

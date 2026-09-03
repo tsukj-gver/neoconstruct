@@ -365,8 +365,8 @@ class TestModbusParity:
     construct-rs 的 Checksum(StreamRange) 与 Python 原版的 Checksum(bytesfunc=RawCopy.data)
     路径不同但应产生相同的 parse/build 结果。
 
-    注：Python 原版 Checksum 的 bytesfunc 接收 context，``this.data[:-2]`` 引用
-    RawCopy 捕获的 raw bytes（剥掉末 2 字节 CRC）。本测试对比核心字段：
+    注：Python 原版 Checksum 的 bytesfunc 接收 context，引用 RawCopy 捕获的
+    raw bytes（剥掉末 2 字节 CRC）。本测试对比核心字段：
     address / function_code / payload.* / built bytes。
     """
 
@@ -533,7 +533,7 @@ def crc16(data):
                 crc >>= 1
     return bytes([crc & 0xFF, (crc >> 8) & 0xFF])
 
-# Python 原版 Checksum 的 bytesfunc 接收 context，引用 this._io 或 RawCopy dict.data
+# Python 原版 Checksum 的 bytesfunc 接收 context，可引用流位置或 RawCopy dict.data
 # 此处用最简单的形式：checksum 在帧末尾，bytesfunc 引用整个 raw bytes（剥末 2 字节）
 M = pc.Struct(
     'body' / pc.RawCopy(pc.Struct(

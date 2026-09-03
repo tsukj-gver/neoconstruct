@@ -1276,7 +1276,7 @@ class Packet(StructMixin):
     fields: ... = field(...)                          # 被校验数据（无 RawCopy 包装）
     end: int = rfield(Tell())                         # 标记结束
     checksum: bytes = rfield(Checksum(Bytes(32), HashAlgo.SHA256, start, end))
-    # 字段名直接引用 start/end（非 this.start/this.end，L-13 教训）
+    # 字段名直接引用 start/end（L-13 教训）
 ```
 
 **HashAlgo Python enum**（construct-rs 扩展）：
@@ -1644,7 +1644,7 @@ def test_checksum_python_callable_compat():
     # 路径 A2：Python callable + ContextBytes
     # d = Struct("fields" / RawCopy(Bytes(16)),
     #            "checksum" / Checksum(Bytes(32), lambda d: hashlib.sha256(d).digest(), this.fields.data))
-    # rs 与 py 行为一致（注：rs 端 bytesfunc 是字段名直接引用 fields.data，不是 this.fields.data）
+    # rs 与 py 行为一致（注：rs 端 bytesfunc 是字段名直接引用 fields.data）
     ...
 
 def test_checksum_mismatch_raises():

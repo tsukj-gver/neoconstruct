@@ -428,7 +428,7 @@ fn build_node_from_descriptor(
             // 从 expr_programs 取该字段的 "func" 参数
             let field_exprs = expr_programs.get(field_index).and_then(Option::as_ref);
             // expr_programs 中可能为 None：ComputedDescriptor 应总是有 "func" 表达式。
-            // 但若用户传入了常量（非 FieldRef/ExprRef），_extract_and_compile_exprs 不编译，
+            // 但若用户传入了不可编译常量（bytes/str 等；int 常量会编译为 Const），
             // 此时 expr_programs 对应位置为 None。理论上 Computed 总需要表达式，
             // 但为防御性，若为 None 视为编译错误。
             let field_exprs_dict =
@@ -579,9 +579,9 @@ fn build_node_from_descriptor(
         // - count 为 FieldRef/ExprRef → 从 expr_programs[field_index]["count"] 取 ExprOp 列表
         // 设计依据：`docs/模块设计-Array.md` §6.2.2。
         //
-        // 限制（设计 §6.2.2 P3.1）：inner subcon 不支持含表达式的子描述符
-        // （如 Array(N, Bytes(this.m))），与 Bitwise(Bytes(this.m)) 同根因——
-        // _extract_and_compile_exprs 不递归 inner。Phase 4 仅支持顶层 count 表达式。
+        // v0.1.1 起嵌套描述符的表达式参数递归收集（方案 C 扁平键 + 同名冲突
+        // 检测），inner subcon 含表达式（如 Array(N, Bytes(m))）可用；同字段内
+        // 同名参数不同表达式报 Compilation（诚实限制）。
         "ArrayDescriptor" => {
             return Ok(Node::Array(build_array_node(
                 py,
@@ -611,9 +611,9 @@ fn build_node_from_descriptor(
         // 编译路径：递归编译 countfield 与 subcon，二者均沿用同一 field_index
         // 和 expr_programs 切片（与 BitwiseDescriptor / ArrayDescriptor 同模式）。
         //
-        // 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）：
-        // countfield 与 inner 均不支持含表达式的子描述符
-        // （如 `PrefixedArray(Bytes(this.m), Byte)`）。
+        // v0.1.1 起嵌套表达式递归收集（同 ArrayDescriptor）：countfield 与
+        // inner 含表达式（如 `PrefixedArray(Bytes(m), Byte)`）可用；同字段内
+        // 同名参数不同表达式报 Compilation。
         "PrefixedArrayDescriptor" => {
             return Ok(Node::PrefixedArray(build_prefixed_array_node(
                 py,
@@ -958,7 +958,7 @@ fn build_node_from_descriptor(
             )?));
         }
         // CheckDescriptor → CheckNode（断言，func 是 ExprProgram）。
-        // 必须作为 RO 字段（_field_kind = "ro"）；func 从 expr_programs 取。
+        // 约定作为 RO 字段使用（rfield 包装）；func 从 expr_programs 取。
         "CheckDescriptor" => {
             return Ok(Node::Check(build_check_node(
                 py,
@@ -1416,9 +1416,10 @@ fn build_padded_string_node(
 /// 1. 递归编译 lengthfield（沿用 field_index；与 BitwiseDescriptor 同模式）。
 /// 2. 解析 `encoding` → [`Encoding`]。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// lengthfield 不支持含表达式的子描述符（Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+/// lengthfield 支持含表达式的子描述符（递归收集）；同字段内同名参数
+/// 不同表达式报 Compilation。
 fn build_pascal_string_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1748,13 +1749,11 @@ fn build_padding_node(
 /// 3. 递归编译 subcon：**沿用同一个 field_index 和 expr_programs 切片**
 ///    （与 BitwiseDescriptor / BytewiseDescriptor 同模式）。
 ///
-/// # 限制（设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// inner subcon 不支持含表达式的子描述符（如 `Array(N, Bytes(this.m))`）。
-/// Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）不递归 inner subcon，
-/// 导致 inner 的表达式参数不会被收集到 expr_programs 中。Rust 侧递归编译 inner 时
-/// 若 inner 是含表达式的描述符，会因 expr_programs 中缺键报 Compilation 错误。
-/// 这与 Phase 3 的 `Bitwise(Bytes(this.m))` 限制一致。
+/// inner subcon 支持含表达式的子描述符（如 `Array(N, Bytes(m))`）：Python 侧
+/// 递归收集嵌套描述符的表达式参数（方案 C 扁平键），Rust 侧递归编译 inner 时
+/// 从同一 expr_programs 切片取。同字段内同名参数不同表达式报 Compilation。
 fn build_array_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1861,10 +1860,9 @@ fn build_array_node(
 ///    与 BitwiseDescriptor / BytewiseDescriptor / ArrayDescriptor 同模式）。
 /// 3. 提取 discard 标志（默认 false）。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// inner subcon 不支持含表达式的子描述符（如 `GreedyRange(Bytes(this.m))`）。
-/// Python 侧 `_extract_and_compile_exprs` 不递归 inner subcon。
+/// inner subcon 支持含表达式的子描述符（如 `GreedyRange(Bytes(m))`，递归收集）。
 fn build_greedy_range_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1909,10 +1907,10 @@ fn build_greedy_range_node(
 /// 3. 递归编译 subcon（inner）：同上。
 /// 4. 组装为 `PrefixedArrayNode { countfield, inner }`。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// countfield 与 inner subcon 均不支持含表达式的子描述符。
-/// Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）不递归进入 inner。
+/// countfield 与 inner subcon 均支持含表达式的子描述符（递归收集）；
+/// 同字段内同名参数不同表达式报 Compilation。
 fn build_prefixed_array_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -1969,12 +1967,10 @@ fn build_prefixed_array_node(
 ///    - 其他（FieldRef/ExprRef 等）→ 从 `expr_programs[field_index]["cond"]` 取
 ///      ExprOp 列表 → [`StopIfCondition::Expr`]。
 ///
-/// # 限制（设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// StopIf 作为 Struct 直接字段时支持表达式（如 `rfield(StopIf(x == 0))`，
-/// `x` 是字段名引用），从 `expr_programs[field_index]["cond"]` 取。
-/// 但作为包装型描述符（Bitwise/Array/...）的 inner 子描述符时不支持
-/// （Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+/// StopIf 表达式从 `expr_programs[field_index]["cond"]` 取，任意嵌套位置
+/// （含包装型描述符的 inner 子描述符）均支持（递归收集）。
 fn build_stop_if_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2243,9 +2239,7 @@ fn build_switch_node(
                     "Switch keyfunc could not be compiled (field index {}): expected \
                      an int/bool constant or a field-name expression (e.g. \
                      Switch(typ, {{...}}) where 'typ' is a field declared earlier in \
-                     the same Struct; arithmetic like typ + 1 also works). Note: \
-                     'this.xxx' syntax does not exist in construct-rs — reference \
-                     field names directly.",
+                     the same Struct; arithmetic like typ + 1 also works).",
                     field_index
                 ),
             });
@@ -2618,15 +2612,15 @@ fn build_repeat_until_node(
 /// 1. 递归编译 subcon（沿用 field_index；与 BitwiseDescriptor 同模式）。
 /// 2. 从 `expr_programs[field_index]["func"]` 取 ExprOp 列表 → ExprProgram。
 ///
-/// # 限制（同 ArrayDescriptor，设计 §6.2.2 P3.1）
+/// # 嵌套表达式（v0.1.1 起）
 ///
-/// subcon 不支持含表达式的子描述符（Python 侧 `_extract_and_compile_exprs` 不递归 inner）。
+/// subcon 支持含表达式的子描述符（递归收集）。
 ///
 /// # 差异记录（设计 §5.3 RB-callable）
 ///
 /// Python Rebuild.func 可以是任意 callable lambda。construct-rs 收窄为仅 Phase 2 表达式
-/// （与 ADR-014 RepeatUntil v5 同脉络）。RebuildDescriptor 的 `_field_kind` 返回 "ro"，
-/// 编译期校验用户使用 `rfield(Rebuild(...))` 包装（RB-4 编译期拒绝 RW 包装）。
+/// （与 ADR-014 RepeatUntil v5 同脉络）。字段包装：RO 用 `rfield(Rebuild(...))`；
+/// v0.1.1 起 `field(Rebuild(...))`（RW）也允许（隐式 default=None，build 用表达式值）。
 fn build_rebuild_node(
     py: Python<'_>,
     desc: &Bound<'_, PyAny>,
@@ -2769,8 +2763,7 @@ fn build_adapter_callback_node(
 //   （与 BytesDescriptor length / StopIfDescriptor cond / ComputedDescriptor func 同模式）。
 // - PointerDescriptor / PrefixedDescriptor 的 subcon / lengthfield 递归编译
 //   （沿用 field_index，与 BitwiseDescriptor / PascalStringDescriptor 同模式）。
-//   P3.1 限制：subcon / lengthfield 不支持含表达式的子描述符（Python 侧
-//   `_extract_and_compile_exprs` 不递归 inner）。
+//   v0.1.1 起嵌套表达式递归收集：subcon / lengthfield 含表达式的子描述符可用。
 // ---------------------------------------------------------------------------
 
 /// 从 Python 描述符读取 `at` / `offset` 参数并构建对应的 Seek/Pointer offset 变体。
@@ -2904,7 +2897,7 @@ fn build_seek_node(
 /// 编译路径（参照 PascalStringDescriptor lengthfield 递归 + StopIf condfunc 表达式）：
 /// 1. 从 desc 读取 `offset`：常量 → Const；表达式 → 从 expr_programs[field_index]["offset"] 取
 /// 2. 从 desc 读取 `relativeOffset`（bool，默认 False）
-/// 3. 递归编译 `subcon`（沿用 field_index，与 BitwiseDescriptor 同模式，不递归 inner 表达式）
+/// 3. 递归编译 `subcon`（沿用 field_index，与 BitwiseDescriptor 同模式；嵌套表达式递归收集）
 /// 4. 校验 `stream` 属性为 None（非 None 编译期拒绝，文档化已知限制）
 fn build_pointer_node(
     py: Python<'_>,

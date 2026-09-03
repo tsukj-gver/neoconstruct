@@ -280,7 +280,7 @@ mod tests {
 
     #[test]
     fn parse_expr_cond_true_takes_then() {
-        // IF-3: cond = this.x > 0, x=5 → 真 → then (Int8ub)
+        // IF-3: cond = x > 0, x=5 → 真 → then (Int8ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let node = IfThenElseNode::new(
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn parse_expr_cond_false_takes_else() {
-        // IF-4: cond = this.x > 0, x=0 → 假 → else (Int16ub)
+        // IF-4: cond = x > 0, x=0 → 假 → else (Int16ub)
         with_py(|py| {
             use pyo3::types::PyString;
             let node = IfThenElseNode::new(

@@ -23,7 +23,7 @@
 //! v3 决策：不扩展 ExprOp（不引入 GetIndex）。用户在表达式中引用下标时，
 //! 先用 Index 字段声明（如 `i: int = rfield(Index())`），再用字段名 `i`
 //! 参与表达式（如 `Bytes(i + 1)`），编译为 `[GetInt(0), Const(1), Add]`。
-//! 这与 Phase 2「字段名即引用、废弃 this」的精神一致。
+//! 这与 Phase 2「字段名即引用」的设计一致。
 
 use crate::context::Context;
 use crate::error::ConstructError;

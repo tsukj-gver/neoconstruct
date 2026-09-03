@@ -504,7 +504,7 @@ pub fn eval_expr_any(
     }
 
     // 简化策略：先求 i64 结果，若程序是"单 GetInt"模式则返回原始 PyObject
-    // （覆盖 ProcessXor padfunc = this.pad_field 的常见用例）。
+    // （覆盖 ProcessXor padfunc = pad_field 的常见用例）。
     // 其他模式 fallback 到 i64 → PyLong。
     let ops = program.ops();
     if ops.len() == 1 {

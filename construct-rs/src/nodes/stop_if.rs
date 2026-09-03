@@ -52,7 +52,6 @@ pub enum StopIfCondition {
     Never,
     /// 表达式（如 `x == 0`，其中 `x` 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`）。
     ///
-    /// construct-rs 不使用 Python 的 `this.x == 0` 语法（v3 决策，§4.5.1 V4 修正）。
     /// 求值结果非零为真（对齐 Python `evaluate(condfunc, context)` 的 truthy 语义，
     /// 但仅支持整数表达式——ExprProgram 的 VM 栈为 i64）。
     Expr(ExprProgram),

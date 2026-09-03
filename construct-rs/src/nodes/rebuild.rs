@@ -11,7 +11,7 @@
 //! ## construct-rs 集成：作为 RO 字段
 //!
 //! Rebuild 必须作为 `FieldMode::Ro` 字段使用（用户写
-//! `count: int = rfield(Rebuild(Byte, this.items.length))`）。
+//! `count: int = rfield(Rebuild(Byte, items.length))`）。
 //! [`crate::nodes::Node::compute_ro_value`] 对 Rebuild 分支调表达式求值，
 //! 返回 PyLong 供 StructNode 写入 context（供后续表达式引用）。
 //!
@@ -47,8 +47,8 @@ use crate::nodes::Node;
 /// [`crate::nodes::Node::compute_ro_value`] 对 Rebuild 分支调 `eval_expr_int`，
 /// 返回 PyLong 供 StructNode 写入 context（供后续表达式引用）。
 ///
-/// 编译期校验：`RebuildDescriptor._field_kind` 返回 `"ro"`，若用户用 `field(...)`
-/// （rw）或 `wfield(...)`（wo）包装，编译期拒绝。
+/// 字段包装约定：RO 用 `rfield(...)`（parse 后有值）；v0.1.1 起 `field(...)`
+/// （RW）也可用——隐式 default=None，build 时实例传入值被忽略（用表达式值）。
 ///
 /// # 表达式约束
 ///
@@ -181,7 +181,7 @@ mod tests {
 
     #[test]
     fn parse_forwards_to_inner() {
-        // RB-1: Rebuild(Byte, this.items.length).parse(b"\x03") → 3
+        // RB-1: Rebuild(Byte, items.length).parse(b"\x03") → 3
         with_py(|py| {
             let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big));
             let func = ExprProgram::new(vec![ExprOp::Const(0)]);

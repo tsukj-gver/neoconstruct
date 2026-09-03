@@ -20,7 +20,7 @@ description: 用 construct-rs 定义和解析二进制协议。触发：实现�
 - 用 `@dataclass class X(StructMixin)` 声明协议，字段用 `field(subcon)` 标注类型
 - 编译在 `__init_subclass__`（类创建时自动触发），用户无感
 - **parse/build 对称**：parse 把字节变对象，build 把对象变字节，互为逆运算
-- **字段名直接引用**（不是 `this.xxx`）：`Bytes(n)` 中 `n` 是同一 Struct 中已声明的字段
+- **字段名直接引用**：`Bytes(n)` 中 `n` 是同一 Struct 中已声明的字段
 - 一次 FFI：parse/build 各只有一次 Python<->Rust 边界穿越
 
 **前置条件**：安装好 construct-rs（`maturin develop --release`），Python 中 `from construct import ...` 可用。
@@ -73,7 +73,7 @@ assert parsed == h
 
 ### 3.2 表达式系统（字段引用 + 算术）
 
-字段名**直接引用**（不是 `this.xxx`，construct-rs 已废弃 `this`）。所有引用必须
+字段名**直接引用**。所有引用必须
 指向同一 Struct 中**前序声明**的 int 字段。
 
 ```python
@@ -1616,7 +1616,7 @@ class P(StructMixin):
 - Python construct 的 `Container` 含 `_io` 等内部状态字段，JSON 比对前必须过滤
   `_*` 开头键：`{k: v for k, v in dict(d).items() if not str(k).startswith('_')}`
 - construct-rs 的 `Sequence` build 不含 RO 字段占位（Python 原版需含 None 占位）
-- 字段名引用语法不同：construct-rs 用字段名直接引用，Python construct 用 `this.xxx`
+- 字段名引用语法不同：construct-rs 用字段名直接引用，Python 原版用容器表达式语法（以原版官方文档为准）
 
 ## 8. 速查表（最常用模式）
 

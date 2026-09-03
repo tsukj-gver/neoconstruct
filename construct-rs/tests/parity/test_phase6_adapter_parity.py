@@ -66,7 +66,7 @@ _CRS_PYTHON_DIR = str(Path(__file__).resolve().parent.parent.parent / "python")
 # ---------------------------------------------------------------------------
 # 关键设计点：
 # - Pass / Substruct / Peek / RawCopy 在 rs/py 两侧行为一致，parity 直接对比
-# - Rebuild：Python construct 用 ``len_(this.items)`` 表达式；construct-rs 用
+# - Rebuild：Python construct 用 ``len_`` 上下文函数取 items 长度；construct-rs 用
 #   Phase 2 表达式（``items_count`` 字段引用）。两侧需用不同表达式但实现等价语义。
 # - RawCopy build：Python 返回 Container(data=...)，construct-rs 不返回。
 #   parity 跳过 build 返回值对比，仅对比 build 字节输出（设计 §5.3 RC-build-1）。
@@ -233,7 +233,7 @@ def _make_case_py(case_id):
         return fmt, bytes([0xBB]), {'x': {'value': 0xBB}}
 
     if C == 'RB1':
-        # Python construct Rebuild：count = Rebuild(Int8ub, this.items_count)
+        # Python construct Rebuild：count 由 items_count 重建
         # build_input 用 items_count=7，count 被忽略（Rebuild 重算）
         fmt = Struct(
             "items_count" / Int8ub,

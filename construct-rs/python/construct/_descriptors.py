@@ -1845,11 +1845,6 @@ def Rebuild(subcon, func):
     ``kw_only=True``，``PR(n=3)`` 可无参实例化，build 时传入值被忽略
     （用表达式值）。
 
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：Rebuild(Byte, this.x + 1)  ← this.x 引用 context
-        # construct-rs：Rebuild(Int8ub, x + 1)  ← 直接用字段名 x
-
     限制：
 
     - **不接收 Python callable / lambda**（同 RepeatUntil v5）。如传入 callable，
@@ -1968,11 +1963,6 @@ def Seek(at, whence=0):
             offset: int = field(Int8ub)
             pos: int = field(Seek(offset))
             tail: bytes = field(Bytes(1))
-
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：d = Sequence(Seek(this.offset), Bytes(1))  ← this.offset 引用 context
-        # construct-rs：在 StructMixin 内用 ``field(Seek(offset))`` 引用字段名
 
     :param at: 定位偏移（int 或 FieldRef/ExprRef 表达式）。
     :param whence: 0=Start / 1=Current / 2=End（默认 0）。
@@ -2179,7 +2169,7 @@ def Prefixed(lengthfield, subcon, includelength=False):
 # - DefaultDescriptor：value（FieldRef/ExprRef/int）+ subcon
 #   value 编译为 ExprProgram（与 Rebuild func 同模式）。
 # - CheckDescriptor：func（FieldRef/ExprRef/int，编译为 ExprProgram）
-#   必须作为 RO 字段（_field_kind = "ro"）。
+#   约定作为 RO 字段使用（rfield 包装）。
 # ---------------------------------------------------------------------------
 
 
@@ -2333,11 +2323,6 @@ def Default(subcon, value):
         P(count=5).build()         # → b'\\x05\\x05'（padded 用 count）
         P(count=5, padded=9).build()  # → b'\\x05\\x09'（padded 用 obj）
 
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：Default(Byte, this.count)
-        # construct-rs：Default(Byte, count)
-
     限制：
 
     - **不接收 Python callable / lambda**（同 Rebuild）。如传入 callable，
@@ -2362,9 +2347,6 @@ class CheckDescriptor:
     ``_expr_params`` 协议返回 ``{"func": self.func}``：编译期将 func 翻译为 ExprOp 列表
     （与 ComputedDescriptor / RebuildDescriptor 同模式）。
 
-    ``_field_kind`` 属性返回 "ro"，由 _mixin._apply_dataclass_field_config 识别，
-    决定 dataclass 字段配置（init=False）。
-
     限制（设计 §1 CK-5）：func 必须是 Phase 2 表达式
     （FieldRef/ExprRef/int 组合），**不接收 Python callable/lambda**
     （与 Rebuild 同脉络，ADR-014 硬约束）。
@@ -2386,15 +2368,6 @@ class CheckDescriptor:
         """表达式参数协议（与 ComputedDescriptor._expr_params 同模式）。"""
         return {"func": self.func}
 
-    @property
-    def _field_kind(self):
-        """字段种类协议（ADR-004）。
-
-        返回 "ro"：Check 必须作为 RO 字段使用（值不来自用户输入）。
-        与 Computed / Tell / Rebuild 同类。
-        """
-        return "ro"
-
     def __repr__(self):
         return "Check({!r})".format(self.func)
 
@@ -2414,11 +2387,6 @@ def Check(func):
 
         P.parse(b"\\x02\\x03")   # → P(width=2, height=3)
         # Check(width == 0) 表达式不满足 → CheckError
-
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：Check(this.width * this.height > 0)
-        # construct-rs：Check(width * height > 0)
 
     限制：
 
@@ -2612,11 +2580,6 @@ def Aligned(modulus, subcon, pattern=b"\x00"):
         class P(StructMixin):
             width: int = field(Byte)
             data: int = field(Aligned(width, Byte))   # modulus = width 字段值
-
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：Aligned(this.width, Byte)
-        # construct-rs：Aligned(width, Byte)
 
     限制：
 
@@ -2912,11 +2875,6 @@ def Checksum(checksumfield, hashfunc, bytesfunc=None, start=None, end=None):
                 lambda d: hashlib.sha256(d).digest(),
                 bytesfunc="fields",   # 引用 RawCopy dict 的 "data" 字段
             ))
-
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：Checksum(Bytes(32), lambda d: hashlib.sha256(d).digest(), this.fields.data)
-        # construct-rs：bytesfunc="fields"（字段名直接引用）
 
     限制（设计 §3.8）：
 
@@ -3465,7 +3423,7 @@ class SequenceDescriptor:
     ``Sequence``（core.py L2329）。
 
     :param subcons: 位置 subcons。
-    :param subconskw: 命名 subcons（写入 child_ctx，供后续字段引用）。
+    :param subconskw: 命名 subcons（以 Renamed 包装，名字写入 child_ctx）。
     """
 
     __slots__ = ("subcons",)
@@ -3490,14 +3448,14 @@ def Sequence(*subcons, **subconskw):
 
     使用方式::
 
-        from construct import Sequence, Byte, Bytes
+        from construct import Sequence, Byte, Bytes, GreedyBytes
 
         d = Sequence(Byte, Bytes(2))
         d.parse(b"\\x01AB")   # → [1, b"AB"]
         d.build([1, b"AB"])   # → b"\\x01AB"
 
-        # 命名字段（写入 context，供后续字段引用）
-        d2 = Sequence("count"/Byte, "data"/Bytes(lambda this: this.count))
+        # 命名字段（写入 child_ctx）
+        d2 = Sequence(count=Byte, data=GreedyBytes)
         d2.parse(b"\\x03ABC")   # → [3, b"ABC"]
 
     **已知 parity 差异（C-1）**：含 RO 字段（Check/Computed/Tell 等）的 build，
@@ -3564,7 +3522,7 @@ def ProcessXor(padfunc, subcon):
         ProcessXor(b"\\xf0\\xf1", Int16ub).parse(b"\\x00\\xff")   # → 0xf00e
 
         # 表达式 pad（引用字段）
-        ProcessXor(this.pad, Int16ub)   # pad 来自 this.pad 字段
+        ProcessXor(pad, Int16ub)   # pad 来自 pad 字段
 
     :param padfunc: XOR pad（int/bytes/FieldRef/ExprRef）。
     :param subcon: 子构造器。

@@ -90,11 +90,6 @@ def IfThenElse(condfunc, thensubcon, elsesubcon):
 
     v0.1.1 起可嵌套于包装器内（Prefixed 等），表达式引用同 Struct 前序字段。
 
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：d = IfThenElse(this.x > 0, Int8ub, Int16ub); d.parse(data, x=1)
-        # construct-rs：在 StructMixin 内用 ``field(IfThenElse(x > 0, ...))``
-
     :param condfunc: 条件（``True`` / ``False`` / FieldRef/ExprRef 表达式）。
     :param thensubcon: 条件为真时的子构造器。
     :param elsesubcon: 条件为假时的子构造器。
@@ -118,11 +113,6 @@ def If(condfunc, subcon):
 
         P.parse(b"\\x01\\xff")  # x=1 > 0, 解析 Byte → P(x=1, v=0xFF)
         P.parse(b"\\x00")       # x=0, Pass（v=None）
-
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：d = If(this.x > 0, Byte); d.parse(data, x=1)
-        # construct-rs：在 StructMixin 内用 ``field(If(x > 0, ...))``
 
     :param condfunc: 条件（``True`` / ``False`` / FieldRef/ExprRef 表达式）。
     :param subcon: 条件为真时的子构造器。
@@ -236,11 +226,6 @@ def Switch(keyfunc, cases, default=None):
             typ: int = field(Int8ub)
             br: Any = field(Prefixed(Int8ub, Switch(typ, {1: Int8ub, 2: Bytes(2)})))
 
-    Python construct 原版写法（``this`` 语法，construct-rs 不支持）::
-
-        # 原版：d = Switch(this.n, {1: Int8ub, 2: Int16ub}); d.parse(data)
-        # construct-rs：在 StructMixin 内用 ``field(Switch(n, ...))``
-
     :param keyfunc: key 函数（int/bool 常量或 FieldRef/ExprRef 表达式）。
     :param cases: dict，{key: subcon}。
     :param default: 默认 subcon（None 时设为 Pass）。
@@ -307,12 +292,13 @@ def Select(*subcons):
 
 
 class Renamed:
-    """命名包装器：为匿名 subcon 添加字段名（用于 FocusedSeq）。
+    """命名包装器：为匿名 subcon 添加字段名（用于 FocusedSeq / Sequence）。
 
     对应 Python construct 的 ``Renamed``（core.py L2014），但 construct-rs 中
-    仅用于 FocusedSeq 的字段命名（不作为通用 Adapter）。
+    仅用于 FocusedSeq / Sequence 的字段命名（不作为通用 Adapter）。
 
-    通常通过 ``"/"`` 运算符创建：``"num" / Byte`` → ``Renamed("num", Byte)``。
+    通过 ``Renamed(name, subcon)`` 直接创建（Sequence 也可用关键字参数
+    ``Sequence(name=subcon)``，内部等价包装为 Renamed）。
 
     :param name: 字段名（str）。
     :param subcon: 被包装的子构造器。
@@ -342,8 +328,8 @@ class FocusedSeqDescriptor:
     对应 Python construct 的 ``FocusedSeq``（core.py L3176）。
 
     :param parsebuildfrom: 聚焦字段名（str）。必须匹配 subcons 中某个命名字段
-                            （通过 ``Renamed`` 或 ``"/"`` 运算符创建）。
-    :param subcons: 子构造器列表。命名字段用 ``"name" / subcon`` 创建，
+                            （通过 ``Renamed`` 创建）。
+    :param subcons: 子构造器列表。命名字段用 ``Renamed("name", subcon)`` 创建，
                     匿名字段直接传 subcon。
 
     ``_expr_params`` 协议返回空 dict（FocusedSeq 本体无表达式参数；
@@ -379,14 +365,14 @@ def FocusedSeq(parsebuildfrom, *subcons):
 
         d = FocusedSeq("num",
             Const(b"SIG"),          # 匿名字段
-            "num" / Byte,           # 命名字段（focus）
+            Renamed("num", Byte),   # 命名字段（focus）
             Terminated,             # 匿名字段
         )
         d.parse(b"SIG\\xff")  # 返回 255（num 字段值）
         d.build(255)          # 返回 b"SIG\\xff"
 
     :param parsebuildfrom: 聚焦字段名（str）。必须匹配 subcons 中某个命名字段。
-    :param subcons: 子构造器列表（``"name" / subcon`` 或匿名 subcon）。
+    :param subcons: 子构造器列表（``Renamed("name", subcon)`` 或匿名 subcon）。
     :return: ``FocusedSeqDescriptor`` 实例。
     """
     return FocusedSeqDescriptor(parsebuildfrom, list(subcons))

@@ -408,7 +408,7 @@ pub struct SeekNode {
 pub enum SeekOffset {
     /// 编译期常量（如 `Seek(5)`）。
     Const(i64),
-    /// 表达式（如 `Seek(this.offset)`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
+    /// 表达式（如 `Seek(offset)`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
     Expr(ExprProgram),
 }
 
@@ -521,7 +521,7 @@ pub struct PointerNode {
 pub enum PointerOffset {
     /// 编译期常量（如 `Pointer(8, Bytes(1))`）。
     Const(i64),
-    /// 表达式（如 `Pointer(this.off, Bytes(1))`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
+    /// 表达式（如 `Pointer(off, Bytes(1))`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
     Expr(ExprProgram),
 }
 
@@ -979,12 +979,12 @@ fn build_prefixed_node(
 | # | 场景 | 输入 | 预期行为 |
 |---|------|------|---------|
 | SK1 | 常量 at | `Seek(5)` parse on `b"01234x"` | pos=5，返回 PyLong(5) |
-| SK2 | 表达式 at | `Seek(this.off)` parse，off=3 | pos=3，返回 PyLong(3) |
+| SK2 | 表达式 at | `Seek(off)` parse，off=3 | pos=3，返回 PyLong(3) |
 | SK3 | whence=Current | `Seek(2, whence=1)` parse，tell()=3 | pos=5 |
 | SK4 | whence=End | `Seek(-2, whence=2)` parse，data.len()=10 | pos=8 |
 | SK5 | build 接受 None | `Seek(5).build(None)` | seek 执行，Ok(()) |
 | SK6 | sizeof | `Seek(5).sizeof()` | Err（Generic） |
-| SK7 | at 表达式字段缺失 | `Seek(this.missing)` parse | ExprFieldMissing（path 含 "at"） |
+| SK7 | at 表达式字段缺失 | `Seek(missing)` parse | ExprFieldMissing（path 含 "at"） |
 
 ### 7.3 PointerNode
 
@@ -996,7 +996,7 @@ fn build_prefixed_node(
 | P4 | build 零填充 | `Pointer(8, Bytes(1)).build(b"Z")` | 输出 `b'\x00'*8 + b'Z'`（9 字节） |
 | P5 | sizeof | `Pointer(8, Bytes(1)).sizeof()` | Ok(0) |
 | P6 | subcon.parse 失败仍 seek 回 | subcon EOF（Bytes(10) on 5 字节） | seek 回 fallback 后返回 Stream Err |
-| P7 | offset 表达式 | `Pointer(this.off, Bytes(1))` | 求值 off，seek，subcon，seek 回 |
+| P7 | offset 表达式 | `Pointer(off, Bytes(1))` | 求值 off，seek，subcon，seek 回 |
 | P8 | stream 参数非 None | `Pointer(8, Bytes(1), stream=foo)` | 编译期 Compilation Err（已知限制：不支持换流） |
 
 ### 7.4 PrefixedNode

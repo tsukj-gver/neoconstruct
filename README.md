@@ -28,7 +28,7 @@ assert Header.parse(b"\xCA\xFE\x01ABCD") == h
 
 - **声明式 API**：`@dataclass class X(StructMixin)` + `field(subcon)`，编译在 `__init_subclass__` 自动触发
 - **parse/build 对称**：parse 把字节变对象，build 把对象变字节
-- **字段名直接引用**（不是 `this.xxx`）：`Bytes(n)` 中 `n` 直接指向同 Struct 中已声明的字段；表达式编译为 Rust VM 指令，运行时零 FFI
+- **字段名直接引用**：`Bytes(n)` 中 `n` 直接指向同 Struct 中已声明的字段；表达式编译为 Rust VM 指令，运行时零 FFI
 - **三种字段模式**：`field`（读写）/ `rfield`（只读，自动算）/ `wfield`（只写，padding/reserved）
 - **全场景高性能**：从 3 字段小 Struct 到 10000 元素 Array，均显著快于纯 Python 实现
 

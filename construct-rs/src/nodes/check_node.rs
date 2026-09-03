@@ -26,7 +26,7 @@ use super::Construct;
 ///
 /// 对应 Python construct `Check(func)`（core.py L3081）。
 ///
-/// **必须作为 RO 字段使用**（与 Computed 同类，`_field_kind = "ro"`）。
+/// **必须作为 RO 字段使用**（`rfield` 包装，与 Computed 同类）。
 /// parse 返回 Py_None（无字段值）；build 求值表达式但不写字节。
 ///
 /// # 表达式约束

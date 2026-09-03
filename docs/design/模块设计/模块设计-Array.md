@@ -66,15 +66,15 @@ v2 逐项修正：
 ### 0.2 v3 修正（V1/V2/V3/V4 —— 决策记录对照驳回）
 
 REV 在 v2 复审通过后，对照 `docs/decisions/README.md` 全部 12 条决策逐条审查，
-发现违反 Phase 2 决策 1（废弃 `this`），驳回 2 个设计问题（V1/V2）+ 2 个文档表述
+发现违反 Phase 2 决策 1，驳回 2 个设计问题（V1/V2）+ 2 个文档表述
 问题（V3/V4）。v3 逐项修正：
 
 | 编号 | 问题 | 修正位置 | 修正内容 |
 |------|------|---------|---------|
-| V1 | `ExprOp::GetIndex` 用户面入口用 `this._index`，违反决策 1；GetIndex 实为死代码 | §3.3 整节重写、§9.4、§9.5 IX-1、§4.4、设计决策记录 Phase 4 决策 3 | **决策：删除 ExprOp::GetIndex**（不扩展表达式系统）。用户通过 `rfield(Index())` + 字段引用实现等价功能。已实现的 GetIndex 代码由 DEV 回退。详见 §3.3 |
-| V2 | §9.4 表格把 `this.xxx` 列为 construct-rs 表达式系统输入 | §9.4 | 重构为三列对照（Python `this.xxx` 语法 / construct-rs 用户面语法 / Rust ExprOp），明确 construct-rs 不用 `this` |
-| V3 | 25+ 处描述性引用 Python 代码时用 `this.xxx` 未标注 | §2.2、§2.3、§2.6、§3.2.2、§6.1.1、§6.2.2、§6.3.3、§7.1、§9.5、§12.2 等 | 全文清理：所有 `this.xxx` 描述性引用统一改为"Python 用户写 `this.xxx`（construct-rs 已废弃，改用 `<字段名>` 直接引用）"格式；示例性使用改为 construct-rs 合法语法 |
-| V4 | §4.5.1 StopIfCondition::Expr 注释使用 `this.x == 0` | §4.5.1 | 改为 construct-rs 实际语法：`x == 0`（x 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`） |
+| V1 | `ExprOp::GetIndex` 用户面入口依赖决策 1 所废弃的旧引用语法，违反决策 1；GetIndex 实为死代码 | §3.3 整节重写、§9.4、§9.5 IX-1、§4.4、设计决策记录 Phase 4 决策 3 | **决策：删除 ExprOp::GetIndex**（不扩展表达式系统）。用户通过 `rfield(Index())` + 字段引用实现等价功能。已实现的 GetIndex 代码由 DEV 回退。详见 §3.3 |
+| V2 | §9.4 表格把旧引用语法列为 construct-rs 表达式系统输入 | §9.4 | 重构为三列对照（Python 语法 / construct-rs 用户面语法 / Rust ExprOp） |
+| V3 | 25+ 处描述性引用 Python 代码时用旧引用语法未标注 | §2.2、§2.3、§2.6、§3.2.2、§6.1.1、§6.2.2、§6.3.3、§7.1、§9.5、§12.2 等 | 全文清理：所有旧引用语法的描述性引用统一标注 Python 归属；示例性使用改为 construct-rs 合法语法 |
+| V4 | §4.5.1 StopIfCondition::Expr 注释使用旧引用语法示例 | §4.5.1 | 改为 construct-rs 实际语法：`x == 0`（x 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`） |
 
 附加修正（连带）：
 - 新增 `docs/decisions/README.md` Phase 4 决策 3（Index 仅作为构造器字段）
@@ -328,7 +328,7 @@ IndexNode.parse 直接读 `ctx.index()`，None 时返回 Py_None（对齐 Python
 `context.get("_index", None)` 的行为，详见 §4.4）。
 
 > **V1 修正（v3）**：v1/v2 在此设计 `ExprOp::GetIndex` 指令读取 `ctx._index`，
-> 但其用户面入口 `this._index` 违反 Phase 2 决策 1（废弃 `this`），实为死代码。
+> 但其用户面入口违反 Phase 2 决策 1，实为死代码。
 > v3 删除 GetIndex，IndexNode 直接调 `ctx.index()`。详见 §3.3 与设计决策记录
 > Phase 4 决策 3。
 
@@ -520,7 +520,6 @@ Python `RepeatUntil(lambda x, lst, ctx: ..., subcon)` 接收任意 callable，�
 ### 2.6 决策 A6：PrefixedArray 用独立 Node（不依赖未实现的 FocusedSeq/Rebuild）
 
 Python `PrefixedArray` 是宏（**Python 语法**）：`FocusedSeq("items", Rebuild(countfield, len_(this.items)), subcon[this.count])`。
-其中 `this.items` / `this.count` 是 Python construct 的 `this` 引用语法，construct-rs 已废弃（见 Phase 2 决策 1）。
 
 `FocusedSeq` / `Rebuild` 尚未实现（属于"字段引用回写"特性，Phase 5+ 范围）。
 若等 FocusedSeq 实现再做 PrefixedArray，会阻塞 Phase 4 出口。
@@ -715,10 +714,10 @@ pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
 ### 3.3 ExprOp 不扩展（Index 与 Element 都通过字段引用复用 GetInt）
 
 > **v3 修正（REV 决策记录对照驳回）**：
-> v1/v2 在此节设计了 `ExprOp::GetIndex` 指令，声称支持 `this._index` 表达式。
-> 但这违反 Phase 2 决策 1（废弃 `this`）——construct-rs 表达式系统输入只有
+> v1/v2 在此节设计了 `ExprOp::GetIndex` 指令，声称支持下标表达式。
+> 但这违反 Phase 2 决策 1——construct-rs 表达式系统输入只有
 > `_FieldDescriptor` / `_ExprRef` / 常量三种节点（表达式系统 §2.3 / §3.3），
-> 不存在 `this._index` 节点类型。Python 侧 `_compile_expr_tree`
+> 不存在下标引用节点类型。Python 侧 `_compile_expr_tree`
 > （`_mixin.py` L475-533）也没有产生 `("getindex",)` 元组的分支。
 > v1/v2 设计的 GetIndex 是事实上的死代码。
 >
@@ -740,7 +739,7 @@ pub fn new_child(parent: &'py Context<'py>, py: Python<'py>) -> PyResult<Self> {
 > | 取 RepeatUntil 当前元素值（作为字段） | `e: int = rfield(Element())` | ElementNode.parse 在 RepeatUntil 之外返回 None；RepeatUntilNode 迭代时 set_expr_value_only 借用该槽位（仅写 buf） |
 > | 在 RepeatUntil 终止表达式中引用当前元素 | 先声明 Element 字段，再用字段名引用：`RepeatUntil(e > 5, subcon)` | `[GetInt(idx_of_e), Const(5), Gt]` |
 >
-> 这与 Phase 2 "字段名即引用、废弃 this" 的精神一致——所有引用统一走
+> 这与 Phase 2 "字段名即引用" 的精神一致——所有引用统一走
 > `_FieldDescriptor`，表达式系统输入类型保持纯粹。
 >
 > **对已实现代码的影响**（DEV 在 4.5 v5 子任务中执行回退/重构）：
@@ -1647,7 +1646,7 @@ fn sync_index_fields(&self, ctx: &mut Context<'_>, py: Python<'_>, i: usize) {
 
 > **V1 修正（v3）**：IndexNode 是 construct-rs 中**唯一**的用户面下标访问机制。
 > v1/v2 设计了 `ExprOp::GetIndex` 作为表达式内引用下标的入口，但用户面写法
-> `this._index` 违反 Phase 2 决策 1，已被删除（§3.3）。
+> 违反 Phase 2 决策 1，已被删除（§3.3）。
 > 用户要在表达式中引用下标，先用 Index 字段声明再用字段名引用：
 >
 > ```python
@@ -1734,8 +1733,7 @@ pub enum StopIfCondition {
     Always,
     /// 常量 false（永远不停止，主要用于调试）。
     Never,
-    /// 表达式（如 `x == 0`，其中 `x` 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`；
-    /// construct-rs 不使用 Python 的 `this.x == 0` 语法）。
+    /// 表达式（如 `x == 0`，其中 `x` 是字段名引用，编译为 `[GetInt(idx), Const(0), Eq]`）。
     Expr(ExprProgram),
 }
 ```
@@ -2223,7 +2221,7 @@ impl IndexNode {
 
 impl StopIfNode {
     pub fn has_expressions(&self) -> bool {
-        // 关键：StopIf(x == 0)（x 是字段名引用，**Python 写法为 `this.x == 0`**）
+        // 关键：StopIf(x == 0)（x 是字段名引用）
         // 中的 x 引用 Struct 字段 x，经 expr_values_buf 取值；
         // 必须返回 true 触发 StructNode 创建 child ctx。
         matches!(self.cond, StopIfCondition::Expr(_))
@@ -2238,12 +2236,12 @@ impl StopIfCondition {
 ```
 
 > **P1 关键说明（REV 驳回修正）**：`StopIf(Expr)` 节点自身的表达式程序
-> （如 `x == 0` 编译为 `[GetInt(0), Const(0), Eq]`，其中 `x` 是字段名引用，
-> **Python 等价写法为 `this.x == 0`**）**确实引用 Struct 字段**
+> （如 `x == 0` 编译为 `[GetInt(0), Const(0), Eq]`，其中 `x` 是字段名引用）
+> **确实引用 Struct 字段**
 > （此例中的 `x`）。`has_expressions()` 必须返回 true，原因有二：
 >
 > 1. **StructRef 路径**（struct_ref.rs L171/L194）：当 StructRef 引用一个含
->    `Array(5, StopIf(x > 10))`（x 是字段名引用，**Python 写法 `this.x > 10`**）
+>    `Array(5, StopIf(x > 10))`（x 是字段名引用）
 >    字段的 Struct 时，`root.has_expressions()` 会递归到 StopIf；若返回 false，
 >    则 StructRef 不创建 child context、不调用 `init_expr_values`，
 >    导致 StopIf 求值时 GetInt 命中空 buf 报错。
@@ -2408,18 +2406,13 @@ fn build_array_node(
 `build_node_from_descriptor` 递归调用 `build_array_node` 时，**沿用同一个 field_index
 和 expr_programs 切片**（参照 BitwiseDescriptor 分支 compile.rs L412-413）。这意味着：
 
-> **语法约定（v3）**：下表中 `this.n` / `this.m` / `this.x` 等是 **Python construct
-> 语法**。construct-rs 中等价写法是字段名直接引用（如 `n`、`m`、`x` 是已声明的
-> `_FieldDescriptor`），不用 `this.` 前缀。本表沿用 Python 语法仅为对照 Python
-> construct 用户的心智模型。
-
-| 场景（Python 语法对照） | 支持情况 | 说明 |
+| 场景 | 支持情况 | 说明 |
 |------|---------|------|
-| `Array(this.n, Byte)` | ✅ Phase 4 支持 | 顶层 count 表达式，从 expr_programs[N]["count"] 取 |
-| `Array(N, StopIf(this.x))` | ❌ 编译期失败 | inner StopIf 的 "cond" 表达式未被 Python 侧收集（见下方） |
-| `Array(N, Bytes(this.m))` | ❌ 编译期失败 | inner Bytes 的 "length" 表达式未被收集 |
-| `Array(N, Array(this.m, Byte))` | ❌ 编译期失败 | 内层 Array 的 count 表达式未被收集 |
-| `Bitwise(Bytes(this.m))` | ❌ Phase 1-3 已不可用 | 同根问题（_extract_and_compile_exprs 不递归） |
+| `Array(n, Byte)` | ✅ Phase 4 支持 | 顶层 count 表达式，从 expr_programs[N]["count"] 取 |
+| `Array(N, StopIf(x))` | ❌ 编译期失败 | inner StopIf 的 "cond" 表达式未被 Python 侧收集（见下方） |
+| `Array(N, Bytes(m))` | ❌ 编译期失败 | inner Bytes 的 "length" 表达式未被收集 |
+| `Array(N, Array(m, Byte))` | ❌ 编译期失败 | 内层 Array 的 count 表达式未被收集 |
+| `Bitwise(Bytes(m))` | ❌ Phase 1-3 已不可用 | 同根问题（_extract_and_compile_exprs 不递归） |
 
 **根因**：Python 侧 `_extract_and_compile_exprs`（_mixin.py L583-615）**只对字段顶层
 subcon 调用一次**（_mixin.py L633-634：`subcon = desc.subcon;
@@ -2434,31 +2427,28 @@ Rust 侧递归调用 `build_node_from_descriptor(inner_desc, field_index, expr_p
 
 **Phase 4 的支持范围明确为**：
 
-- ✅ **顶层 count 表达式**：`Array(n, simple_subcon)`（`n` 是字段名引用，**Python 写法 `this.n`**），
+- ✅ **顶层 count 表达式**：`Array(n, simple_subcon)`（`n` 是字段名引用），
   simple_subcon 是 FormatField / 常量 Bytes / 常量 BitsInteger / Padding 等不含表达式的描述符。
 - ❌ **inner 含表达式**：留待"嵌套表达式收集"特性（独立子任务，建议 Phase 4.0b 或
   Phase 5+，需扩展 `_extract_and_compile_exprs` 递归收集 inner，并解决命名空间冲突
   ——见下方 P3.2）。
 
 **StopIf 在 Struct 直接字段中**（非 inner）依然支持：`@dataclass class S(StructMixin):
-x: int = field(Byte); stop = rfield(StopIf(x))`（`x` 是字段名引用，**Python 写法 `this.x`**）。
+x: int = field(Byte); stop = rfield(StopIf(x))`（`x` 是字段名引用）。
 StopIfDescriptor 是字段，field_index 在字段列表中，其 "cond" 表达式从
 `expr_programs[field_index]["cond"]` 取（与 ComputedDescriptor 的 "func" 同模式），
 不受上述 inner 限制影响。
 
 ##### P3.2 嵌套 inner 表达式的扩展方案（后续子任务参考）
 
-> **语法约定（v3）**：本节示例中 `this.m` / `this.x` 等是 **Python construct 语法**，
-> 仅供对照。construct-rs 等价写法是字段名直接引用（`m`、`x`）。
-
-若未来需支持 `Array(N, Bytes(m))`（**Python 写法 `Bytes(this.m)`**）、
-`Array(N, StopIf(x))`（**Python 写法 `StopIf(this.x)`**），扩展点：
+若未来需支持 `Array(N, Bytes(m))`、
+`Array(N, StopIf(x))`，扩展点：
 
 1. **Python 侧**：修改 `_extract_and_compile_exprs` 递归进入包装型描述符的 `subcon`
    属性，用**路径化键名**避免命名空间冲突：
    ```python
-   # 例如 Array(N, Array(m, Byte))（Python 写法 Array(N, Array(this.m, Byte))）
-   # 的 expr_programs[N] 结构：
+    # 例如 Array(N, Array(m, Byte))
+    # 的 expr_programs[N] 结构：
    {
        "count": <outer count ops>,           # 顶层 Array count
        "inner.count": <inner count ops>,     # 内层 Array count（路径化键名）
@@ -2474,10 +2464,9 @@ StopIfDescriptor 是字段，field_index 在字段列表中，其 "cond" 表达�
 端到端测试）。**不阻塞 Phase 4 出口**——S-FUNC 仅要求覆盖 Python 顶层 count 表达式。
 
 > **PM 决策点（更新 §12.2）**：Phase 4 首版仅支持顶层 count 表达式。
-> inner 含表达式的场景（`Array(N, Bytes(m))`（Python 写法 `Bytes(this.m)`）、
-> `Array(N, StopIf(x))`（Python 写法 `StopIf(this.x)`））
-> 归入 Phase 4.0b 或 Phase 5+，与现有 `Bitwise(Bytes(m))`（Python 写法
-> `Bitwise(Bytes(this.m))`）的限制一致。
+> inner 含表达式的场景（`Array(N, Bytes(m))`、`Array(N, StopIf(x))`）
+> 归入 Phase 4.0b 或 Phase 5+，与现有 `Bitwise(Bytes(m))`
+> 的限制一致。
 
 #### 6.2.3 其他 build_*_node 函数
 
@@ -2877,7 +2866,7 @@ ConstructError::IndexField { .. } => &classes.index_field_error,
 | AR-7 | discard=True | 仍消耗字节，返回空 list |
 | AR-8 | count 超过 usize::MAX（i64 表达式） | 求值时 as usize 截断（wrapping），后续 Stream 错误 |
 | AR-9 | inner 是 Struct | 每个 elem 是 Struct 实例，list 是 PyList of instances |
-| AR-10 | inner 是表达式长度 Bytes（`Array(N, Bytes(m))`，**Python 写法 `Bytes(this.m)`**） | **编译期失败**（CompilationError，"length key missing"）—— inner 表达式收集未实现，§6.2.2 P3.1 |
+| AR-10 | inner 是表达式长度 Bytes（`Array(N, Bytes(m))`） | **编译期失败**（CompilationError，"length key missing"）—— inner 表达式收集未实现，§6.2.2 P3.1 |
 
 ### 7.2 GreedyRange 边界
 
@@ -3371,9 +3360,9 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 
 ### 9.4 Python 表达式对应
 
-> **V2 修正（v3）**：本表重构为三列对照，明确 construct-rs 用户面**不使用 `this.xxx` 语法**。
+> **V2 修正（v3）**：本表重构为三列对照。
 > construct-rs 表达式系统输入是 `_FieldDescriptor` / `_ExprRef` 对象（字段名直接引用），
-> 详见表达式系统 §2.3。Phase 2 决策 1 明确禁止 `this.xxx` 语法。
+> 详见表达式系统 §2.3 与 Phase 2 决策 1。
 
 | Python construct 语法 | construct-rs 用户面语法 | Rust ExprOp | 备注 |
 |-----------------------|------------------------|-------------|------|
@@ -3381,8 +3370,8 @@ print("场景 | Python ns/call | Rust ns/call | 加速比 | parse/build 比率 |
 | 算术/位/比较（如 `this.a + this.b`） | 字段名 + 运算符（如 `a + b`，编译为 `_ExprRef` 树） | `Add` / `Sub` / ... / `Gt` / ... | 现有；表达式系统 §2.3.3 |
 | `this._index`（数组下标引用） | **不直接支持**——通过 Index 字段 + 字段名引用实现：`i: int = rfield(Index()); v: bytes = field(Bytes(i + 1))` | `[GetInt(idx_of_i), Const(1), Add]` | v3 决策（§3.3）；不引入 `GetIndex` 指令，复用 GetInt |
 
-> **v3 决策说明**：v1/v2 设计了 `ExprOp::GetIndex` 指令作为 `this._index` 的对应物，
-> 但用户面入口违反 Phase 2 决策 1（废弃 `this`）。v3 删除 GetIndex，统一通过
+> **v3 决策说明**：v1/v2 设计了 `ExprOp::GetIndex` 指令作为下标引用的对应物，
+> 但用户面入口违反 Phase 2 决策 1。v3 删除 GetIndex，统一通过
 > IndexNode + 字段引用机制实现等价功能。详见 §3.3 与设计决策记录 Phase 4 决策 3。
 
 ### 9.5 已知行为差异（M1 修正 + 整理）
@@ -3396,15 +3385,15 @@ PM/REV 验收时需逐项确认（用户文档应注明）。
 | LC-2 | `result.search(name, value)` | 可用 | **AttributeError**（原生 list 无 search） | 工具方法可后续作为独立函数提供 |
 | LC-3 | `repr(result)` / `str(result)` | ListContainer 美化（缩进展示） | 原生 list repr | 用户可用 pprint 替代；非核心功能 |
 | LC-4 | `result == [1,2,3]` | True（值相等） | True | 值比较一致，无差异 |
-| IX-1 | 数组下标引用不在数组内（Python 写法 `Computed(this._index + 1)`） | `TypeError: None + 1` | construct-rs 等价写法 `i: int = rfield(Index()); v = rfield(Computed(i + 1))` 在 `i` 为 None 时 `i + 1` 表达式求值抛 `ExprType`（None 无法 extract 为 i64） | v3：行为与 Python 一致（都报错）。v1/v2 设计的 `GetIndex` 在 None 时返回 0 导致行为差异，已删除（§3.3） |
+| IX-1 | 数组下标引用不在数组内 | `TypeError: None + 1` | construct-rs 等价写法 `i: int = rfield(Index()); v = rfield(Computed(i + 1))` 在 `i` 为 None 时 `i + 1` 表达式求值抛 `ExprType`（None 无法 extract 为 i64） | v3：行为与 Python 一致（都报错）。v1/v2 设计的 `GetIndex` 在 None 时返回 0 导致行为差异，已删除（§3.3） |
 | GE-1 | GreedyRange 内部子构造器抛 `ExplicitError` | 向上传播（不回退） | **无 ExplicitError 等价物**，与其他错误一样 seek 回退 + 正常终止 | 见下方详述 |
 | GE-2 | GreedyRange 内部子构造器抛 FormatField/Stream 等普通错误 | seek 回退 + 正常终止 | 同 Python（seek 回退 + 正常终止） | 行为一致 |
 | RU-v5-1 | RepeatUntil 用户面 API 传入 Python lambda/callable | 接受 | **编译期失败**（CompilationError） | v5 用户硬约束 #1（禁止 PyCallable）；§7.3 RU-16 |
 | RU-v5-2 | RepeatUntil 终止表达式引用 list 切片（如 `lst[-2:] == [0, 0]`） | 接受 | **编译期失败**（CompilationError） | Phase 2 表达式 VM 栈为 i64，不支持 list 切片；用户须改用 Adapter；§13.9 |
 | RU-v5-3 | Element 字段在 RepeatUntil 之外独立存在 | — | ElementNode.parse 返回 None，Packet 实例属性 = None | v5 新增能力（Python construct 无对应物）；§4.7 / §13.2 |
 | PA-5 | PrefixedArray build 时 list 长度超出 countfield 表示范围 | countfield 抛 FormatFieldError/StreamError | 由 countfield 节点自行报错（同方向） | 行为一致，§7.4 PA-5 |
-| NE-expr-1 | `Array(N, Bytes(m))` inner 含表达式（**Python 写法 `Bytes(this.m)`**） | 支持 | **编译期失败**（CompilationError） | 与 `Bitwise(Bytes(m))`（Python 写法 `Bitwise(Bytes(this.m))`）同限制；§6.2.2 P3.1 |
-| NE-expr-2 | `Array(N, StopIf(x))` inner 含表达式（**Python 写法 `StopIf(this.x)`**） | 支持 | **编译期失败** | 同上，需扩展 _extract_and_compile_exprs 递归 |
+| NE-expr-1 | `Array(N, Bytes(m))` inner 含表达式 | 支持 | **编译期失败**（CompilationError） | 与 `Bitwise(Bytes(m))` 同限制；§6.2.2 P3.1 |
+| NE-expr-2 | `Array(N, StopIf(x))` inner 含表达式 | 支持 | **编译期失败** | 同上，需扩展 _extract_and_compile_exprs 递归 |
 
 #### M1 详述：GreedyRange 错误吞掉（GE-1）
 
@@ -3512,7 +3501,7 @@ LazyStruct 同阶段）。
 ✅ 覆盖 Python Array 功能集的全部公开方法（§9.1）
 ✅ 异常映射完整（§9.2）
 ✅ Context 字段映射完整（§9.3）
-✅ 表达式映射完整（§9.4，v3 重构为三列对照，明确 construct-rs 不用 `this.xxx`）
+✅ 表达式映射完整（§9.4，v3 重构为三列对照）
 ✅ 决策记录对照完整（v3 修正后，Phase 2 决策 1 不再违反，详见 §11.7）
 
 ### 11.2 边界条件完整性
@@ -3583,18 +3572,18 @@ LazyStruct 同阶段）。
 | V1 | 是否说明已实现代码（expr.rs/compile.rs 的 GetIndex）需 DEV 回退？ | ✅ §3.3 + §12.7 |
 | V1 | 是否保留 Context._index 字段（IndexNode 仍需通过 ctx.index() 读）？ | ✅ §3.3 明确"保留" |
 | V2 | §9.4 是否重构为三列对照（Python / construct-rs / ExprOp）？ | ✅ |
-| V2 | 是否明确 construct-rs 用户面不用 `this.xxx` 语法？ | ✅ §9.4 表头 + 表内说明 |
-| V3 | §2.2 CountSource::Expr 示例的 `this.length` 是否标注 Python 语法？ | ✅ |
-| V3 | §2.3 的 `this._index` 描述是否改为标注 Python 语法或删除？ | ✅ 重写为"不通过用户面表达式暴露" |
-| V3 | §2.6 PrefixedArray 宏 `len_(this.items)` 是否标注 Python 语法？ | ✅ |
-| V3 | §3.2.2 `this._index` 是否标注 Python 语法？ | ✅ |
-| V3 | §6.1.1 has_expressions 注释中 `this.x` 是否改为 construct-rs 语法或标注？ | ✅ 改为字段名引用 + Python 写法注释 |
-| V3 | §6.2.2 P3.1/P3.2 表格中 `this.n`/`this.m`/`this.x` 是否标注 Python 语法？ | ✅ 表前加语法约定 + 表内字段名引用 |
-| V3 | §6.3.3 `len_(this.items)` 是否标注 Python 语法？ | ✅ |
-| V3 | §7.1 AR-10 边界 `Bytes(this.m)` 是否标注 Python 语法？ | ✅ |
-| V3 | §9.5 NE-expr-1/2 差异表 `this.m`/`this.x` 是否标注 Python 语法？ | ✅ |
-| V3 | §12.2 PM 决策点 2 表格 `this.xxx` 是否标注 Python 语法？ | ✅ 表前加语法约定 |
-| V4 | §4.5.1 StopIfCondition::Expr 注释 `this.x == 0` 是否改为 construct-rs 语法？ | ✅ 改为 `x == 0` + 编译产物说明 |
+| V2 | 是否明确 construct-rs 用户面语法与 Python 引用语法的对照？ | ✅ §9.4 三列表 |
+| V3 | §2.2 CountSource::Expr 的 Python 示例是否标注 Python 语法？ | ✅ |
+| V3 | §2.3 的下标引用描述是否改写？ | ✅ 重写为"不通过用户面表达式暴露" |
+| V3 | §2.6 PrefixedArray 宏的 Python 引用是否标注 Python 语法？ | ✅ |
+| V3 | §3.2.2 下标引用是否标注 Python 语法？ | ✅ |
+| V3 | §6.1.1 has_expressions 注释是否改为 construct-rs 语法？ | ✅ 改为字段名引用 |
+| V3 | §6.2.2 P3.1/P3.2 表格是否使用字段名引用？ | ✅ 表内字段名引用 |
+| V3 | §6.3.3 `len_` 分析是否标注 Python 语法？ | ✅ |
+| V3 | §7.1 AR-10 边界是否使用字段名引用？ | ✅ |
+| V3 | §9.5 NE-expr-1/2 差异表是否使用字段名引用？ | ✅ |
+| V3 | §12.2 PM 决策点 2 表格是否使用字段名引用？ | ✅ |
+| V4 | §4.5.1 StopIfCondition::Expr 注释是否改为 construct-rs 语法？ | ✅ 改为 `x == 0` + 编译产物说明 |
 
 ### 11.8 VET 驳回修正自检（v4 新增）
 
@@ -3653,21 +3642,17 @@ Phase 2 表达式（ExprProgram），无 PyCallable 路径。
 
 ### 12.2 PM 决策点 2：Array count 表达式支持范围（P3 已明确）
 
-**问题**：Array 的 count 表达式（**Python 写法 `Array(this.length, Byte)`**；
-construct-rs 等价写法 `Array(length, Byte)`，`length` 是字段名引用）支持范围？
+**问题**：Array 的 count 表达式（`Array(length, Byte)`，`length` 是字段名引用）支持范围？
 
 **结论（P3 修正后）**：
 
-> **语法约定（v3）**：下表"场景"列同时给出 Python 写法（含 `this.`）与 construct-rs
-> 等价写法（字段名直接引用），便于 Python construct 用户对照。
-
 | 场景 | Phase 4 支持 | 说明 |
 |------|------------|------|
-| 顶层 count 表达式（construct-rs：`Array(n, simple_subcon)`；Python 写法：`Array(this.n, ...)`） | ✅ 支持 | 从 `expr_programs[field_index]["count"]` 取，参照 BytesDescriptor 表达式长度（§6.2.2 完整路径） |
-| inner 含表达式（construct-rs：`Array(N, Bytes(m))`；Python 写法：`Array(N, Bytes(this.m))`） | ❌ 编译期失败 | 与 `Bitwise(Bytes(m))`（Python 写法 `Bitwise(Bytes(this.m))`）同限制；§6.2.2 P3.1 |
-| inner 含表达式（construct-rs：`Array(N, StopIf(x))`；Python 写法：`Array(N, StopIf(this.x))`） | ❌ 编译期失败 | 同上 |
-| 嵌套 Array 表达式（construct-rs：`Array(N, Array(m, Byte))`；Python 写法：`Array(N, Array(this.m, Byte))`） | ❌ 编译期失败 | 同上 |
-| StopIf 作为 Struct 直接字段（construct-rs：`rfield(StopIf(x))`；Python 写法：`rfield(StopIf(this.x))`） | ✅ 支持 | 与 ComputedDescriptor 的 "func" 同模式 |
+| 顶层 count 表达式（`Array(n, simple_subcon)`） | ✅ 支持 | 从 `expr_programs[field_index]["count"]` 取，参照 BytesDescriptor 表达式长度（§6.2.2 完整路径） |
+| inner 含表达式（`Array(N, Bytes(m))`） | ❌ 编译期失败 | 与 `Bitwise(Bytes(m))` 同限制；§6.2.2 P3.1 |
+| inner 含表达式（`Array(N, StopIf(x))`） | ❌ 编译期失败 | 同上 |
+| 嵌套 Array 表达式（`Array(N, Array(m, Byte))`） | ❌ 编译期失败 | 同上 |
+| StopIf 作为 Struct 直接字段（`rfield(StopIf(x))`） | ✅ 支持 | 与 ComputedDescriptor 的 "func" 同模式 |
 
 理由：
 - 顶层 count 表达式：ExprProgram 基础设施已具备，完整编译路径已在 §6.2.2 设计。
@@ -3679,7 +3664,7 @@ construct-rs 等价写法 `Array(length, Byte)`，`length` 是字段名引用）
 - 子任务 4.1（ArrayNode）必须支持顶层 count 表达式（参照 §6.2.2 完整编译路径）。
 - 若需要 inner 含表达式支持，新增子任务（Phase 4.0b 或后续），扩展 Python 侧
   `_extract_and_compile_exprs` 递归（§6.2.2 P3.2 扩展方案）。
-- **与现有 `Bitwise(Bytes(m))` 限制一致**（Python 写法 `Bitwise(Bytes(this.m))`）：
+- **与现有 `Bitwise(Bytes(m))` 限制一致**：
   在用户文档中明确说明"包装型描述符的 inner 不支持含表达式的子描述符，需扁平化到字段层级"。
 
 **PM 行动**：确认 expr_programs 在编译期的传递路径（§6.2.2）。

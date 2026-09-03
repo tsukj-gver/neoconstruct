@@ -60,7 +60,7 @@ pub struct SeekNode {
 pub enum SeekOffset {
     /// 编译期常量（如 `Seek(5)`）。
     Const(i64),
-    /// 表达式（如 `Seek(this.offset)`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
+    /// 表达式（如 `Seek(offset)`），编译期从 FieldRef/ExprRef 翻译为 ExprProgram。
     Expr(ExprProgram),
 }
 
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn parse_sk2_expr_at() {
         with_py(|py| {
-            // Seek(this.off), off=3
+            // Seek(off), off=3
             let prog = ExprProgram::new(vec![ExprOp::GetInt(0)]);
             let node = SeekNode::new(SeekOffset::Expr(prog), Whence::Start);
             let mut stream = ParseStream::new(b"0123456789");
