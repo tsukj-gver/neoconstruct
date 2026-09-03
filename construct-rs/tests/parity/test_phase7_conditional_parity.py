@@ -7,11 +7,16 @@
 测试策略（子进程隔离）：每个用例 × impl 在独立子进程中运行，通过 JSON 输出
 结果，主进程比对。与 Phase 4 / 6 同模式。
 
-覆盖范围（10 case）：
-- IfThenElse（I1-I3）：常量 / Expr condparse/build
-- Switch（S1-S3）：int 常量 key / Expr key / default
-- Select（SL1-SL2）：候选成功 / SelectError
-- FocusedSeq（F1-F2）：基础场景 / build
+覆盖范围（9 case）：
+- IfThenElse（I1-I3）：常量 cond=True / 常量 cond=False / If 宏
+- Switch（S1-S3）：int 常量 key / default=Pass / default=Int8ub
+- Select（SL1-SL2）：第 1 候选成功 / 第 1 失败第 2 成功
+- FocusedSeq（F1）：基础场景（parsebuildfrom="num"）
+
+注（v0.1.1-2 P7 订正）：本文件历史头注释声称覆盖 "Switch: Expr key"、
+"IfThenElse: Expr cond"，实际 case 不存在（表达式 key/cond 的端到端
+用例此前缺失，即 v0.1.1 BUG-1 用例遗漏的一部分）。Expr 端到端回归用例
+现补于 ``tests/integration/test_v0_1_1_regressions.py``。
 
 用法::
 

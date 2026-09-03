@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import textwrap
@@ -29,15 +30,29 @@ _PY_PYTHON = _VENV_ROOT / "crs_venv_py_313" / "Scripts" / "python.exe"
 
 
 def get_rs_python() -> str:
-    """CRS venv python.exe（含 construct-rs wheel）。"""
-    env = sys.executable
+    """CRS venv python.exe（含 construct-rs wheel）。
+
+    解析顺序（与 tests/conftest.py 的 ``rs_python`` fixture 一致，P8 修复）：
+      1. 环境变量 CRS_PYTHON（路径存在时优先）
+      2. 默认 venv 路径 _RS_PYTHON（原开发机硬编码 fallback）
+      3. sys.executable（最后手段，可能两个 construct 冲突）
+    """
+    env = os.environ.get("CRS_PYTHON")
+    if env and Path(env).exists():
+        return env
     if _RS_PYTHON.exists():
         return str(_RS_PYTHON)
-    return env
+    return sys.executable
 
 
 def get_py_python() -> str:
-    """PC venv python.exe（含 Python construct 2.10.70）。"""
+    """PC venv python.exe（含 Python construct 2.10.70）。
+
+    解析顺序同 ``get_rs_python``，环境变量名 PC_PYTHON（P8 修复）。
+    """
+    env = os.environ.get("PC_PYTHON")
+    if env and Path(env).exists():
+        return env
     if _PY_PYTHON.exists():
         return str(_PY_PYTHON)
     return sys.executable
