@@ -43,15 +43,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 / aarch64：manylinux 容器交叉构建
-          - os: ubuntu-latest
-            platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            python-version: "3.8"
-          - os: ubuntu-latest
-            platform: linux-x86_64
-            target: x86_64-unknown-linux-gnu
-            python-version: "3.9"
           - os: ubuntu-latest
             platform: linux-x86_64
             target: x86_64-unknown-linux-gnu
@@ -71,14 +62,6 @@ jobs:
           - os: ubuntu-latest
             platform: linux-aarch64
             target: aarch64-unknown-linux-gnu
-            python-version: "3.8"
-          - os: ubuntu-latest
-            platform: linux-aarch64
-            target: aarch64-unknown-linux-gnu
-            python-version: "3.9"
-          - os: ubuntu-latest
-            platform: linux-aarch64
-            target: aarch64-unknown-linux-gnu
             python-version: "3.10"
           - os: ubuntu-latest
             platform: linux-aarch64
@@ -92,15 +75,6 @@ jobs:
             platform: linux-aarch64
             target: aarch64-unknown-linux-gnu
             python-version: "3.13"
-          # macOS：x86_64 runner 交叉编译双架构
-          - os: macos-13
-            platform: macos-x86_64
-            target: x86_64-apple-darwin
-            python-version: "3.8"
-          - os: macos-13
-            platform: macos-x86_64
-            target: x86_64-apple-darwin
-            python-version: "3.9"
           - os: macos-13
             platform: macos-x86_64
             target: x86_64-apple-darwin
@@ -120,10 +94,6 @@ jobs:
           - os: macos-13
             platform: macos-aarch64
             target: aarch64-apple-darwin
-            python-version: "3.9"
-          - os: macos-13
-            platform: macos-aarch64
-            target: aarch64-apple-darwin
             python-version: "3.10"
           - os: macos-13
             platform: macos-aarch64
@@ -137,15 +107,6 @@ jobs:
             platform: macos-aarch64
             target: aarch64-apple-darwin
             python-version: "3.13"
-          # Windows x64
-          - os: windows-latest
-            platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            python-version: "3.8"
-          - os: windows-latest
-            platform: windows-x86_64
-            target: x86_64-pc-windows-msvc
-            python-version: "3.9"
           - os: windows-latest
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
@@ -162,7 +123,6 @@ jobs:
             platform: windows-x86_64
             target: x86_64-pc-windows-msvc
             python-version: "3.13"
-
     steps:
       - uses: actions/checkout@v4
 

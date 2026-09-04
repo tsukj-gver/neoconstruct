@@ -34,7 +34,7 @@ assert Header.parse(b"\xCA\xFE\x01ABCD") == h
 
 ## 安装
 
-需要 Rust 工具链（stable）与 Python ≥ 3.8。
+需要 Rust 工具链（stable）与 Python ≥ 3.10。
 
 ```bash
 cd neoconstruct
