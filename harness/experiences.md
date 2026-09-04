@@ -514,3 +514,27 @@ DEV 报告"bench 编译通过 / 1 个 test passed"，PM 标注"通过"并打 tag
 - **不删除**：教训一旦写入不删除。若对策失效，标记为"对策失效"并补充新对策。
 - **引用而非复制**：本文件只记录模式 + 证据指针。具体技术细节引用源文件（如 `docs/archive/phase1/设计修订-parse路径优化.md §0`）。
 - **Agent 自检**：每次决策前，agent 自问"当前情境是否匹配 L-XX？" 若匹配，必须主动应用对策并在过程记录中注明引用的教训 ID。
+
+---
+
+## L-16: workflow runner label 与版本支持线凭记忆书写
+
+> **核心约束**：GitHub Actions 的 runner label（macos-13/ubuntu-20.04 类）与 Python 版本支持声明，必须**当场对照官方现行支持表**（actions/runner-images README、Python devguide EOL 表）后写入，禁止凭记忆/旧模板书写。
+
+**模式描述**：写 CI/CD workflow 时使用过时的 runner label（如已退役的 `macos-13`）或过宽的版本支持线（为 EOL 的 Python 3.8/3.9 声明 wheel），导致 job 无限期排队（runner 池不存在）或构建失败（镜像不预装 EOL 解释器）。这类故障本地无法发现——本地没有 runner 调度环节，只能靠 CI 反馈回路暴露，每轮暴露成本 = 一次完整 CI 周期 + 重打 tag 发布。
+
+**反复出现事件**：
+
+| # | 时间 | 事件 | 证据 |
+|---|------|------|------|
+| 1 | 2026-09-03/04 | v0.1.1 首发三连修：①macos-13 已退役（镜像表现役仅 26/15/14-deprecated）→ 8-11 个 macOS job 无限排队近 10 小时零启动；②Windows runner 新镜像不预装 Python 3.8/3.9 → wheel 构建失败；③为 EOL Python（3.8 EOL 2024-10/3.9 EOL 2025-10）维护支持线无用户价值 → 用户决策收紧 >=3.10。三轮 = 三次完整 CI/Release 周期 + 三次重打 tag。 | `plans/v0.1.1/总纲.md` v0.1.1-8 发布轮；GitHub Actions Run#1-#3 |
+
+**根因**：
+1. workflow 模板来自记忆/旧项目，未对照 runner-images 现役表
+2. requires-python 与 classifiers 复制了"越宽越好"的惯性，未核对 EOL 事实
+3. 发布前无 dry-run 机制，错误全部在发布回路中暴露
+
+**对策**：
+- **PM/DEV**：写或改 workflow 的 `runs-on:` 前，webfetch `actions/runner-images` README 核对现行 label；声明 Python 支持版本前，核对 devguide EOL 表（声明线下不得含 EOL 版本）
+- **DEV**：新 workflow 首推后立即盯首轮 CI（当作强制验证环节），不安排后续任务依赖其结论
+- **PM**：发布会话预留 CI 反馈回路时间；发现排队异常（>15 分钟零启动）立即怀疑 runner label 失效而非"排队长"
