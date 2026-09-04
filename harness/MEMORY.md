@@ -83,6 +83,7 @@ last_updated: 2026-07-29
 | 10 用法 SKILL | ✅ 完成（2026-08-07，SKILL v2 + SCTP 验证通过，tag phase-10-complete） | `phase-10-complete` | `plans/phase10-skill/总纲.md` |
 | **管理方式变更** | 2026-09-03 起进入半正式发布状态：任务标识 `v<version>-<任务号>`，目录 `plans/v<version>/`，tag `v<N>.<M>.<P>-complete`（phase 制历史标识不变） | — | `AGENTS.md §1` |
 | v0.1.1（含 -8 更名 neoconstruct + PyPI 首发）| ✅ 已发布（2026-09-04：neoconstruct 0.1.1 上架 PyPI，21 产物 5 平台 ×3.10-3.13；历史已重写推送 GitHub；tag v0.1.1） | `v0.1.1` | `plans/v0.1.1/总纲.md` |
+| v0.1.2 值语义修复 + 框架 | 🔵 进行中（0.1.2 止血已发布；ValueKind 框架实现 v0.1.2-4 CODING 中——设计 v2.2 定稿；管理批次含 §0 新增第 9/10 条：construct 仅 benchmark / 源码零过程信息） | — | `plans/v0.1.2/总纲.md` |
 
 > **状态图例**：⚪ 未开始 / 🔵 进行中 / ✅ 完成 / 🔴 阻塞。状态细节由 `plans/phaseN/总纲.md` 维护（单一事实源），本表只索引。
 > **iter9 结构变更**：phase4 过程记录.md（11837 行）拆分为 12 个 phase4 traces + 7 个 META traces；META 类 cross-phase 资产抽到 `plans/meta/`；`docs/design/` 子目录化（模块设计/ + 基础设施/）。详见 `plans/phase4-array/索引.md` 和 `harness/metadata-convention.md §5.1/§9`。
@@ -150,7 +151,7 @@ last_updated: 2026-07-29
 | L-12 | PM 角色越界深入技术/代码细节 | Phase 6 立项沉淀：PM 自己 grep 源码查依赖（应分派 ARCH），违背 pm.md base §PM 不做的事 |
 | L-13 | docstring 未跟随语法演进 | Phase 7 审查沉淀：Phase 2 废弃 `this` 但 15+ docstring 残留 `this.xxx` |
 | L-14 | 设计硬约束认知需交叉验证 | RawCopy 质疑沉淀：ARCH 把"必须拷贝"当硬约束，漏了 Rust 内置 hashfunc 零拷贝路径 |
-| L-15 | 权限白名单绕过与审查角色写代码 | v0.1.1 批次沉淀：PM 分派越权（临时目录/给 VET 派写代码/给 DEV 派文档）+ VET bash 绕过白名单；对策=分派对照权限表 + 拦截即上报 + 审查角色只读验证 |
+| L-15 | 权限白名单绕过与审查角色写代码 | 两次触发（v0.1.1：PM 分派越权×4 + VET bash 绕过；v0.1.2：DEV 写 Temp 复数次[平台工具描述诱导] + PM 越权未遂删 DEV 过程文件 + commit 未检混入半成品）；对策=分派对照权限表 + 拦截即上报 + 过程文件归任务所有者 + commit 前核对 status 明细 |
 
 ---
 
