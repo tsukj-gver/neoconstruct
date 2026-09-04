@@ -83,7 +83,8 @@ def test_bits_integer_valid_value_roundtrip():
 def test_bit_padding_invalid_pattern_raises_padding_error():
     """bit 域 Padding pattern=2（仅接受 0x00/0x01）→ 编译期 PaddingError。[文档]
 
-    双重断言：类型 PaddingError；消息含 pattern 语义词。
+    双重断言：类型 PaddingError；消息含 pattern 语义词；
+    path 携带出错字段名上下文（编译期注入，非空串）。
     """
 
     with pytest.raises(PaddingError) as exc_info:
@@ -94,6 +95,7 @@ def test_bit_padding_invalid_pattern_raises_padding_error():
             pad: Any = field(Padding(4, pattern=2))
 
     assert "pattern" in str(exc_info.value).lower() or "padding" in str(exc_info.value).lower()
+    assert "pad" in (exc_info.value.path or "")
 
 
 def test_bit_padding_valid_pattern_compiles_and_roundtrip():

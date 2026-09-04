@@ -117,6 +117,14 @@ impl Construct for ProcessRotateLeftNode {
     ) -> Result<(), ConstructError> {
         let amount = eval_expr_int(&self.amount, ctx, py)?;
         let group = eval_expr_int(&self.group, ctx, py)?;
+        // 参数校验（与 parse 侧 rotate_left 的 group 校验对称）：先于取负执行，
+        // 避免 group==0 时 rem_euclid(group*8) 除零 panic。
+        if group < 1 {
+            return Err(ConstructError::Rotation {
+                message: "group size must be at least 1 to be valid".to_string(),
+                path: path.to_string(),
+            });
+        }
         // build 取负（对齐 Python L5499：amount = -amount % (group*8)）
         let neg_amount = (-(amount)).rem_euclid(group * 8) as usize;
         let capacity = self.inner.sizeof(ctx).unwrap_or(0);
@@ -303,6 +311,27 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             assert!(matches!(err, ConstructError::Rotation { .. }));
+        });
+    }
+
+    #[test]
+    fn build_group_zero_raises() {
+        // PR-5 对称：ProcessRotateLeft(4, 0, ...) build → RotationError（非 panic）
+        with_py(|py| {
+            let node = make_rotate_node(4, 0);
+            let obj = py.eval_bound("1", None, None).expect("int");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            match err {
+                ConstructError::Rotation { message, .. } => {
+                    assert!(message.contains("group"), "got: {}", message);
+                }
+                other => panic!("expected Rotation, got {:?}", other),
+            }
         });
     }
 

@@ -184,13 +184,6 @@ class TestProcessRotateLeftSemantics:
         with pytest.raises(RotationError, match="group"):
             RG.parse(b"\x0f\xf0")
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="疑似库缺陷：group=0 build 侧 Rust panic（rem_euclid 除零，"
-        "process_rotate_left build 分支在参数校验前取负 amount）——违反"
-        "『非法输入返回 Err 而非 panic』红线；自然语义应与 parse 同报 "
-        "RotationError",
-    )
     def test_rotate_group_zero_build_raises_rotation_error(self):
         """group=0 build：应报 RotationError（与 parse 对称）。[自然]"""
 

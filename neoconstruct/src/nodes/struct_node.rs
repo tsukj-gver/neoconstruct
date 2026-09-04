@@ -165,7 +165,7 @@ pub enum FieldMode {
 /// | `Computed` | 求值表达式；build no-op（不写不校验） |
 /// | `Tell` | `stream.tell()`；build no-op |
 /// | `Void` | 哑值 None（Padding/Pass：节点自身写 pattern 字节/空） |
-/// | `Control` | 透传显式实例值/parse 产出值；缺省（None 或属性不存在）产哑值 None——实例值不参与字节编码，Peek no-op / Seek 移针 / Checksum 重算由节点自理 |
+/// | `Control` | 透传显式实例值/parse 产出值；缺省（None 或属性不存在）产哑值 None——实例值不参与字节编码，Peek no-op / Seek 移针 / Checksum 重算 / Probe 打印由节点自理 |
 /// | `Index` | `ctx.index()`（build 期循环状态，无实例值语义） |
 #[derive(Debug)]
 pub enum ValueKind {
@@ -189,7 +189,7 @@ pub enum ValueKind {
     Tell,
     /// Padding/Pass：ctx 写 None；节点自身写 pattern 字节/空。
     Void,
-    /// 低频控制与流操作（StopIf/Check/Terminated/Element/Peek/Seek/Checksum）：
+    /// 低频控制与流操作（StopIf/Check/Terminated/Element/Peek/Seek/Checksum/Probe）：
     /// resolve 产透传值（显式实例值/parse 产出值透传，缺省产哑值 None——
     /// 属性不存在等同缺省），build 值语义由节点自理（实例值不参与字节编码）。
     Control,
@@ -203,7 +203,7 @@ impl ValueKind {
     /// 分类规则（按根节点类型，不递归拆包——字段持有根节点）：
     /// ConstNode→`Const`、DefaultNode→`Default`、RebuildNode→`Rebuild`、
     /// ComputedNode→`Computed`、TellNode→`Tell`、Padding/BitPadding/Pass→`Void`、
-    /// StopIf/Check/Terminated/Element/Peek/Seek/Checksum→`Control`、
+    /// StopIf/Check/Terminated/Element/Peek/Seek/Checksum/Probe→`Control`、
     /// IndexNode→`Index`、其余（含一切包装器根）→`Instance{expr_derived}`。
     ///
     /// # 参数
@@ -225,7 +225,8 @@ impl ValueKind {
             | Node::Element(_)
             | Node::Peek(_)
             | Node::Seek(_)
-            | Node::Checksum(_) => ValueKind::Control,
+            | Node::Checksum(_)
+            | Node::Probe(_) => ValueKind::Control,
             Node::Index(_) => ValueKind::Index,
             _ => ValueKind::Instance { expr_derived },
         }

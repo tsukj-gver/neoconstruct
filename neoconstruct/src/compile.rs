@@ -3192,12 +3192,20 @@ fn is_adapter_like(desc: &Bound<'_, PyAny>) -> bool {
 
 /// 为编译期错误附加字段名上下文。
 ///
-/// 仅对 [`ConstructError::Compilation`] 变体追加 `field '{name}': ` 前缀，
-/// 以便在多字段 schema 中定位出错的字段。其他变体（运行时错误）原样传播。
+/// - [`ConstructError::Compilation`]：追加 `field '{name}': ` 消息前缀，
+///   以便在多字段 schema 中定位出错的字段。
+/// - 携带**空 path** 的错误（如 `BitPaddingNode::new` 编译期构造的
+///   `Padding`——构造点尚无运行期路径）：注入字段名作为 path，
+///   避免 Python 侧呈现 "Error in path \n..." 的空 path 消息形态。
+/// - 其他（运行期错误，path 已有值）：原样传播。
 fn with_field_context(err: ConstructError, field_name: &str) -> ConstructError {
     match err {
         ConstructError::Compilation { message } => ConstructError::Compilation {
             message: format!("field '{}': {}", field_name, message),
+        },
+        ConstructError::Padding { message, path } if path.is_empty() => ConstructError::Padding {
+            message,
+            path: field_name.to_string(),
         },
         other => other,
     }
@@ -5357,6 +5365,32 @@ class {name}:
         };
         let wrapped = with_field_context(err, "field");
         assert!(matches!(wrapped, ConstructError::Stream { .. }));
+    }
+
+    #[test]
+    fn with_field_context_injects_field_name_into_empty_padding_path() {
+        // 编译期构造的 Padding 错误（空 path）→ 注入字段名；非空 path 不覆盖。
+        let err = ConstructError::Padding {
+            message: "bit-domain padding pattern must be 0x00 or 0x01".to_string(),
+            path: String::new(),
+        };
+        let wrapped = with_field_context(err, "pad");
+        match wrapped {
+            ConstructError::Padding { message, path } => {
+                assert_eq!(path, "pad");
+                assert!(message.contains("pattern"), "got: {}", message);
+            }
+            other => panic!("expected Padding, got {:?}", other),
+        }
+        // 非空 path（运行期错误）原样保留。
+        let runtime = ConstructError::Padding {
+            message: "m".to_string(),
+            path: "root.pad".to_string(),
+        };
+        match with_field_context(runtime, "pad") {
+            ConstructError::Padding { path, .. } => assert_eq!(path, "root.pad"),
+            other => panic!("expected Padding, got {:?}", other),
+        }
     }
 
     // ======================================================================

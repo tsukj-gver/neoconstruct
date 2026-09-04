@@ -219,12 +219,6 @@ class TestProbeSemantics:
         out = capsys.readouterr().out
         assert "<field no_such_field missing>" in out
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="疑似库缺陷：Probe 被 ValueKind 分类为 Instance——rfield(Probe()) "
-        "build 期取实例值 None ≡ 缺值 → FieldValueMissingError，round-trip "
-        "断裂；自然语义应为 Control 类 no-op（parse 返回 None、build 不参与）",
-    )
     def test_probe_roundtrip_after_parse(self):
         """round-trip：rfield(Probe()) parse → build 字节稳定（探针 no-op）。[自然]"""
 
