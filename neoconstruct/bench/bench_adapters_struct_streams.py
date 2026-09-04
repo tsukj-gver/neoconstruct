@@ -215,8 +215,8 @@ def _make_p0_case(impl, case):
 
     # ===== Terminated =====
     if C == 'TM1':  # Terminated at EOF
-        # rfield(Terminated) 支持：compute_ro_value 对 Terminated 返回
-        # Py_None（build 是 no-op）。
+        # rfield(Terminated) 支持：值 resolve 对 Terminated 提供 None
+        # （build 是 no-op）。
         if impl == 'rs':
             return mk_rs(['    v: int = field(Byte)',
                           '    _t: object = rfield(Terminated)'],

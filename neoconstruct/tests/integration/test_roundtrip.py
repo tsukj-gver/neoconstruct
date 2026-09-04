@@ -284,3 +284,44 @@ def test_mixed_fields_roundtrip():
     assert parsed.b == b"\xab\xcd\xef"
     assert parsed.c == 0xCAFEBABE
     assert parsed.d == b"\x00\x11\x22"
+
+
+# ---------------------------------------------------------------------------
+# 浮点格式别名（Half/Single/Double）：别名即同物 + 往返
+# ---------------------------------------------------------------------------
+
+
+def test_float_aliases_are_identical_objects():
+    """Half/Single/Double 是 Float16b/32b/64b 的同一对象（别名即同物）。[自然]"""
+
+    from neoconstruct import Double, Float16b, Float32b, Float64b, Half, Single
+
+    assert Half is Float16b
+    assert Single is Float32b
+    assert Double is Float64b
+
+
+@pytest.mark.parametrize(
+    "alias,struct_fmt,value",
+    [
+        ("Half", ">e", 1.0),
+        ("Single", ">f", 100.0),
+        ("Double", ">d", 1234.5),
+    ],
+)
+def test_float_alias_roundtrip_matches_struct_pack(alias, struct_fmt, value):
+    """别名 build 与 struct.pack 一致；build→parse 往返保持值。[自然]"""
+
+    from neoconstruct import Double, Half, Single
+
+    descriptor = {"Half": Half, "Single": Single, "Double": Double}[alias]
+
+    @dataclass
+    class FloatAlias(StructMixin):
+        v: float = field(descriptor)
+
+    built = FloatAlias(v=value).build()
+    assert built == struct.pack(struct_fmt, value)
+    parsed = FloatAlias.parse(built)
+    assert parsed.v == value
+    assert parsed.build() == built

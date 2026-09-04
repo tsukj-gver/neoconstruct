@@ -1051,13 +1051,12 @@ def _compile_schema_for_class(cls):
     modes = [desc.mode for _, desc in descriptors]
 
     # 编译期拒绝 context= 注入（静默忽略比报错更危险——fail fast）。
-    # 跨层显式 context 注入将于 v0.1.3 提供机制。
+    # 跨层显式 context 注入暂不支持，需通过外层字段引用传值。
     for name, desc in descriptors:
         if getattr(desc, "_context_injections", None) is not None:
             raise CompilationError(
-                "字段 '{}' 使用了 context= 注入参数，当前版本尚未支持"
-                "（将于 v0.1.3 提供注入机制）；当前请通过外层字段引用"
-                "传递值。".format(name)
+                "字段 '{}' 使用了 context= 注入参数，当前尚未支持；"
+                "请通过外层字段引用传递值。".format(name)
             )
 
     # 构建 field_index_map：{id(descriptor): field_index}。

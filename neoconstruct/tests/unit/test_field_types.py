@@ -657,7 +657,7 @@ class TestApplyDataclassFieldConfig:
 
         descriptors = _collect_field_descriptors(_Owner)
         # schema=None 走回退路径（延迟桩，无编译产物）：统一 Optional
-        # （设计 v2.3 回填 §5.3——缺值错误后移到 build 值使用点）。
+        # （缺值错误后移到 build 值使用点）。
         _apply_dataclass_field_config(_Owner, descriptors)
 
         assert isinstance(_Owner.x, dataclasses.Field)
@@ -671,7 +671,7 @@ class TestApplyDataclassFieldConfig:
             pad: int = wfield(_dummy)
 
         descriptors = _collect_field_descriptors(_Owner)
-        # 回退路径统一 Optional（设计 v2.3 回填 §5.3）。
+        # 回退路径统一 Optional（缺值错误后移到 build 值使用点）。
         _apply_dataclass_field_config(_Owner, descriptors)
 
         assert isinstance(_Owner.pad, dataclasses.Field)
@@ -690,7 +690,7 @@ class TestApplyDataclassFieldConfig:
         descriptors = _collect_field_descriptors(_Owner)
         _apply_dataclass_field_config(_Owner, descriptors)
 
-        # a: RW 无 default，回退路径 → Optional（设计 v2.3 回填 §5.3）
+        # a: RW 无 default，回退路径 → Optional（缺值错误后移到 build 值使用点）
         assert isinstance(_Owner.a, dataclasses.Field)
         assert _Owner.a.kw_only is True
         assert _Owner.a.default is None

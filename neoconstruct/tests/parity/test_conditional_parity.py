@@ -12,7 +12,7 @@
 - FocusedSeq（F1）：基础场景（parsebuildfrom="num"）
 
 注：本文件 case 均为常量 cond/key；表达式 key/cond 的端到端回归用例见
-``tests/integration/test_v0_1_1_regressions.py``。
+``tests/integration/test_field_value_regressions.py``。
 
 用法::
 

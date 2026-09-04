@@ -1,7 +1,5 @@
 //! StructNode：字段序列根节点。
 //!
-//! Python 参考：`construct/construct/core.py` `Struct._parse` / `_build`（L2162-2268）。
-//!
 //! ## 行为概述
 //!
 //! StructNode 是 StructMixin 子类执行树的根节点：按顺序解析/构建一组命名字段。
