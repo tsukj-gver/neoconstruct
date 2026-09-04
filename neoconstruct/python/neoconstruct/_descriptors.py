@@ -3394,7 +3394,7 @@ def Sequence(*subcons, **subconskw):
         d2.parse(b"\\x03ABC")   # → [3, b"ABC"]
 
     **已知 parity 差异**：含 RO 字段（Check/Computed/Tell 等）的 build，
-    neoconstruct RO 字段不从 list 取值（走 compute_ro_value），list 不含 RO 字段占位。
+    neoconstruct RO 字段不从 list 取值（走 ValueKind resolve），list 不含 RO 字段占位。
     Python 原版 list 需含 RO 字段占位 None。用户迁移需调整 build 输入。
 
     :param subcons: 位置 subcons。

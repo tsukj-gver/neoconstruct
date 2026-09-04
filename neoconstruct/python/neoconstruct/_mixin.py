@@ -311,7 +311,7 @@ class TellDescriptor:
     使用方式：``rfield(Tell())``。
 
     对应 Python construct 的 ``Tell``。parse 时返回当前流位置，
-    build 时位置由 StructNode 的 ``compute_ro_value`` 处理（不入流）。
+    build 时位置由字段值 resolve 直接取流位置（不入流）。
 
     ``_expr_params`` 协议返回空 dict：Tell 无表达式参数。
     """
@@ -347,7 +347,7 @@ class ComputedDescriptor:
     使用方式：``rfield(Computed(end - start))``。
 
     对应 Python construct 的 ``Computed``。parse 时通过表达式 VM 求值，
-    build 时由 StructNode 的 ``compute_ro_value`` 调用同样的求值逻辑。
+    build 时由字段值 resolve 调用同样的求值逻辑。
 
     ``_expr_params`` 协议返回 ``{"func": <expr>}``：编译期将 expr
     （``_FieldDescriptor`` / ``_ExprRef``）翻译为 ExprOp 指令列表，
@@ -941,7 +941,7 @@ def _expr_programs_to_list(expr_programs, field_count):
 # ---------------------------------------------------------------------------
 
 
-def _apply_dataclass_field_config(cls, descriptors, schema=None, expr_programs=None):
+def _apply_dataclass_field_config(cls, descriptors, schema=None):
     """将 ``_FieldDescriptor`` 转换为 ``dataclasses.field()`` 配置。
 
     在 ``__init_subclass__`` 末尾调用（编译完成后，``@dataclass`` 执行前）。
@@ -967,10 +967,11 @@ def _apply_dataclass_field_config(cls, descriptors, schema=None, expr_programs=N
     - init_defaults 三态分派（如上）
 
     回退路径（``schema=None``，前向引用编译失败安装延迟桩时无编译产物）：
-    用 ``expr_programs`` 推导——表达式非空 → Optional（缺值错误后移到
-    build）；其余 → Required。延迟桩重试编译成功后本函数以 schema 重新
-    调用，类属性默认值更新为编译产物（init 签名由首次配置确定，延迟
-    场景不改变字段集）。
+    统一回退为 Optional——全字段可省、缺值错误后移到 build 值使用点
+    （与"错误时机=值使用点"哲学一致；build 侧行为由 Rust 侧 resolve
+    保证不变）。延迟桩重试编译成功后本函数以 schema 重新调用，类属性
+    默认值更新为编译产物（init 签名由首次配置确定，延迟场景不改变
+    字段集）。
 
     注意：``_FieldDescriptor`` 带有 ``__eq__`` 运算符重载（表达式系统），
     导致 ``__hash__ = None``。Python 3.x 的
@@ -982,19 +983,16 @@ def _apply_dataclass_field_config(cls, descriptors, schema=None, expr_programs=N
     :param cls: StructMixin 子类。
     :param descriptors: ``[(field_name, _FieldDescriptor), ...]`` 有序列表。
     :param schema: 编译产物（``CompiledSchema``）；正常路径必传。
-    :param expr_programs: 每字段表达式程序映射（回退路径推导用）。
     """
 
-    def _fallback_default(idx):
-        """回退推导：表达式派生 → 可省；其余 → 必填。"""
-        if expr_programs is not None and expr_programs.get(idx):
-            return (1, None)
-        return (0, None)
+    def _fallback_default():
+        """回退推导：统一 Optional（缺值错误后移到 build 值使用点）。"""
+        return (1, None)
 
     if schema is not None:
         init_defaults = schema._init_defaults()
     else:
-        init_defaults = [_fallback_default(i) for i in range(len(descriptors))]
+        init_defaults = [_fallback_default() for _ in range(len(descriptors))]
 
     for idx, (name, desc) in enumerate(descriptors):
         kind_code, default_value = init_defaults[idx]
@@ -1101,12 +1099,11 @@ def _compile_schema_for_class(cls):
         # Rust 侧该错误消息含 "unresolved" 或 "未解析"。
         err_str = str(e)
         if "unresolved" in err_str.lower() or "未解析" in err_str:
-            # 在安装延迟桩前注入 dataclass 字段配置（回退推导：无编译产物）。
+            # 在安装延迟桩前注入 dataclass 字段配置（回退推导：统一
+            # Optional，缺值错误后移到 build 值使用点）。
             # _FieldDescriptor 有 __hash__=None（表达式系统），
             # 若不替换为 dataclasses.field()，@dataclass 会拒绝。
-            _apply_dataclass_field_config(
-                cls, descriptors, schema=None, expr_programs=expr_programs
-            )
+            _apply_dataclass_field_config(cls, descriptors, schema=None)
             _install_lazy_stubs(cls)
         else:
             raise

@@ -98,7 +98,8 @@ pub enum ConstructError {
         path: String,
     },
 
-    /// build 时字段缺值：Instance 字段的实例值为 None（缺值统一语义）。
+    /// build 时字段缺值：Instance 字段的实例值为 None，或实例无该属性
+    /// （AttributeError ≡ 缺值，缺值统一语义）。
     ///
     /// 触发场景：构造实例时未提供该字段值（且无框架派生默认值），错误
     /// 时机后移到 build（值使用点）而非实例化——携带字段名与指引。

@@ -618,17 +618,26 @@ impl Construct for StructNode {
             // 产出 Bound PyObject（就地替换，无 owned Py 中转）。
             let value: Bound<'_, PyAny> = match &field.kind {
                 ValueKind::Instance { .. } => {
-                    // 值必须来自实例：getattr → None 视为缺值（错误时机＝build）。
-                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
-                        ConstructError::Generic {
-                            message: format!(
-                                "object has no attribute '{}' (required for build): {}",
-                                field.name.rust_name(),
-                                e
-                            ),
-                            path: path.to_string(),
+                    // 值必须来自实例：getattr → None 或 AttributeError ≡ 缺值
+                    // （错误时机＝build，报 BuildValueMissing 含字段+path）；
+                    // 其余 getattr 错误包装为 Generic（与 Const/Default 同判据，
+                    // 错误判据单源收敛）。
+                    let v = match obj.getattr(field.name.py_name().bind(py)) {
+                        Ok(v) => v,
+                        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                            py.None().into_bound(py)
                         }
-                    })?;
+                        Err(e) => {
+                            return Err(ConstructError::Generic {
+                                message: format!(
+                                    "reading attribute '{}' failed for build: {}",
+                                    field.name.rust_name(),
+                                    e
+                                ),
+                                path: path.to_string(),
+                            });
+                        }
+                    };
                     if v.is_none() {
                         let mut err = ConstructError::BuildValueMissing {
                             field: field.name.rust_name().to_string(),
@@ -705,13 +714,27 @@ impl Construct for StructNode {
                 ValueKind::Tell => stream.tell().into_py(py).into_bound(py),
                 ValueKind::Void => py.None().into_bound(py),
                 ValueKind::Control => {
-                    // 透传显式实例值/parse 产出值；缺省（None 或属性不存在，
+                    // 透传显式实例值/parse 产出值；缺省（None 或 AttributeError，
                     // RO 面 init=False 实例可能无属性——属性缺失 ≡ 哑值 None）
-                    // 产哑值 None。节点编码忽略实例值（Peek no-op / Seek 移针 /
-                    // Checksum 重算），ctx 写透传值使后继表达式读到有效值。
+                    // 产哑值 None；其余 getattr 错误包装为 Generic（与
+                    // Const/Default/Instance 同判据，错误判据单源收敛）。
+                    // 节点编码忽略实例值（Peek no-op / Seek 移针 / Checksum 重算），
+                    // ctx 写透传值使后继表达式读到有效值。
                     match obj.getattr(field.name.py_name().bind(py)) {
                         Ok(v) => v,
-                        Err(_) => py.None().into_bound(py),
+                        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                            py.None().into_bound(py)
+                        }
+                        Err(e) => {
+                            return Err(ConstructError::Generic {
+                                message: format!(
+                                    "reading attribute '{}' failed for build: {}",
+                                    field.name.rust_name(),
+                                    e
+                                ),
+                                path: path.to_string(),
+                            });
+                        }
                     }
                 }
                 ValueKind::Index => ctx.index().into_py(py).into_bound(py),
@@ -1029,13 +1052,14 @@ mod tests {
     // ======================================================================
 
     #[test]
-    fn build_missing_field_returns_generic_error_with_field_name() {
+    fn build_missing_field_returns_missing_value_error_with_field_name() {
         with_py(|py| {
             let node = StructNode::new_for_test(
                 py,
                 vec![("a".to_string(), u8_node()), ("b".to_string(), u8_node())],
             );
-            // 对象只有 a，缺 b
+            // 对象只有 a，缺 b（AttributeError ≡ 缺值，设计 v2.3 回填 §5.2
+            // ——错误判据单源收敛，报 BuildValueMissing 含字段+path）
             let obj = py
                 .eval_bound("type('O', (), {'a': 1})()", None, None)
                 .expect("obj");
@@ -1046,14 +1070,11 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::Generic { message, .. } => {
-                    assert!(
-                        message.contains("b"),
-                        "error should mention field 'b': {}",
-                        message
-                    );
+                ConstructError::BuildValueMissing { field, path, .. } => {
+                    assert_eq!(field, "b");
+                    assert_eq!(path, "root.b");
                 }
-                other => panic!("expected Generic error, got {:?}", other),
+                other => panic!("expected BuildValueMissing, got {:?}", other),
             }
             // a 已写入，b 未写入
             assert_eq!(stream.as_bytes(), &[1]);
@@ -1664,7 +1685,8 @@ mod tests {
 
     #[test]
     fn ro_instance_field_without_attribute_reports_missing() {
-        // RO + Instance 分类且从零实例无该属性 → 报错（实例未提供值）。
+        // RO + Instance 分类且从零实例无该属性 → 缺值（错误判据单源收敛，
+        // 设计 v2.3 §5.2 补：AttributeError ≡ 缺值 → BuildValueMissing）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "v", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, false);
@@ -1678,14 +1700,15 @@ mod tests {
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
             match err {
-                ConstructError::Generic { message, .. } => {
+                ConstructError::BuildValueMissing { field, path, .. } => {
+                    assert_eq!(field, "v");
                     assert!(
-                        message.contains("no attribute") || message.contains("'v'"),
-                        "error should mention missing attribute: {}",
-                        message
+                        path.contains("v"),
+                        "path should mention field 'v': {}",
+                        path
                     );
                 }
-                other => panic!("expected Generic error, got {:?}", other),
+                other => panic!("expected BuildValueMissing, got {:?}", other),
             }
         });
     }

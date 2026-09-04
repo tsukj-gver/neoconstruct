@@ -16,6 +16,7 @@ Python 异常                    Rust ConstructError 变体
 :class:`CompilationError`     ``ConstructError::Compilation``
 :class:`UnresolvedReferenceError`  ``ConstructError::UnresolvedReference``
 :class:`GenericConstructError``ConstructError::Generic``
+:class:`FieldValueMissingError``  ``ConstructError::BuildValueMissing``
 :class:`IntegerError`         ``ConstructError::Integer``
 :class:`PaddingError`         ``ConstructError::Padding``
 :class:`RangeError`           ``ConstructError::Range``
@@ -432,6 +433,7 @@ __all__ = [
     "CompilationError",
     "UnresolvedReferenceError",
     "GenericConstructError",
+    "FieldValueMissingError",
     "IntegerError",
     "PaddingError",
     "RangeError",
