@@ -350,12 +350,10 @@ pub struct StructField {
 ///
 /// # build 行为
 ///
-/// 对每个 `StructField`，根据 `field.mode` 分支：
-/// - `Rw`：`obj.getattr(py_name)` 取值 → `ctx.set_field_at`（若 has_expressions）
-///   → `node.build(value, ...)`
-/// - `Wo`：`obj.getattr(py_name)` 取值 → `node.build(value, ...)`（不写 context）
-/// - `Ro`：通过 `compute_ro_value` 从节点逻辑计算（不从实例取值），写入 context
-///   （若有表达式），然后 `node.build`（对 Tell/Computed 是 no-op）
+/// 对每个 `StructField`，按 `field.kind`（[`ValueKind`]）统一 resolve
+/// （缺省补值/显式值尊重/哑值）后 `node.build(value, ...)`；
+/// `field.mode` 仅决定是否写 context（Wo 不写）与 parse 存储。
+/// 详见 [`ValueKind`] 的语义表。
 ///
 /// 子节点 `Err` 时 `push_path_segment(rust_name)` 重建路径（仅错误路径）。
 ///
@@ -643,16 +641,24 @@ impl Construct for StructNode {
                 }
                 ValueKind::Const(c) => {
                     // RW/RO 均取实例属性（校验留给节点）；None → 就地补编译期常量。
-                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
-                        ConstructError::Generic {
-                            message: format!(
-                                "object has no attribute '{}' (required for build): {}",
-                                field.name.rust_name(),
-                                e
-                            ),
-                            path: path.to_string(),
+                    // 属性不存在 ≡ 缺省（RO 面 init=False 的从零实例无该属性）
+                    // → 同样补常量（resolve 缺省补值语义对属性缺失的统一）。
+                    let v = match obj.getattr(field.name.py_name().bind(py)) {
+                        Ok(v) => v,
+                        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                            c.bind(py).to_owned().into_any()
                         }
-                    })?;
+                        Err(e) => {
+                            return Err(ConstructError::Generic {
+                                message: format!(
+                                    "reading attribute '{}' failed for build: {}",
+                                    field.name.rust_name(),
+                                    e
+                                ),
+                                path: path.to_string(),
+                            })
+                        }
+                    };
                     if v.is_none() {
                         c.bind(py).to_owned().into_any()
                     } else {
@@ -660,17 +666,25 @@ impl Construct for StructNode {
                     }
                 }
                 ValueKind::Default(p) => {
-                    // None → 求值；非 None → 用显式值。
-                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
-                        ConstructError::Generic {
-                            message: format!(
-                                "object has no attribute '{}' (required for build): {}",
-                                field.name.rust_name(),
-                                e
-                            ),
-                            path: path.to_string(),
+                    // None → 求值；非 None → 用显式值。属性不存在 ≡ 缺省
+                    // （RO 面 init=False 的从零实例无该属性）→ 求值表达式。
+                    let v = match obj.getattr(field.name.py_name().bind(py)) {
+                        Ok(v) => v,
+                        Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
+                            let n = crate::expr::eval_expr_int(p, ctx, py)?;
+                            n.into_py(py).into_bound(py)
                         }
-                    })?;
+                        Err(e) => {
+                            return Err(ConstructError::Generic {
+                                message: format!(
+                                    "reading attribute '{}' failed for build: {}",
+                                    field.name.rust_name(),
+                                    e
+                                ),
+                                path: path.to_string(),
+                            })
+                        }
+                    };
                     if v.is_none() {
                         let n = crate::expr::eval_expr_int(p, ctx, py)?;
                         n.into_py(py).into_bound(py)
@@ -1552,19 +1566,23 @@ mod tests {
 
     /// 构造 WO StructField 的便捷函数（测试专用）。
     fn wo_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        let kind = ValueKind::classify(py, &node, false);
         StructField {
             name: FieldName::new(py, name),
             node,
             mode: FieldMode::Wo,
+            kind,
         }
     }
 
     /// 构造 RO StructField 的便捷函数（测试专用）。
     fn ro_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        let kind = ValueKind::classify(py, &node, false);
         StructField {
             name: FieldName::new(py, name),
             node,
             mode: FieldMode::Ro,
+            kind,
         }
     }
 
@@ -1626,18 +1644,32 @@ mod tests {
     }
 
     #[test]
-    fn ro_field_build_with_unsupported_node_returns_error() {
-        // RO 字段使用不支持的节点（FormatField）→ compute_ro_value 返回 Generic error。
-        // 编译期校验应保证 RO 只用 Tell/Computed/Const/ContextParam，
-        // 此测试模拟运行时兜底场景。
+    fn ro_instance_field_build_reads_instance_value() {
+        // RO 字段携带 Instance 分类（如 FormatField 根）→ build 从实例取值
+        // （FieldMode 退出 build 分派后的放宽：显式提供实例值即可 build）。
         with_py(|py| {
-            let fields = vec![
-                rw_field(py, "a", u8_node()),
-                ro_field(py, "computed", u8_node()),
-            ];
+            let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "v", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, false);
             let obj = py
-                .eval_bound("type('O', (), {'a': 1, 'computed': 0})()", None, None)
+                .eval_bound("type('O', (), {'a': 1, 'v': 0xFF})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0x01, 0xFF]);
+        });
+    }
+
+    #[test]
+    fn ro_instance_field_without_attribute_reports_missing() {
+        // RO + Instance 分类且从零实例无该属性 → 报错（实例未提供值）。
+        with_py(|py| {
+            let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "v", u8_node())];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 1})()", None, None)
                 .expect("obj");
             let mut stream = BuildStream::new();
             let mut ctx = Context::placeholder(py);
@@ -1648,8 +1680,8 @@ mod tests {
             match err {
                 ConstructError::Generic { message, .. } => {
                     assert!(
-                        message.contains("compute_ro_value") || message.contains("RO"),
-                        "error should mention compute_ro_value/RO: {}",
+                        message.contains("no attribute") || message.contains("'v'"),
+                        "error should mention missing attribute: {}",
                         message
                     );
                 }
@@ -1660,8 +1692,8 @@ mod tests {
 
     #[test]
     fn ro_terminated_field_build_is_noop() {
-        // Terminated 作为 RO 字段时 compute_ro_value 返回 Py_None，
-        // 随后 TerminatedNode.build 是 no-op（不写字节，不从 obj 取值）。
+        // Terminated 作为 RO 字段分类为 Control：resolve 缺省（属性不存在）
+        // 产哑值 None，TerminatedNode.build 是 no-op（不写字节，不从 obj 取值）。
         with_py(|py| {
             let terminated_node = Node::Terminated(crate::nodes::terminated::TerminatedNode::new());
             let fields = vec![
@@ -1685,8 +1717,9 @@ mod tests {
 
     #[test]
     fn ro_default_field_build_uses_constant_value() {
-        // Default(Byte, 0) 作为 RO 字段时 compute_ro_value 求值
-        // value 表达式（Const(0) → PyLong(0)），随后 DefaultNode.build 转发 inner。
+        // Default(Byte, 0) 作为 RO 字段分类为 Default：属性不存在 ≡ 缺省
+        // → resolve 求值 value 表达式（Const(0) → PyLong(0)），
+        // 随后 DefaultNode.build 转发 inner。
         with_py(|py| {
             let inner = u8_node();
             let value = crate::expr::ExprProgram::new(vec![crate::expr::ExprOp::Const(0)]);
@@ -1697,7 +1730,7 @@ mod tests {
                 ro_field(py, "d", default_node),
             ];
             let node = StructNode::new(py, fields, mock_cls(py), false, false);
-            // obj 只有 RW 字段 'a'，Default 的值由 compute_ro_value 计算
+            // obj 只有 RW 字段 'a'，Default 的值由 resolve 求值补齐
             let obj = py
                 .eval_bound("type('O', (), {'a': 0x07})()", None, None)
                 .expect("obj");
@@ -1713,8 +1746,9 @@ mod tests {
 
     #[test]
     fn ro_const_field_build_uses_constant_value() {
-        // Const(5, Int8ub) 作为 RO 字段时 compute_ro_value 返回常量值 5
-        // （v0.1.2 B1），随后 ConstNode.build 收到 obj == value → inner.build(5)。
+        // Const(5, Int8ub) 作为 RO 字段分类为 Const：属性不存在 ≡ 缺省
+        // → resolve 就地补编译期常量 5，随后 ConstNode.build 收到
+        // obj == value → inner.build(5)。
         // rfield(Const(...)) 场景：用户无需为该字段提供实例属性。
         with_py(|py| {
             let const_node = crate::nodes::const_node::ConstNode::new(u8_node(), 5i64.into_py(py));
@@ -1723,7 +1757,7 @@ mod tests {
                 ro_field(py, "c", Node::Const(const_node)),
             ];
             let node = StructNode::new(py, fields, mock_cls(py), false, false);
-            // obj 只有 RW 字段 'a'，Const 的值由 compute_ro_value 提供
+            // obj 只有 RW 字段 'a'，Const 的值由 resolve 补齐
             let obj = py
                 .eval_bound("type('O', (), {'a': 0x07})()", None, None)
                 .expect("obj");
@@ -1739,8 +1773,8 @@ mod tests {
 
     #[test]
     fn ro_padding_field_build_writes_pattern() {
-        // Padding(2) 作为 RO 字段时 compute_ro_value 返回 Py_None（占位），
-        // PaddingNode.build 忽略 obj 写 pattern 字节（v0.1.2 B1 同族）。
+        // Padding(2) 作为 RO 字段分类为 Void：resolve 产哑值 None（占位），
+        // PaddingNode.build 忽略 obj 写 pattern 字节。
         // rfield(Padding(...)) 是 README/docstring 宣称的用法。
         with_py(|py| {
             let padding_node = crate::nodes::padding::PaddingNode::new_const(2, 0x00);
@@ -1926,7 +1960,7 @@ mod tests {
     }
 
     // ======================================================================
-    // RO 字段 build（Tell/Computed）：compute_ro_value 路径
+    // RO 字段 build（Tell/Computed）：ValueKind resolve 路径
     // ======================================================================
 
     /// 构造 Tell 节点的便捷函数。
@@ -2152,10 +2186,12 @@ mod tests {
 
     /// 构造 RO 模式的 StopIf StructField（StopIf 作为 RO 字段，不从实例取值）。
     fn stop_field(py: Python<'_>, name: &str, stop_node: Node) -> StructField {
+        let kind = ValueKind::classify(py, &stop_node, false);
         StructField {
             name: FieldName::new(py, name),
             node: stop_node,
             mode: FieldMode::Ro,
+            kind,
         }
     }
 
@@ -2495,7 +2531,7 @@ mod tests {
             assert_eq!(x, 0x42);
             // 验证 dict 是 instance 的 __dict__（identity 比较）
             let dict_via_getattr = inst.getattr("__dict__").unwrap();
-            let dict_via_ggd = crate::instance::dict_via_generic_getdict(py, &inst).expect("ggd");
+            let dict_via_ggd = crate::instance::dict_via_generic_getdict(py, inst).expect("ggd");
             assert!(
                 dict_via_ggd.as_ptr() == dict_via_getattr.as_ptr(),
                 "GenericGetDict and getattr should return the same dict object"

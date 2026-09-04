@@ -32,6 +32,7 @@ from neoconstruct import (
     Computed,
     Const,
     Default,
+    FieldValueMissingError,
     If,
     Int8ub,
     Padding,
@@ -211,8 +212,10 @@ class TestC1WrapperConsumerMatrix:
     def test_prefixed_computed_build(self):
         """BUG-1 同族：Prefixed×Computed build → ``b'\\x01\\x00'``。
 
-        Computed 不消费字节，前缀长度为 0；``br=None`` 显式传值以解耦
-        对隐式 default 推导的依赖。
+        Computed 不消费字节，前缀长度为 0。包装器根（Prefixed）按
+        Instance 分类：显式 None ≡ 缺值 → FieldValueMissingError
+        （值语义框架的缺值统一语义）；显式传非 None 值成功（值不参与
+        编码——Computed no-op）。
         """
 
         @dataclass
@@ -220,7 +223,9 @@ class TestC1WrapperConsumerMatrix:
             typ: int = field(Int8ub)
             br: Any = field(Prefixed(Int8ub, Computed(typ)))
 
-        assert P(typ=1, br=None).build() == b"\x01\x00"
+        assert P(typ=1, br=0).build() == b"\x01\x00"
+        with pytest.raises(FieldValueMissingError):
+            P(typ=1, br=None).build()
 
     def test_prefixed_bytes_len_parse(self):
         """BUG-1 同族：Prefixed×Bytes(typ) parse。"""

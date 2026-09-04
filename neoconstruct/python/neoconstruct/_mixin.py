@@ -941,86 +941,36 @@ def _expr_programs_to_list(expr_programs, field_count):
 # ---------------------------------------------------------------------------
 
 
-def _subcon_contains_field_expr(node, seen):
-    """递归检测 subcon 描述符图中是否存在**待编译的字段表达式**参数。
-
-    遍历协议与 ``_collect_exprs_from_node`` 一致（``_EXPR_SLOT_NAMES`` 槽位
-    + ``_expr_params`` 参数）；仅检测参数值是否为 ``_FieldDescriptor`` /
-    ``_ExprRef``（待编译形态——已编译的 ops list / int 常量 / bytes 常量
-    均返回 False）。
-
-    用途：``_apply_dataclass_field_config`` 对 WO 模式表达式长度字段推导
-    隐式 default=None（v0.1.2 B3，对齐 wfield(Padding) 的无参实例化）。
-
-    :param node: 描述符图中的任意节点（描述符 / 表达式 / 常量 / 容器）。
-    :param seen: 已访问节点 id 集合（防环；模块级单例跨字段共享，
-                 每次调用按字段新建）。
-    :return: True 表示图中至少有一个待编译的字段表达式参数。
-    """
-    if node is None or isinstance(node, _EXPR_SLOT_LEAF_TYPES):
-        return False
-    if isinstance(node, (list, tuple)):
-        return any(_subcon_contains_field_expr(item, seen) for item in node)
-    if isinstance(node, dict):
-        return any(_subcon_contains_field_expr(v, seen) for v in node.values())
-    if isinstance(node, (_FieldDescriptor, _ExprRef)) or isinstance(node, type):
-        return False
-    node_id = id(node)
-    if node_id in seen:
-        return False
-    seen.add(node_id)
-    for param_value in getattr(node, "_expr_params", {}).values():
-        if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
-            return True
-    for slot in _EXPR_SLOT_NAMES:
-        if _subcon_contains_field_expr(getattr(node, slot, None), seen):
-            return True
-    return False
-
-
-def _apply_dataclass_field_config(cls, descriptors):
-    """将有 default 的 ``_FieldDescriptor`` 转换为 ``dataclasses.field()`` 配置。
+def _apply_dataclass_field_config(cls, descriptors, schema=None, expr_programs=None):
+    """将 ``_FieldDescriptor`` 转换为 ``dataclasses.field()`` 配置。
 
     在 ``__init_subclass__`` 末尾调用（编译完成后，``@dataclass`` 执行前）。
     将类属性上的 ``_FieldDescriptor`` 替换为 ``dataclasses.field()`` 返回值，
     使 ``@dataclass`` 能正确配置 ``init`` / ``default`` / ``kw_only``。
 
-    处理规则：
+    实例化默认值的单一事实源是 Rust 侧编译期按字段值来源分类
+    （ValueKind）推导的 ``init_defaults`` 三态：
+
+    - ``(2, v)``（Value）→ ``kw_only=True, default=v``（Const 不可变标量 /
+      表达式常量折叠——实例化即携带构造器值）
+    - ``(1, None)``（Optional）→ ``kw_only=True, default=None``
+      （哑值可省：Peek/Seek/Checksum/Tell/Padding 等；表达式派生字段
+      缺值错误后移到 build）
+    - ``(0, None)``（Required）→ 无参 ``field()``（必填 positional）
+
+    处理规则（优先级从高到低）：
+
     - ``mode="ro"`` → ``dataclasses.field(init=False, default=None)``
       （RO 字段不在 ``__init__`` 中，parse 时由 force_setattr 覆盖）
-    - ``mode="rw"`` 或 ``"wo"`` 且有显式 ``default`` →
-      ``dataclasses.field(kw_only=True, default=desc.default)``
-    - ``mode="rw"`` 且 subcon 是 ``ConstDescriptor``（无显式 default）→
-      ``dataclasses.field(kw_only=True, default=<常量值>)``（v0.1.2 B1）：
-      Const 字段值恒为 value，实例化后即是 value 本身——表达式消费
-      （build 时 ctx 从实例取值）拿到正确类型
-    - ``mode="rw"`` 且 subcon 是 ``DefaultDescriptor``（无显式 default）→
-      value 为 int 常量 → ``default=<value>``（v0.1.2 B1）；value 为表达式
-      → ``default=None``（build 时节点层求值）
-    - ``mode="rw"`` 或 ``"wo"``，subcon 是其余值提供型构造器
-      （Rebuild/Computed/Padding）→ ``dataclasses.field(kw_only=True,
-      default=None)``——节点层 build 已支持 None 补值
-    - ``mode="wo"`` 且 subcon 含待编译字段表达式（如 ``wfield(Bytes(x+1))``）
-      → ``dataclasses.field(kw_only=True, default=None)``（v0.1.2 B3，
-      对齐 wfield(Padding) 的无参实例化）
-    - 其余 ``mode="rw"`` 或 ``"wo"`` → ``dataclasses.field()``
-      （必填 positional 参数，无默认值）
+    - 有显式 ``default`` → ``kw_only=True, default=desc.default``
+      （**用户显式 default 永远优先于框架派生**）
+    - init_defaults 三态分派（如上）
 
-    隐式 default 设计：
-
-    - **显式 default 优先**（上述分支顺序保证）。
-    - **kw_only=True 是必需**而非可选：隐式 default 字段在前、必填字段在后
-      时，``@dataclass`` 否则报 "non-default argument follows default
-      argument"。
-    - Const/Default 的隐式 default 取描述符自身携带的值（常量语义），
-      实例值参与 build 时 ctx 与节点层校验；其余统一 ``default=None``
-      语义 = "让节点层自动生成值"。行为差异由节点层既有语义决定：
-      Default 传非 None 值用显式值；Padding/Rebuild/Computed 传值被忽略。
-    - 显式传错值给 Const（如 ``P(x=9)`` 而 ``x=field(Const(1, Byte))``）
-      仍由节点层报 ConstError（build 校验兜底）。
-    - **类型注解告警接受 + 文档说明**（``v: int = field(Const(5, Int8ub))``
-      隐式 default 与 int 注解在 mypy/pyright strict 下告警，运行时无
-      影响；可显式传 default 或注解写 ``int | None``），不为静态检查器改机制。
+    回退路径（``schema=None``，前向引用编译失败安装延迟桩时无编译产物）：
+    用 ``expr_programs`` 推导——表达式非空 → Optional（缺值错误后移到
+    build）；其余 → Required。延迟桩重试编译成功后本函数以 schema 重新
+    调用，类属性默认值更新为编译产物（init 签名由首次配置确定，延迟
+    场景不改变字段集）。
 
     注意：``_FieldDescriptor`` 带有 ``__eq__`` 运算符重载（表达式系统），
     导致 ``__hash__ = None``。Python 3.x 的
@@ -1031,27 +981,23 @@ def _apply_dataclass_field_config(cls, descriptors):
 
     :param cls: StructMixin 子类。
     :param descriptors: ``[(field_name, _FieldDescriptor), ...]`` 有序列表。
+    :param schema: 编译产物（``CompiledSchema``）；正常路径必传。
+    :param expr_programs: 每字段表达式程序映射（回退路径推导用）。
     """
-    # 延迟导入值提供型描述符（_mixin 顶部不导入 _descriptors，
-    # 避免循环导入）。
-    from ._descriptors import (
-        ConstDescriptor,
-        DefaultDescriptor,
-        PaddingDescriptor,
-        RebuildDescriptor,
-    )
 
-    # 值提供型构造器：build 时节点层可自动获得值的描述符。
-    # ComputedDescriptor 定义于本模块。
-    value_providing = (
-        ConstDescriptor,
-        DefaultDescriptor,
-        RebuildDescriptor,
-        PaddingDescriptor,
-        ComputedDescriptor,
-    )
+    def _fallback_default(idx):
+        """回退推导：表达式派生 → 可省；其余 → 必填。"""
+        if expr_programs is not None and expr_programs.get(idx):
+            return (1, None)
+        return (0, None)
 
-    for name, desc in descriptors:
+    if schema is not None:
+        init_defaults = schema._init_defaults()
+    else:
+        init_defaults = [_fallback_default(i) for i in range(len(descriptors))]
+
+    for idx, (name, desc) in enumerate(descriptors):
+        kind_code, default_value = init_defaults[idx]
         if desc.mode == "ro":
             # RO 字段：init=False，用 None 占位（parse 时由 force_setattr 覆盖）
             setattr(cls, name, dataclasses.field(init=False, default=None))
@@ -1062,40 +1008,19 @@ def _apply_dataclass_field_config(cls, descriptors):
                 name,
                 dataclasses.field(kw_only=True, default=desc.default),
             )
-        elif isinstance(desc.subcon, ConstDescriptor):
-            # Const 且无显式 default → 隐式 default = 常量值（v0.1.2 B1）。
-            # Const 字段值恒为 value：实例化后即是 value，build 时 ctx 从
-            # 实例取值拿到正确类型；显式传错值仍由节点层 ConstError 兜底。
-            setattr(
-                cls,
-                name,
-                dataclasses.field(kw_only=True, default=desc.subcon.value),
-            )
-        elif isinstance(desc.subcon, DefaultDescriptor):
-            # Default 且无显式 default → int 常量 value 用之（v0.1.2 B1）；
-            # 表达式 value 无法静态求值 → None（build 时节点层求值）。
-            default_value = desc.subcon.value
-            if not isinstance(default_value, int):
-                default_value = None
+        elif kind_code == 2:
+            # Value：框架派生默认值（Const 不可变标量/常量折叠）
             setattr(
                 cls,
                 name,
                 dataclasses.field(kw_only=True, default=default_value),
             )
-        elif isinstance(desc.subcon, value_providing):
-            # 其余值提供型 subcon（Rebuild/Computed/Padding）且无显式
-            # default → 隐式 default=None + kw_only=True。build 由节点层
-            # 补值（Rebuild/Computed 求值，Padding 忽略传入值）。
-            setattr(cls, name, dataclasses.field(kw_only=True, default=None))
-        elif desc.mode == "wo" and _subcon_contains_field_expr(
-            desc.subcon, set()
-        ):
-            # WO + subcon 含待编译字段表达式（如 wfield(Bytes(x+1))）→
-            # 隐式 default=None + kw_only（v0.1.2 B3，对齐 wfield(Padding)
-            # 的无参实例化；build 时 None 传给节点层由其语义决定）。
+        elif kind_code == 1:
+            # Optional：哑值可省/表达式派生——缺值错误后移到 build
             setattr(cls, name, dataclasses.field(kw_only=True, default=None))
         else:
-            # RW/WO 无 default → dataclasses.field() 无默认值（必填 positional）
+            # Required：RW/WO 无 default → dataclasses.field() 无默认值
+            # （必填 positional 参数）
             setattr(cls, name, dataclasses.field())
 
 
@@ -1126,6 +1051,16 @@ def _compile_schema_for_class(cls):
     field_names = [name for name, _ in descriptors]
     subcons = [desc.subcon for _, desc in descriptors]
     modes = [desc.mode for _, desc in descriptors]
+
+    # 编译期拒绝 context= 注入（静默忽略比报错更危险——fail fast）。
+    # 跨层显式 context 注入将于 v0.1.3 提供机制。
+    for name, desc in descriptors:
+        if getattr(desc, "_context_injections", None) is not None:
+            raise CompilationError(
+                "字段 '{}' 使用了 context= 注入参数，当前版本尚未支持"
+                "（将于 v0.1.3 提供注入机制）；当前请通过外层字段引用"
+                "传递值。".format(name)
+            )
 
     # 构建 field_index_map：{id(descriptor): field_index}。
     # 表达式中的 FieldRef 通过 id() 查找对应字段索引。
@@ -1166,16 +1101,21 @@ def _compile_schema_for_class(cls):
         # Rust 侧该错误消息含 "unresolved" 或 "未解析"。
         err_str = str(e)
         if "unresolved" in err_str.lower() or "未解析" in err_str:
-            # 在安装延迟桩前注入 dataclass 字段配置。
+            # 在安装延迟桩前注入 dataclass 字段配置（回退推导：无编译产物）。
             # _FieldDescriptor 有 __hash__=None（表达式系统），
             # 若不替换为 dataclasses.field()，@dataclass 会拒绝。
-            _apply_dataclass_field_config(cls, descriptors)
+            _apply_dataclass_field_config(
+                cls, descriptors, schema=None, expr_programs=expr_programs
+            )
             _install_lazy_stubs(cls)
         else:
             raise
 
-    # 编译成功：注入 dataclass 字段配置（在编译后、@dataclass 执行前）
-    _apply_dataclass_field_config(cls, descriptors)
+    # 编译成功：注入 dataclass 字段配置（在编译后、@dataclass 执行前）。
+    # init_defaults 三态由编译产物提供（单一事实源＝Rust 侧分类）。
+    _apply_dataclass_field_config(
+        cls, descriptors, schema=cls._construct_compiled
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1245,8 +1185,9 @@ def _install_lazy_stubs(cls):
                 expr_programs=expr_programs_list,
                 bitwise=getattr(cls, "_construct_bitwise", False),
             )
-            # 编译成功：注入 dataclass 配置，存储产物，删除桩
-            _apply_dataclass_field_config(cls, descriptors)
+            # 编译成功：注入 dataclass 配置（编译产物提供 init_defaults），
+            # 存储产物，删除桩
+            _apply_dataclass_field_config(cls, descriptors, schema=schema)
             cls._construct_compiled = schema
             _remove_lazy_stubs(cls)
 

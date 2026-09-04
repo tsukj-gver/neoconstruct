@@ -6,7 +6,8 @@
 //!
 //! Computed 是 RO（只读）节点：parse 通过 [`crate::expr::eval_expr_int`]
 //! 求值表达式并返回 `PyLong`。sizeof 恒为 0。build 方向是 no-op——值计算
-//! 由 [`crate::nodes::struct_node`] 的 `compute_ro_value` 在 RO 字段处理时完成。
+//! 由 [`crate::nodes::struct_node::ValueKind`] 的 `Computed` 分类在字段
+//! resolve 时完成。
 //!
 //! ## 典型用法
 //!
@@ -33,8 +34,8 @@ use super::Construct;
 /// parse 通过 [`eval_expr_int`] 求值表达式，返回 `PyLong`。
 /// sizeof 返回 0。
 ///
-/// build 方向是 no-op：值计算由 [`crate::nodes::struct_node`] 的
-/// `compute_ro_value` 在 RO 字段处理时完成。
+/// build 方向是 no-op：值计算由 [`crate::nodes::struct_node::ValueKind`]
+/// 的 `Computed` 分类在字段 resolve 时完成。
 #[derive(Debug, Clone)]
 pub struct ComputedNode {
     /// 计算表达式（编译后的 ExprProgram）。
@@ -47,7 +48,7 @@ impl ComputedNode {
         Self { expr }
     }
 
-    /// 返回表达式的只读引用（供 `compute_ro_value` 在 build 方向求值）。
+    /// 返回表达式的只读引用（供字段分类 resolve 在 build 方向求值）。
     pub fn expr(&self) -> &ExprProgram {
         &self.expr
     }
@@ -73,7 +74,7 @@ impl Construct for ComputedNode {
         _ctx: &mut Context<'_>,
         _path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // Computed build 是 no-op。值计算由 StructNode 的 compute_ro_value 处理。
+        // Computed build 是 no-op。值计算由字段分类 resolve 处理。
         Ok(())
     }
 

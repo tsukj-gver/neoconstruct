@@ -84,7 +84,9 @@ use crate::nodes::strings::{
     CStringNode, GreedyStringNode, NullStrippedNode, NullTerminatedNode, PaddedStringNode,
     PascalStringNode,
 };
-use crate::nodes::struct_node::{FieldMode, FieldName, InitDefault, StructField, StructNode, ValueKind};
+use crate::nodes::struct_node::{
+    FieldMode, FieldName, InitDefault, StructField, StructNode, ValueKind,
+};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::subconstruct::SubconstructNode;
 use crate::nodes::switch::{SwitchCase, SwitchKey, SwitchNode};
@@ -240,9 +242,7 @@ pub fn compile_schema(
         .map_err(|e| with_field_context(e, name))?;
         // 值来源分类：按根节点单点判定；expr_derived = 该字段的表达式
         // 程序非空（subcon 树内含表达式消费者）→ Instance 实例化降为 Optional。
-        let expr_derived = expr_programs_slice
-            .get(i)
-            .is_some_and(|p| p.is_some());
+        let expr_derived = expr_programs_slice.get(i).is_some_and(|p| p.is_some());
         let kind = ValueKind::classify(py, &node, expr_derived);
         // FieldName::new 创建 interned PyString 缓存。
         // mode 从解析后的 modes_resolved 取。
@@ -256,8 +256,7 @@ pub fn compile_schema(
     }
 
     // 4b. 实例化默认值派生（I 点，单一事实源＝ValueKind 分类；冷路径一次）。
-    let init_defaults: Vec<InitDefault> =
-        fields.iter().map(|f| f.kind.init_default(py)).collect();
+    let init_defaults: Vec<InitDefault> = fields.iter().map(|f| f.kind.init_default(py)).collect();
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
     //    has_expressions 由两部分组合——
@@ -3826,6 +3825,730 @@ fn build_checksum_node(
         bytes_source,
     ))
 }
+// ===========================================================================
+// build_*_node 辅助函数
+//
+// 共通模式：
+// - 递归编译 subcon（沿用 field_index）
+// - 编译期物化 Python 对象为 Py<PyDict>/Py<PyFrozenSet>/Py<PyType>
+// - 表达式参数从 expr_programs[field_index]["param"] 取
+// ===========================================================================
+
+/// 从 `EnumDescriptor` 构建 `EnumNode`。
+///
+/// `EnumDescriptor` 字段：`subcon` + `decmapping`（dict int→EnumIntegerString）
+/// 与 `encmapping`（dict str→int）。`EnumInteger` 类从 `neoconstruct._internals` 加载。
+fn build_enum_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<EnumNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "EnumDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        // Enum 无表达式参数，传空切片。
+        &[],
+        field_names,
+        false,
+    )?;
+    let decmapping = desc
+        .getattr("decmapping")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("EnumDescriptor missing 'decmapping': {}", e),
+        })?
+        .extract::<Py<PyDict>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("EnumDescriptor.decmapping not a dict: {}", e),
+        })?;
+    let encmapping = desc
+        .getattr("encmapping")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("EnumDescriptor missing 'encmapping': {}", e),
+        })?
+        .extract::<Py<PyDict>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("EnumDescriptor.encmapping not a dict: {}", e),
+        })?;
+    // 加载 EnumInteger 类（从 neoconstruct._internals）。
+    let enum_integer_cls = py
+        .import_bound("neoconstruct._internals")
+        .and_then(|m| m.getattr("EnumInteger"))
+        .and_then(|a| a.extract::<Py<PyType>>())
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "failed to load EnumInteger from neoconstruct._internals: {}",
+                e
+            ),
+        })?;
+    Ok(EnumNode::new(
+        inner_node,
+        decmapping,
+        encmapping,
+        enum_integer_cls,
+    ))
+}
+
+/// 从 `FlagsEnumDescriptor` 构建 `FlagsEnumNode`。
+fn build_flags_enum_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<FlagsEnumNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "FlagsEnumDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
+    // flags 是 Python dict {name: value}，编译期物化为 Vec<(Py<PyString>, i64)>。
+    let flags_dict = desc
+        .getattr("flags")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("FlagsEnumDescriptor missing 'flags': {}", e),
+        })?;
+    let flags_bound = flags_dict
+        .downcast::<PyDict>()
+        .map_err(|_| ConstructError::Compilation {
+            message: "FlagsEnumDescriptor.flags not a dict".to_string(),
+        })?;
+    let mut flags = Vec::with_capacity(flags_bound.len());
+    for (k, v) in flags_bound.iter() {
+        let name: Py<PyString> = k.extract().map_err(|_| ConstructError::Compilation {
+            message: "FlagsEnum flag name not a str".to_string(),
+        })?;
+        let value: i64 = v.extract().map_err(|_| ConstructError::Compilation {
+            message: "FlagsEnum flag value not an int".to_string(),
+        })?;
+        flags.push((name, value));
+    }
+    // encmapping 同 Enum（str→int）。
+    let encmapping = desc
+        .getattr("encmapping")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("FlagsEnumDescriptor missing 'encmapping': {}", e),
+        })?
+        .extract::<Py<PyDict>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("FlagsEnumDescriptor.encmapping not a dict: {}", e),
+        })?;
+    Ok(FlagsEnumNode::new(inner_node, flags, encmapping))
+}
+
+/// 从 `MappingDescriptor` 构建 `MappingNode`（TypeError 捕获在 Node 内实现）。
+fn build_mapping_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<MappingNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "MappingDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
+    let decmapping = desc
+        .getattr("decmapping")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("MappingDescriptor missing 'decmapping': {}", e),
+        })?
+        .extract::<Py<PyDict>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("MappingDescriptor.decmapping not a dict: {}", e),
+        })?;
+    let encmapping = desc
+        .getattr("encmapping")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("MappingDescriptor missing 'encmapping': {}", e),
+        })?
+        .extract::<Py<PyDict>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("MappingDescriptor.encmapping not a dict: {}", e),
+        })?;
+    Ok(MappingNode::new(inner_node, decmapping, encmapping))
+}
+
+/// 从 `OneOfDescriptor` 构建 `OneOfNode`。
+/// valids 编译期转 frozenset 物化（list/set 输入统一）。
+fn build_one_of_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<OneOfNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "OneOfDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
+    let valids_obj = desc
+        .getattr("valids")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("OneOfDescriptor missing 'valids': {}", e),
+        })?;
+    // 转 frozenset（list/set/frozenset 输入统一）。
+    let valids_frozen = py
+        .eval_bound("frozenset", None, None)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("failed to get frozenset builtin: {}", e),
+        })?
+        .call1((valids_obj,))
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("OneOfDescriptor.valids to frozenset failed: {}", e),
+        })?
+        .extract::<Py<PyFrozenSet>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("OneOfDescriptor.valids not convertible to frozenset: {}", e),
+        })?;
+    Ok(OneOfNode::new(inner_node, valids_frozen))
+}
+
+/// 从 `NoneOfDescriptor` 构建 `NoneOfNode`。
+fn build_none_of_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<NoneOfNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NoneOfDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
+    let invalids_obj = desc
+        .getattr("invalids")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("NoneOfDescriptor missing 'invalids': {}", e),
+        })?;
+    let invalids_frozen = py
+        .eval_bound("frozenset", None, None)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("failed to get frozenset builtin: {}", e),
+        })?
+        .call1((invalids_obj,))
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("NoneOfDescriptor.invalids to frozenset failed: {}", e),
+        })?
+        .extract::<Py<PyFrozenSet>>()
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NoneOfDescriptor.invalids not convertible to frozenset: {}",
+                e
+            ),
+        })?;
+    Ok(NoneOfNode::new(inner_node, invalids_frozen))
+}
+
+/// 从 `UnionDescriptor` 构建 `UnionNode`。
+/// parsefrom 编译期分类：None / int Index / str Name（编译期 name→index 解析）/
+/// 表达式 Expr（编译为 ExprProgram）。
+fn build_union_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<UnionNode, ConstructError> {
+    let subcons_obj = desc
+        .getattr("subcons")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "UnionDescriptor missing 'subcons': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let subcons_list =
+        subcons_obj
+            .downcast::<PyList>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "UnionDescriptor.subcons not a list".to_string(),
+            })?;
+
+    // 编译每个 subcon，识别 Renamed 包装提取 name。
+    let mut subcons: Vec<UnionSubcon> = Vec::with_capacity(subcons_list.len());
+    let mut name_to_index: std::collections::HashMap<String, usize> =
+        std::collections::HashMap::new();
+    let mut has_expressions = false;
+    for (idx, sub_desc) in subcons_list.iter().enumerate() {
+        // 检测 Renamed 包装（type name == "Renamed"，有 name + subcon 属性）。
+        let (name_opt, inner_desc) = if sub_desc
+            .get_type()
+            .name()
+            .map(|s| s == "Renamed")
+            .unwrap_or(false)
+        {
+            let n: String = sub_desc
+                .getattr("name")
+                .and_then(|n| n.extract())
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("Union Renamed.name not a str: {}", e),
+                })?;
+            let inner = sub_desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("Union Renamed.subcon missing: {}", e),
+                })?;
+            name_to_index.insert(n.clone(), idx);
+            (Some(FieldName::new(py, n)), inner)
+        } else {
+            (None, sub_desc.clone())
+        };
+        let node = build_node_from_descriptor(
+            py,
+            &inner_desc,
+            field_index,
+            expr_programs,
+            field_names,
+            false,
+        )?;
+        if node.has_expressions() {
+            has_expressions = true;
+        }
+        let subcon = match name_opt {
+            Some(name) => UnionSubcon::new_named(name, node),
+            None => UnionSubcon::new_anonymous(node),
+        };
+        subcons.push(subcon);
+    }
+
+    // parsefrom 分类
+    let parsefrom_obj = desc
+        .getattr("parsefrom")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("UnionDescriptor missing 'parsefrom': {}", e),
+        })?;
+    let parsefrom = if parsefrom_obj.is_none() {
+        ParseFrom::None
+    } else if let Ok(idx) = parsefrom_obj.extract::<i64>() {
+        ParseFrom::Index(idx as usize)
+    } else if let Ok(name) = parsefrom_obj.extract::<String>() {
+        // 编译期 name→index 解析
+        let resolved = *name_to_index
+            .get(&name)
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!("Union parsefrom name '{}' not found in subcons", name),
+            })?;
+        let name_py = PyString::new_bound(py, &name).unbind();
+        ParseFrom::Name {
+            name: name_py,
+            resolved_index: resolved,
+        }
+    } else {
+        // 表达式路径：从 expr_programs 取（key="parsefrom"）。
+        let _ = expr_programs;
+        return Err(ConstructError::Compilation {
+            message: "Union parsefrom as expression not yet supported (use None/int/str)"
+                .to_string(),
+        });
+    };
+
+    Ok(UnionNode::new(subcons, parsefrom, has_expressions))
+}
+
+/// 从 `SequenceDescriptor` 构建 `SequenceNode`（RO 字段不从 list 取值）。
+fn build_sequence_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<SequenceNode, ConstructError> {
+    let subcons_obj = desc
+        .getattr("subcons")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "SequenceDescriptor missing 'subcons': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let subcons_list =
+        subcons_obj
+            .downcast::<PyList>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "SequenceDescriptor.subcons not a list".to_string(),
+            })?;
+
+    let mut fields: Vec<SequenceField> = Vec::with_capacity(subcons_list.len());
+    let mut has_expressions = false;
+    for sub_desc in subcons_list.iter() {
+        let (name_opt, inner_desc, kind) = if sub_desc
+            .get_type()
+            .name()
+            .map(|s| s == "Renamed")
+            .unwrap_or(false)
+        {
+            let n: String = sub_desc
+                .getattr("name")
+                .and_then(|n| n.extract())
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("Sequence Renamed.name not a str: {}", e),
+                })?;
+            let inner = sub_desc
+                .getattr("subcon")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("Sequence Renamed.subcon missing: {}", e),
+                })?;
+            (Some(FieldName::new(py, n)), inner, FieldMode::Rw)
+        } else {
+            (None, sub_desc.clone(), FieldMode::Rw)
+        };
+        let node = build_node_from_descriptor(
+            py,
+            &inner_desc,
+            field_index,
+            expr_programs,
+            field_names,
+            false,
+        )?;
+        if node.has_expressions() {
+            has_expressions = true;
+        }
+        let field = match name_opt {
+            Some(name) => SequenceField::new_named_with_kind(py, name, node, kind),
+            None => SequenceField::new_anonymous(py, node),
+        };
+        fields.push(field);
+    }
+
+    Ok(SequenceNode::new(fields, has_expressions))
+}
+
+/// 从 `ProcessXorDescriptor` 构建 `ProcessXorNode`。
+fn build_process_xor_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<ProcessXorNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "ProcessXorDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+    // padfunc：int/bytes 物化；FieldRef/ExprRef 走 ExprProgram。
+    let padfunc = desc
+        .getattr("padfunc")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("ProcessXorDescriptor missing 'padfunc': {}", e),
+        })?;
+    let pad = if let Ok(v) = padfunc.extract::<i64>() {
+        XorPad::Int(v as u8)
+    } else if let Ok(b) = padfunc.extract::<&[u8]>() {
+        if b.len() == 1 {
+            XorPad::Int(b[0])
+        } else {
+            XorPad::Bytes(b.to_vec())
+        }
+    } else {
+        // 表达式路径：从 expr_programs[field_index]["pad"] 取
+        let prog = compile_expr_program_from_desc(py, desc, "pad", field_index, expr_programs)?;
+        XorPad::Expr(prog)
+    };
+    Ok(ProcessXorNode::new(inner_node, pad))
+}
+
+/// 从 `ProcessRotateLeftDescriptor` 构建 `ProcessRotateLeftNode`。
+fn build_process_rotate_left_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+    field_names: &[String],
+) -> Result<ProcessRotateLeftNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "ProcessRotateLeftDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node = build_node_from_descriptor(
+        py,
+        &subcon_desc,
+        field_index,
+        expr_programs,
+        field_names,
+        false,
+    )?;
+    // amount/group：int 包装为单 op Const ExprProgram；FieldRef/ExprRef 走 ExprProgram。
+    let amount_prog = compile_int_or_expr_program(py, desc, "amount", field_index, expr_programs)?;
+    let group_prog = compile_int_or_expr_program(py, desc, "group", field_index, expr_programs)?;
+    Ok(ProcessRotateLeftNode::new(
+        inner_node,
+        amount_prog,
+        group_prog,
+    ))
+}
+
+/// 从 `NamedTupleDescriptor` 构建 `NamedTupleNode`。
+fn build_named_tuple_node(
+    py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    field_index: usize,
+    field_names: &[String],
+) -> Result<NamedTupleNode, ConstructError> {
+    let subcon_desc = desc
+        .getattr("subcon")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!(
+                "NamedTupleDescriptor missing 'subcon': {} (field {})",
+                e, field_index
+            ),
+        })?;
+    let inner_node =
+        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
+    // 编译期调用 collections.namedtuple 物化 factory
+    let tuplename: String = desc
+        .getattr("tuplename")
+        .and_then(|n| n.extract())
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("NamedTupleDescriptor.tuplename not a str: {}", e),
+        })?;
+    let tuplefields_obj = desc
+        .getattr("tuplefields")
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("NamedTupleDescriptor missing 'tuplefields': {}", e),
+        })?;
+    // tuplefields 可为 str（空格分隔）或 list
+    let field_names_list: Vec<String> = if let Ok(s) = tuplefields_obj.extract::<String>() {
+        s.split_whitespace().map(|s| s.to_string()).collect()
+    } else if let Ok(v) = tuplefields_obj.extract::<Vec<String>>() {
+        v
+    } else {
+        return Err(ConstructError::Compilation {
+            message: "NamedTupleDescriptor.tuplefields must be str or list".to_string(),
+        });
+    };
+    let factory = {
+        let nt_module =
+            py.import_bound("collections")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("failed to import collections: {}", e),
+                })?;
+        let namedtuple_fn =
+            nt_module
+                .getattr("namedtuple")
+                .map_err(|e| ConstructError::Compilation {
+                    message: format!("collections.namedtuple missing: {}", e),
+                })?;
+        let name_bound = PyString::new_bound(py, &tuplename);
+        let fields_bound = PyList::new_bound(py, field_names_list.iter().map(|s| s.as_str()));
+        let args_tuple = PyTuple::new_bound(py, [name_bound.into_any(), fields_bound.into_any()]);
+        namedtuple_fn
+            .call1(args_tuple)
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("collections.namedtuple call failed: {}", e),
+            })?
+            .extract::<Py<PyType>>()
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("namedtuple did not return a type: {}", e),
+            })?
+    };
+    // mode：根据 inner_node 类型推断（Struct → Struct 模式；其他 → Sequence 模式）。
+    let mode = match &inner_node {
+        Node::Struct(_) | Node::StructRef(_) => NamedTupleMode::Struct,
+        _ => NamedTupleMode::Sequence,
+    };
+    // field_names 转 Vec<Py<PyString>>
+    let field_names_py: Vec<Py<PyString>> = field_names_list
+        .iter()
+        .map(|s| PyString::new_bound(py, s).unbind())
+        .collect();
+    Ok(NamedTupleNode::new(
+        inner_node,
+        factory,
+        mode,
+        field_names_py,
+    ))
+}
+
+/// 辅助：从 desc.attr_name 取 int 常量包装为单 op Const ExprProgram，
+/// 或从 expr_programs 取已编译 ExprProgram。
+fn compile_int_or_expr_program(
+    _py: Python<'_>,
+    desc: &Bound<'_, PyAny>,
+    attr: &str,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<ExprProgram, ConstructError> {
+    let val_obj = desc
+        .getattr(attr)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("Descriptor missing '{}': {}", attr, e),
+        })?;
+    if let Ok(v) = val_obj.extract::<i64>() {
+        Ok(ExprProgram::new(vec![ExprOp::Const(v)]))
+    } else {
+        // 表达式路径：从 expr_programs[field_index][attr] 取
+        let field_exprs = expr_programs
+            .get(field_index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| ConstructError::Compilation {
+                message: format!(
+                    "expression for '{}' missing in expr_programs (field {})",
+                    attr, field_index
+                ),
+            })?;
+        extract_expr_program_from_dict(_py, field_exprs.bind(_py), attr, field_index)
+    }
+}
+
+/// 辅助：从 desc 的 expr_programs 取指定 key 的 ExprProgram（ProcessXor pad 用）。
+fn compile_expr_program_from_desc(
+    py: Python<'_>,
+    _desc: &Bound<'_, PyAny>,
+    key: &str,
+    field_index: usize,
+    expr_programs: &[Option<Py<PyAny>>],
+) -> Result<ExprProgram, ConstructError> {
+    let field_exprs = expr_programs
+        .get(field_index)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "expression for '{}' missing in expr_programs (field {})",
+                key, field_index
+            ),
+        })?;
+    extract_expr_program_from_dict(py, field_exprs.bind(py), key, field_index)
+}
+
+/// 辅助：从 Python dict {key: [ops]} 取 ExprProgram。
+fn extract_expr_program_from_dict(
+    _py: Python<'_>,
+    dict: &Bound<'_, PyAny>,
+    key: &str,
+    field_index: usize,
+) -> Result<ExprProgram, ConstructError> {
+    let dict = dict
+        .downcast::<PyDict>()
+        .map_err(|_| ConstructError::Compilation {
+            message: "expression program must be a dict".to_string(),
+        })?;
+    let ops_obj = dict
+        .get_item(key)
+        .map_err(|e| ConstructError::Compilation {
+            message: format!("failed to get '{}' from expression programs: {}", key, e),
+        })?
+        .ok_or_else(|| ConstructError::Compilation {
+            message: format!(
+                "missing '{}' in expression programs (field {})",
+                key, field_index
+            ),
+        })?;
+    // ops_obj 是 list of tuples [("const", N), ("getint", idx), ...]。
+    parse_expr_ops(&ops_obj)
+}
+
+/// 辅助：把 Python ops list 转为 ExprOp Vec。
+fn parse_expr_ops(ops_obj: &Bound<'_, PyAny>) -> Result<ExprProgram, ConstructError> {
+    let ops_list = ops_obj
+        .downcast::<PyList>()
+        .map_err(|_| ConstructError::Compilation {
+            message: "expression ops must be a list".to_string(),
+        })?;
+    let mut ops = Vec::with_capacity(ops_list.len());
+    for op_item in ops_list.iter() {
+        let op_tuple = op_item
+            .downcast::<PyTuple>()
+            .map_err(|_| ConstructError::Compilation {
+                message: "expression op must be a tuple".to_string(),
+            })?;
+        let name: String = op_tuple
+            .get_item(0)
+            .and_then(|n| n.extract())
+            .map_err(|e| ConstructError::Compilation {
+                message: format!("expression op name not a str: {}", e),
+            })?;
+        let op = match name.as_str() {
+            "const" => {
+                let v: i64 = op_tuple
+                    .get_item(1)
+                    .and_then(|v| v.extract())
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("const op value not i64: {}", e),
+                    })?;
+                ExprOp::Const(v)
+            }
+            "getint" => {
+                let idx: usize = op_tuple
+                    .get_item(1)
+                    .and_then(|v| v.extract())
+                    .map_err(|e| ConstructError::Compilation {
+                        message: format!("getint op index not usize: {}", e),
+                    })?;
+                ExprOp::GetInt(idx)
+            }
+            "add" => ExprOp::Add,
+            "sub" => ExprOp::Sub,
+            "mul" => ExprOp::Mul,
+            "floordiv" => ExprOp::FloorDiv,
+            "mod" => ExprOp::Mod,
+            "bitand" => ExprOp::BitAnd,
+            "bitor" => ExprOp::BitOr,
+            "bitxor" => ExprOp::BitXor,
+            "shl" => ExprOp::Shl,
+            "shr" => ExprOp::Shr,
+            "neg" => ExprOp::Neg,
+            "not" => ExprOp::Not,
+            "eq" => ExprOp::Eq,
+            "ne" => ExprOp::Ne,
+            "lt" => ExprOp::Lt,
+            "le" => ExprOp::Le,
+            "gt" => ExprOp::Gt,
+            "ge" => ExprOp::Ge,
+            _ => {
+                return Err(ConstructError::Compilation {
+                    message: format!("unknown expression op: {}", name),
+                })
+            }
+        };
+        ops.push(op);
+    }
+    Ok(ExprProgram::new(ops))
+}
 
 // ---------------------------------------------------------------------------
 // 单元测试
@@ -7101,729 +7824,4 @@ class {name}:
             assert_eq!(items.len(), 0);
         });
     }
-}
-
-// ===========================================================================
-// build_*_node 辅助函数
-//
-// 共通模式：
-// - 递归编译 subcon（沿用 field_index）
-// - 编译期物化 Python 对象为 Py<PyDict>/Py<PyFrozenSet>/Py<PyType>
-// - 表达式参数从 expr_programs[field_index]["param"] 取
-// ===========================================================================
-
-/// 从 `EnumDescriptor` 构建 `EnumNode`。
-///
-/// `EnumDescriptor` 字段：`subcon` + `decmapping`（dict int→EnumIntegerString）
-/// 与 `encmapping`（dict str→int）。`EnumInteger` 类从 `neoconstruct._internals` 加载。
-fn build_enum_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<EnumNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "EnumDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node = build_node_from_descriptor(
-        py,
-        &subcon_desc,
-        field_index,
-        // Enum 无表达式参数，传空切片。
-        &[],
-        field_names,
-        false,
-    )?;
-    let decmapping = desc
-        .getattr("decmapping")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("EnumDescriptor missing 'decmapping': {}", e),
-        })?
-        .extract::<Py<PyDict>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("EnumDescriptor.decmapping not a dict: {}", e),
-        })?;
-    let encmapping = desc
-        .getattr("encmapping")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("EnumDescriptor missing 'encmapping': {}", e),
-        })?
-        .extract::<Py<PyDict>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("EnumDescriptor.encmapping not a dict: {}", e),
-        })?;
-    // 加载 EnumInteger 类（从 neoconstruct._internals）。
-    let enum_integer_cls = py
-        .import_bound("neoconstruct._internals")
-        .and_then(|m| m.getattr("EnumInteger"))
-        .and_then(|a| a.extract::<Py<PyType>>())
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "failed to load EnumInteger from neoconstruct._internals: {}",
-                e
-            ),
-        })?;
-    Ok(EnumNode::new(
-        inner_node,
-        decmapping,
-        encmapping,
-        enum_integer_cls,
-    ))
-}
-
-/// 从 `FlagsEnumDescriptor` 构建 `FlagsEnumNode`。
-fn build_flags_enum_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<FlagsEnumNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "FlagsEnumDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
-    // flags 是 Python dict {name: value}，编译期物化为 Vec<(Py<PyString>, i64)>。
-    let flags_dict = desc
-        .getattr("flags")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("FlagsEnumDescriptor missing 'flags': {}", e),
-        })?;
-    let flags_bound = flags_dict
-        .downcast::<PyDict>()
-        .map_err(|_| ConstructError::Compilation {
-            message: "FlagsEnumDescriptor.flags not a dict".to_string(),
-        })?;
-    let mut flags = Vec::with_capacity(flags_bound.len());
-    for (k, v) in flags_bound.iter() {
-        let name: Py<PyString> = k.extract().map_err(|_| ConstructError::Compilation {
-            message: "FlagsEnum flag name not a str".to_string(),
-        })?;
-        let value: i64 = v.extract().map_err(|_| ConstructError::Compilation {
-            message: "FlagsEnum flag value not an int".to_string(),
-        })?;
-        flags.push((name, value));
-    }
-    // encmapping 同 Enum（str→int）。
-    let encmapping = desc
-        .getattr("encmapping")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("FlagsEnumDescriptor missing 'encmapping': {}", e),
-        })?
-        .extract::<Py<PyDict>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("FlagsEnumDescriptor.encmapping not a dict: {}", e),
-        })?;
-    Ok(FlagsEnumNode::new(inner_node, flags, encmapping))
-}
-
-/// 从 `MappingDescriptor` 构建 `MappingNode`（TypeError 捕获在 Node 内实现）。
-fn build_mapping_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<MappingNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "MappingDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
-    let decmapping = desc
-        .getattr("decmapping")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("MappingDescriptor missing 'decmapping': {}", e),
-        })?
-        .extract::<Py<PyDict>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("MappingDescriptor.decmapping not a dict: {}", e),
-        })?;
-    let encmapping = desc
-        .getattr("encmapping")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("MappingDescriptor missing 'encmapping': {}", e),
-        })?
-        .extract::<Py<PyDict>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("MappingDescriptor.encmapping not a dict: {}", e),
-        })?;
-    Ok(MappingNode::new(inner_node, decmapping, encmapping))
-}
-
-/// 从 `OneOfDescriptor` 构建 `OneOfNode`。
-/// valids 编译期转 frozenset 物化（list/set 输入统一）。
-fn build_one_of_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<OneOfNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "OneOfDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
-    let valids_obj = desc
-        .getattr("valids")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("OneOfDescriptor missing 'valids': {}", e),
-        })?;
-    // 转 frozenset（list/set/frozenset 输入统一）。
-    let valids_frozen = py
-        .eval_bound("frozenset", None, None)
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("failed to get frozenset builtin: {}", e),
-        })?
-        .call1((valids_obj,))
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("OneOfDescriptor.valids to frozenset failed: {}", e),
-        })?
-        .extract::<Py<PyFrozenSet>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("OneOfDescriptor.valids not convertible to frozenset: {}", e),
-        })?;
-    Ok(OneOfNode::new(inner_node, valids_frozen))
-}
-
-/// 从 `NoneOfDescriptor` 构建 `NoneOfNode`。
-fn build_none_of_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<NoneOfNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "NoneOfDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
-    let invalids_obj = desc
-        .getattr("invalids")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("NoneOfDescriptor missing 'invalids': {}", e),
-        })?;
-    let invalids_frozen = py
-        .eval_bound("frozenset", None, None)
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("failed to get frozenset builtin: {}", e),
-        })?
-        .call1((invalids_obj,))
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("NoneOfDescriptor.invalids to frozenset failed: {}", e),
-        })?
-        .extract::<Py<PyFrozenSet>>()
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "NoneOfDescriptor.invalids not convertible to frozenset: {}",
-                e
-            ),
-        })?;
-    Ok(NoneOfNode::new(inner_node, invalids_frozen))
-}
-
-/// 从 `UnionDescriptor` 构建 `UnionNode`。
-/// parsefrom 编译期分类：None / int Index / str Name（编译期 name→index 解析）/
-/// 表达式 Expr（编译为 ExprProgram）。
-fn build_union_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-    field_names: &[String],
-) -> Result<UnionNode, ConstructError> {
-    let subcons_obj = desc
-        .getattr("subcons")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "UnionDescriptor missing 'subcons': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let subcons_list =
-        subcons_obj
-            .downcast::<PyList>()
-            .map_err(|_| ConstructError::Compilation {
-                message: "UnionDescriptor.subcons not a list".to_string(),
-            })?;
-
-    // 编译每个 subcon，识别 Renamed 包装提取 name。
-    let mut subcons: Vec<UnionSubcon> = Vec::with_capacity(subcons_list.len());
-    let mut name_to_index: std::collections::HashMap<String, usize> =
-        std::collections::HashMap::new();
-    let mut has_expressions = false;
-    for (idx, sub_desc) in subcons_list.iter().enumerate() {
-        // 检测 Renamed 包装（type name == "Renamed"，有 name + subcon 属性）。
-        let (name_opt, inner_desc) = if sub_desc
-            .get_type()
-            .name()
-            .map(|s| s == "Renamed")
-            .unwrap_or(false)
-        {
-            let n: String = sub_desc
-                .getattr("name")
-                .and_then(|n| n.extract())
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("Union Renamed.name not a str: {}", e),
-                })?;
-            let inner = sub_desc
-                .getattr("subcon")
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("Union Renamed.subcon missing: {}", e),
-                })?;
-            name_to_index.insert(n.clone(), idx);
-            (Some(FieldName::new(py, n)), inner)
-        } else {
-            (None, sub_desc.clone())
-        };
-        let node = build_node_from_descriptor(
-            py,
-            &inner_desc,
-            field_index,
-            expr_programs,
-            field_names,
-            false,
-        )?;
-        if node.has_expressions() {
-            has_expressions = true;
-        }
-        let subcon = match name_opt {
-            Some(name) => UnionSubcon::new_named(name, node),
-            None => UnionSubcon::new_anonymous(node),
-        };
-        subcons.push(subcon);
-    }
-
-    // parsefrom 分类
-    let parsefrom_obj = desc
-        .getattr("parsefrom")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("UnionDescriptor missing 'parsefrom': {}", e),
-        })?;
-    let parsefrom = if parsefrom_obj.is_none() {
-        ParseFrom::None
-    } else if let Ok(idx) = parsefrom_obj.extract::<i64>() {
-        ParseFrom::Index(idx as usize)
-    } else if let Ok(name) = parsefrom_obj.extract::<String>() {
-        // 编译期 name→index 解析
-        let resolved = *name_to_index
-            .get(&name)
-            .ok_or_else(|| ConstructError::Compilation {
-                message: format!("Union parsefrom name '{}' not found in subcons", name),
-            })?;
-        let name_py = PyString::new_bound(py, &name).unbind();
-        ParseFrom::Name {
-            name: name_py,
-            resolved_index: resolved,
-        }
-    } else {
-        // 表达式路径：从 expr_programs 取（key="parsefrom"）。
-        let _ = expr_programs;
-        return Err(ConstructError::Compilation {
-            message: "Union parsefrom as expression not yet supported (use None/int/str)"
-                .to_string(),
-        });
-    };
-
-    Ok(UnionNode::new(subcons, parsefrom, has_expressions))
-}
-
-/// 从 `SequenceDescriptor` 构建 `SequenceNode`（RO 字段不从 list 取值）。
-fn build_sequence_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-    field_names: &[String],
-) -> Result<SequenceNode, ConstructError> {
-    let subcons_obj = desc
-        .getattr("subcons")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "SequenceDescriptor missing 'subcons': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let subcons_list =
-        subcons_obj
-            .downcast::<PyList>()
-            .map_err(|_| ConstructError::Compilation {
-                message: "SequenceDescriptor.subcons not a list".to_string(),
-            })?;
-
-    let mut fields: Vec<SequenceField> = Vec::with_capacity(subcons_list.len());
-    let mut has_expressions = false;
-    for sub_desc in subcons_list.iter() {
-        let (name_opt, inner_desc, kind) = if sub_desc
-            .get_type()
-            .name()
-            .map(|s| s == "Renamed")
-            .unwrap_or(false)
-        {
-            let n: String = sub_desc
-                .getattr("name")
-                .and_then(|n| n.extract())
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("Sequence Renamed.name not a str: {}", e),
-                })?;
-            let inner = sub_desc
-                .getattr("subcon")
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("Sequence Renamed.subcon missing: {}", e),
-                })?;
-            (Some(FieldName::new(py, n)), inner, FieldMode::Rw)
-        } else {
-            (None, sub_desc.clone(), FieldMode::Rw)
-        };
-        let node = build_node_from_descriptor(
-            py,
-            &inner_desc,
-            field_index,
-            expr_programs,
-            field_names,
-            false,
-        )?;
-        if node.has_expressions() {
-            has_expressions = true;
-        }
-        let field = match name_opt {
-            Some(name) => SequenceField::new_named_with_kind(py, name, node, kind),
-            None => SequenceField::new_anonymous(py, node),
-        };
-        fields.push(field);
-    }
-
-    Ok(SequenceNode::new(fields, has_expressions))
-}
-
-/// 从 `ProcessXorDescriptor` 构建 `ProcessXorNode`。
-fn build_process_xor_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-    field_names: &[String],
-) -> Result<ProcessXorNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "ProcessXorDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node = build_node_from_descriptor(
-        py,
-        &subcon_desc,
-        field_index,
-        expr_programs,
-        field_names,
-        false,
-    )?;
-    // padfunc：int/bytes 物化；FieldRef/ExprRef 走 ExprProgram。
-    let padfunc = desc
-        .getattr("padfunc")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("ProcessXorDescriptor missing 'padfunc': {}", e),
-        })?;
-    let pad = if let Ok(v) = padfunc.extract::<i64>() {
-        XorPad::Int(v as u8)
-    } else if let Ok(b) = padfunc.extract::<&[u8]>() {
-        if b.len() == 1 {
-            XorPad::Int(b[0])
-        } else {
-            XorPad::Bytes(b.to_vec())
-        }
-    } else {
-        // 表达式路径：从 expr_programs[field_index]["pad"] 取
-        let prog = compile_expr_program_from_desc(py, desc, "pad", field_index, expr_programs)?;
-        XorPad::Expr(prog)
-    };
-    Ok(ProcessXorNode::new(inner_node, pad))
-}
-
-/// 从 `ProcessRotateLeftDescriptor` 构建 `ProcessRotateLeftNode`。
-fn build_process_rotate_left_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-    field_names: &[String],
-) -> Result<ProcessRotateLeftNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "ProcessRotateLeftDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node = build_node_from_descriptor(
-        py,
-        &subcon_desc,
-        field_index,
-        expr_programs,
-        field_names,
-        false,
-    )?;
-    // amount/group：int 包装为单 op Const ExprProgram；FieldRef/ExprRef 走 ExprProgram。
-    let amount_prog = compile_int_or_expr_program(py, desc, "amount", field_index, expr_programs)?;
-    let group_prog = compile_int_or_expr_program(py, desc, "group", field_index, expr_programs)?;
-    Ok(ProcessRotateLeftNode::new(
-        inner_node,
-        amount_prog,
-        group_prog,
-    ))
-}
-
-/// 从 `NamedTupleDescriptor` 构建 `NamedTupleNode`。
-fn build_named_tuple_node(
-    py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    field_index: usize,
-    field_names: &[String],
-) -> Result<NamedTupleNode, ConstructError> {
-    let subcon_desc = desc
-        .getattr("subcon")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!(
-                "NamedTupleDescriptor missing 'subcon': {} (field {})",
-                e, field_index
-            ),
-        })?;
-    let inner_node =
-        build_node_from_descriptor(py, &subcon_desc, field_index, &[], field_names, false)?;
-    // 编译期调用 collections.namedtuple 物化 factory
-    let tuplename: String = desc
-        .getattr("tuplename")
-        .and_then(|n| n.extract())
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("NamedTupleDescriptor.tuplename not a str: {}", e),
-        })?;
-    let tuplefields_obj = desc
-        .getattr("tuplefields")
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("NamedTupleDescriptor missing 'tuplefields': {}", e),
-        })?;
-    // tuplefields 可为 str（空格分隔）或 list
-    let field_names_list: Vec<String> = if let Ok(s) = tuplefields_obj.extract::<String>() {
-        s.split_whitespace().map(|s| s.to_string()).collect()
-    } else if let Ok(v) = tuplefields_obj.extract::<Vec<String>>() {
-        v
-    } else {
-        return Err(ConstructError::Compilation {
-            message: "NamedTupleDescriptor.tuplefields must be str or list".to_string(),
-        });
-    };
-    let factory = {
-        let nt_module =
-            py.import_bound("collections")
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("failed to import collections: {}", e),
-                })?;
-        let namedtuple_fn =
-            nt_module
-                .getattr("namedtuple")
-                .map_err(|e| ConstructError::Compilation {
-                    message: format!("collections.namedtuple missing: {}", e),
-                })?;
-        let name_bound = PyString::new_bound(py, &tuplename);
-        let fields_bound = PyList::new_bound(py, field_names_list.iter().map(|s| s.as_str()));
-        let args_tuple = PyTuple::new_bound(py, [name_bound.into_any(), fields_bound.into_any()]);
-        namedtuple_fn
-            .call1(args_tuple)
-            .map_err(|e| ConstructError::Compilation {
-                message: format!("collections.namedtuple call failed: {}", e),
-            })?
-            .extract::<Py<PyType>>()
-            .map_err(|e| ConstructError::Compilation {
-                message: format!("namedtuple did not return a type: {}", e),
-            })?
-    };
-    // mode：根据 inner_node 类型推断（Struct → Struct 模式；其他 → Sequence 模式）。
-    let mode = match &inner_node {
-        Node::Struct(_) | Node::StructRef(_) => NamedTupleMode::Struct,
-        _ => NamedTupleMode::Sequence,
-    };
-    // field_names 转 Vec<Py<PyString>>
-    let field_names_py: Vec<Py<PyString>> = field_names_list
-        .iter()
-        .map(|s| PyString::new_bound(py, s).unbind())
-        .collect();
-    Ok(NamedTupleNode::new(
-        inner_node,
-        factory,
-        mode,
-        field_names_py,
-    ))
-}
-
-/// 辅助：从 desc.attr_name 取 int 常量包装为单 op Const ExprProgram，
-/// 或从 expr_programs 取已编译 ExprProgram。
-fn compile_int_or_expr_program(
-    _py: Python<'_>,
-    desc: &Bound<'_, PyAny>,
-    attr: &str,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-) -> Result<ExprProgram, ConstructError> {
-    let val_obj = desc
-        .getattr(attr)
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("Descriptor missing '{}': {}", attr, e),
-        })?;
-    if let Ok(v) = val_obj.extract::<i64>() {
-        Ok(ExprProgram::new(vec![ExprOp::Const(v)]))
-    } else {
-        // 表达式路径：从 expr_programs[field_index][attr] 取
-        let field_exprs = expr_programs
-            .get(field_index)
-            .and_then(Option::as_ref)
-            .ok_or_else(|| ConstructError::Compilation {
-                message: format!(
-                    "expression for '{}' missing in expr_programs (field {})",
-                    attr, field_index
-                ),
-            })?;
-        extract_expr_program_from_dict(_py, field_exprs.bind(_py), attr, field_index)
-    }
-}
-
-/// 辅助：从 desc 的 expr_programs 取指定 key 的 ExprProgram（ProcessXor pad 用）。
-fn compile_expr_program_from_desc(
-    py: Python<'_>,
-    _desc: &Bound<'_, PyAny>,
-    key: &str,
-    field_index: usize,
-    expr_programs: &[Option<Py<PyAny>>],
-) -> Result<ExprProgram, ConstructError> {
-    let field_exprs = expr_programs
-        .get(field_index)
-        .and_then(Option::as_ref)
-        .ok_or_else(|| ConstructError::Compilation {
-            message: format!(
-                "expression for '{}' missing in expr_programs (field {})",
-                key, field_index
-            ),
-        })?;
-    extract_expr_program_from_dict(py, field_exprs.bind(py), key, field_index)
-}
-
-/// 辅助：从 Python dict {key: [ops]} 取 ExprProgram。
-fn extract_expr_program_from_dict(
-    _py: Python<'_>,
-    dict: &Bound<'_, PyAny>,
-    key: &str,
-    field_index: usize,
-) -> Result<ExprProgram, ConstructError> {
-    let dict = dict
-        .downcast::<PyDict>()
-        .map_err(|_| ConstructError::Compilation {
-            message: "expression program must be a dict".to_string(),
-        })?;
-    let ops_obj = dict
-        .get_item(key)
-        .map_err(|e| ConstructError::Compilation {
-            message: format!("failed to get '{}' from expression programs: {}", key, e),
-        })?
-        .ok_or_else(|| ConstructError::Compilation {
-            message: format!(
-                "missing '{}' in expression programs (field {})",
-                key, field_index
-            ),
-        })?;
-    // ops_obj 是 list of tuples [("const", N), ("getint", idx), ...]。
-    parse_expr_ops(&ops_obj)
-}
-
-/// 辅助：把 Python ops list 转为 ExprOp Vec。
-fn parse_expr_ops(ops_obj: &Bound<'_, PyAny>) -> Result<ExprProgram, ConstructError> {
-    let ops_list = ops_obj
-        .downcast::<PyList>()
-        .map_err(|_| ConstructError::Compilation {
-            message: "expression ops must be a list".to_string(),
-        })?;
-    let mut ops = Vec::with_capacity(ops_list.len());
-    for op_item in ops_list.iter() {
-        let op_tuple = op_item
-            .downcast::<PyTuple>()
-            .map_err(|_| ConstructError::Compilation {
-                message: "expression op must be a tuple".to_string(),
-            })?;
-        let name: String = op_tuple
-            .get_item(0)
-            .and_then(|n| n.extract())
-            .map_err(|e| ConstructError::Compilation {
-                message: format!("expression op name not a str: {}", e),
-            })?;
-        let op = match name.as_str() {
-            "const" => {
-                let v: i64 = op_tuple
-                    .get_item(1)
-                    .and_then(|v| v.extract())
-                    .map_err(|e| ConstructError::Compilation {
-                        message: format!("const op value not i64: {}", e),
-                    })?;
-                ExprOp::Const(v)
-            }
-            "getint" => {
-                let idx: usize = op_tuple
-                    .get_item(1)
-                    .and_then(|v| v.extract())
-                    .map_err(|e| ConstructError::Compilation {
-                        message: format!("getint op index not usize: {}", e),
-                    })?;
-                ExprOp::GetInt(idx)
-            }
-            "add" => ExprOp::Add,
-            "sub" => ExprOp::Sub,
-            "mul" => ExprOp::Mul,
-            "floordiv" => ExprOp::FloorDiv,
-            "mod" => ExprOp::Mod,
-            "bitand" => ExprOp::BitAnd,
-            "bitor" => ExprOp::BitOr,
-            "bitxor" => ExprOp::BitXor,
-            "shl" => ExprOp::Shl,
-            "shr" => ExprOp::Shr,
-            "neg" => ExprOp::Neg,
-            "not" => ExprOp::Not,
-            "eq" => ExprOp::Eq,
-            "ne" => ExprOp::Ne,
-            "lt" => ExprOp::Lt,
-            "le" => ExprOp::Le,
-            "gt" => ExprOp::Gt,
-            "ge" => ExprOp::Ge,
-            _ => {
-                return Err(ConstructError::Compilation {
-                    message: format!("unknown expression op: {}", name),
-                })
-            }
-        };
-        ops.push(op);
-    }
-    Ok(ExprProgram::new(ops))
 }

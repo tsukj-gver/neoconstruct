@@ -11,8 +11,9 @@
 //!
 //! Rebuild 必须作为 `FieldMode::Ro` 字段使用（用户写
 //! `count: int = rfield(Rebuild(Byte, items.length))`）。
-//! [`crate::nodes::Node::compute_ro_value`] 对 Rebuild 分支调表达式求值，
-//! 返回 PyLong 供 StructNode 写入 context（供后续表达式引用）。
+//! 字段值来源分类 [`crate::nodes::struct_node::ValueKind::Rebuild`] 在
+//! resolve 时调表达式求值，返回 PyLong 供 StructNode 写入 context
+//! （供后续表达式引用）。
 //!
 //! ## 表达式系统
 //!
@@ -42,8 +43,9 @@ use crate::nodes::Node;
 /// # RO 字段集成
 ///
 /// Rebuild 必须作为 `FieldMode::Ro` 字段使用（与 Computed/Tell 同类）。
-/// [`crate::nodes::Node::compute_ro_value`] 对 Rebuild 分支调 `eval_expr_int`，
-/// 返回 PyLong 供 StructNode 写入 context（供后续表达式引用）。
+/// 字段值来源分类 [`crate::nodes::struct_node::ValueKind::Rebuild`] 在
+/// resolve 时调 `eval_expr_int`，返回 PyLong 供 StructNode 写入 context
+/// （供后续表达式引用）。
 ///
 /// 字段包装约定：RO 用 `rfield(...)`（parse 后有值）；v0.1.1 起 `field(...)`
 /// （RW）也可用——隐式 default=None，build 时实例传入值被忽略（用表达式值）。
@@ -79,7 +81,7 @@ impl RebuildNode {
         &self.inner
     }
 
-    /// 返回 build 表达式的只读引用（供 `compute_ro_value` 在 build 方向求值）。
+    /// 返回 build 表达式的只读引用（供字段分类 resolve 在 build 方向求值）。
     pub fn func(&self) -> &ExprProgram {
         &self.func
     }
@@ -106,11 +108,10 @@ impl Construct for RebuildNode {
         path: &mut Path,
     ) -> Result<(), ConstructError> {
         // build：求值表达式得到 i64，转 PyLong，再交给 inner.build。
-        // 注：Rebuild 作为 RO 字段时，obj 由 StructNode.compute_ro_value 提供
-        // （compute_ro_value 调本节点的 compute_ro_value 分支，详见 mod.rs）。
-        // 此处 build 的 obj 是 compute_ro_value 的返回值（PyLong）。
-        // 但 Python 语义是"忽略 obj，重算"——为对齐 Python，build 内部仍调
-        // 表达式求值（即使 obj 已是 compute_ro_value 计算的值）。
+        // 注：Rebuild 作为字段时，resolve（ValueKind::Rebuild）求值表达式
+        // 后传入 PyLong；本 build 的语义是"忽略 obj，重算"——即使 obj
+        // 已是 resolve 计算的值，仍调表达式求值（节点自治与字段分类解耦，
+        // 保证非字段语境如 Sequence/Array 中行为一致）。
         // 双重求值的开销：仅一次 ExprProgram::eval（~10ns），可忽略。
         let value_i64 = eval_expr_int(&self.func, ctx, py)?;
         let value_py = value_i64.into_py(py);

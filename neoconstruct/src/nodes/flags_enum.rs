@@ -266,46 +266,36 @@ mod tests {
                 .parse(py, &mut stream, &mut ctx, &mut path)
                 .expect("parse");
             let d = result.bind(py).downcast::<PyDict>().expect("dict");
-            assert_eq!(
-                d.get_item("one")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap(),
-                true
-            );
-            assert_eq!(
-                d.get_item("two")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap(),
-                true
-            );
-            assert_eq!(
-                d.get_item("four")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap(),
-                false
-            );
-            assert_eq!(
-                d.get_item("eight")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap(),
-                false
-            );
-            assert_eq!(
-                d.get_item("_flagsenum")
-                    .unwrap()
-                    .unwrap()
-                    .extract::<bool>()
-                    .unwrap(),
-                true
-            );
+            assert!(d
+                .get_item("one")
+                .unwrap()
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(d
+                .get_item("two")
+                .unwrap()
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(!d
+                .get_item("four")
+                .unwrap()
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(!d
+                .get_item("eight")
+                .unwrap()
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
+            assert!(d
+                .get_item("_flagsenum")
+                .unwrap()
+                .unwrap()
+                .extract::<bool>()
+                .unwrap());
         });
     }
 

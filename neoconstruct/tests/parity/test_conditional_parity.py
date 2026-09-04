@@ -114,11 +114,13 @@ def _make_case_rs(case_id):
 
     if C == 'S2':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Pass
+        # rs 侧 build 显式传值（包装器根按 Instance 分类：None ≡ 缺值；
+        # Pass 分支编码忽略值，两端 build 字节一致）
         @dataclass
         class P(StructMixin):
             v: int = field(Switch(99, {1: Int8ub, 2: Int16ub}, default=Pass))
         data = bytes([])
-        return P, data, lambda: P(v=None), lambda o: o.v
+        return P, data, lambda: P(v=0), lambda o: o.v
 
     if C == 'S3':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Int8ub

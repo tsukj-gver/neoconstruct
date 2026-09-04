@@ -134,6 +134,15 @@ class GenericConstructError(ConstructError):
     """
 
 
+class FieldValueMissingError(ConstructError):
+    """build 时字段缺值：实例未提供该字段的值。
+
+    对应 Rust 的 ``ConstructError::BuildValueMissing``。错误消息含字段名
+    与指引（构造实例时未提供该字段值）。错误时机＝值使用点（build），
+    而非实例化——表达式派生/哑值可省字段在实例化时可省。
+    """
+
+
 class RangeError(ConstructError):
     """范围错误：Array count 无效（负数或与给定列表长度不符）。
 

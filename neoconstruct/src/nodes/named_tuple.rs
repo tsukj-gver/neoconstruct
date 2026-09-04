@@ -206,7 +206,7 @@ mod tests {
     use crate::nodes::bytes::BytesNode;
     use crate::nodes::format_field::{FormatFieldNode, PythonFormat};
     use crate::nodes::struct_node::FieldMode;
-    use crate::nodes::struct_node::{FieldName, StructField, StructNode};
+    use crate::nodes::struct_node::{FieldName, StructField, StructNode, ValueKind};
     use crate::nodes::Construct;
 
     fn ensure_python() {
@@ -251,6 +251,11 @@ mod tests {
                             PythonFormat::UnsignedInt8Big,
                         )),
                         mode: FieldMode::Rw,
+                        kind: ValueKind::classify(
+                            py,
+                            &Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big)),
+                            false,
+                        ),
                     },
                     StructField {
                         name: FieldName::new(py, "y"),
@@ -258,6 +263,11 @@ mod tests {
                             PythonFormat::UnsignedInt8Big,
                         )),
                         mode: FieldMode::Rw,
+                        kind: ValueKind::classify(
+                            py,
+                            &Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big)),
+                            false,
+                        ),
                     },
                 ],
                 py.eval_bound("type('MockStruct', (), {})", None, None)
@@ -304,6 +314,11 @@ mod tests {
                             PythonFormat::UnsignedInt8Big,
                         )),
                         mode: FieldMode::Rw,
+                        kind: ValueKind::classify(
+                            py,
+                            &Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big)),
+                            false,
+                        ),
                     },
                     StructField {
                         name: FieldName::new(py, "y"),
@@ -311,6 +326,11 @@ mod tests {
                             PythonFormat::UnsignedInt8Big,
                         )),
                         mode: FieldMode::Rw,
+                        kind: ValueKind::classify(
+                            py,
+                            &Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt8Big)),
+                            false,
+                        ),
                     },
                 ],
                 py.eval_bound("type('MockStruct', (), {})", None, None)

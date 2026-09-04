@@ -295,13 +295,17 @@ class {name}:
         fields: Vec<(String, Node)>,
     ) -> Py<CompiledSchema> {
         // 将 String 字段名转换为 StructField（interned + mode=Rw）。
-        use crate::nodes::struct_node::{FieldMode, StructField};
+        use crate::nodes::struct_node::{FieldMode, StructField, ValueKind};
         let struct_fields = fields
             .into_iter()
-            .map(|(name, node)| StructField {
-                name: crate::nodes::struct_node::FieldName::new(py, name),
-                node,
-                mode: FieldMode::Rw,
+            .map(|(name, node)| {
+                let kind = ValueKind::classify(py, &node, false);
+                StructField {
+                    name: crate::nodes::struct_node::FieldName::new(py, name),
+                    node,
+                    mode: FieldMode::Rw,
+                    kind,
+                }
             })
             .collect();
         let root = Node::Struct(StructNode::new(
@@ -311,7 +315,7 @@ class {name}:
             false,
             false,
         ));
-        let schema = CompiledSchema::new(root, cls.clone_ref(py), py);
+        let schema = CompiledSchema::new(root, cls.clone_ref(py), py, Vec::new());
         let schema_py = Py::new(py, schema).expect("Py::new schema");
         cls.bind(py)
             .setattr("_construct_compiled", schema_py.clone_ref(py))

@@ -220,7 +220,7 @@ mod tests {
 
     /// 构造一个含若干整数字段的 `Context`，用于表达式求值测试。
     fn make_context<'py>(py: Python<'py>, entries: &[(&str, i64)]) -> Context<'py> {
-        let mut ctx = Context::new_root(py).expect("new_root");
+        let ctx = Context::new_root(py).expect("new_root");
         for (name, value) in entries {
             let val = (*value).into_py(py);
             ctx.set_field(name, val.bind(py)).expect("set_field");

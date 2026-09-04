@@ -575,17 +575,21 @@ mod tests {
         // GreedyRange 看到 Ok(instance) 继续迭代，直到 EOF。
         with_py(|py| {
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
-            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use crate::nodes::struct_node::{
+                FieldMode, FieldName, StructField, StructNode, ValueKind,
+            };
             let inner_fields = vec![
                 StructField {
                     name: FieldName::new(py, "x"),
                     node: byte_node(),
                     mode: FieldMode::Rw,
+                    kind: ValueKind::classify(py, &byte_node(), false),
                 },
                 StructField {
                     name: FieldName::new(py, "stop"),
                     node: Node::StopIf(StopIfNode::new(StopIfCondition::Always)),
                     mode: FieldMode::Ro,
+                    kind: ValueKind::Control,
                 },
             ];
             let cls = py
@@ -654,17 +658,21 @@ mod tests {
         with_py(|py| {
             // inner: GreedyRange(Struct{Byte, StopIf(Never)})
             use crate::nodes::stop_if::{StopIfCondition, StopIfNode};
-            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use crate::nodes::struct_node::{
+                FieldMode, FieldName, StructField, StructNode, ValueKind,
+            };
             let inner_fields = vec![
                 StructField {
                     name: FieldName::new(py, "x"),
                     node: byte_node(),
                     mode: FieldMode::Rw,
+                    kind: ValueKind::classify(py, &byte_node(), false),
                 },
                 StructField {
                     name: FieldName::new(py, "stop"),
                     node: Node::StopIf(StopIfNode::new(StopIfCondition::Never)),
                     mode: FieldMode::Ro,
+                    kind: ValueKind::Control,
                 },
             ];
             let cls = py
@@ -779,12 +787,15 @@ mod tests {
         //   2. Struct.push_segment("x"): "root" → "root.x"
         //   3. GreedyRange.push_path_index(1): "root.x" → "root[1].x"
         with_py(|py| {
-            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use crate::nodes::struct_node::{
+                FieldMode, FieldName, StructField, StructNode, ValueKind,
+            };
             use pyo3::types::PyType;
             let inner_struct_fields = vec![StructField {
                 name: FieldName::new(py, "x"),
                 node: byte_node(),
                 mode: FieldMode::Rw,
+                kind: ValueKind::classify(py, &byte_node(), false),
             }];
             let cls = py
                 .eval_bound("type('Item', (), {})", None, None)

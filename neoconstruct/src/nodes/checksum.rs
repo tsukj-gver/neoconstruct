@@ -479,7 +479,7 @@ mod tests {
         int_entries: &[(&str, i64)],
         bytes_entries: &[(&str, &[u8])],
     ) -> Context<'py> {
-        let mut ctx = make_context_with_ints(py, int_entries);
+        let ctx = make_context_with_ints(py, int_entries);
         for (name, value) in bytes_entries {
             let py_bytes = PyBytes::new_bound(py, value);
             ctx.set_field(name, &py_bytes).expect("set_field bytes");

@@ -910,7 +910,7 @@ class TestExprConsumers:
         assert MA(x=1, items=[1, 2]).build() == b"\x01\x01\x02"
 
     def test_if_cond_expr(self):
-        """If(x>0, Byte)：cond 表达式（真分支 + 假分支 Pass）。"""
+        """If(x>0, Byte)：cond 表达式（真分支可用 + 假分支缺值报错）。"""
 
         @dataclass
         class MI(StructMixin):
@@ -920,10 +920,13 @@ class TestExprConsumers:
         parsed = MI.parse(b"\x01\x7f")
         assert parsed.c == 0x7F
         assert MI(x=1, c=0x7F).build() == b"\x01\x7f"
-        # cond=0 → Pass：0 数据字节
+        # cond=0 → Pass：parse 0 数据字节（c=None）
         parsed0 = MI.parse(b"\x00")
         assert parsed0.c is None
-        assert MI(x=0, c=None).build() == b"\x00"
+        # 显式 None ≡ 缺值：包装器根按 Instance 分类 → FieldValueMissing
+        # （缺省/None 报错语义锁定——包装器全哑值分支可省属后续演进项）
+        with pytest.raises(FieldValueMissingError):
+            MI(x=0, c=None).build()
 
     def test_computed_expr_consumer(self):
         """Computed(x+1)：消费者 no-op + parse 求值。"""
@@ -1172,21 +1175,34 @@ class TestPeekField:
         """
 
         @dataclass
+        class Body1(StructMixin):
+            v: int = field(Byte)
+            w: int = field(Byte)
+
+        @dataclass
+        class Body3(StructMixin):
+            v: int = field(Byte)
+            w: int = field(Byte)
+            u: int = field(Byte)
+
+        @dataclass
         class IECFrame(StructMixin):
             cf1_peek: int = field(Peek(Byte))
             frame_type: int = rfield(
                 Computed((cf1_peek & 1) * (1 + 2 * ((cf1_peek >> 1) & 1)))
             )
-            body: Any = field(Switch(frame_type, {0: Byte, 1: Bytes(2), 3: Bytes(3)}))
+            body: Any = field(Switch(frame_type, {0: Byte, 1: Body1, 3: Body3}))
 
-        # parse 腿全链：cf1=0x03 → frame_type=3 → Bytes(3) 分支
-        parsed = IECFrame.parse(b"\x03" + b"\x01\x02\x03")
+        # parse 腿全链：cf1=0x03 → frame_type=3 → Body3（3 字节，覆盖被
+        # peek 的字节——流已回退）分派
+        parsed = IECFrame.parse(b"\x03\x01\x02")
         assert parsed.cf1_peek == 3
         assert parsed.frame_type == 3
-        assert parsed.body == b"\x01\x02\x03"
+        assert (parsed.body.v, parsed.body.w, parsed.body.u) == (3, 1, 2)
 
         # build 腿：parse 存的有效值透传 → 分派一致 → round-trip
-        assert parsed.build() == b"\x03\x01\x02\x03"
+        # （Peek build no-op，字节由 body 分支完整重写）
+        assert parsed.build() == b"\x03\x01\x02"
 
     def test_from_scratch_build_dummy_none_flowing_raises(self):
         """从零 build + 后继 Computed 引用 peek → 报错。
@@ -1403,10 +1419,12 @@ class TestControlRfieldBuildUsable:
 
         @dataclass
         class RC(StructMixin):
+            body_start: int = rfield(Tell())
             addr: int = field(Byte)
             fc: int = field(Byte)
+            body_end: int = rfield(Tell())
             crc: bytes = rfield(
-                Checksum(Bytes(2), _modbus_crc16)
+                Checksum(Bytes(2), _modbus_crc16, start=body_start, end=body_end)
             )
 
         built = RC(addr=1, fc=2).build()

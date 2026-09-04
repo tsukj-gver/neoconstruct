@@ -5,8 +5,8 @@
 //! ## 行为概述
 //!
 //! Tell 是 RO（只读）节点：parse 返回当前 `ParseStream` 的读取位置，
-//! build 不写字节（位置记录由 [`crate::nodes::struct_node`] 的
-//! `compute_ro_value` 在 RO 字段处理时完成）。sizeof 恒为 0。
+//! build 不写字节（位置记录由 [`crate::nodes::struct_node::ValueKind::Tell`]
+//! 在字段 resolve 时完成）。sizeof 恒为 0。
 //!
 //! ## 典型用法
 //!
@@ -32,8 +32,8 @@ use super::Construct;
 /// parse 返回当前 `ParseStream` 的读取位置（`usize` → `PyLong`）。
 /// sizeof 返回 0（不占字节）。
 ///
-/// build 方向是 no-op：位置记录由 [`crate::nodes::struct_node`] 的
-/// `compute_ro_value` 在 RO 字段处理时完成。
+/// build 方向是 no-op：位置记录由 [`crate::nodes::struct_node::ValueKind::Tell`]
+/// 在字段 resolve 时完成。
 #[derive(Debug)]
 pub struct TellNode;
 
@@ -70,7 +70,7 @@ impl Construct for TellNode {
         _ctx: &mut Context<'_>,
         _path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // Tell build 是 no-op。位置记录由 StructNode 的 compute_ro_value 处理。
+        // Tell build 是 no-op。位置记录由字段分类 resolve 处理。
         Ok(())
     }
 

@@ -37,6 +37,7 @@ from neoconstruct import (
     Const,
     ConstError,
     Default,
+    FieldValueMissingError,
     If,
     Int8ub,
     Padding,
@@ -273,7 +274,12 @@ class TestB2BinExprNestedInWrapper:
         assert M(x=1, c=0x7F).build() == b"\x01\x01\x7f"
 
     def test_prefixed_if_cond_zero_else_branch(self):
-        """B2：Prefixed × If(x-1, Byte)（cond 求值 0 → Pass，0 字节）。"""
+        """B2：Prefixed × If(x-1, Byte)（cond 求值 0 → Pass，0 字节）。
+
+        包装器根（Prefixed）按 Instance 分类：显式 None ≡ 缺值 →
+        FieldValueMissingError（缺值统一语义）；显式传值成功（假分支
+        Pass 不消费值）。
+        """
 
         @dataclass
         class M(StructMixin):
@@ -282,7 +288,9 @@ class TestB2BinExprNestedInWrapper:
 
         parsed = M.parse(b"\x01\x00")
         assert (parsed.x, parsed.c) == (1, None)
-        assert M(x=1, c=None).build() == b"\x01\x00"
+        assert M(x=1, c=0).build() == b"\x01\x00"
+        with pytest.raises(FieldValueMissingError):
+            M(x=1, c=None).build()
 
     def test_prefixed_computed_add(self):
         """B2：Prefixed × Computed(x+1)（0 数据字节，值 = 表达式求值）。
