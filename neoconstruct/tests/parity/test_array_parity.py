@@ -78,7 +78,7 @@ def _make_case_rs(case_id):
         StructMixin, field, rfield, wfield,
         Int8ub, Int8sb, Int16ub, Int32ub, Bytes,
         Array, GreedyRange, PrefixedArray,
-        RepeatUntil, Index, StopIf,
+        RepeatUntil, Index, StopIf, Element,
     )
 
     C = case_id
@@ -212,29 +212,32 @@ def _make_case_rs(case_id):
         return P, data, lambda: P(items=[]), lambda o: {'items': o.items}
 
     if C == 'R1':
-        # RepeatUntil Expr 路径（简单 lambda x OP N）
+        # RepeatUntil 终止表达式路径（Element 引用当前元素，e > 5）
         @dataclass
         class P(StructMixin):
-            items: list = field(RepeatUntil(lambda x, lst, ctx: x > 5, Int8ub))
+            e: int = rfield(Element())
+            items: list = field(RepeatUntil(e > 5, Int8ub))
         data = bytes([1, 2, 3, 4, 5, 6, 7, 8])
         return P, data, lambda: P(items=[1, 2, 3, 4, 5, 6]), \\
             lambda o: {'items': o.items}
 
     if C == 'R2':
-        # RepeatUntil PyCallable 路径（依赖 list 内容）
+        # RepeatUntil 哨兵来自前序字段（终止表达式跨字段引用 e == stop）
         @dataclass
         class P(StructMixin):
-            items: list = field(
-                RepeatUntil(lambda x, lst, ctx: len(lst) >= 2 and lst[-2] == lst[-1], Int8ub)
-            )
-        data = bytes([1, 5, 5, 9, 9])
-        return P, data, lambda: P(items=[1, 5, 5]), lambda o: {'items': o.items}
+            stop: int = field(Int8ub)
+            e: int = rfield(Element())
+            items: list = field(RepeatUntil(e == stop, Int8ub))
+        data = bytes([5, 1, 2, 5, 9])
+        return P, data, lambda: P(stop=5, items=[1, 2, 5]), \\
+            lambda o: {'stop': o.stop, 'items': o.items}
 
     if C == 'R3':
-        # RepeatUntil Expr 路径负数（哨兵 -1）
+        # RepeatUntil 负数哨兵（终止表达式 e == -1，Int8sb）
         @dataclass
         class P(StructMixin):
-            items: list = field(RepeatUntil(lambda x, lst, ctx: x != -1, Int8sb))
+            e: int = rfield(Element())
+            items: list = field(RepeatUntil(e == -1, Int8sb))
         data = bytes([1, 2, 3, 0xFF, 9])
         return P, data, lambda: P(items=[1, 2, 3, -1]), \\
             lambda o: {'items': o.items}
@@ -426,14 +429,16 @@ def _make_case_py(case_id):
                 bytes([1, 2, 3, 4, 5, 6, 7, 8]),
                 dict(items=[1, 2, 3, 4, 5, 6]))
     if C == 'R2':
-        return (pc.Struct("items"/pc.RepeatUntil(
-                    lambda x, lst, ctx: len(lst) >= 2 and lst[-2] == lst[-1], pc.Int8ub)),
-                bytes([1, 5, 5, 9, 9]),
-                dict(items=[1, 5, 5]))
+        # RepeatUntil 哨兵来自前序字段（x == ctx.stop）
+        return (pc.Struct("stop"/pc.Int8ub,
+                          "items"/pc.RepeatUntil(
+                              lambda x, lst, ctx: x == ctx.stop, pc.Int8ub)),
+                bytes([5, 1, 2, 5, 9]),
+                dict(stop=5, items=[1, 2, 5]))
     if C == 'R3':
-        # RepeatUntil 哨兵 -1：signed Int8sb
+        # RepeatUntil 哨兵 -1：signed Int8sb，在哨兵处停止（x == -1）
         return (pc.Struct("items"/pc.RepeatUntil(
-                    lambda x, lst, ctx: x != -1, pc.Int8sb)),
+                    lambda x, lst, ctx: x == -1, pc.Int8sb)),
                 bytes([1, 2, 3, 0xFF, 9]),
                 dict(items=[1, 2, 3, -1]))
 
@@ -506,9 +511,9 @@ ALL_CASES = [
     ("P3", "PrefixedArray(Byte, Struct{2 字段})"),
     ("P4", "PrefixedArray count=0 返回空 list"),
     # RepeatUntil
-    ("R1", "RepeatUntil Expr 路径（x > 5）"),
-    ("R2", "RepeatUntil PyCallable 路径（依赖 list 内容）"),
-    ("R3", "RepeatUntil Expr 路径负数（哨兵 -1，Int8sb）"),
+    ("R1", "RepeatUntil 终止表达式路径（e > 5，Element 引用）"),
+    ("R2", "RepeatUntil 哨兵来自前序字段（e == stop 跨字段引用）"),
+    ("R3", "RepeatUntil 负数哨兵（e == -1，Int8sb）"),
     # Index
     ("I1", "Index 在 Array 内（3 元素）"),
     ("I2", "Index 在 GreedyRange 内"),
@@ -528,10 +533,12 @@ ALL_CASES = [
 # ---------------------------------------------------------------------------
 # 自动生成 parity_results fixture（预跑全部 case × impl 缓存）
 # ---------------------------------------------------------------------------
-# **工程处理**：
-# R1/R2/R3 的 terminator 用了 lambda（PyCallable 路径已删除），当前 neoconstruct
-# 下 broken。此处用容错 fixture 让 broken case 显示为 skip（而非让整个 fixture
-# 崩溃），其余 24 case 正常验证。R2 依赖 lst 内容，修复需 Adapter 类机制。
+# **历史处理记录**：R1-R3 曾因 rs 侧 case 定义使用 Python lambda（PyCallable
+# 路径已删除，RepeatUntil 终止条件必须是字段表达式）导致子进程崩溃，被容错
+# fixture 以 skip 静默放行。现已修复：R1/R3 改为 Element 表达式路径，R2 重定义
+# 为"哨兵来自前序字段"（两 impl 均可表达的跨字段引用语义；依赖 list 内容的
+# 终止判定超出表达式 VM 能力，需用户面 Adapter）。容错 fixture 保留——真正的
+# 子进程基础设施故障仍以 skip 呈现而非让整个 module 崩溃。
 @pytest.fixture(scope="module")
 def parity_results(venv_pair):
     """预跑全部 case × impl，失败 case 记录 error（不崩溃）。"""
