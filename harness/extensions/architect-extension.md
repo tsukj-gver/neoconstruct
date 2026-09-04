@@ -1,11 +1,11 @@
 ---
 id: EXT-architect
-project: construct-rs
+project: neoconstruct
 phase: meta
 last_updated: 2026-07-27
 ---
 
-# ARCH 项目特定拓展（construct-rs）
+# ARCH 项目特定拓展（neoconstruct）
 
 > 配合 `.opencode/agents/architect.md`（跨工程 base）使用。
 
@@ -15,11 +15,8 @@ last_updated: 2026-07-27
 
 ARCH 在 **DESIGNING** 阶段执行。
 
-## 子任务标识格式
 
-`<phase>.<子任务编号> [任务名]`。
-
-## 模块设计文档模板（construct-rs 项目特定）
+## 模块设计文档模板（neoconstruct 项目特定）
 
 ```markdown
 ---
@@ -47,7 +44,7 @@ last_updated: YYYY-MM-DD
 | ...           | ...           |
 
 ## §0 原则对照表（硬要求，L-01 对策）
-（逐条说明设计如何满足 AGENTS.md §0 核心原则 1-8）
+（逐条说明设计如何满足 AGENTS.md §0 核心原则全条）
 
 ## 性能假设（涉及性能改进时必填，L-02/L-05 对策）
 - 瓶颈识别（量化数据 + 来源）
@@ -64,9 +61,9 @@ last_updated: YYYY-MM-DD
 
 ## §0 原则对照（硬要求）
 
-涉及 parse/build 数据流的设计**必须**包含 §0 原则对照表（`AGENTS.md §0` 核心原则 1-8），逐条说明设计如何满足。未提供对照表的设计会被 REV 直接驳回（L-01 对策）。
+涉及 parse/build 数据流的设计**必须**包含 §0 原则对照表（`AGENTS.md §0` 核心原则全条），逐条说明设计如何满足。未提供对照表的设计会被 REV 直接驳回（L-01 对策）。
 
-## Python 参考速查（construct-rs 项目特定）
+## Python 参考速查（neoconstruct 项目特定）
 
 开发任何模块时，首先定位 Python 源码中的对应实现（其他角色可参考本表）：
 
@@ -90,7 +87,7 @@ last_updated: YYYY-MM-DD
 
 ## 跨阶段决策检查
 
-每个 Phase 设计时，先 read：
+每个版本批次设计时，先 read：
 - `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）
 - `experiences.md`（L-01~L-08 模式化失败教训）
 

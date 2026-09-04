@@ -522,12 +522,15 @@ mod tests {
         //   2. Struct.push_segment("x"): "root" → "root.x"
         //   3. Array.push_path_index(1): "root.x" → "root[1].x"
         with_py(|py| {
-            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use crate::nodes::struct_node::{
+                FieldMode, FieldName, StructField, StructNode, ValueKind,
+            };
             use pyo3::types::PyType;
             let inner_struct_fields = vec![StructField {
                 name: FieldName::new(py, "x"),
                 node: byte_node(),
                 mode: FieldMode::Rw,
+                kind: ValueKind::classify(py, &byte_node(), false),
             }];
             let cls = py
                 .eval_bound("type('Item', (), {})", None, None)
@@ -566,12 +569,15 @@ mod tests {
         //   2. Struct.push_segment("x"): "root" → "root.x"
         //   3. Array.push_path_index(1): "root.x" → "root[1].x"
         with_py(|py| {
-            use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+            use crate::nodes::struct_node::{
+                FieldMode, FieldName, StructField, StructNode, ValueKind,
+            };
             use pyo3::types::PyType;
             let inner_struct_fields = vec![StructField {
                 name: FieldName::new(py, "x"),
                 node: byte_node(),
                 mode: FieldMode::Rw,
+                kind: ValueKind::classify(py, &byte_node(), false),
             }];
             let cls = py
                 .eval_bound("type('Item', (), {})", None, None)

@@ -22,6 +22,7 @@
 
 use crate::context::Context;
 use crate::error::ConstructError;
+use crate::nodes::struct_node::InitDefault;
 use crate::nodes::{Construct, Node};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
@@ -65,6 +66,12 @@ pub struct CompiledSchema {
     /// 创建时调用一次 `root.sizeof(placeholder)`。`_build_raw` 直接读此缓存
     /// 决定 `BuildStream::with_capacity` 预分配，消除每次 build 的 sizeof 递归遍历。
     static_size: Option<usize>,
+    /// 每字段的实例化默认值三态（编译期由 [`crate::nodes::struct_node::ValueKind`]
+    /// 推导，冷路径一次计算）。
+    ///
+    /// Python 侧 `_apply_dataclass_field_config` 通过 `_init_defaults` 方法
+    /// 消费（I 点单一事实源＝Rust 分类）。
+    init_defaults: Vec<InitDefault>,
 }
 
 impl CompiledSchema {
@@ -78,7 +85,13 @@ impl CompiledSchema {
     /// - `root`：执行树根节点（通常是 `Node::Struct(StructNode { ... })`）
     /// - `cls`：用户类（`StructMixin` 子类）的 Python 引用
     /// - `py`：GIL token（用于 sizeof 的 placeholder context）
-    pub fn new(root: Node, cls: Py<PyType>, py: Python<'_>) -> Self {
+    /// - `init_defaults`：每字段的实例化默认值三态（编译期推导）
+    pub fn new(
+        root: Node,
+        cls: Py<PyType>,
+        py: Python<'_>,
+        init_defaults: Vec<InitDefault>,
+    ) -> Self {
         let has_expressions = root.has_expressions();
         // 仅对无表达式结构尝试 sizeof（含表达式时 sizeof 必然失败，跳过无用计算）。
         let static_size = if !has_expressions {
@@ -91,6 +104,7 @@ impl CompiledSchema {
             cls,
             has_expressions,
             static_size,
+            init_defaults,
         }
     }
 
@@ -127,6 +141,31 @@ impl CompiledSchema {
 
 #[pymethods]
 impl CompiledSchema {
+    /// 返回每个字段的实例化默认值三态（编译期一次计算，冷路径）。
+    ///
+    /// Python 可见签名：
+    /// ```python
+    /// _init_defaults(self) -> list[tuple[int, Any | None]]
+    /// ```
+    ///
+    /// 每项 `(kind, value)`：
+    /// - `(0, None)`：Required——必填 positional（`dataclasses.field()` 无参）
+    /// - `(1, None)`：Optional——可省（`kw_only=True, default=None`）
+    /// - `(2, v)`：Value——携带默认值（`kw_only=True, default=v`）
+    ///
+    /// 用户显式 `default=` 参数永远优先于本派生（Python 侧保证）。
+    #[pyo3(name = "_init_defaults")]
+    pub fn init_defaults_py(&self, py: Python<'_>) -> Vec<(u8, Option<Py<PyAny>>)> {
+        self.init_defaults
+            .iter()
+            .map(|d| match d {
+                InitDefault::Required => (0u8, None),
+                InitDefault::Optional => (1u8, None),
+                InitDefault::Value(v) => (2u8, Some(v.clone_ref(py))),
+            })
+            .collect()
+    }
+
     /// 从字节解析为用户类实例（parse FFI 入口，恰好一次 FFI 穿越）。
     ///
     /// Python 可见签名：
@@ -284,7 +323,7 @@ mod tests {
                 .expect("extract type");
 
             let root = empty_root(py);
-            let schema = CompiledSchema::new(root, object_cls.clone_ref(py), py);
+            let schema = CompiledSchema::new(root, object_cls.clone_ref(py), py, Vec::new());
 
             // root 返回的 Node 是 Struct 变体
             assert!(matches!(schema.root(), Node::Struct(s) if s.is_empty()));
@@ -301,7 +340,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(py), cls, py);
+            let schema = CompiledSchema::new(empty_root(py), cls, py, Vec::new());
             match schema.root() {
                 Node::Struct(s) => assert_eq!(s.len(), 0),
                 _ => panic!("expected Node::Struct"),
@@ -319,7 +358,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(empty_root(py), cls.clone_ref(py), py);
+            let schema = CompiledSchema::new(empty_root(py), cls.clone_ref(py), py, Vec::new());
             let schema_py = Py::new(py, schema).expect("Py::new");
 
             // setattr 到 cls
@@ -368,7 +407,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(root, cls, py);
+            let schema = CompiledSchema::new(root, cls, py, Vec::new());
 
             // static_size 应为 Some(4)（Int16ub=2 + pad=2）；
             // 若 sizeof 失败则为 None（对照下一测试）。
@@ -406,7 +445,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(root, cls, py);
+            let schema = CompiledSchema::new(root, cls, py, Vec::new());
 
             assert_eq!(
                 schema.static_size, None,
@@ -438,7 +477,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(root, cls, py);
+            let schema = CompiledSchema::new(root, cls, py, Vec::new());
             // 5 字节输入，schema 只消费 1（剩余忽略）
             let input: &[u8] = &[0xAA, 0xBB, 0xCC, 0xDD, 0xEE];
             let data = PyBytes::new_bound(py, input);
@@ -460,7 +499,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(root, cls, py);
+            let schema = CompiledSchema::new(root, cls, py, Vec::new());
             let data = PyBytes::new_bound(py, b"");
             let result = schema._parse_raw(py, &data).expect("parse ok");
             // 空 schema 返回实例（不是 None），验证返回路径正常
@@ -481,7 +520,7 @@ mod tests {
                 .expect("create type")
                 .extract::<Py<PyType>>()
                 .expect("extract");
-            let schema = CompiledSchema::new(root, cls, py);
+            let schema = CompiledSchema::new(root, cls, py, Vec::new());
             let data = PyBytes::new_bound(py, b"");
             let _ = schema._parse_raw(py, &data).expect("parse empty ok");
         });

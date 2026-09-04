@@ -84,7 +84,7 @@ use crate::nodes::strings::{
     CStringNode, GreedyStringNode, NullStrippedNode, NullTerminatedNode, PaddedStringNode,
     PascalStringNode,
 };
-use crate::nodes::struct_node::{FieldMode, FieldName, StructField, StructNode};
+use crate::nodes::struct_node::{FieldMode, FieldName, InitDefault, StructField, StructNode, ValueKind};
 use crate::nodes::struct_ref::StructRefNode;
 use crate::nodes::subconstruct::SubconstructNode;
 use crate::nodes::switch::{SwitchCase, SwitchKey, SwitchNode};
@@ -238,15 +238,26 @@ pub fn compile_schema(
             bitwise,
         )
         .map_err(|e| with_field_context(e, name))?;
+        // 值来源分类：按根节点单点判定；expr_derived = 该字段的表达式
+        // 程序非空（subcon 树内含表达式消费者）→ Instance 实例化降为 Optional。
+        let expr_derived = expr_programs_slice
+            .get(i)
+            .is_some_and(|p| p.is_some());
+        let kind = ValueKind::classify(py, &node, expr_derived);
         // FieldName::new 创建 interned PyString 缓存。
         // mode 从解析后的 modes_resolved 取。
         let field = StructField {
             name: crate::nodes::struct_node::FieldName::new(py, name.clone()),
             node,
             mode: modes_resolved[i],
+            kind,
         };
         fields.push(field);
     }
+
+    // 4b. 实例化默认值派生（I 点，单一事实源＝ValueKind 分类；冷路径一次）。
+    let init_defaults: Vec<InitDefault> =
+        fields.iter().map(|f| f.kind.init_default(py)).collect();
 
     // 5. 组装根 Struct 节点（含 cls + has_post_init + has_expressions）。
     //    has_expressions 由两部分组合——
@@ -274,8 +285,14 @@ pub fn compile_schema(
         struct_root
     };
 
-    // 7. 包装为 CompiledSchema
-    Ok(CompiledSchema::new(root, cls.clone().unbind(), py))
+    // 7. 包装为 CompiledSchema（init_defaults 与根 StructNode 字段一一对应；
+    //    bitwise 包裹不改变字段布局）。
+    Ok(CompiledSchema::new(
+        root,
+        cls.clone().unbind(),
+        py,
+        init_defaults,
+    ))
 }
 
 /// 检查类是否定义了 `__slots__`（含 MRO 查找）。
@@ -7494,8 +7511,8 @@ fn build_sequence_node(
             has_expressions = true;
         }
         let field = match name_opt {
-            Some(name) => SequenceField::new_named_with_kind(name, node, kind),
-            None => SequenceField::new_anonymous(node),
+            Some(name) => SequenceField::new_named_with_kind(py, name, node, kind),
+            None => SequenceField::new_anonymous(py, node),
         };
         fields.push(field);
     }

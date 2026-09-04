@@ -1,11 +1,11 @@
 ---
 id: EXT-reviewer
-project: construct-rs
+project: neoconstruct
 phase: meta
 last_updated: 2026-07-27
 ---
 
-# REV 项目特定拓展（construct-rs）
+# REV 项目特定拓展（neoconstruct）
 
 > 配合 `.opencode/agents/reviewer.md`（跨工程 base）使用。
 > 工作流状态机与子任务标识格式见 `AGENTS.md §1`。
@@ -13,13 +13,11 @@ last_updated: 2026-07-27
 
 ## §0 原则对照（硬要求，L-01 对策）
 
-涉及 parse/build 数据流的设计**必须**包含 §0 原则对照表（`AGENTS.md §0` 核心原则 1-8），逐条说明设计如何满足。**未提供对照表直接驳回**。
-
-历史教训：iter 推倒重来（2026-06-21）的根因是 §0 违反，三方审查（ARCH/REV/PM）均未发现。详见 `experiences.md §L-01`。
+涉及 parse/build 数据流的设计**必须**包含 §0 原则对照表（`AGENTS.md §0` 核心原则全条），逐条说明设计如何满足。**未提供对照表直接驳回**。
 
 ## 性能检查项目特定补充
 
-补充 base §性能 的通用检查项，加入 construct-rs 特有：
+补充 base §性能 的通用检查项，加入 neoconstruct 特有：
 
 - [ ] FFI 边界（Python 互操作）的穿越次数有量化分析
 - [ ] 数据结构选择合理（IndexMap vs Vec vs HashMap 等 Rust 特定容器）
@@ -35,7 +33,7 @@ last_updated: 2026-07-27
 
 ## 跨阶段决策检查
 
-设计不可违反 `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）。每个 Phase 设计时先 read ADR 与 `experiences.md`，避免重新决策（L-04 对策）。
+设计不可违反 `docs/decisions/`（ADR-001~ADR-NNN，索引 `docs/decisions/README.md`）。每个版本批次设计时先 read ADR 与 `experiences.md`，避免重新决策（L-04 对策）。
 
 ## 可写文件
 

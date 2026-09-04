@@ -18,8 +18,10 @@
 6. **构造器分派**：`enum_dispatch` 静态分派（参考 pydantic-core CombinedValidator）
 7. **错误处理**：`Result<T, ConstructError>` + `thiserror`，错误携带 `path` 字段
 8. **Stream 抽象**：纯 Rust 内部抽象，不跨 FFI
+9. **独立分支定位（2026-09-04 起）**：neoconstruct 是独立库，Python `construct` 仅作 **benchmark 性能基线**（≥4x 目标度量用）。行为语义**自主定义**（用户面自然性优先），禁止"与原版对齐"作为设计/测试依据；源码中除 benchmark 相关外不引用 construct
+10. **源码零过程信息（2026-09-04 起）**：源码（含测试/bench）不允许出现任务号/批次号/日期/开发环境信息；测试文件按被测语义命名（不带版本号）
 
-> **历史教训**：违反上述原则的实现，性能仅为原版 0.3-1.8x。本项目于 2026-06-21 推倒重来。详见 `harness/experiences.md §L-01`。
+> **违反 §0 的实现立即驳回**（实证后果见 `harness/experiences.md §L-01`）。
 
 ## 1. 工作流管道
 

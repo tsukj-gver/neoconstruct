@@ -1,13 +1,19 @@
 ---
 id: EXT-developer
-project: construct-rs
+project: neoconstruct
 phase: meta
-last_updated: 2026-07-27
+last_updated: 2026-09-04
 ---
 
-# DEV 项目特定拓展（construct-rs）
+# DEV 项目特定拓展（neoconstruct）
 
 > 配合 `.opencode/agents/developer.md`（跨工程 base）使用。
+
+## 工作区写入纪律（强制）
+
+- 交付物必须进工作区：测试/报告/最终产物放项目内合规路径；探针脚本放 `experiments/<语义名>-probe/`
+- Temp 仅限可丢弃草稿——需要保留/交付/被引用的东西一律不放
+- edit/write 对工作区外路径被拒是预期行为：换工作区内路径，禁止 bash 绕过（L-15）
 
 ## 工作流状态名
 
@@ -15,9 +21,6 @@ last_updated: 2026-07-27
 
 DEV 在 **CODING** 阶段执行。
 
-## 子任务标识格式
-
-`<phase>.<子任务编号> [任务名]`。
 
 ## 项目特定自检项（补充 base 通用自检）
 
@@ -37,7 +40,7 @@ DEV 在 **CODING** 阶段执行。
 - [ ] 所有 pub 项有 /// 文档注释
 - [ ] 错误携带 path 字段
 
-parse/build 对称性（construct-rs 核心约束）：
+parse/build 对称性（核心约束）：
 - [ ] parse 和 build 均已实现
 - [ ] build 后 parse 可还原原始数据
 
@@ -65,13 +68,13 @@ parse/build 对称性（construct-rs 核心约束）：
 
 ## 项目特定注意事项
 
-- 所有 cargo 命令必须使用 bash 工具的 `workdir="construct-rs"` 参数
+- 所有 cargo 命令必须使用 bash 工具的 `workdir="neoconstruct"` 参数
 - 优先阅读 Python 原版实现来理解行为，但编码风格必须是惯用 Rust
 - 不要过度设计，只实现当前子任务要求的功能
 - 跨阶段决策不可违反 `docs/decisions/`（ADR-001~ADR-NNN）
 
 ## 可写文件
 
-- `construct-rs/src/**`（代码和测试）
+- `neoconstruct/**`（代码和测试）
 - `plans/phaseN/过程记录.md`（开发日志，按 `harness/metadata-convention.md` 格式）
 - `experiments/**`

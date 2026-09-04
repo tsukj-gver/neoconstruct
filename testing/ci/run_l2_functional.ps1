@@ -1,4 +1,4 @@
-﻿# run_l2_functional.ps1 - L2 功能门禁（META-CI-1b）
+# run_l2_functional.ps1 - L2 功能门禁（META-CI-1b）
 #
 # 设计依据：docs/design/基础设施/CI冒烟门禁设计.md §4.2（L2 详细规范）+ §6.2（子任务 1b 范围）
 #           + §1.1 B 类脚本清单（含 OBS-1 修订）
@@ -25,10 +25,10 @@
 #
 # venv 选择规则：
 #   - target=CRS：脚本依赖 neoconstruct 用户面 API（StructMixin/field/Int8ub...）
-#                 → crs_venv_new 跑（含 neoconstruct wheel）
+#                 → .venv 跑（含 neoconstruct wheel）
 #   - target=PC ：脚本依赖 Python construct 2.10.70 原版（Bitwise/Bit/BitsInteger
 #                 是 Adapter 而非 Descriptor）
-#                 → crs_venv_py_new 跑
+#                 → .venv-pc 跑
 #
 # expected 字段（L2 判定语义）：
 #   - pass           必须通过（FAIL → L2 FAIL）

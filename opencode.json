@@ -4,6 +4,9 @@
   "default_agent": "pm",
   "permission": {
     "websearch": "allow",
-    "webfetch": "allow"
+    "webfetch": "allow",
+    "external_directory": {
+      "~/AppData/Local/Temp/opencode/**": "allow"
+    }
   }
 }

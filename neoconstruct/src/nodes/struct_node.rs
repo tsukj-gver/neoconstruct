@@ -39,6 +39,7 @@
 
 use crate::context::Context;
 use crate::error::ConstructError;
+use crate::expr::ExprProgram;
 use crate::instance::{
     create_class, dict_via_generic_getdict, intern_pystring, set_item_knownhash,
 };
@@ -49,6 +50,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyAny, PyDict, PyString, PyType};
 
 use super::{Construct, Node};
+use std::sync::Arc;
 
 /// 编译期缓存的字段名：包含 interned PyString（C API 快速比较）、Rust 侧 String、
 /// 以及 interned key 的 PyObject_Hash 缓存值。
@@ -143,17 +145,177 @@ pub enum FieldMode {
     Wo,
 }
 
-/// StructNode 的单个字段：携带模式信息。
+/// 字段 build 值来源分类（编译期封闭枚举，静态 match 分派，无 trait 抽象）。
 ///
-/// 携带 `mode`（RW/RO/WO），供 parse/build 路径按模式分支处理。
+/// 分类在编译期按字段 subcon **根节点**单点判定（`ValueKind::classify`），
+/// build 循环统一走"resolve → 有效值 → ctx 回写 → node.build"：
+///
+/// - resolve 只做**缺省补值**（Const 补常量 / Default 求值 / Control 补哑值
+///   None）与**显式值尊重**（透传），节点保留"值校验与编码"
+///   （ConstNode 的相等校验、Checksum 的重算、Seek 的移针等）。
+/// - ctx 回写**有效值**（resolve 产出的值，而非实例原始 None），使后继
+///   表达式消费者读到节点实际使用的值。
+///
+/// 各变体的 resolve 语义：
+///
+/// | 变体 | resolve 值来源 |
+/// |------|---------------|
+/// | `Instance` | 实例属性；None → `BuildValueMissing`（错误时机＝值使用点 build） |
+/// | `Const` | 实例属性；None → 补编译期常量（就地 Bound 替换） |
+/// | `Default` | 实例属性；None → 求值表达式 |
+/// | `Rebuild` | 忽略实例值，求值表达式 |
+/// | `Computed` | 求值表达式；build no-op（不写不校验） |
+/// | `Tell` | `stream.tell()`；build no-op |
+/// | `Void` | 哑值 None（Padding/Pass：节点自身写 pattern 字节/空） |
+/// | `Control` | 透传显式实例值/parse 产出值；缺省（None 或属性不存在）产哑值 None——实例值不参与字节编码，Peek no-op / Seek 移针 / Checksum 重算由节点自理 |
+/// | `Index` | `ctx.index()`（build 期循环状态，无实例值语义） |
+#[derive(Debug)]
+pub enum ValueKind {
+    /// 值必须来自实例。build 时 None → `BuildValueMissing`。
+    ///
+    /// `expr_derived`：subcon 树内含表达式消费者（该字段的表达式程序非空）
+    /// → 实例化默认值降为 Optional（缺值错误后移到 build——值使用点）。
+    Instance {
+        /// subcon 树内是否含表达式消费者。
+        expr_derived: bool,
+    },
+    /// Const：编译期持有 Python 常量对象；实例值 None → 补值；ctx 写有效值。
+    Const(Py<PyAny>),
+    /// Default：实例值 None → 求值；非 None → 用显式值；ctx 写有效值。
+    Default(Arc<ExprProgram>),
+    /// Rebuild：忽略实例值，求值；ctx 写求值值；inner.build(求值值)。
+    Rebuild(Arc<ExprProgram>),
+    /// Computed：求值 → ctx；build no-op（不写不校验）。
+    Computed(Arc<ExprProgram>),
+    /// Tell：ctx 写 stream.tell()；build no-op。
+    Tell,
+    /// Padding/Pass：ctx 写 None；节点自身写 pattern 字节/空。
+    Void,
+    /// 低频控制与流操作（StopIf/Check/Terminated/Element/Peek/Seek/Checksum）：
+    /// resolve 产透传值（显式实例值/parse 产出值透传，缺省产哑值 None——
+    /// 属性不存在等同缺省），build 值语义由节点自理（实例值不参与字节编码）。
+    Control,
+    /// Index：resolve 产 ctx.index()。
+    Index,
+}
+
+impl ValueKind {
+    /// 按字段 subcon 根节点分类（编译期单点判定，封闭规则）。
+    ///
+    /// 分类规则（按根节点类型，不递归拆包——字段持有根节点）：
+    /// ConstNode→`Const`、DefaultNode→`Default`、RebuildNode→`Rebuild`、
+    /// ComputedNode→`Computed`、TellNode→`Tell`、Padding/BitPadding/Pass→`Void`、
+    /// StopIf/Check/Terminated/Element/Peek/Seek/Checksum→`Control`、
+    /// IndexNode→`Index`、其余（含一切包装器根）→`Instance{expr_derived}`。
+    ///
+    /// # 参数
+    ///
+    /// - `py`：GIL token（Const 分支 clone_ref 常量对象）。
+    /// - `node`：字段 subcon 的执行树根节点。
+    /// - `expr_derived`：该字段的表达式程序是否非空（树内含表达式消费者）。
+    pub fn classify(py: Python<'_>, node: &Node, expr_derived: bool) -> Self {
+        match node {
+            Node::Const(c) => ValueKind::Const(c.value().clone_ref(py)),
+            Node::Default(d) => ValueKind::Default(Arc::new(d.value().clone())),
+            Node::Rebuild(r) => ValueKind::Rebuild(Arc::new(r.func().clone())),
+            Node::Computed(c) => ValueKind::Computed(Arc::new(c.expr().clone())),
+            Node::Tell(_) => ValueKind::Tell,
+            Node::Padding(_) | Node::BitPadding(_) | Node::Pass(_) => ValueKind::Void,
+            Node::StopIf(_)
+            | Node::Check(_)
+            | Node::Terminated(_)
+            | Node::Element(_)
+            | Node::Peek(_)
+            | Node::Seek(_)
+            | Node::Checksum(_) => ValueKind::Control,
+            Node::Index(_) => ValueKind::Index,
+            _ => ValueKind::Instance { expr_derived },
+        }
+    }
+
+    /// 按分类推导实例化默认值（I 点，单一事实源＝本分类）。
+    ///
+    /// 规则：
+    /// - `Const(v)`：v 为不可变标量（int/bytes/str/bool/float）→ `Value(v)`；
+    ///   可变对象 → `Optional`（防 dataclass 共享可变默认值）。
+    /// - `Default`/`Rebuild`/`Computed` 且程序可常量折叠（ops == [Const(c)]）
+    ///   → `Value(c)`；其余 → `Optional`。
+    /// - `Tell`/`Void`/`Control`/`Index` → `Optional`（实例化可省哑值）。
+    /// - `Instance{expr_derived: false}` → `Required`（必填 positional）。
+    /// - `Instance{expr_derived: true}` → `Optional`（缺值错误后移到 build）。
+    pub fn init_default(&self, py: Python<'_>) -> InitDefault {
+        match self {
+            ValueKind::Const(v) => {
+                if is_immutable_scalar(v.bind(py)) {
+                    InitDefault::Value(v.clone_ref(py))
+                } else {
+                    InitDefault::Optional
+                }
+            }
+            ValueKind::Default(p) | ValueKind::Rebuild(p) | ValueKind::Computed(p) => {
+                if let [crate::expr::ExprOp::Const(c)] = p.ops() {
+                    InitDefault::Value((*c).into_py(py))
+                } else {
+                    InitDefault::Optional
+                }
+            }
+            ValueKind::Tell | ValueKind::Void | ValueKind::Control | ValueKind::Index => {
+                InitDefault::Optional
+            }
+            ValueKind::Instance { expr_derived } => {
+                if *expr_derived {
+                    InitDefault::Optional
+                } else {
+                    InitDefault::Required
+                }
+            }
+        }
+    }
+}
+
+/// 实例化默认值三态（由 [`ValueKind::init_default`] 推导）。
+///
+/// - `Required`：必填 positional（`dataclasses.field()` 无参）。
+/// - `Optional`：可省（`kw_only=True, default=None`）。
+/// - `Value(v)`：携带默认值（`kw_only=True, default=v`）——用户显式
+///   `default=` 参数永远优先于本派生（Python 侧保证）。
+#[derive(Debug)]
+pub enum InitDefault {
+    /// 必填 positional 参数。
+    Required,
+    /// 可省（默认 None）。
+    Optional,
+    /// 携带默认值。
+    Value(Py<PyAny>),
+}
+
+/// 判断 Python 对象是否为不可变标量（int/bytes/str/bool/float）。
+///
+/// bool 是 PyLong 的子类（PyBool），`is_instance_of::<PyLong>` 命中。
+/// 可变对象（list/dict 等）与其他不可变容器（tuple 等）返回 false——
+/// Const 携带此类值时实例化默认值退化为 Optional。
+fn is_immutable_scalar(v: &Bound<'_, PyAny>) -> bool {
+    v.is_instance_of::<pyo3::types::PyLong>()
+        || v.is_instance_of::<pyo3::types::PyBytes>()
+        || v.is_instance_of::<pyo3::types::PyString>()
+        || v.is_instance_of::<pyo3::types::PyFloat>()
+}
+
+/// StructNode 的单个字段：携带模式信息与值来源分类。
+///
+/// 携带 `mode`（RW/RO/WO，供 parse 存储分支）与 `kind`（[`ValueKind`]，
+/// 供 build 循环统一 resolve）。FieldMode 职责收敛为"init 可见性 + parse
+/// 存储"两维，不再参与 build 分派。
 #[derive(Debug)]
 pub struct StructField {
     /// 字段名（interned PyString + Rust String）。
     pub name: FieldName,
     /// 子节点。
     pub node: Node,
-    /// 字段模式（RW/RO/WO）。
+    /// 字段模式（RW/RO/WO；parse 存储 + init 可见性）。
     pub mode: FieldMode,
+    /// build 值来源分类（编译期判定）。
+    pub kind: ValueKind,
 }
 
 /// StructMixin 子类的根节点：按顺序解析/构建一组命名字段。
@@ -262,10 +424,14 @@ impl StructNode {
     pub fn new_for_test(py: Python<'_>, fields: Vec<(String, Node)>) -> Self {
         let struct_fields = fields
             .into_iter()
-            .map(|(name, node)| StructField {
-                name: FieldName::new(py, name),
-                node,
-                mode: FieldMode::Rw,
+            .map(|(name, node)| {
+                let kind = ValueKind::classify(py, &node, false);
+                StructField {
+                    name: FieldName::new(py, name),
+                    node,
+                    mode: FieldMode::Rw,
+                    kind,
+                }
             })
             .collect();
         let cls = py
@@ -450,12 +616,12 @@ impl Construct for StructNode {
             ctx.init_expr_values(self.fields.len());
         }
         for (idx, field) in self.fields.iter().enumerate() {
-            match field.mode {
-                FieldMode::Rw | FieldMode::Wo => {
-                    // RW/WO：从实例 getattr 取值，递归 build。
-                    // 区别仅在于 RW 在 has_expressions 时额外写入 context（供后续表达式引用）。
-                    // WO 不写入 context（编译期已禁止表达式引用 WO 字段）。
-                    let value = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
+            // resolve：按值来源分类统一求值（缺省补值/显式值尊重/哑值），
+            // 产出 Bound PyObject（就地替换，无 owned Py 中转）。
+            let value: Bound<'_, PyAny> = match &field.kind {
+                ValueKind::Instance { .. } => {
+                    // 值必须来自实例：getattr → None 视为缺值（错误时机＝build）。
+                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
                         ConstructError::Generic {
                             message: format!(
                                 "object has no attribute '{}' (required for build): {}",
@@ -465,43 +631,91 @@ impl Construct for StructNode {
                             path: path.to_string(),
                         }
                     })?;
-                    // 仅 RW 字段写入 context（WO 字段不参与表达式引用）。
-                    if matches!(field.mode, FieldMode::Rw) && self.has_expressions {
-                        ctx.set_field_at(idx, field.name.py_name(), &value, py)?;
+                    if v.is_none() {
+                        let mut err = ConstructError::BuildValueMissing {
+                            field: field.name.rust_name().to_string(),
+                            path: path.to_string(),
+                        };
+                        err.push_path_segment(field.name.rust_name());
+                        return Err(err);
                     }
-                    // 成功路径不 push/pop；子节点 Err 时重建路径。
-                    match field.node.build(py, &value, stream, ctx, path) {
-                        Ok(()) => {}
-                        // StopField 捕获：StopIf 在 build 方向
-                        // 同样停止后续字段。对齐 Python Struct._build 的 except StopFieldError。
-                        Err(ConstructError::StopField { .. }) => break,
-                        Err(mut e) => {
-                            e.push_path_segment(field.name.rust_name());
-                            return Err(e);
+                    v
+                }
+                ValueKind::Const(c) => {
+                    // RW/RO 均取实例属性（校验留给节点）；None → 就地补编译期常量。
+                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
+                        ConstructError::Generic {
+                            message: format!(
+                                "object has no attribute '{}' (required for build): {}",
+                                field.name.rust_name(),
+                                e
+                            ),
+                            path: path.to_string(),
                         }
+                    })?;
+                    if v.is_none() {
+                        c.bind(py).to_owned().into_any()
+                    } else {
+                        v
                     }
                 }
-                FieldMode::Ro => {
-                    // RO：不从实例取值，通过节点自身逻辑计算（Tell/Computed/Const/ContextParam）。
-                    let value = field.node.compute_ro_value(py, stream, ctx, path)?;
-                    let value_bound = value.bind(py);
-
-                    // 写入 context（供后续表达式引用）
-                    if self.has_expressions {
-                        ctx.set_field_at(idx, field.name.py_name(), value_bound, py)?;
-                    }
-
-                    // build（对 sizeof=0 的节点如 Tell/Computed 是 no-op；
-                    // 其他可能写字节，仍递归调用以处理）
-                    match field.node.build(py, value_bound, stream, ctx, path) {
-                        Ok(()) => {}
-                        // StopField 捕获：RO 路径同样支持（虽然 StopIf 通常不用 RO）。
-                        Err(ConstructError::StopField { .. }) => break,
-                        Err(mut e) => {
-                            e.push_path_segment(field.name.rust_name());
-                            return Err(e);
+                ValueKind::Default(p) => {
+                    // None → 求值；非 None → 用显式值。
+                    let v = obj.getattr(field.name.py_name().bind(py)).map_err(|e| {
+                        ConstructError::Generic {
+                            message: format!(
+                                "object has no attribute '{}' (required for build): {}",
+                                field.name.rust_name(),
+                                e
+                            ),
+                            path: path.to_string(),
                         }
+                    })?;
+                    if v.is_none() {
+                        let n = crate::expr::eval_expr_int(p, ctx, py)?;
+                        n.into_py(py).into_bound(py)
+                    } else {
+                        v
                     }
+                }
+                ValueKind::Rebuild(p) => {
+                    // 忽略实例值，求值。
+                    let n = crate::expr::eval_expr_int(p, ctx, py)?;
+                    n.into_py(py).into_bound(py)
+                }
+                ValueKind::Computed(p) => {
+                    // 求值 → ctx；node.build 是 no-op（不写不校验）。
+                    let n = crate::expr::eval_expr_int(p, ctx, py)?;
+                    n.into_py(py).into_bound(py)
+                }
+                ValueKind::Tell => stream.tell().into_py(py).into_bound(py),
+                ValueKind::Void => py.None().into_bound(py),
+                ValueKind::Control => {
+                    // 透传显式实例值/parse 产出值；缺省（None 或属性不存在，
+                    // RO 面 init=False 实例可能无属性——属性缺失 ≡ 哑值 None）
+                    // 产哑值 None。节点编码忽略实例值（Peek no-op / Seek 移针 /
+                    // Checksum 重算），ctx 写透传值使后继表达式读到有效值。
+                    match obj.getattr(field.name.py_name().bind(py)) {
+                        Ok(v) => v,
+                        Err(_) => py.None().into_bound(py),
+                    }
+                }
+                ValueKind::Index => ctx.index().into_py(py).into_bound(py),
+            };
+            // ctx 写有效值（供后续表达式引用）。仅 RW/RO 写入——WO 字段
+            // 编译期已禁止表达式引用（_check_wo_reference），不写 ctx。
+            if self.has_expressions && !matches!(field.mode, FieldMode::Wo) {
+                ctx.set_field_at(idx, field.name.py_name(), &value, py)?;
+            }
+            // 成功路径不 push/pop；子节点 Err 时重建路径。
+            match field.node.build(py, &value, stream, ctx, path) {
+                Ok(()) => {}
+                // StopField 捕获：StopIf 在 build 方向
+                // 同样停止后续字段（对齐 Python Struct._build 的 except StopFieldError）。
+                Err(ConstructError::StopField { .. }) => break,
+                Err(mut e) => {
+                    e.push_path_segment(field.name.rust_name());
+                    return Err(e);
                 }
             }
         }
@@ -558,10 +772,12 @@ mod tests {
 
     /// 构造 Rw StructField 的便捷函数（测试专用）。
     fn rw_field(py: Python<'_>, name: &str, node: Node) -> StructField {
+        let kind = ValueKind::classify(py, &node, false);
         StructField {
             name: FieldName::new(py, name),
             node,
             mode: FieldMode::Rw,
+            kind,
         }
     }
 

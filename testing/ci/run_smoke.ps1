@@ -40,7 +40,7 @@ param(
     [string]
     $ReportDir
     ,
-    # venv 路径（默认 crs_venv_new）
+    # venv 路径（默认 .venv）
     [string]
     $VenvPath
 )
@@ -107,7 +107,7 @@ function Invoke-L4Gate {
 
     $l4Script = Join-Path $PSScriptRoot "run_l4_consistency.py"
 
-    # 选择 Python：优先 crs_venv_new，回退系统 python
+    # 选择 Python：优先 .venv，回退系统 python
     $py = $PythonExe
     if (-not $py -or -not (Test-Path -LiteralPath $py)) {
         $py = "python"  # 依赖 PATH

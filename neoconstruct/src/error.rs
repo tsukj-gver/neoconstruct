@@ -98,6 +98,18 @@ pub enum ConstructError {
         path: String,
     },
 
+    /// build 时字段缺值：Instance 字段的实例值为 None（缺值统一语义）。
+    ///
+    /// 触发场景：构造实例时未提供该字段值（且无框架派生默认值），错误
+    /// 时机后移到 build（值使用点）而非实例化——携带字段名与指引。
+    #[error("field value missing: no value was provided for field '{field}' when constructing the instance (provide the field value or set an explicit default) at {path}")]
+    BuildValueMissing {
+        /// 缺值的字段名。
+        field: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
     // --- 表达式求值错误 ---
     // 所有 Expr* 变体携带 `path` 字段，支持 `push_path_segment`
     // 重建路径，与 Stream/FormatField/Generic 等变体行为一致。
@@ -499,7 +511,8 @@ impl ConstructError {
             | ConstructError::ExprFieldMissing { .. }
             | ConstructError::ExprStackUnderflow { .. }
             | ConstructError::StopField { .. }
-            | ConstructError::CancelParsing { .. } => None,
+            | ConstructError::CancelParsing { .. }
+            | ConstructError::BuildValueMissing { .. } => None,
         }
     }
 
@@ -512,6 +525,7 @@ impl ConstructError {
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
             | ConstructError::Generic { path, .. }
+            | ConstructError::BuildValueMissing { path, .. }
             | ConstructError::ExprType { path, .. }
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
@@ -552,7 +566,7 @@ impl ConstructError {
     /// 若无 path（编译期错误），仅返回 `{message}`。
     ///
     /// 对于无单一 `message` 字段的结构化变体（`ExprType` / `ExprFieldMissing` /
-    /// `ExprStackUnderflow`），使用 `Display` 实现作为完整消息。
+    /// `ExprStackUnderflow` / `BuildValueMissing`），使用 `Display` 实现作为完整消息。
     pub fn full_message(&self) -> String {
         match self {
             // 结构化变体：无单一 message 字段，Display 已包含完整信息（含 path）。
@@ -561,7 +575,8 @@ impl ConstructError {
             | ConstructError::ExprStackUnderflow { .. }
             | ConstructError::StopField { .. }
             // CancelParsing 也走 Display（无 message 字段，仅 path）。
-            | ConstructError::CancelParsing { .. } => self.to_string(),
+            | ConstructError::CancelParsing { .. }
+            | ConstructError::BuildValueMissing { .. } => self.to_string(),
             // 其他变体：按 path 拼接。此分支的变体均有 message 字段（message() 返回 Some）。
             _ => match self.path() {
                 Some(p) => format!("Error in path {}\n{}", p, self.message().unwrap_or("")),
@@ -579,6 +594,7 @@ impl ConstructError {
             ConstructError::Compilation { .. } => "Compilation",
             ConstructError::UnresolvedReference { .. } => "UnresolvedReference",
             ConstructError::Generic { .. } => "Generic",
+            ConstructError::BuildValueMissing { .. } => "BuildValueMissing",
             ConstructError::ExprType { .. } => "ExprType",
             ConstructError::ExprFieldMissing { .. } => "ExprFieldMissing",
             ConstructError::ExprContext { .. } => "ExprContext",
@@ -696,6 +712,7 @@ impl ConstructError {
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
             | ConstructError::Generic { path, .. }
+            | ConstructError::BuildValueMissing { path, .. }
             | ConstructError::ExprType { path, .. }
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
@@ -754,6 +771,9 @@ struct ExceptionClasses {
     unresolved_reference_error: Py<PyType>,
     /// 对应 `ConstructError::Generic`。
     generic_construct_error: Py<PyType>,
+    /// 对应 `ConstructError::BuildValueMissing`。
+    /// Python 的 `FieldValueMissingError`（build 时字段缺值）。
+    field_value_missing_error: Py<PyType>,
     /// `ConstructError` 基类，用于 Expr* 变体
     /// （ExprType / ExprFieldMissing / ExprContext / ExprDivByZero / ExprStackUnderflow）。
     ///
@@ -858,14 +878,15 @@ impl ExceptionClasses {
         // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
         // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
         //
-        // 数组覆盖全部 26 个缓存异常类；新增缓存字段时需同步扩容此数组与类型长度。
-        let builtin_ptrs: [*mut ffi::PyObject; 26] = [
+        // 数组覆盖全部 27 个缓存异常类；新增缓存字段时需同步扩容此数组与类型长度。
+        let builtin_ptrs: [*mut ffi::PyObject; 27] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
             self.field_length_error.as_ptr(),
             self.compilation_error.as_ptr(),
             self.unresolved_reference_error.as_ptr(),
             self.generic_construct_error.as_ptr(),
+            self.field_value_missing_error.as_ptr(),
             self.construct_error_base.as_ptr(),
             self.integer_error.as_ptr(),
             self.padding_error.as_ptr(),
@@ -924,6 +945,7 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         compilation_error: get("CompilationError")?,
         unresolved_reference_error: get("UnresolvedReferenceError")?,
         generic_construct_error: get("GenericConstructError")?,
+        field_value_missing_error: get("FieldValueMissingError")?,
         construct_error_base: get("ConstructError")?,
         integer_error: get("IntegerError")?,
         padding_error: get("PaddingError")?,
@@ -977,6 +999,8 @@ fn select_exception_class<'py>(
         ConstructError::Compilation { .. } => &classes.compilation_error,
         ConstructError::UnresolvedReference { .. } => &classes.unresolved_reference_error,
         ConstructError::Generic { .. } => &classes.generic_construct_error,
+        // build 时字段缺值映射到 FieldValueMissingError。
+        ConstructError::BuildValueMissing { .. } => &classes.field_value_missing_error,
         // Expr* 变体无专门的 Python 异常类，统一映射到基类 ConstructError。
         ConstructError::ExprType { .. }
         | ConstructError::ExprFieldMissing { .. }
@@ -1522,6 +1546,7 @@ mod tests {
             "class CompilationError(ConstructError): pass\n",
             "class UnresolvedReferenceError(ConstructError): pass\n",
             "class GenericConstructError(ConstructError): pass\n",
+            "class FieldValueMissingError(ConstructError): pass\n",
             "class IntegerError(ConstructError): pass\n",
             "class PaddingError(ConstructError): pass\n",
             "class RangeError(ConstructError): pass\n",
@@ -1559,6 +1584,7 @@ mod tests {
             compilation_error: get("CompilationError"),
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),
+            field_value_missing_error: get("FieldValueMissingError"),
             construct_error_base: get("ConstructError"),
             integer_error: get("IntegerError"),
             padding_error: get("PaddingError"),
@@ -1969,6 +1995,7 @@ mod tests {
             "class CompilationError(ConstructError): pass\n",
             "class UnresolvedReferenceError(ConstructError): pass\n",
             "class GenericConstructError(ConstructError): pass\n",
+            "class FieldValueMissingError(ConstructError): pass\n",
             "class IntegerError(ConstructError): pass\n",
             "class PaddingError(ConstructError): pass\n",
             "class RangeError(ConstructError): pass\n",
@@ -2006,6 +2033,7 @@ mod tests {
             compilation_error: get("CompilationError"),
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),
+            field_value_missing_error: get("FieldValueMissingError"),
             construct_error_base: get("ConstructError"),
             integer_error: get("IntegerError"),
             padding_error: get("PaddingError"),

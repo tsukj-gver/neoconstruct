@@ -24,7 +24,7 @@ last_updated: 2026-07-27
 
 ```
 ## Evaluate 摘录（AHE §演化循环）
-- task_id: <phase>.<子任务编号>
+- task_id: <v版本号>.<任务号>（如 v0.1.1.3）
 - tool_calls 关键点: [简述]
 - failures 对齐 L-XX: [L-XX 或 "候选 L-XX" 或 "无"]
 - outcome: [完成/部分/失败]
@@ -119,7 +119,7 @@ prompt: "包含子任务信息、必读文件、输出要求的完整指令"
 
 **ARCH 辅助**：新构造器设计文档落地时（DESIGNING 阶段），ARCH 在 inventory.csv 追加骨架行（status=not_implemented，仅填 category/name/python_class/notes）。详见 `architect-extension.md §新构造器设计同步清单`。
 
-**AUDITOR 审计**：Phase 阶段验收时，AUDITOR 必查"清单与代码一致性"（status 字段 ↔ 实际实现、impl_module ↔ 真实文件存在、perf_data_source ↔ 源文件存在）。详见 `auditor-extension.md §构造器清单一致性审计`。
+**AUDITOR 审计**：版本验收时，AUDITOR 必查"清单与代码一致性"（status 字段 ↔ 实际实现、impl_module ↔ 真实文件存在、perf_data_source ↔ 源文件存在）。详见 `auditor-extension.md §构造器清单一致性审计`。
 
 **维护红线**：
 - 数据来源指针必须精确到 `文件:行号`（L-02 对策）

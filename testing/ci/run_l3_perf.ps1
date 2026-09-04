@@ -4,7 +4,7 @@
 #
 # 职责：
 #   - 调用 Python 子组件 run_l3_perf.py（baseline diff / 环境采集 / 报告生成）
-#   - venv 管理（crs_venv_new / crs_venv_py_new 切换）
+#   - venv 管理（.venv / .venv-pc 切换）
 #   - 整合到 run_smoke.ps1 的 -Level L3 支持
 #
 # 注意：本编排只 forward 参数到 Python 子组件；测量逻辑/判据/报告全在
@@ -33,10 +33,10 @@ param(
     # Markdown 报告输出路径（默认与 ReportPath 同名 .md）
     [string]$MarkdownPath
     ,
-    # crs_venv_new python.exe（默认从 lib_smoke 解析）
+    # .venv python.exe（默认从 lib_smoke 解析）
     [string]$CrsPython
     ,
-    # crs_venv_py_new python.exe（默认从 lib_smoke 解析）
+    # .venv-pc python.exe（默认从 lib_smoke 解析）
     [string]$PcPython
 )
 

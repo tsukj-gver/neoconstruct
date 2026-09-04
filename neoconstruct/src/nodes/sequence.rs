@@ -1,7 +1,5 @@
 //! SequenceNode：位置序字段序列节点。
 //!
-//! Python 参考：`construct/construct/core.py` `Sequence`（L2329-2487）。
-//!
 //! ## 行为概述
 //!
 //! `Sequence(*subcons)` 是位置序字段序列，parse 返回 PyList（按 subcons 顺序），
@@ -9,21 +7,22 @@
 //!
 //! - parse：context nesting；空 PyList；遍历 fields：field.parse → append；
 //!   命名字段写入 child_ctx；StopField 哨兵捕获 break；返回 PyList
-//! - build：context nesting；obj 是 list；遍历 fields：next(iter) 取元素；
-//!   命名字段前置写入；RO 字段走 compute_ro_value（不从 list 取值）；
-//!   StopField 哨兵捕获 break
+//! - build：context nesting；obj 是 list；遍历 fields 按 [`ValueKind`] resolve——
+//!   Instance 从 list 位置取值（`iter.next()`，None 视为缺值），其余分类
+//!   产各自的有效值（Const 补常量/Default 求值/Tell 流位置/Control 哑值 None
+//!   等，不消费 list 元素）；命名字段写 child_ctx；StopField 哨兵捕获 break
 //! - sizeof：sum 字段 sizeof（context nesting 仅影响字段引用，sizeof 用父 ctx）
 //!
-//! ## RO 字段不从 list 取值（parity 差异）
+//! ## RO 字段不从 list 取值（与 StructNode 的 Instance 取值入口差异）
 //!
-//! Python core.py L2410 对所有 subcons 都 `next(objiter)`，含 RO 字段（Check/Computed
-//! 等），故 Python 用户需传 `[1, None, 2]`（list 含 RO 字段占位 None）。
-//! neoconstruct RO 字段走 compute_ro_value（与 StructNode 同模式），list 不含占位——
-//! 用户传 `[1, 2]` 即可。**用户从 Python 迁移需调整 build 输入**。
+//! 值来源分类（[`ValueKind`]）与 StructNode 完全一致，仅 Instance 分支的
+//! 取值入口不同：StructNode 从实例 getattr，SequenceNode 从 list 位置访问。
+//! 值提供型分类（Const/Default/Tell/Control 等）的字段不要求 list 提供
+//! 元素——list 仅需覆盖 Instance 字段（宽松方向：多余元素忽略）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
-use crate::nodes::struct_node::{FieldMode, FieldName};
+use crate::nodes::struct_node::{FieldMode, FieldName, ValueKind};
 use crate::path::Path;
 use crate::stream::{BuildStream, ParseStream};
 use pyo3::prelude::*;
@@ -31,42 +30,50 @@ use pyo3::types::PyList;
 
 use super::{Construct, Node};
 
-/// Sequence 字段（name 可选 + node + field_kind）。
+/// Sequence 字段（name 可选 + node + field_kind + 值来源分类）。
 #[derive(Debug)]
 pub struct SequenceField {
     /// 字段名（None 表示匿名字段）。
     pub name: Option<FieldName>,
     /// 子节点。
     pub node: Node,
-    /// 字段模式（ro/rw；与 StructNode FieldMode 同脉络，仅 Rw/Ro 使用）。
-    /// RO 字段（Check/Computed/Tell/Rebuild 等）在 build 时不从 list 取值，
-    /// 走 compute_ro_value。
+    /// 字段模式（ro/rw；parse 存储语义，与 StructNode FieldMode 同脉络）。
     pub field_kind: FieldMode,
+    /// build 值来源分类（与 StructNode 一致；Instance 从 list 位置取值）。
+    pub value_kind: ValueKind,
 }
 
 impl SequenceField {
-    /// 创建命名的 Rw SequenceField。
-    pub fn new_named(name: FieldName, node: Node) -> Self {
+    /// 创建命名的 Rw SequenceField（值来源分类按节点推导，无表达式派生）。
+    pub fn new_named(py: Python<'_>, name: FieldName, node: Node) -> Self {
         Self {
             name: Some(name),
+            value_kind: ValueKind::classify(py, &node, false),
             node,
             field_kind: FieldMode::Rw,
         }
     }
 
-    /// 创建命名的 SequenceField（指定 field_kind）。
-    pub fn new_named_with_kind(name: FieldName, node: Node, kind: FieldMode) -> Self {
+    /// 创建命名的 SequenceField（指定 field_kind，值来源分类按节点推导）。
+    pub fn new_named_with_kind(
+        py: Python<'_>,
+        name: FieldName,
+        node: Node,
+        kind: FieldMode,
+    ) -> Self {
         Self {
             name: Some(name),
+            value_kind: ValueKind::classify(py, &node, false),
             node,
             field_kind: kind,
         }
     }
 
-    /// 创建匿名的 Rw SequenceField。
-    pub fn new_anonymous(node: Node) -> Self {
+    /// 创建匿名的 Rw SequenceField（值来源分类按节点推导）。
+    pub fn new_anonymous(py: Python<'_>, node: Node) -> Self {
         Self {
             name: None,
+            value_kind: ValueKind::classify(py, &node, false),
             node,
             field_kind: FieldMode::Rw,
         }
@@ -175,28 +182,53 @@ impl Construct for SequenceNode {
 
         let mut iter = obj_list.iter().peekable();
         for (idx, field) in self.fields.iter().enumerate() {
-            // RO 字段不从 list 取值（走 compute_ro_value），list 不含占位。
-            let build_obj: Py<PyAny> = if field.field_kind == FieldMode::Ro {
-                field.node.compute_ro_value(py, stream, &child_ctx, path)?
-            } else {
-                match iter.next() {
-                    Some(item) => item.unbind(),
+            // resolve：Instance 从 list 位置取值（与 StructNode 的 getattr
+            // 入口不同），其余分类产各自有效值（不消费 list 元素）。
+            let build_obj: Bound<'_, PyAny> = match &field.value_kind {
+                ValueKind::Instance { .. } => match iter.next() {
+                    Some(item) => {
+                        if item.is_none() {
+                            // list 元素 None ≡ 缺值（与 StructNode 实例属性
+                            // None 同语义，错误时机＝build 值使用点）。
+                            let mut err = ConstructError::BuildValueMissing {
+                                field: field
+                                    .name
+                                    .as_ref()
+                                    .map(|n| n.rust_name().to_string())
+                                    .unwrap_or_else(|| format!("sequence[{}]", idx)),
+                                path: path.to_string(),
+                            };
+                            if let Some(n) = &field.name {
+                                err.push_path_segment(n.rust_name());
+                            }
+                            return Err(err);
+                        }
+                        item
+                    }
                     None => {
                         return Err(ConstructError::Generic {
                             message: "Sequence build: list shorter than fields".to_string(),
                             path: path.to_string(),
                         })
                     }
+                },
+                ValueKind::Const(c) => c.bind(py).to_owned().into_any(),
+                ValueKind::Default(p) | ValueKind::Rebuild(p) | ValueKind::Computed(p) => {
+                    let n = crate::expr::eval_expr_int(p, &child_ctx, py)?;
+                    n.into_py(py).into_bound(py)
                 }
+                ValueKind::Tell => stream.tell().into_py(py).into_bound(py),
+                ValueKind::Void | ValueKind::Control => py.None().into_bound(py),
+                ValueKind::Index => child_ctx.index().into_py(py).into_bound(py),
             };
             // 命名字段前置写入 child_ctx（与 StructNode build 同模式）。
             if let Some(name) = &field.name {
-                child_ctx.set_field_at(idx, name.py_name(), build_obj.bind(py), py)?;
+                child_ctx.set_field_at(idx, name.py_name(), &build_obj, py)?;
             }
             // build
             match field
                 .node
-                .build(py, build_obj.bind(py), stream, &mut child_ctx, path)
+                .build(py, &build_obj, stream, &mut child_ctx, path)
             {
                 Ok(()) => {}
                 Err(ConstructError::StopField { .. }) => break,
@@ -252,8 +284,8 @@ mod tests {
     /// 构造 Sequence(Byte, Byte) 测试 fixture。
     fn make_simple_sequence(py: Python<'_>) -> SequenceNode {
         let fields = vec![
-            SequenceField::new_anonymous(fmt_node(PythonFormat::UnsignedInt8Big)),
-            SequenceField::new_anonymous(fmt_node(PythonFormat::UnsignedInt8Big)),
+            SequenceField::new_anonymous(py, fmt_node(PythonFormat::UnsignedInt8Big)),
+            SequenceField::new_anonymous(py, fmt_node(PythonFormat::UnsignedInt8Big)),
         ];
         SequenceNode::new(fields, false)
     }
@@ -356,10 +388,11 @@ mod tests {
         with_py(|py| {
             let fields = vec![
                 SequenceField::new_named(
+                    py,
                     FieldName::new(py, "count"),
                     fmt_node(PythonFormat::UnsignedInt8Big),
                 ),
-                SequenceField::new_anonymous(fmt_node(PythonFormat::UnsignedInt8Big)),
+                SequenceField::new_anonymous(py, fmt_node(PythonFormat::UnsignedInt8Big)),
             ];
             let node = SequenceNode::new(fields, false);
             let obj = py.eval_bound("[3, 99]", None, None).expect("list");
