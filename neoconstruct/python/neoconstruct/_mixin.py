@@ -941,6 +941,43 @@ def _expr_programs_to_list(expr_programs, field_count):
 # ---------------------------------------------------------------------------
 
 
+def _subcon_contains_field_expr(node, seen):
+    """递归检测 subcon 描述符图中是否存在**待编译的字段表达式**参数。
+
+    遍历协议与 ``_collect_exprs_from_node`` 一致（``_EXPR_SLOT_NAMES`` 槽位
+    + ``_expr_params`` 参数）；仅检测参数值是否为 ``_FieldDescriptor`` /
+    ``_ExprRef``（待编译形态——已编译的 ops list / int 常量 / bytes 常量
+    均返回 False）。
+
+    用途：``_apply_dataclass_field_config`` 对 WO 模式表达式长度字段推导
+    隐式 default=None（v0.1.2 B3，对齐 wfield(Padding) 的无参实例化）。
+
+    :param node: 描述符图中的任意节点（描述符 / 表达式 / 常量 / 容器）。
+    :param seen: 已访问节点 id 集合（防环；模块级单例跨字段共享，
+                 每次调用按字段新建）。
+    :return: True 表示图中至少有一个待编译的字段表达式参数。
+    """
+    if node is None or isinstance(node, _EXPR_SLOT_LEAF_TYPES):
+        return False
+    if isinstance(node, (list, tuple)):
+        return any(_subcon_contains_field_expr(item, seen) for item in node)
+    if isinstance(node, dict):
+        return any(_subcon_contains_field_expr(v, seen) for v in node.values())
+    if isinstance(node, (_FieldDescriptor, _ExprRef)) or isinstance(node, type):
+        return False
+    node_id = id(node)
+    if node_id in seen:
+        return False
+    seen.add(node_id)
+    for param_value in getattr(node, "_expr_params", {}).values():
+        if isinstance(param_value, (_FieldDescriptor, _ExprRef)):
+            return True
+    for slot in _EXPR_SLOT_NAMES:
+        if _subcon_contains_field_expr(getattr(node, slot, None), seen):
+            return True
+    return False
+
+
 def _apply_dataclass_field_config(cls, descriptors):
     """将有 default 的 ``_FieldDescriptor`` 转换为 ``dataclasses.field()`` 配置。
 
@@ -953,10 +990,19 @@ def _apply_dataclass_field_config(cls, descriptors):
       （RO 字段不在 ``__init__`` 中，parse 时由 force_setattr 覆盖）
     - ``mode="rw"`` 或 ``"wo"`` 且有显式 ``default`` →
       ``dataclasses.field(kw_only=True, default=desc.default)``
-    - ``mode="rw"`` 或 ``"wo"`` 无显式 ``default``，但 subcon 是值提供型
-      构造器（Const/Default/Rebuild/Computed/Padding，v0.1.1 起）→
-      ``dataclasses.field(kw_only=True, default=None)``——节点层 build 已
-      支持 None 补值，实例化不再强制实参
+    - ``mode="rw"`` 且 subcon 是 ``ConstDescriptor``（无显式 default）→
+      ``dataclasses.field(kw_only=True, default=<常量值>)``（v0.1.2 B1）：
+      Const 字段值恒为 value，实例化后即是 value 本身——表达式消费
+      （build 时 ctx 从实例取值）拿到正确类型
+    - ``mode="rw"`` 且 subcon 是 ``DefaultDescriptor``（无显式 default）→
+      value 为 int 常量 → ``default=<value>``（v0.1.2 B1）；value 为表达式
+      → ``default=None``（build 时节点层求值）
+    - ``mode="rw"`` 或 ``"wo"``，subcon 是其余值提供型构造器
+      （Rebuild/Computed/Padding）→ ``dataclasses.field(kw_only=True,
+      default=None)``——节点层 build 已支持 None 补值
+    - ``mode="wo"`` 且 subcon 含待编译字段表达式（如 ``wfield(Bytes(x+1))``）
+      → ``dataclasses.field(kw_only=True, default=None)``（v0.1.2 B3，
+      对齐 wfield(Padding) 的无参实例化）
     - 其余 ``mode="rw"`` 或 ``"wo"`` → ``dataclasses.field()``
       （必填 positional 参数，无默认值）
 
@@ -966,11 +1012,14 @@ def _apply_dataclass_field_config(cls, descriptors):
     - **kw_only=True 是必需**而非可选：隐式 default 字段在前、必填字段在后
       时，``@dataclass`` 否则报 "non-default argument follows default
       argument"。
-    - 统一 ``default=None`` 语义 = "让节点层自动生成值"。行为差异由节点层
-      既有语义决定：Const/Default 传非 None 值会被校验（错值报
-      ConstError）；Padding/Rebuild/Computed 传值被忽略。
+    - Const/Default 的隐式 default 取描述符自身携带的值（常量语义），
+      实例值参与 build 时 ctx 与节点层校验；其余统一 ``default=None``
+      语义 = "让节点层自动生成值"。行为差异由节点层既有语义决定：
+      Default 传非 None 值用显式值；Padding/Rebuild/Computed 传值被忽略。
+    - 显式传错值给 Const（如 ``P(x=9)`` 而 ``x=field(Const(1, Byte))``）
+      仍由节点层报 ConstError（build 校验兜底）。
     - **类型注解告警接受 + 文档说明**（``v: int = field(Const(5, Int8ub))``
-      隐式 default=None 与 int 注解在 mypy/pyright strict 下告警，运行时无
+      隐式 default 与 int 注解在 mypy/pyright strict 下告警，运行时无
       影响；可显式传 default 或注解写 ``int | None``），不为静态检查器改机制。
 
     注意：``_FieldDescriptor`` 带有 ``__eq__`` 运算符重载（表达式系统），
@@ -1013,10 +1062,37 @@ def _apply_dataclass_field_config(cls, descriptors):
                 name,
                 dataclasses.field(kw_only=True, default=desc.default),
             )
+        elif isinstance(desc.subcon, ConstDescriptor):
+            # Const 且无显式 default → 隐式 default = 常量值（v0.1.2 B1）。
+            # Const 字段值恒为 value：实例化后即是 value，build 时 ctx 从
+            # 实例取值拿到正确类型；显式传错值仍由节点层 ConstError 兜底。
+            setattr(
+                cls,
+                name,
+                dataclasses.field(kw_only=True, default=desc.subcon.value),
+            )
+        elif isinstance(desc.subcon, DefaultDescriptor):
+            # Default 且无显式 default → int 常量 value 用之（v0.1.2 B1）；
+            # 表达式 value 无法静态求值 → None（build 时节点层求值）。
+            default_value = desc.subcon.value
+            if not isinstance(default_value, int):
+                default_value = None
+            setattr(
+                cls,
+                name,
+                dataclasses.field(kw_only=True, default=default_value),
+            )
         elif isinstance(desc.subcon, value_providing):
-            # 值提供型 subcon 且无显式 default → 隐式
-            # default=None + kw_only=True。build 由节点层补值（Const/Default
-            # 用常量/表达式值，Rebuild/Computed 求值，Padding 忽略传入值）。
+            # 其余值提供型 subcon（Rebuild/Computed/Padding）且无显式
+            # default → 隐式 default=None + kw_only=True。build 由节点层
+            # 补值（Rebuild/Computed 求值，Padding 忽略传入值）。
+            setattr(cls, name, dataclasses.field(kw_only=True, default=None))
+        elif desc.mode == "wo" and _subcon_contains_field_expr(
+            desc.subcon, set()
+        ):
+            # WO + subcon 含待编译字段表达式（如 wfield(Bytes(x+1))）→
+            # 隐式 default=None + kw_only（v0.1.2 B3，对齐 wfield(Padding)
+            # 的无参实例化；build 时 None 传给节点层由其语义决定）。
             setattr(cls, name, dataclasses.field(kw_only=True, default=None))
         else:
             # RW/WO 无 default → dataclasses.field() 无默认值（必填 positional）

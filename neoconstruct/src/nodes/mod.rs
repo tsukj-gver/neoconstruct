@@ -581,12 +581,21 @@ impl Node {
                 let v = crate::expr::eval_expr_int(d.value(), ctx, py)?;
                 Ok(v.into_py(py))
             }
+            // Const 作为 RO 字段时，返回常量值（v0.1.2 B1）。
+            // rfield(Const(...)) 的 build 自动补值：随后 StructNode 将 value
+            // 传给 ConstNode.build，obj == value 校验通过，inner.build(value)。
+            // 对齐原版 construct：Const 在 ctx 中可见为常量值。
+            Node::Const(c) => Ok(c.value().clone_ref(py)),
+            // Padding 作为 RO 字段时，compute_ro_value 返回 Py_None
+            // （v0.1.2 B1 同族：与 StopIf/Check 同模式——PaddingNode.build
+            // 忽略 obj 写 pattern 字节，compute_ro_value 仅占位返回 None）。
+            Node::Padding(_) => Ok(py.None()),
             // 其他节点暂不支持 RO 语义
             _ => Err(ConstructError::Generic {
                 message: format!(
                     "compute_ro_value: node type {:?} is not a valid RO node. \
                      RO fields must be Tell, Computed, Index, StopIf, Check, Terminated, \
-                     Default, Rebuild, Element, or Const/ContextParam (future).",
+                     Default, Rebuild, Element, Const, or Padding.",
                     self
                 ),
                 path: path.to_string(),

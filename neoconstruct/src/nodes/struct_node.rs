@@ -1496,6 +1496,58 @@ mod tests {
     }
 
     #[test]
+    fn ro_const_field_build_uses_constant_value() {
+        // Const(5, Int8ub) 作为 RO 字段时 compute_ro_value 返回常量值 5
+        // （v0.1.2 B1），随后 ConstNode.build 收到 obj == value → inner.build(5)。
+        // rfield(Const(...)) 场景：用户无需为该字段提供实例属性。
+        with_py(|py| {
+            let const_node = crate::nodes::const_node::ConstNode::new(u8_node(), 5i64.into_py(py));
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "c", Node::Const(const_node)),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            // obj 只有 RW 字段 'a'，Const 的值由 compute_ro_value 提供
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x07})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed");
+            // 字段 a=0x07，Const 值=0x05
+            assert_eq!(stream.as_bytes(), &[0x07, 0x05]);
+        });
+    }
+
+    #[test]
+    fn ro_padding_field_build_writes_pattern() {
+        // Padding(2) 作为 RO 字段时 compute_ro_value 返回 Py_None（占位），
+        // PaddingNode.build 忽略 obj 写 pattern 字节（v0.1.2 B1 同族）。
+        // rfield(Padding(...)) 是 README/docstring 宣称的用法。
+        with_py(|py| {
+            let padding_node = crate::nodes::padding::PaddingNode::new_const(2, 0x00);
+            let fields = vec![
+                rw_field(py, "a", u8_node()),
+                ro_field(py, "p", Node::Padding(padding_node)),
+                rw_field(py, "b", u8_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, false);
+            let obj = py
+                .eval_bound("type('O', (), {'a': 0x01, 'b': 0x02})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed");
+            // a=0x01 + 2 字节 pad + b=0x02
+            assert_eq!(stream.as_bytes(), &[0x01, 0x00, 0x00, 0x02]);
+        });
+    }
+
+    #[test]
     fn ro_field_parse_stores_value_in_instance() {
         // RO 字段 parse 时正常解析并存入实例（与 RW 相同）。
         with_py(|py| {
