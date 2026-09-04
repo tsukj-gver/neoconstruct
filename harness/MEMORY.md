@@ -152,6 +152,8 @@ last_updated: 2026-07-29
 | L-13 | docstring 未跟随语法演进 | Phase 7 审查沉淀：Phase 2 废弃 `this` 但 15+ docstring 残留 `this.xxx` |
 | L-14 | 设计硬约束认知需交叉验证 | RawCopy 质疑沉淀：ARCH 把"必须拷贝"当硬约束，漏了 Rust 内置 hashfunc 零拷贝路径 |
 | L-15 | 权限白名单绕过与审查角色写代码 | 两次触发（v0.1.1：PM 分派越权×4 + VET bash 绕过；v0.1.2：DEV 写 Temp 复数次[平台工具描述诱导] + PM 越权未遂删 DEV 过程文件 + commit 未检混入半成品）；对策=分派对照权限表 + 拦截即上报 + 过程文件归任务所有者 + commit 前核对 status 明细 |
+| L-16 | workflow runner label 与版本支持线凭记忆书写 | v0.1.1 首发三连修（macos-13 退役/EOL Python/venv pip）；对策=写 workflow 前核对现行支持表 + 声明线不含 EOL 版本 |
+| L-17 | 进度优先压倒职责优先 | 2026-09-04 全天模式定性：急→跳步/越权/漏检/抢决策；对策=动作前两问（职责吗/流程完整吗），速度只来自一次做对 |
 
 ---
 
