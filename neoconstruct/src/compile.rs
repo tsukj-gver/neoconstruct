@@ -978,8 +978,13 @@ fn build_node_from_descriptor(
         "TerminatedDescriptor" => return Ok(Node::Terminated(TerminatedNode::new())),
         // ProbeDescriptor → ProbeNode（调试探针）。
         // into 是可选字段名引用（FieldName）；lookahead 是可选编译期 usize 常量。
+        // 注入宿主字段名作 path_label（探针输出定位到字段，lazy path 下
+        // 叶节点 path 恒为 "root"，不注入则所有探针都打 "root"）。
         "ProbeDescriptor" => {
-            return Ok(Node::Probe(build_probe_node(py, desc, field_index)?));
+            return Ok(Node::Probe(
+                build_probe_node(py, desc, field_index)?
+                    .with_path_label(field_names.get(field_index).cloned()),
+            ));
         }
         // === Aligned ===
         // AlignedDescriptor → AlignedNode（对齐包装）。
@@ -4394,10 +4399,40 @@ fn build_named_tuple_node(
                 message: format!("namedtuple did not return a type: {}", e),
             })?
     };
-    // mode：根据 inner_node 类型推断（Struct → Struct 模式；其他 → Sequence 模式）。
+    // mode：根据 inner_node 类型推断（Struct → Struct 模式；Sequence/
+    // Array/GreedyRange → Sequence 模式；其他 → 编译期拒绝）。
+    //
+    // NamedTuple 的字段提取协议要求 inner 产出"按名可取的实例"或"按位
+    // 可解包的 list"——非容器 inner（如 FormatField）在描述符编译时即可
+    // 静态判定为误用，按项目 fail-fast 一贯策略在 __init_subclass__ 阶段
+    // 报 CompilationError，而非延迟到 parse 期字段提取失败。
+    let kind_name = |n: &Node| -> &'static str {
+        match n {
+            Node::FormatField(_) => "FormatField (int/float primitive)",
+            Node::Bytes(_) => "Bytes",
+            Node::GreedyBytes(_) => "GreedyBytes",
+            Node::CString(_)
+            | Node::GreedyString(_)
+            | Node::PaddedString(_)
+            | Node::PascalString(_)
+            | Node::NullTerminated(_)
+            | Node::NullStripped(_) => "String constructor",
+            Node::VarInt(_) | Node::ZigZag(_) | Node::BytesInteger(_) => "integer constructor",
+            _ => "non-container",
+        }
+    };
     let mode = match &inner_node {
         Node::Struct(_) | Node::StructRef(_) => NamedTupleMode::Struct,
-        _ => NamedTupleMode::Sequence,
+        Node::Sequence(_) | Node::Array(_) | Node::GreedyRange(_) => NamedTupleMode::Sequence,
+        other => {
+            return Err(ConstructError::Compilation {
+                message: format!(
+                    "NamedTuple subcon must be a container (Struct / Sequence / Array / \
+                     GreedyRange) so fields can be extracted by name or position, got {}",
+                    kind_name(other)
+                ),
+            });
+        }
     };
     // field_names 转 Vec<Py<PyString>>
     let field_names_py: Vec<Py<PyString>> = field_names_list

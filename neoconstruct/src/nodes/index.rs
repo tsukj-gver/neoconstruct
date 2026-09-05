@@ -6,7 +6,8 @@
 //!
 //! `Index` 是 neoconstruct 中**唯一**的用户面下标访问机制。
 //! parse 时从 `ctx._index`（栈分配字段）读取当前数组迭代下标，返回 PyLong；
-//! 不在数组中时返回 Py_None（对齐 Python `context.get("_index", None)`）。
+//! 不在数组迭代上下文中时显式报 [`ConstructError::IndexField`]（静默 None
+//! 会让哑值流入下游远处炸成难归因错误——显式报错更早暴露误用）。
 //!
 //! - sizeof = 0（不消耗流）
 //! - build 是 no-op（不写字节）
@@ -43,22 +44,19 @@ use pyo3::prelude::*;
 ///
 /// # parse 行为
 ///
-/// 对齐 Python `Index._parse`（core.py L2965-2966）：
-/// ```python
-/// def _parse(self, stream, context, path):
-///     return context.get("_index", None)
-/// ```
+/// 读取当前数组迭代下标：
 /// - `ctx.index() == Some(i)` → 返回 `PyLong(i)`
-/// - `ctx.index() == None` → 返回 `Py_None`（不在数组迭代中）
+/// - `ctx.index() == None`（不在数组迭代上下文）→ [`ConstructError::IndexField`]
+///   （Index 字段的语义是"当前数组迭代下标"，脱离数组迭代时无值可言，
+///   显式报错优于静默 None——哑值会在下游远处炸成难归因的 Generic 错误）
 ///
 /// # build 行为
 ///
-/// 对齐 Python `Index._build`（core.py L2968-2969）：build 是 no-op（不写字节），
-/// IndexNode 的 sizeof=0。Python 返回 `context._index` 但 build 结果不影响输出。
+/// build 是 no-op（不写字节），IndexNode 的 sizeof=0。
 ///
 /// # sizeof 行为
 ///
-/// 对齐 Python `Index._sizeof`（core.py L2971-2972）：返回 0（不消耗字节）。
+/// 返回 0（不消耗字节）。
 #[derive(Debug, Default, Clone, Copy)]
 pub struct IndexNode;
 
@@ -79,12 +77,20 @@ impl super::Construct for IndexNode {
         py: Python<'py>,
         _stream: &mut ParseStream<'_>,
         ctx: &mut Context<'py>,
-        _path: &mut Path,
+        path: &mut Path,
     ) -> Result<Py<PyAny>, ConstructError> {
-        // 对齐 Python `context.get("_index", None)`：
-        // 在 Array 系列节点内 → Some(i) → PyLong
-        // 不在 Array 内 → None → Py_None
-        Ok(ctx.index().into_py(py))
+        // 在 Array 系列节点内 → Some(i) → PyLong；
+        // 不在数组迭代上下文 → None → 显式 IndexFieldError（早暴露误用）。
+        match ctx.index() {
+            Some(i) => Ok(i.into_py(py)),
+            None => Err(ConstructError::IndexField {
+                message: "Index field used outside of array iteration \
+                          (no active index in context; place it inside Array/GreedyRange/\
+                          PrefixedArray/RepeatUntil)"
+                    .to_string(),
+                path: path.to_string(),
+            }),
+        }
     }
 
     fn build(
@@ -224,12 +230,12 @@ mod tests {
     }
 
     // ======================================================================
-    // parse：不在 Array 内返回 Py_None
+    // parse：不在数组迭代上下文 → IndexFieldError
     // ======================================================================
 
     #[test]
-    fn parse_returns_none_when_not_in_array() {
-        // ctx.index() = None → 返回 Py_None（对齐 Python `context.get("_index", None)`）
+    fn parse_errors_when_not_in_array() {
+        // ctx.index() = None → IndexFieldError（显式暴露误用，非静默 None）
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -239,16 +245,21 @@ mod tests {
             // 默认 _index = None（new_root 不设置）
             assert!(ctx.index().is_none());
 
-            let result = node
+            let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
-                .expect("parse");
-            assert!(result.bind(py).is_none(), "should return Py_None");
+                .expect_err("should return IndexFieldError");
+            match err {
+                ConstructError::IndexField { message, .. } => {
+                    assert!(message.contains("outside of array iteration"));
+                }
+                other => panic!("expected IndexField, got {:?}", other),
+            }
         });
     }
 
     #[test]
-    fn parse_returns_none_after_clear_index() {
-        // clear_index 后返回 None
+    fn parse_errors_after_clear_index() {
+        // clear_index 后同样报 IndexFieldError
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
@@ -257,26 +268,26 @@ mod tests {
 
             ctx.set_index(5);
             ctx.clear_index();
-            let result = node
+            let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
-                .expect("parse");
-            assert!(result.bind(py).is_none());
+                .expect_err("should error after clear_index");
+            assert!(matches!(err, ConstructError::IndexField { .. }));
         });
     }
 
     #[test]
-    fn parse_returns_none_on_placeholder_context() {
-        // placeholder context 也没有 _index
+    fn parse_errors_on_placeholder_context() {
+        // placeholder context 也没有 _index → IndexFieldError
         with_py(|py| {
             let node = IndexNode::new();
             let mut stream = ParseStream::new(b"");
             let mut ctx = Context::placeholder(py);
             let mut path = Path::new();
 
-            let result = node
+            let err = node
                 .parse(py, &mut stream, &mut ctx, &mut path)
-                .expect("parse");
-            assert!(result.bind(py).is_none());
+                .expect_err("placeholder ctx has no index");
+            assert!(matches!(err, ConstructError::IndexField { .. }));
         });
     }
 

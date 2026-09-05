@@ -6,12 +6,16 @@
 //!
 //! `FlagsEnum(subcon, *merge, **flags)` 把 subcon 返回的整数映射为多个 bool 标志。
 //!
-//! - parse：inner.parse(int) → 遍历 flags 构造 PyDict（每项 `name: (obj & value) == value`）
-//!   并设置 `_flagsenum=True` 特殊标志。返回该 dict
+//! - parse：inner.parse(int) → 遍历 flags 构造 PyDict（每项 `name: (obj & value) == value`）。
+//!   返回该 dict——**全键形态且无内部标记键**（用户值不携带任何下划线
+//!   内部键，parse 全键 dict 与 build 部分键 dict 形态对称，`dict(**flags)`
+//!   展开与直接比较均可用）
 //! - build：按 obj 类型分支：
 //!   - int → inner.build(obj)
 //!   - str → split("|") 后查 encmapping 累加 OR（key 缺失 → MappingError）
 //!   - dict → 遍历 items，name 不以 "_" 开头且 value truthy 时累加 OR
+//!     （下划线键跳过——parse 产出不含内部键，该规则仅为用户 dict 的
+//!     宽容处理保留）
 //! - sizeof：转发 inner.sizeof
 //!
 //! ## 编译期物化
@@ -89,8 +93,8 @@ impl Construct for FlagsEnumNode {
                 path: path.to_string(),
             })?;
         let result = PyDict::new_bound(py);
-        // _flagsenum=True 标志（对齐 Python core.py L2072）。
-        result.set_item("_flagsenum", true)?;
+        // 全键形态、无内部标记键：parse 产出的用户值与 build 接受的 dict
+        // 形态对称（部分键 dict），内部实现细节不泄漏到值。
         for (name, value) in &self.flags {
             let set = (int_val & value) == *value;
             result.set_item(name.bind(py), set)?;
@@ -256,7 +260,8 @@ mod tests {
     #[test]
     fn parse_returns_flag_dict() {
         // FE-1: FlagsEnum(Byte, one=1, two=2, four=4, eight=8).parse(b'\x03')
-        //      → dict{_flagsenum=True, one=True, two=True, four=False, eight=False}
+        //      → dict{one=True, two=True, four=False, eight=False}（全键形态，
+        //      无内部标记键）
         with_py(|py| {
             let node = make_flags_enum_node(py);
             let mut stream = ParseStream::new(&[0x03]);
@@ -290,12 +295,11 @@ mod tests {
                 .unwrap()
                 .extract::<bool>()
                 .unwrap());
-            assert!(d
-                .get_item("_flagsenum")
-                .unwrap()
-                .unwrap()
-                .extract::<bool>()
-                .unwrap());
+            // 用户值不携带任何下划线内部键（parse/build 形态对称）。
+            assert!(
+                d.get_item("_flagsenum").unwrap().is_none(),
+                "parse result must not contain internal marker key"
+            );
         });
     }
 

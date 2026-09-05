@@ -65,9 +65,11 @@ def Timestamp(subcon, unit, epoch):
 
     :param subcon: Int*/Float* 描述符，或 Int32ub（msdos 模式自动用 BitStruct）。
                    必须是描述符类型（编译期校验）。
-    :param unit: int/float（秒/毫秒/微秒分辨率）或 "msdos"。
-    :param epoch: int（年）/ Arrow 实例 / "msdos"。
-    :raises TimestampError: 参数类型错误（unit/epoch/subcon）。
+    :param unit: int/float（每 tick 秒数，如 1.0=秒、0.001=毫秒）或 "msdos"
+                 （str 形态仅 "msdos" 合法，其他字符串构造期即抛
+                 TimestampError——fail-fast，而非延迟到 parse 期）。
+    :param epoch: int（年）/ Arrow 实例 / "msdos"（str 形态同上仅 "msdos" 合法）。
+    :raises TimestampError: 参数类型错误或 str 参数值非法（unit/epoch/subcon）。
     :raises ImportError: arrow 未安装（用户 pip install arrow）。
 
     Example::
@@ -88,9 +90,19 @@ def Timestamp(subcon, unit, epoch):
             "subcon must not be None; pass a descriptor or Construct instance"
         )
 
-    if not isinstance(unit, (int, float, str)):
+    if not isinstance(unit, (int, float)) and unit != "msdos":
+        if isinstance(unit, str):
+            raise TimestampError(
+                'unit string only supports "msdos"; got {!r} '
+                "(use int/float for tick seconds, e.g. 1.0 = seconds, 0.001 = ms)".format(unit)
+            )
         raise TimestampError("unit must be one of: int float string")
-    if not isinstance(epoch, (int, arrow.Arrow, str)):
+    if not isinstance(epoch, (int, arrow.Arrow)) and epoch != "msdos":
+        if isinstance(epoch, str):
+            raise TimestampError(
+                'epoch string only supports "msdos"; got {!r} '
+                "(use int year e.g. 1970 or an Arrow instance)".format(epoch)
+            )
         raise TimestampError("epoch must be one of: int Arrow string")
 
     if unit == "msdos" or epoch == "msdos":

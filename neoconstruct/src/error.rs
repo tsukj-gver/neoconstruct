@@ -71,6 +71,24 @@ pub enum ConstructError {
         path: String,
     },
 
+    /// 大小计算错误：节点无静态尺寸（元素数量运行时未知）或依赖动态值。
+    ///
+    /// 对应 Python 的 `SizeofError`。
+    ///
+    /// 触发场景（内核 sizeof 路径）：
+    /// - `RepeatUntilNode::sizeof`：元素数量由终止表达式运行时决定，无静态尺寸
+    /// - `AlignedNode::sizeof`：modulus 非编译期常量，无法静态计算
+    ///
+    /// 用户面 sizeof API 尚未提供（follow-up）；当前该变体由内核 sizeof
+    /// 失败路径产生，保证错误分类学与 Python 侧 `SizeofError` 类接线一致。
+    #[error("sizeof error: {message} at {path}")]
+    Sizeof {
+        /// 错误详情。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
     /// 编译错误：schema 编译失败（未知描述符、字段重复等）。
     ///
     /// 对应 Python construct 在类创建阶段触发的错误。
@@ -159,6 +177,23 @@ pub enum ConstructError {
     #[error("expression error: {message} at {path}")]
     ExprDivByZero {
         /// 错误详情（如 `"expression division by zero"`）。
+        message: String,
+        /// 错误发生的路径。
+        path: String,
+    },
+
+    /// 表达式求值：算术/移位溢出（i64 边界）。
+    ///
+    /// 触发场景：[`crate::expr::ExprOp`] 的 `Add` / `Sub` / `Mul` / `Neg` /
+    /// `FloorDiv`（`i64::MIN / -1`）/ `Shl`（值超界或移位量 ≥ 64）/ `Shr`
+    /// （移位量 ≥ 64）数学结果超出 i64 表示范围。
+    ///
+    /// Python int 是任意精度永不溢出；静默回绕会产生符号翻转错值（协议
+    /// 字段缩放/校验和计算最危险的缺陷形态），因此显式报错。消息统一含
+    /// "overflow" 语义词。
+    #[error("expression error: {message} at {path}")]
+    ExprOverflow {
+        /// 错误详情（统一含 "overflow" 语义词与操作数）。
         message: String,
         /// 错误发生的路径。
         path: String,
@@ -482,11 +517,13 @@ impl ConstructError {
             ConstructError::Stream { message, .. }
             | ConstructError::FormatField { message, .. }
             | ConstructError::FieldLength { message, .. }
+            | ConstructError::Sizeof { message, .. }
             | ConstructError::Compilation { message }
             | ConstructError::UnresolvedReference { message }
             | ConstructError::Generic { message, .. }
             | ConstructError::ExprContext { message, .. }
             | ConstructError::ExprDivByZero { message, .. }
+            | ConstructError::ExprOverflow { message, .. }
             | ConstructError::BitField { message, .. }
             | ConstructError::Integer { message, .. }
             | ConstructError::Padding { message, .. }
@@ -525,12 +562,14 @@ impl ConstructError {
             ConstructError::Stream { path, .. }
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
+            | ConstructError::Sizeof { path, .. }
             | ConstructError::Generic { path, .. }
             | ConstructError::BuildValueMissing { path, .. }
             | ConstructError::ExprType { path, .. }
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
+            | ConstructError::ExprOverflow { path, .. }
             | ConstructError::ExprStackUnderflow { path }
             | ConstructError::BitField { path, .. }
             | ConstructError::Integer { path, .. }
@@ -592,6 +631,7 @@ impl ConstructError {
             ConstructError::Stream { .. } => "Stream",
             ConstructError::FormatField { .. } => "FormatField",
             ConstructError::FieldLength { .. } => "FieldLength",
+            ConstructError::Sizeof { .. } => "Sizeof",
             ConstructError::Compilation { .. } => "Compilation",
             ConstructError::UnresolvedReference { .. } => "UnresolvedReference",
             ConstructError::Generic { .. } => "Generic",
@@ -600,6 +640,7 @@ impl ConstructError {
             ConstructError::ExprFieldMissing { .. } => "ExprFieldMissing",
             ConstructError::ExprContext { .. } => "ExprContext",
             ConstructError::ExprDivByZero { .. } => "ExprDivByZero",
+            ConstructError::ExprOverflow { .. } => "ExprOverflow",
             ConstructError::ExprStackUnderflow { .. } => "ExprStackUnderflow",
             ConstructError::BitField { .. } => "BitField",
             ConstructError::Integer { .. } => "Integer",
@@ -712,12 +753,14 @@ impl ConstructError {
             ConstructError::Stream { path, .. }
             | ConstructError::FormatField { path, .. }
             | ConstructError::FieldLength { path, .. }
+            | ConstructError::Sizeof { path, .. }
             | ConstructError::Generic { path, .. }
             | ConstructError::BuildValueMissing { path, .. }
             | ConstructError::ExprType { path, .. }
             | ConstructError::ExprFieldMissing { path, .. }
             | ConstructError::ExprContext { path, .. }
             | ConstructError::ExprDivByZero { path, .. }
+            | ConstructError::ExprOverflow { path, .. }
             | ConstructError::ExprStackUnderflow { path }
             | ConstructError::BitField { path, .. }
             | ConstructError::Integer { path, .. }
@@ -766,6 +809,9 @@ struct ExceptionClasses {
     format_field_error: Py<PyType>,
     /// 对应 `ConstructError::FieldLength`。
     field_length_error: Py<PyType>,
+    /// 对应 `ConstructError::Sizeof`。
+    /// Python 的 `SizeofError`，内核 sizeof 失败（无静态尺寸/动态 modulus）。
+    sizeof_error: Py<PyType>,
     /// 对应 `ConstructError::Compilation`。
     compilation_error: Py<PyType>,
     /// 对应 `ConstructError::UnresolvedReference`。
@@ -776,7 +822,8 @@ struct ExceptionClasses {
     /// Python 的 `FieldValueMissingError`（build 时字段缺值）。
     field_value_missing_error: Py<PyType>,
     /// `ConstructError` 基类，用于 Expr* 变体
-    /// （ExprType / ExprFieldMissing / ExprContext / ExprDivByZero / ExprStackUnderflow）。
+    /// （ExprType / ExprFieldMissing / ExprContext / ExprDivByZero /
+    /// ExprOverflow / ExprStackUnderflow）。
     ///
     /// 当前无专门的 ExprError Python 类，统一映射到基类。
     /// 若需更精确的错误类型映射，可增加专门的 ExprError 类并在此缓存。
@@ -879,11 +926,12 @@ impl ExceptionClasses {
         // Py<PyType>::as_ptr() 返回 *mut PyObject（与 Bound<PyType>::as_ptr() 一致）。
         // 比较裸指针即可判定是否同一对象（CPython 类型对象是单例）。
         //
-        // 数组覆盖全部 27 个缓存异常类；新增缓存字段时需同步扩容此数组与类型长度。
-        let builtin_ptrs: [*mut ffi::PyObject; 27] = [
+        // 数组覆盖全部 28 个缓存异常类；新增缓存字段时需同步扩容此数组与类型长度。
+        let builtin_ptrs: [*mut ffi::PyObject; 28] = [
             self.stream_error.as_ptr(),
             self.format_field_error.as_ptr(),
             self.field_length_error.as_ptr(),
+            self.sizeof_error.as_ptr(),
             self.compilation_error.as_ptr(),
             self.unresolved_reference_error.as_ptr(),
             self.generic_construct_error.as_ptr(),
@@ -943,6 +991,7 @@ pub fn init_exception_classes(py: Python<'_>) -> PyResult<()> {
         stream_error: get("StreamError")?,
         format_field_error: get("FormatFieldError")?,
         field_length_error: get("FieldLengthError")?,
+        sizeof_error: get("SizeofError")?,
         compilation_error: get("CompilationError")?,
         unresolved_reference_error: get("UnresolvedReferenceError")?,
         generic_construct_error: get("GenericConstructError")?,
@@ -997,6 +1046,7 @@ fn select_exception_class<'py>(
         ConstructError::Stream { .. } => &classes.stream_error,
         ConstructError::FormatField { .. } => &classes.format_field_error,
         ConstructError::FieldLength { .. } => &classes.field_length_error,
+        ConstructError::Sizeof { .. } => &classes.sizeof_error,
         ConstructError::Compilation { .. } => &classes.compilation_error,
         ConstructError::UnresolvedReference { .. } => &classes.unresolved_reference_error,
         ConstructError::Generic { .. } => &classes.generic_construct_error,
@@ -1007,6 +1057,7 @@ fn select_exception_class<'py>(
         | ConstructError::ExprFieldMissing { .. }
         | ConstructError::ExprContext { .. }
         | ConstructError::ExprDivByZero { .. }
+        | ConstructError::ExprOverflow { .. }
         | ConstructError::ExprStackUnderflow { .. } => &classes.construct_error_base,
         // BitField：Python construct 无独立 BitFieldError，
         // 复用 StreamError（与 Python RestreamedBytesIO.close 缓冲
@@ -1237,13 +1288,25 @@ impl From<ConstructError> for PyErr {
                 // ExprStackUnderflow/StopField），使用 Display（to_string）作为
                 // 完整消息，path=None（避免重复，path 已嵌入 Display 输出）。
                 // 此分支罕见（仅在表达式错误时），分配 String 可接受。
+                //
+                // 例外：BuildValueMissing 虽无单一 message 字段，但 path 是
+                // 结构化 API 承诺（错误携带 path 字段）——拆分出消息体与
+                // path 分别传入，保证 Python 侧 `e.path == "root.y"` 可用
+                // （与其他运行期变体的 path 契约一致）。
                 let formatted_str: String;
-                let (message, path): (&str, Option<&str>) = match err.message() {
-                    Some(m) => (m, err.path()),
-                    None => {
-                        formatted_str = err.to_string();
-                        (formatted_str.as_str(), None)
+                let bvm_str: String;
+                let (message, path): (&str, Option<&str>) = match &err {
+                    ConstructError::BuildValueMissing { field, path } => {
+                        bvm_str = build_value_missing_message(field);
+                        (bvm_str.as_str(), Some(path.as_str()))
                     }
+                    other => match other.message() {
+                        Some(m) => (m, other.path()),
+                        None => {
+                            formatted_str = other.to_string();
+                            (formatted_str.as_str(), None)
+                        }
+                    },
                 };
 
                 // 借用类引用，无 incref。
@@ -1267,7 +1330,63 @@ impl From<ConstructError> for PyErr {
     }
 }
 
-/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（含 CancelParsing 识别）。
+/// 构造 `BuildValueMissing` 的 Python 侧消息体（不含 path 后缀）。
+///
+/// 与 [`ConstructError::BuildValueMissing`] 的 Display 输出同文（去掉
+/// " at {path}" 尾部），使 Python 侧 `str(e)` 呈现为标准的
+/// "Error in path {path}\n{message}" 形态且 `.path` 属性可用。
+fn build_value_missing_message(field: &str) -> String {
+    format!(
+        "field value missing: no value was provided for field '{}' when \
+         constructing the instance (provide the field value or set an explicit default)",
+        field
+    )
+}
+
+/// 用户语义异常分类：识别 Python 侧主动 raise 的特殊异常类。
+///
+/// 识别清单（指针相等比较，与 [`ExceptionClasses::is_builtin_class`] 同模式）：
+///
+/// - `ExplicitError` → [`ConstructError::Explicit`]：用户显式终止信号，
+///   Select/Peek 等容错链**透传不吞**（兑现 `_errors.py` docstring 承诺）。
+/// - `CancelParsing` → [`ConstructError::CancelParsing`]：用户主动取消，
+///   被 schema.rs 顶层 catch（parse 返回 None）。
+///
+/// 其余异常（用户回调中的 ValueError 等）返回 `None`，由调用方按 Generic
+/// 包装（携带上下文消息）。
+///
+/// 供 [`From<PyErr> for ConstructError`](impl-From%3CPyErr%3E-for-ConstructError)
+/// 与用户回调边界（如 `AdapterCallbackNode`）共用——两处的用户异常分类
+/// 必须一致，否则嵌入回调链中的语义异常会被吞掉。
+pub(crate) fn classify_user_pyerr(e: &PyErr, py: Python<'_>) -> Option<ConstructError> {
+    let classes = EXCEPTIONS.get(py)?;
+    let err_type_ptr = e.get_type_bound(py).as_ptr();
+    let value = e.value_bound(py);
+    // 提取异常实例的 message/path 属性（失败时回退空值——异常构造不走
+    // fast-path 时属性仍由 __init__ 设置，正常路径均有）。
+    let extract_str = |name: &str| -> String {
+        value
+            .getattr(name)
+            .ok()
+            .and_then(|p| p.extract::<String>().ok())
+            .unwrap_or_default()
+    };
+    if err_type_ptr == classes.explicit_error.as_ptr() {
+        return Some(ConstructError::Explicit {
+            message: extract_str("message"),
+            path: extract_str("path"),
+        });
+    }
+    if err_type_ptr == classes.cancel_parsing_error.as_ptr() {
+        // CancelParsing 顶层 catch 后 path 会被丢弃（对齐 Python `pass`）。
+        return Some(ConstructError::CancelParsing {
+            path: extract_str("path"),
+        });
+    }
+    None
+}
+
+/// 将 pyo3 的 `PyErr` 转换为 [`ConstructError`]（含用户语义异常识别）。
 ///
 /// 使 `dict.set_item(...)?` 等返回 `PyResult` 的 C API 调用能通过 `?` 直接传播，
 /// 无需在每个调用点写 `map_err` 闭包。错误上下文（字段名、路径）由上层
@@ -1275,29 +1394,17 @@ impl From<ConstructError> for PyErr {
 ///
 /// 对齐 pydantic-core 的 `ValResult: From<PyErr>`（model_fields.rs:363）。
 ///
-/// # CancelParsing 识别
+/// # 用户语义异常识别
 ///
-/// 用户从 Python 代码 `raise CancelParsing()` 时，pyo3 把 PyErr 传给 Rust。
-/// 本实现检查 PyErr 的类型是否为缓存的 `cancel_parsing_error`（指针相等），
-/// 是则转为 `ConstructError::CancelParsing`（被 schema.rs 顶层 catch），
-/// 否则 fallback 到 `Generic`（原有行为）。
+/// 用户从 Python 代码 `raise ExplicitError` / `raise CancelParsing` 时，
+/// pyo3 把 PyErr 传给 Rust。本实现通过 [`classify_user_pyerr`] 识别这两个
+/// 用户语义异常类（指针相等比较），保持类型语义跨 FFI 不丢失；
+/// 否则 fallback 到 `Generic`。
 impl From<PyErr> for ConstructError {
     fn from(e: PyErr) -> Self {
         Python::with_gil(|py| {
-            // 识别 CancelParsing（指针相等比较，与 is_builtin_class 同模式）。
-            if let Some(classes) = EXCEPTIONS.get(py) {
-                let err_type_ptr = e.get_type_bound(py).as_ptr();
-                if err_type_ptr == classes.cancel_parsing_error.as_ptr() {
-                    // CancelParsing 在 Python 是 ConstructError 子类，可能携带 path 属性。
-                    // 提取失败时 path 留空（顶层 catch 后 path 会被丢弃，对齐 Python `pass`）。
-                    let path = e
-                        .value_bound(py)
-                        .getattr("path")
-                        .ok()
-                        .and_then(|p| p.extract::<String>().ok())
-                        .unwrap_or_default();
-                    return ConstructError::CancelParsing { path };
-                }
+            if let Some(classified) = classify_user_pyerr(&e, py) {
+                return classified;
             }
             // 默认 fallback（原逻辑）
             ConstructError::Generic {
@@ -1544,6 +1651,7 @@ mod tests {
             "class StreamError(ConstructError): pass\n",
             "class FormatFieldError(ConstructError): pass\n",
             "class FieldLengthError(ConstructError): pass\n",
+            "class SizeofError(ConstructError): pass\n",
             "class CompilationError(ConstructError): pass\n",
             "class UnresolvedReferenceError(ConstructError): pass\n",
             "class GenericConstructError(ConstructError): pass\n",
@@ -1582,6 +1690,7 @@ mod tests {
             stream_error: get("StreamError"),
             format_field_error: get("FormatFieldError"),
             field_length_error: get("FieldLengthError"),
+            sizeof_error: get("SizeofError"),
             compilation_error: get("CompilationError"),
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),
@@ -1993,6 +2102,7 @@ mod tests {
             "class StreamError(ConstructError): pass\n",
             "class FormatFieldError(ConstructError): pass\n",
             "class FieldLengthError(ConstructError): pass\n",
+            "class SizeofError(ConstructError): pass\n",
             "class CompilationError(ConstructError): pass\n",
             "class UnresolvedReferenceError(ConstructError): pass\n",
             "class GenericConstructError(ConstructError): pass\n",
@@ -2031,6 +2141,7 @@ mod tests {
             stream_error: get("StreamError"),
             format_field_error: get("FormatFieldError"),
             field_length_error: get("FieldLengthError"),
+            sizeof_error: get("SizeofError"),
             compilation_error: get("CompilationError"),
             unresolved_reference_error: get("UnresolvedReferenceError"),
             generic_construct_error: get("GenericConstructError"),

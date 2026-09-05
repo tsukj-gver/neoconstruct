@@ -13,7 +13,8 @@
   ==label 成立）；未命中 → EnumInteger（int 子类 fallback，不报错）。
 - Enum build：label 查映射；int 直接透传（含未知 int）；未知 label →
   MappingError。
-- FlagsEnum parse → dict(_flagsenum=True, 每 flag 一 bool)（全键形态）；
+- FlagsEnum parse → dict（每 flag 一 bool，全键形态，**无内部标记键**——
+  用户值不含下划线内部键，与 build 接受部分键 dict 形态对称）；
   build 接受部分键 dict / int / "A|B" 竖线串；未知 label → MappingError。
 - Mapping parse/build 无映射 → MappingError（与 Enum 的 int fallback 是
   文档化差异）；映射对象为任意对象（同一性保持）。
@@ -146,7 +147,12 @@ class TestFlagsEnumSemantics:
     """FlagsEnum(Byte, READ=1, WRITE=2, EXEC=4) × field()。"""
 
     def test_flagsenum_parse_multi_flags_full_dict(self):
-        """parse b'\\x03' → 全键 dict(_flagsenum=True, READ/WRITE=True, EXEC=False)。[文档]"""
+        """parse b'\\x03' → 全键 dict（READ/WRITE=True, EXEC=False），无内部标记键。[文档]
+
+        parse 产出的用户值不携带任何下划线内部键（内核实现细节不泄漏到值）；
+        ``parsed.flags == {"READ": True}`` 类比较与 ``dict(**flags)`` 展开
+        因此可用。双重断言：值逐键相等；无 "_flagsenum" 键。
+        """
 
         @dataclass
         class F(StructMixin):
@@ -154,11 +160,12 @@ class TestFlagsEnumSemantics:
 
         parsed = F.parse(b"\x03")
         assert parsed.flags == {
-            "_flagsenum": True,
             "READ": True,
             "WRITE": True,
             "EXEC": False,
         }
+        assert "_flagsenum" not in parsed.flags
+        assert not [k for k in parsed.flags if k.startswith("_")]
 
     def test_flagsenum_parse_zero_all_false(self):
         """parse b'\\x00' → 全 False 边界。[自然]"""

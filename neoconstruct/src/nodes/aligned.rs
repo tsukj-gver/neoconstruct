@@ -183,10 +183,11 @@ impl Construct for AlignedNode {
         let modulus = match self.modulus.ops() {
             [ExprOp::Const(n)] if *n >= 2 => *n as usize,
             _ => {
-                return Err(ConstructError::Generic {
-                    message:
-                        "Aligned sizeof requires constant modulus (dynamic modulus triggers SizeofError)"
-                            .to_string(),
+                // 非常量或非法常量（< 2）modulus 无静态尺寸 → SizeofError。
+                return Err(ConstructError::Sizeof {
+                    message: "Aligned sizeof requires constant modulus >= 2 \
+                              (dynamic modulus has no static size)"
+                        .to_string(),
                     path: String::new(),
                 });
             }
@@ -481,7 +482,8 @@ mod tests {
 
     #[test]
     fn sizeof_runtime_modulus_returns_err() {
-        // modulus 是运行期表达式（GetInt）→ sizeof 返回 Err（对齐 Python SizeofError）
+        // modulus 是运行期表达式（GetInt）→ sizeof 返回 Sizeof 变体
+        // （映射 Python SizeofError）。
         // 区分编译期常量（应成功，见上）vs 运行期表达式（应 Err）。
         let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
         let modulus = ExprProgram::new(vec![ExprOp::GetInt(0)]);
@@ -491,13 +493,13 @@ mod tests {
             let err = node
                 .sizeof(&ctx)
                 .expect_err("runtime modulus should fail sizeof");
-            assert!(matches!(err, ConstructError::Generic { .. }));
+            assert!(matches!(err, ConstructError::Sizeof { .. }));
         });
     }
 
     #[test]
     fn sizeof_const_modulus_below_two_returns_err() {
-        // 防御性：Const(1) 是非法 modulus（< 2），sizeof 返回 Err。
+        // 防御性：Const(1) 是非法 modulus（< 2），sizeof 返回 Sizeof 变体。
         // 注：编译期 build_node 会拒绝 Const(<2)，此处覆盖防御性运行期路径。
         let inner = Node::FormatField(FormatFieldNode::new(PythonFormat::UnsignedInt16Big));
         let modulus = ExprProgram::new(vec![ExprOp::Const(1)]);
@@ -507,7 +509,7 @@ mod tests {
             let err = node
                 .sizeof(&ctx)
                 .expect_err("const modulus < 2 should fail");
-            assert!(matches!(err, ConstructError::Generic { .. }));
+            assert!(matches!(err, ConstructError::Sizeof { .. }));
         });
     }
 

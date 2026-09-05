@@ -41,12 +41,17 @@ use super::Construct;
 /// - `into`：可选字段名（任意类型字段引用），求值后 repr 打印。None 表示打印整个 context。
 ///   （用 `FieldName` 而非 `ExprProgram`，详见模块级注释）
 /// - `lookahead`：可选 peek 字节数。None 表示不 peek。
+/// - `path_label`：宿主字段名（编译期注入）。lazy path 设计下叶节点 path
+///   恒为 "root"，探针靠它打印限定的 "Probe, path is root.<field>"——
+///   调试探针若不能定位自身（多个 Probe 都打 "root"）即失去观测价值。
 #[derive(Debug)]
 pub struct ProbeNode {
     /// 可选字段名：求值后 repr 打印。None 表示打印整个 context。
     into: Option<FieldName>,
     /// 可选 peek 字节数：None 表示不 peek。
     lookahead: Option<usize>,
+    /// 宿主字段名（编译期由 compile.rs 注入；None 时打印裸 path）。
+    path_label: Option<String>,
 }
 
 impl ProbeNode {
@@ -57,7 +62,22 @@ impl ProbeNode {
     /// - `into`：可选字段名（任意类型字段引用），None 表示打印整个 context。
     /// - `lookahead`：可选 peek 字节数，None 表示不 peek。
     pub fn new(into: Option<FieldName>, lookahead: Option<usize>) -> Self {
-        Self { into, lookahead }
+        Self {
+            into,
+            lookahead,
+            path_label: None,
+        }
+    }
+
+    /// 设置宿主字段名（编译期注入，打印限定的 path）。
+    pub fn with_path_label(mut self, label: Option<String>) -> Self {
+        self.path_label = label;
+        self
+    }
+
+    /// 返回宿主字段名（None 表示打印裸 path）。
+    pub fn path_label(&self) -> Option<&str> {
+        self.path_label.as_deref()
     }
 
     /// 返回 into 字段名的引用（None 表示打印整个 context）。
@@ -93,7 +113,12 @@ impl ProbeNode {
             .and_then(|b| b.getattr("print"))
             .and_then(|print| print.call1((sep,)));
 
-        let path_str = format!("Probe, path is {}", path);
+        let path_str = match &self.path_label {
+            // 编译期注入的宿主字段名：打印限定 path（root.<field>），使探针
+            // 输出可定位（lazy path 下叶节点 path 恒为 "root"）。
+            Some(label) => format!("Probe, path is {}.{}", path, label),
+            None => format!("Probe, path is {}", path),
+        };
         let _ = py
             .import_bound("builtins")
             .and_then(|b| b.getattr("print"))

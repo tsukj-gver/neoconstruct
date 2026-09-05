@@ -17,6 +17,7 @@ from neoconstruct import (
     BitsInteger,
     Bytes,
     Element,
+    FieldValueMissingError,
     FormatFieldError,
     GreedyRange,
     Int16ub,
@@ -133,10 +134,11 @@ def test_three_level_nested_struct_path_on_parse():
 
 
 def test_bitstruct_field_path_on_build_missing_value():
-    """BitStruct build 缺字段值 → 消息含字段级位置 root.y。[基线]
+    """BitStruct build 缺字段值 → FieldValueMissingError，path 属性 == root.y。[文档]
 
-    FieldValueMissingError 的 path 属性为 None（Display 全文内嵌路径），
-    断言 str(e) 含 "root.y"。
+    path 是结构化 API 承诺（错误携带 path 字段）：BitStruct 内 build 缺值
+    与普通 Struct 同构，path 属性精确到字段（非仅在消息文本中内嵌）。
+    双重断言：类型 FieldValueMissingError；path == root.y；str(e) 含字段名。
     """
 
     @dataclass
@@ -144,14 +146,21 @@ def test_bitstruct_field_path_on_build_missing_value():
         x: int = field(BitsInteger(4))
         y: int = field(BitsInteger(4))
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(FieldValueMissingError) as exc_info:
         B.build(B(x=1))
 
+    assert exc_info.value.path == "root.y"
     assert "root.y" in str(exc_info.value)
+    assert "y" in str(exc_info.value)
 
 
 def test_repeat_until_element_level_path_on_eof():
-    """RepeatUntil EOF 失败 → path 含元素索引 root.items[3]。[基线]"""
+    """RepeatUntil 全流无哨兵至 EOF → StreamError，path 含元素索引。[文档]
+
+    EOF 行为契约：哨兵是组帧契约（必须在流内出现），EOF 仍未出现即报错
+    （"读到 EOF 停"是 GreedyRange 的语义，两者不可混）；path 定位到首个
+    失败元素索引 root.items[3]。
+    """
 
     @dataclass
     class P(StructMixin):

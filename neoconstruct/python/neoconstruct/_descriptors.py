@@ -949,6 +949,12 @@ class RepeatUntilDescriptor:
     终止表达式数组：解析元素到 list 直到终止表达式求值非零（最后元素包含在内），
     或从 list 构建字节序列直到某元素满足终止表达式。对应 Python construct 的 ``RepeatUntil``。
 
+    **EOF 行为契约**：终止表达式（哨兵）是组帧契约——必须在流内某元素处
+    求值非零。若整流读尽（EOF）仍未出现满足元素，parse 显式报
+    ``StreamError``（path 定位到首个失败元素索引）；**不是**像 GreedyRange
+    那样在 EOF 优雅停止（"读到 EOF 停"是 GreedyRange 的语义，两者不可混）。
+    build 侧对称：遍历完列表无元素满足终止表达式 → ``RepeatError``。
+
     :param terminator: 终止表达式（``_FieldDescriptor`` / ``_ExprRef`` /
                        ``int`` 组合）。必须引用同 Struct 中已声明的 Element 字段
                        （如 ``e > 5``，其中 ``e`` 是 ``rfield(Element())``）。
@@ -3148,7 +3154,8 @@ def FlagsEnum(subcon, *merge, **flags):
 
         fe = FlagsEnum(Byte, one=1, two=2, four=4, eight=8)
         fe.parse(b"\\x03")
-        # → dict(_flagsenum=True, one=True, two=True, four=False, eight=False)
+        # → dict(one=True, two=True, four=False, eight=False)
+        #   （全键形态，无内部标记键——与 build 接受的部分键 dict 形态对称）
         fe.build(dict(one=True, two=True))   # → b"\\x03"
         fe.build("one|two")                  # → b"\\x03"
         fe.build(3)                          # → b"\\x03"
@@ -3527,6 +3534,11 @@ class NamedTupleDescriptor:
 
     NamedTuple 包装：把 inner（Struct/Sequence/Array/GreedyRange）结果转为
     collections.namedtuple 实例。对应 Python construct ``NamedTuple``（core.py L3381）。
+
+    **inner 容器校验（编译期 fail-fast）**：inner 非 Struct/Sequence/Array/
+    GreedyRange 类容器时，类创建（``__init_subclass__``）阶段即抛
+    ``CompilationError``——非容器 inner 无法按名/按位提取字段，属静态可
+    判定的误用，不延迟到 parse 期。
 
     :param tuplename: namedtuple 名称（str）。
     :param tuplefields: 字段名（str 空格分隔 或 list）。

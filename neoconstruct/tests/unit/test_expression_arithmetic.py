@@ -1,18 +1,21 @@
 """表达式 VM 算术边界行为锁定。
 
-VM 是 i64 栈机：算术溢出采用回绕语义（wrapping），除零/取模零与负移位
-返回显式 ``ConstructError`` 族异常，绝不 panic。本文件锁定各边界值的具体形态。
+VM 是 i64 栈机：Python 用户心智是任意精度整数，因此**算术溢出与移位越界
+显式报错**（消息含 "overflow" 语义词），绝不静默回绕、绝不 panic。除零/
+取模零与负移位同样返回显式 ``ConstructError`` 族异常。
 
 覆盖：
 - ``//0`` / ``%0``：显式 ConstructError（消息含语义词 + path）
-- i64 溢出边界（±2^63）：回绕语义（[基线] 锚定，VM 实现为 i64 栈机）
-- 移位边界：``<<63`` / ``<<64``（移位量按 64 掩码）、负移位显式报错
-- 消费者场景：``Bytes(表达式)`` 大值（溢出为负 → FieldLengthError；
-  超流长 → StreamError；除零 → 显式错误）
+- i64 溢出边界（±2^63）：加/乘/一元负/整除 MIN//-1 → 显式溢出错误
+- 移位边界：``<<63``（值溢出）、``<<64`` / ``>>64``（移位量越界）→ 显式报错；
+  负移位显式报错
+- 消费者场景：``Bytes(表达式)`` 负长度（FieldLengthError 长度面防御）、
+  表达式溢出（GenericConstructError 含 overflow 原因）、超流长（StreamError）、
+  除零（显式错误）
 - 整除/取模的 Python floor 语义（负数侧）
 - 比较运算返回 0/1 整型
 
-期望值来源标注：[文档]=expr 模块文档（回绕/floor 语义）；
+期望值来源标注：[文档]=溢出防御契约（显式失败优于静默错值）；
 [自然]=语义自然性；[基线]=实测绿灯行为锚定。
 """
 
@@ -90,15 +93,15 @@ def test_bytes_length_division_by_zero_raises_explicit_error():
 
 
 # ---------------------------------------------------------------------------
-# i64 溢出边界：回绕语义
+# i64 溢出边界：显式报错（Python 心智 = 任意精度，静默错值不可接受）
 # ---------------------------------------------------------------------------
 
 
-def test_i64_max_plus_one_wraps_to_min():
-    """``(2**63-1) + 1`` → 回绕为 -2**63。[基线]
+def test_i64_max_plus_one_raises_overflow_error():
+    """``(2**63-1) + 1`` → 显式 ConstructError（消息含 "overflow"）。[文档]
 
-    VM 算术为 i64 回绕（表达式典型值远低于边界；任意精度与性能目标冲突，
-    为文档化行为）。
+    Python int 任意精度永不溢出；VM 溢出必须显式失败而非静默回绕。
+    双重断言：异常类型 ConstructError；消息含 overflow 语义词；path 定位字段。
     """
 
     @dataclass
@@ -106,56 +109,91 @@ def test_i64_max_plus_one_wraps_to_min():
         n: int = field(Int64ub)
         c: int = rfield(Computed(n + 1))
 
-    pkt = P.parse((2**63 - 1).to_bytes(8, "big"))
-    assert pkt.n == 2**63 - 1
-    assert pkt.c == -(2**63)
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse((2**63 - 1).to_bytes(8, "big"))
+
+    assert type(exc_info.value) is ConstructError
+    assert "overflow" in str(exc_info.value)
+    assert exc_info.value.path == "root.c"
 
 
-def test_i64_min_unary_negation_wraps():
-    """一元负 ``-(i64::MIN)`` → 回绕仍为 -2**63。[基线]"""
+def test_i64_min_unary_negation_raises_overflow_error():
+    """一元负 ``-(i64::MIN)`` 数学结果 +2^63 超界 → 显式溢出错误。[文档]"""
 
     @dataclass
     class P(StructMixin):
         n: int = field(Int64sb)
         c: int = rfield(Computed(-n))
 
-    pkt = P.parse((-(2**63)).to_bytes(8, "big", signed=True))
-    assert pkt.n == -(2**63)
-    assert pkt.c == -(2**63)
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse((-(2**63)).to_bytes(8, "big", signed=True))
+
+    assert type(exc_info.value) is ConstructError
+    assert "overflow" in str(exc_info.value)
 
 
-def test_large_multiplication_wraps():
-    """``(2**63-1) * (2**63-1)`` → 回绕结果 1。[基线]"""
+def test_large_multiplication_raises_overflow_error():
+    """``(2**63-1) * (2**63-1)`` 数学结果远超 i64 → 显式溢出错误。[文档]
+
+    校验和/缩放计算的极端值静默错值是协议解析最危险的缺陷形态。
+    """
 
     @dataclass
     class P(StructMixin):
         n: int = field(Int64ub)
         c: int = rfield(Computed(n * n))
 
-    pkt = P.parse((2**63 - 1).to_bytes(8, "big"))
-    assert pkt.c == 1
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse((2**63 - 1).to_bytes(8, "big"))
+
+    assert "overflow" in str(exc_info.value)
+
+
+def test_floordiv_i64_min_by_minus_one_raises_overflow_error():
+    """``i64::MIN // -1`` 数学结果 +2^63 超界 → 显式溢出错误。[文档]
+
+    Python 任意精度下 -(-2**63) // -1 = 2**63 合法；i64 VM 必须显式报错
+    而非回绕（``%`` 侧数学结果为 0，仍合法）。
+    """
+
+    @dataclass
+    class P(StructMixin):
+        n: int = field(Int64sb)
+        q: int = rfield(Computed(n // -1))
+
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse((-(2**63)).to_bytes(8, "big", signed=True))
+
+    assert "overflow" in str(exc_info.value)
 
 
 # ---------------------------------------------------------------------------
-# 移位边界
+# 移位边界：移位量越界与值溢出均显式报错
 # ---------------------------------------------------------------------------
 
 
-def test_shl_63_boundary():
-    """``1 << 63`` → i64 位模式即 -2**63。[基线]"""
+def test_shl_63_raises_overflow_error():
+    """``1 << 63`` 数学结果 2^63 超 i64 上界 → 显式溢出错误。[文档]
+
+    Python ``1 << 63`` 是正整数 9223372036854775808；VM 静默给出 -2^63
+    属符号翻转错值。
+    """
 
     @dataclass
     class P(StructMixin):
         x: int = field(Int8ub)
         c: int = rfield(Computed(x << 63))
 
-    assert P.parse(b"\x01").c == -(2**63)
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse(b"\x01")
+
+    assert "overflow" in str(exc_info.value)
 
 
-def test_shl_64_masks_shift_amount():
-    """``1 << 64`` → 移位量按 64 掩码（等价 <<0），结果 1。[基线]
+def test_shl_64_raises_shift_overflow_error():
+    """``1 << 64`` 移位量 ≥ 64 越界 → 显式报错（含 overflow 语义词）。[文档]
 
-    VM 移位采用 wrapping 语义（移位量取低 6 位），非任意精度左移。
+    Python ``1 << 64`` 合法（任意精度）；VM 掩码移位量静默得 1 是错值。
     """
 
     @dataclass
@@ -163,18 +201,25 @@ def test_shl_64_masks_shift_amount():
         x: int = field(Int8ub)
         c: int = rfield(Computed(x << 64))
 
-    assert P.parse(b"\x01").c == 1
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse(b"\x01")
+
+    assert "overflow" in str(exc_info.value)
+    assert exc_info.value.path == "root.c"
 
 
-def test_shr_64_masks_shift_amount():
-    """``0xff >> 64`` → 等价 >>0，结果 255。[基线]"""
+def test_shr_64_raises_shift_overflow_error():
+    """``0xff >> 64`` 移位量 ≥ 64 越界 → 显式报错（与 ``<<64`` 对称）。[文档]"""
 
     @dataclass
     class P(StructMixin):
         x: int = field(Int8ub)
         c: int = rfield(Computed(x >> 64))
 
-    assert P.parse(b"\xff").c == 255
+    with pytest.raises(ConstructError) as exc_info:
+        P.parse(b"\xff")
+
+    assert "overflow" in str(exc_info.value)
 
 
 def test_negative_shift_raises_explicit_error():
@@ -200,10 +245,28 @@ def test_negative_shift_raises_explicit_error():
 # ---------------------------------------------------------------------------
 
 
-def test_bytes_length_overflow_to_negative_raises_field_length_error():
-    """``Bytes(n * 2)`` 且 n=2**62 → 积回绕为负 → FieldLengthError。[基线]
+def test_bytes_length_negative_raises_field_length_error():
+    """``Bytes(0 - n)`` 求值负长度 → FieldLengthError（长度面防御）。[基线]
 
     消费者对长度表达式结果做负值防御，显式报错而非 panic/静默截断。
+    """
+
+    @dataclass
+    class P(StructMixin):
+        n: int = field(Int8ub)
+        data: bytes = field(Bytes(0 - n))
+
+    with pytest.raises(FieldLengthError) as exc_info:
+        P.parse(b"\x05")
+
+    assert "negative" in str(exc_info.value)
+
+
+def test_bytes_length_expression_overflow_reports_overflow():
+    """``Bytes(n * 2)`` 且 n=2**62 → 表达式乘法溢出 → 显式错误（含 overflow）。[文档]
+
+    溢出在表达式求值面报错（GenericConstructError 含原因链），与长度面
+    负值防御（FieldLengthError）分层：溢出先于长度检查发生。
     """
 
     @dataclass
@@ -211,10 +274,10 @@ def test_bytes_length_overflow_to_negative_raises_field_length_error():
         n: int = field(Int64ub)
         data: bytes = field(Bytes(n * 2))
 
-    with pytest.raises(FieldLengthError) as exc_info:
+    with pytest.raises(GenericConstructError) as exc_info:
         P.parse((2**62).to_bytes(8, "big"))
 
-    assert "negative" in str(exc_info.value)
+    assert "overflow" in str(exc_info.value)
 
 
 def test_bytes_length_exceeding_stream_raises_stream_error():

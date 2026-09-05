@@ -91,7 +91,11 @@ class TestHexBytesSemantics:
     """Hex(Bytes(4)) × field()：bytes 显示包装。"""
 
     def test_hex_bytes_parse_returns_hex_displayed_bytes(self):
-        """parse：值等于原字节（bytes 子类），str() 为 unhexlify 形态。[文档]"""
+        """parse：值等于原字节（bytes 子类），str() 为 unhexlify 形态。[文档]
+
+        str() 契约：``unhexlify('...')`` 可 eval 代码形态（repr 可回粘贴
+        执行），display 场景用户应使用 bytes 值本身或 hex()。
+        """
 
         @dataclass
         class HB(StructMixin):
@@ -165,9 +169,13 @@ class TestHexDumpSemantics:
 class TestProbeSemantics:
     """Probe × rfield()：调试探针输出与流位置不扰动。"""
 
-    def test_probe_parse_prints_probe_banner_without_disturbing_stream(self):
+    def test_probe_parse_prints_probe_banner_without_disturbing_stream(self, capsys):
         """parse：stdout 含探针横幅 + "Probe, path is"行；后继字段值正确
-        （流位置不被探针扰动）。[文档+自然]"""
+        （流位置不被探针扰动）。[文档+自然]
+
+        双重断言：输出行（分隔线 + "Probe, path is root.p"）；流不扰动
+        （b 字段值正确）。
+        """
 
         @dataclass
         class PR(StructMixin):
@@ -176,11 +184,17 @@ class TestProbeSemantics:
             b: int = field(Byte)
 
         parsed = PR.parse(b"\x01\x02")
+        out = capsys.readouterr().out
+        assert "Probe, path is root.p" in out
+        assert "===" in out
         assert parsed.a == 1
         assert parsed.b == 2
 
     def test_probe_into_prints_field_value(self, capsys):
-        """into=字段名：打印该字段当前值。[文档]"""
+        """into=字段名：打印该字段当前值（repr 行精确匹配）。[文档]
+
+        into 行是字段值的 repr 独占一行（非子串误命中）：a=7 → 行 "7"。
+        """
 
         @dataclass
         class PRI(StructMixin):
@@ -191,7 +205,7 @@ class TestProbeSemantics:
         PRI.parse(b"\x07\x08")
         out = capsys.readouterr().out
         assert "Probe" in out
-        assert "7" in out
+        assert "\n7\n" in out
 
     def test_probe_lookahead_prints_hex_of_next_bytes(self, capsys):
         """lookahead=n：打印 "Stream peek: <hex>"（后继 n 字节 hex）。[文档]"""

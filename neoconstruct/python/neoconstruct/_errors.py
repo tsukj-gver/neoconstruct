@@ -30,11 +30,11 @@ Python 异常                    Rust ConstructError 变体
 
 .. note::
 
-    当前 Rust ``From<ConstructError> for PyErr`` 实现将所有变体映射为
-    ``PyValueError``（携带含 path 的完整消息）。当后续更新 Rust 侧映射为各 Python
-    异常子类后，用户可通过 ``except StreamError`` 等精确捕获。当前阶段用户可通过
-    ``except ValueError`` 或 ``except Exception`` 捕获 Rust 抛出的错误，错误消息
-    中已包含 path 信息。
+    Rust 侧在模块初始化时缓存本模块的异常类引用（指针级），``From<ConstructError>
+    for PyErr`` 按变体精确映射——用户可通过 ``except StreamError`` 等精确捕获，
+    错误消息统一为 path 非 None 时的 ``"Error in path {path}\\n{message}"``。
+    用户在回调中主动 raise 的语义异常（ExplicitError / CancelParsing）跨内核
+    边界类型保真（分类不降级为 Generic）。
 """
 
 
@@ -87,7 +87,9 @@ class FieldLengthError(ConstructError):
 class SizeofError(ConstructError):
     """大小计算错误：字段大小无法在编译期或当前上下文确定。
 
-    对应 Python construct 的 ``SizeofError``。
+    内核 sizeof 失败路径已接线此异常（如 RepeatUntil 无静态尺寸、
+    Aligned 动态 modulus）；用户面 sizeof API 尚未提供（后续版本引入时
+    此类即为该 API 的错误面）。
     """
 
 
@@ -141,6 +143,7 @@ class FieldValueMissingError(ConstructError):
     对应 Rust 的 ``ConstructError::BuildValueMissing``。错误消息含字段名
     与指引（构造实例时未提供该字段值）。错误时机＝值使用点（build），
     而非实例化——表达式派生/哑值可省字段在实例化时可省。
+    ``path`` 属性精确定位到缺值字段（如 ``root.y``，含 BitStruct 位域路径）。
     """
 
 
@@ -178,13 +181,11 @@ class StopFieldError(ConstructError):
 
 
 class IndexFieldError(ConstructError):
-    """Index 字段错误：Index 节点读取 _index 时上下文未提供。
+    """Index 字段错误：Index 字段用在非数组迭代上下文中。
 
-    对应 Python construct 的 ``IndexFieldError`` 和 Rust 的
-    ``ConstructError::IndexField``。
-
-    当前 IndexNode 在 _index 缺失时返回 Py_None（不触发此错误），
-    此异常类保留供未来严格模式使用。
+    Index 字段的语义是"当前数组迭代下标"；脱离数组迭代（Array /
+    GreedyRange / PrefixedArray / RepeatUntil 之外）时无值可言，
+    parse 显式报此错误（早暴露误用，优于静默 None 让哑值流入下游）。
     """
 
 
@@ -210,19 +211,13 @@ class StringError(ConstructError):
 class ExplicitError(ConstructError):
     """显式错误：用户主动抛出（Select / Peek 不吞掉，直接向上传播）。
 
-    对应 Python construct 的 ``ExplicitError``（core.py L89）和 Rust 的
-    ``ConstructError::Explicit``。
+    触发场景：
 
-    触发场景（Python construct 中）：
-
-    - 用户在 Adapter 回调中 ``raise ExplicitError`` → Select / Peek 不吞掉
-    - ``Error`` 构造器（core.py 未定义独立类，暂不实现）parse/build 时抛出
-
-    neoconstruct 已知差异：当前 Rust 侧
-    ``From<PyErr> for ConstructError`` 统一转 ``Generic``，无法保留 Python 侧的
-    ``ExplicitError`` 类型信息。此异常类供 Rust 内部主动构造的
-    ``ConstructError::Explicit`` 变体映射（Select / Peek 识别 Explicit 时传播），
-    用户 Python 路径的完整 parity 待后续版本修复 ``From<PyErr>`` 后达成。
+    - 用户在 Adapter 回调中 ``raise ExplicitError`` → 跨内核边界类型
+      保真，Select / Peek **透传不吞**（不像普通回调异常那样包装降级
+      或尝试下一候选）
+    - 嵌入 Struct 的 Select 内某候选回调 raise ExplicitError → 立即向
+      上传播给调用者（``except ExplicitError`` 可精确捕获）
     """
 
 

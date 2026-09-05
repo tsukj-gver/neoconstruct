@@ -115,17 +115,18 @@ impl Construct for AdapterCallbackNode {
         };
         let args = PyTuple::new_bound(py, [inner_value.bind(py), ctx_view.bind(py), &path_py]);
 
-        // Rust→Python 回调：_decode 是 bound method，含 self（adapter 实例）
-        let result =
-            self.decode
-                .call_bound(py, args, None)
-                .map_err(|e| ConstructError::Generic {
-                    message: format!(
-                        "Adapter _decode callback failed: {} (path: {})",
-                        e, path_str
-                    ),
-                    path: path_str,
-                })?;
+        // Rust→Python 回调：_decode 是 bound method，含 self（adapter 实例）。
+        // 用户语义异常（ExplicitError / CancelParsing）先分类保真（透传/顶层
+        // 捕获），其余异常包装为 Generic（携带回调名与 path 上下文）。
+        let result = self.decode.call_bound(py, args, None).map_err(|e| {
+            crate::error::classify_user_pyerr(&e, py).unwrap_or(ConstructError::Generic {
+                message: format!(
+                    "Adapter _decode callback failed: {} (path: {})",
+                    e, path_str
+                ),
+                path: path_str,
+            })
+        })?;
         Ok(result)
     }
 
@@ -146,16 +147,16 @@ impl Construct for AdapterCallbackNode {
         };
         let args = PyTuple::new_bound(py, [obj, ctx_view.bind(py), &path_py]);
 
-        let encoded =
-            self.encode
-                .call_bound(py, args, None)
-                .map_err(|e| ConstructError::Generic {
-                    message: format!(
-                        "Adapter _encode callback failed: {} (path: {})",
-                        e, path_str
-                    ),
-                    path: path_str,
-                })?;
+        let encoded = self.encode.call_bound(py, args, None).map_err(|e| {
+            // 用户语义异常先分类保真（与 _decode 回调同判据），其余包装 Generic。
+            crate::error::classify_user_pyerr(&e, py).unwrap_or(ConstructError::Generic {
+                message: format!(
+                    "Adapter _encode callback failed: {} (path: {})",
+                    e, path_str
+                ),
+                path: path_str,
+            })
+        })?;
 
         // 把 _encode 结果交给 subcon.build（encoded 是 owned Py<PyAny>，需 bind）
         self.subcon.build(py, encoded.bind(py), stream, ctx, path)

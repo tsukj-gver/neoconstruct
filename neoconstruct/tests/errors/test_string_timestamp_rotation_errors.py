@@ -119,6 +119,35 @@ def test_timestamp_error_on_none_subcon():
     assert "subcon" in str(exc_info.value).lower()
 
 
+def test_timestamp_error_on_non_msdos_unit_string():
+    """Timestamp unit 传非 "msdos" 字符串 → 构造期 TimestampError。[文档]
+
+    str 形态仅 "msdos" 合法；其他字符串（如 "ms"）是单位拼写误用，
+    在宏构造期拒绝（fail-fast），而非延迟到 parse 期 obj * unit 的
+    TypeError。双重断言：类型 TimestampError；消息含 unit 与实际值。
+    """
+
+    with pytest.raises(TimestampError) as exc_info:
+        Timestamp(Int32ub, unit="ms", epoch=1970)
+
+    assert "unit" in str(exc_info.value)
+    assert "msdos" in str(exc_info.value)
+
+
+def test_timestamp_error_on_non_msdos_epoch_string():
+    """Timestamp epoch 传非 "msdos" 字符串 → 构造期 TimestampError。[文档]
+
+    与 unit 同判据：str 形态仅 "msdos" 合法（int 表年 / Arrow 实例另两条
+    合法路径）。
+    """
+
+    with pytest.raises(TimestampError) as exc_info:
+        Timestamp(Int32ub, unit=1, epoch="unix")
+
+    assert "epoch" in str(exc_info.value)
+    assert "msdos" in str(exc_info.value)
+
+
 # ---------------------------------------------------------------------------
 # RotationError：ProcessRotateLeft 参数/数据长度非法
 # ---------------------------------------------------------------------------

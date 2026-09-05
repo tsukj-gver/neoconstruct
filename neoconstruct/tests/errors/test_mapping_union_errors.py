@@ -96,14 +96,20 @@ def test_enum_parse_unknown_value_falls_back_to_int():
 
 
 def test_enum_parse_known_label_roundtrip():
-    """Enum 命中 label：parse → 枚举字符串（int() 可取原值），build 对称。[文档]"""
+    """Enum 命中 label：parse → 枚举字符串（int() 可取原值），build 对称。[文档]
+
+    双重断言（str/int 两面独立断言，不用析取丧失区分度）：
+    str(op) == "READ" 且 op == "READ"（枚举字符串身份）；int(op) == 1；
+    build 对 label 与 int 两种形态对称。
+    """
 
     @dataclass
     class P(StructMixin):
         op: Any = field(Enum(Int8ub, READ=1, WRITE=2))
 
     pkt = P.parse(b"\x01")
-    assert str(pkt.op) == "READ" or pkt.op == 1
+    assert str(pkt.op) == "READ"
+    assert pkt.op == "READ"
     assert int(pkt.op) == 1
     assert P(op="READ").build() == b"\x01"
     assert P(op=1).build() == b"\x01"

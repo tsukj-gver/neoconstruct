@@ -899,7 +899,7 @@ from neoconstruct import FlagsEnum, Int8ub
 
 fe = FlagsEnum(Int8ub, READ=1, WRITE=2, EXEC=4)
 fe.parse(b"\x03")
-# -> dict(_flagsenum=True, READ=True, WRITE=True, EXEC=False)
+# -> dict(READ=True, WRITE=True, EXEC=False)
 fe.build(dict(READ=True, WRITE=True))   # -> b"\x03"
 ```
 

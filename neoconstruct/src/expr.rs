@@ -22,8 +22,10 @@
 //!
 //! ## 整数溢出
 //!
-//! 所有算术/位运算使用 `wrapping_*` 语义（如 [`i64::wrapping_add`]），对齐
-//! Python 无溢出异常的行为。编译期不做溢出检查。
+//! 算术/移位运算采用 **checked** 语义：数学结果超出 i64 表示范围（或移位量
+//! ≥ 64）时返回 [`ConstructError::ExprOverflow`]（消息含 "overflow" 语义词），
+//! **绝不静默回绕**。Python int 是任意精度永不溢出，回绕会产生符号翻转
+//! 错值（协议字段缩放/校验和计算最危险的缺陷形态），显式失败优于静默错值。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -48,14 +50,16 @@ pub enum ExprOp {
     Const(i64),
 
     // --- 算术运算（二元，弹出栈顶两个 a/b，压入结果）---
-    /// 栈顶弹出 b、a，压入 `a + b`（[`i64::wrapping_add`]，对齐 Python 无溢出异常语义）。
+    /// 栈顶弹出 b、a，压入 `a + b`（[`i64::checked_add`]，溢出返回
+    /// [`ConstructError::ExprOverflow`]）。
     Add,
-    /// 栈顶弹出 b、a，压入 `a - b`（[`i64::wrapping_sub`]）。
+    /// 栈顶弹出 b、a，压入 `a - b`（[`i64::checked_sub`]，溢出报错）。
     Sub,
-    /// 栈顶弹出 b、a，压入 `a * b`（[`i64::wrapping_mul`]）。
+    /// 栈顶弹出 b、a，压入 `a * b`（[`i64::checked_mul`]，溢出报错）。
     Mul,
     /// 栈顶弹出 b、a，压入 `a // b`（向负无穷取整，对齐 Python `//` 语义；
-    /// `b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
+    /// `b == 0` 返回 [`ConstructError::ExprDivByZero`]；`i64::MIN / -1`
+    /// 溢出返回 [`ConstructError::ExprOverflow`]）。
     FloorDiv,
     /// 栈顶弹出 b、a，压入 `a % b`（结果符号与除数一致，对齐 Python `%` 语义；
     /// `b == 0` 返回 [`ConstructError::ExprDivByZero`]）。
@@ -68,13 +72,15 @@ pub enum ExprOp {
     BitOr,
     /// 栈顶弹出 b、a，压入 `a ^ b`。
     BitXor,
-    /// 栈顶弹出 b、a，压入 `a << b`（[`i64::wrapping_shl`]，b 被 cast 为 u32）。
+    /// 栈顶弹出 b、a，压入 `a << b`（b < 0 报负移位错；b >= 64 或数学结果
+    /// 超出 i64 返回 [`ConstructError::ExprOverflow`]）。
     Shl,
-    /// 栈顶弹出 b、a，压入 `a >> b`（[`i64::wrapping_shr`]，b 被 cast 为 u32）。
+    /// 栈顶弹出 b、a，压入 `a >> b`（b < 0 报负移位错；b >= 64 返回
+    /// [`ConstructError::ExprOverflow`]）。
     Shr,
 
     // --- 一元运算 ---
-    /// 栈顶弹出 a，压入 `-a`（[`i64::wrapping_neg`]）。
+    /// 栈顶弹出 a，压入 `-a`（[`i64::checked_neg`]，`-(i64::MIN)` 溢出报错）。
     Neg,
     /// 栈顶弹出 a，压入 `!a`（按位取反）。
     Not,
@@ -304,6 +310,7 @@ const VM_STACK_SLOTS: usize = 32;
 /// - [`ConstructError::ExprFieldMissing`]：`GetInt` 引用的槽位为 null（未设置）
 /// - [`ConstructError::ExprContext`]：`ctx.expr_values_buf` 未初始化（placeholder），无法求值
 /// - [`ConstructError::ExprDivByZero`]：`FloorDiv` / `Mod` 除数为 0
+/// - [`ConstructError::ExprOverflow`]：算术/移位结果超出 i64 范围（含移位量 ≥ 64）
 /// - [`ConstructError::ExprStackUnderflow`]：栈下溢（指令序列不合法，编译期保证不会发生）
 /// - [`ConstructError::Generic`]：传入空程序，或 `max_stack` 超过 [`VM_STACK_SLOTS`]（编译期保证不发生）
 pub fn eval_expr_int(
@@ -347,18 +354,58 @@ pub fn eval_expr_int(
                 stack_len += 1;
             }
             // 二元算术
-            // 注意：i64 wrapping 语义——溢出时静默回绕（如 i64::MAX + 1 = i64::MIN）。
-            // Python int 是任意精度，永不溢出。表达式 VM 用于字段长度计算（典型值 < 2^32），
-            // 实际场景不触及 i64 边界。如需精确对齐 Python，需引入 num_bigint（堆分配，
-            // 与性能目标冲突）。
-            ExprOp::Add => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_add)?,
-            ExprOp::Sub => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_sub)?,
-            ExprOp::Mul => binop_fixed(&mut stack_buf, &mut stack_len, i64::wrapping_mul)?,
+            // checked 语义：i64 溢出显式报错（Python int 任意精度永不溢出，
+            // 静默回绕会产生符号翻转错值——协议字段缩放/校验和计算最危险
+            // 的缺陷形态）。消息统一含 "overflow" 语义词。
+            ExprOp::Add => {
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
+                match a.checked_add(b) {
+                    Some(v) => push_fixed(&mut stack_buf, &mut stack_len, v),
+                    None => {
+                        return Err(ConstructError::ExprOverflow {
+                            message: format!("integer overflow: {} + {} does not fit in i64", a, b),
+                            path: String::new(),
+                        })
+                    }
+                }
+            }
+            ExprOp::Sub => {
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
+                match a.checked_sub(b) {
+                    Some(v) => push_fixed(&mut stack_buf, &mut stack_len, v),
+                    None => {
+                        return Err(ConstructError::ExprOverflow {
+                            message: format!("integer overflow: {} - {} does not fit in i64", a, b),
+                            path: String::new(),
+                        })
+                    }
+                }
+            }
+            ExprOp::Mul => {
+                let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
+                match a.checked_mul(b) {
+                    Some(v) => push_fixed(&mut stack_buf, &mut stack_len, v),
+                    None => {
+                        return Err(ConstructError::ExprOverflow {
+                            message: format!("integer overflow: {} * {} does not fit in i64", a, b),
+                            path: String::new(),
+                        })
+                    }
+                }
+            }
             ExprOp::FloorDiv => {
                 let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
                 if b == 0 {
                     return Err(ConstructError::ExprDivByZero {
                         message: "expression division by zero".to_string(),
+                        path: String::new(),
+                    });
+                }
+                // i64::MIN / -1 数学结果 +2^63 超出 i64 范围（Python 任意精度
+                // 合法），显式报错而非回绕。
+                if a == i64::MIN && b == -1 {
+                    return Err(ConstructError::ExprOverflow {
+                        message: format!("integer overflow: {} // {} does not fit in i64", a, b),
                         path: String::new(),
                     });
                 }
@@ -382,12 +429,32 @@ pub fn eval_expr_int(
             ExprOp::BitAnd => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a & b)?,
             ExprOp::BitOr => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a | b)?,
             ExprOp::BitXor => binop_fixed(&mut stack_buf, &mut stack_len, |a, b| a ^ b)?,
-            // Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为。
+            // Python `a << b` 当 b < 0 时抛 ValueError，此处对齐行为；
+            // b >= 64 是移位量越界（Python 任意精度合法，i64 VM 掩码移位量
+            // 会静默错值），显式报错；值超界（如 1 << 63 > i64::MAX）显式报错。
             ExprOp::Shl => {
                 let (a, b) = pop2_fixed(&stack_buf, &mut stack_len)?;
                 if b < 0 {
                     return Err(ConstructError::Generic {
                         message: format!("negative shift count: {}", b),
+                        path: String::new(),
+                    });
+                }
+                if b >= i64::BITS as i64 {
+                    return Err(ConstructError::ExprOverflow {
+                        message: format!(
+                            "shift overflow: shift amount {} out of range 0..{}",
+                            b,
+                            i64::BITS - 1
+                        ),
+                        path: String::new(),
+                    });
+                }
+                // 数学结果 a * 2^b 必须落在 [i64::MIN, i64::MAX]：
+                // 正侧 a <= i64::MAX >> b；负侧 a >= i64::MIN >> b（算术右移）。
+                if a > (i64::MAX >> b) || a < (i64::MIN >> b) {
+                    return Err(ConstructError::ExprOverflow {
+                        message: format!("integer overflow: {} << {} does not fit in i64", a, b),
                         path: String::new(),
                     });
                 }
@@ -401,6 +468,17 @@ pub fn eval_expr_int(
                         path: String::new(),
                     });
                 }
+                if b >= i64::BITS as i64 {
+                    return Err(ConstructError::ExprOverflow {
+                        message: format!(
+                            "shift overflow: shift amount {} out of range 0..{}",
+                            b,
+                            i64::BITS - 1
+                        ),
+                        path: String::new(),
+                    });
+                }
+                // 算术右移收缩值域，0 <= b < 64 时永不溢出。
                 push_fixed(&mut stack_buf, &mut stack_len, a.wrapping_shr(b as u32));
             }
             // 一元
@@ -411,7 +489,19 @@ pub fn eval_expr_int(
                     });
                 }
                 let i = stack_len - 1;
-                stack_buf[i] = stack_buf[i].wrapping_neg();
+                match stack_buf[i].checked_neg() {
+                    Some(v) => stack_buf[i] = v,
+                    // -(i64::MIN) 数学结果 +2^63 超界（Python 合法），显式报错。
+                    None => {
+                        return Err(ConstructError::ExprOverflow {
+                            message: format!(
+                                "integer overflow: -{} does not fit in i64",
+                                stack_buf[i]
+                            ),
+                            path: String::new(),
+                        })
+                    }
+                }
             }
             ExprOp::Not => {
                 if stack_len == 0 {
@@ -550,7 +640,8 @@ fn pop2_fixed(
 
 /// Python 风格的向下取整除法（`//`），对齐 Python `int.__floordiv__`。
 ///
-/// 使用 `wrapping_*` 算术，永不 panic（即使 `i64::MIN / -1` 也不触发硬件异常）。
+/// 使用 `wrapping_*` 算术，永不 panic。调用方已保证 `b != 0` 且
+/// 非 `i64::MIN / -1`（该组合由调用方前置检查报 `ExprOverflow`）。
 /// 向负无穷取整，区别于 Rust `/` 的向零取整。
 ///
 /// 示例（与 Python 一致）：`floor_div(-7, 2) = -4`，`floor_div(7, -2) = -4`。
@@ -948,22 +1039,25 @@ mod tests {
     }
 
     #[test]
-    fn eval_floor_div_mod_i64_min_div_minus_one() {
-        // i64::MIN / -1 和 i64::MIN % -1：数学结果分别为 9223372036854775808 和 0。
-        // Python 不会报错（任意精度），i64 VM 中 FloorDiv wrapping，Mod 为 0。
-        // 确保此边界场景不 panic。
+    fn eval_floor_div_i64_min_div_minus_one_overflows() {
+        // i64::MIN / -1 数学结果 +2^63 超出 i64 范围（Python 任意精度合法）。
+        // checked 语义：显式 ExprOverflow（消息含 overflow），不静默回绕。
         with_python(|py| {
             let ctx = Context::placeholder(py);
-            // i64::MIN / -1
             let prog_div = ExprProgram::new(vec![
                 ExprOp::Const(i64::MIN),
                 ExprOp::Const(-1),
                 ExprOp::FloorDiv,
             ]);
-            let result_div = eval_expr_int(&prog_div, &ctx, py).expect("min div -1");
-            assert_eq!(result_div, i64::MIN); // wrapping: 9223372036854775808 mod 2^64
+            let err = eval_expr_int(&prog_div, &ctx, py).expect_err("min div -1 overflows");
+            match err {
+                ConstructError::ExprOverflow { message, .. } => {
+                    assert!(message.contains("overflow"), "message: {}", message);
+                }
+                other => panic!("expected ExprOverflow, got {:?}", other),
+            }
 
-            // i64::MIN % -1
+            // i64::MIN % -1 数学结果为 0（合法，不报错）。
             let prog_mod = ExprProgram::new(vec![
                 ExprOp::Const(i64::MIN),
                 ExprOp::Const(-1),
@@ -971,6 +1065,69 @@ mod tests {
             ]);
             let result_mod = eval_expr_int(&prog_mod, &ctx, py).expect("min mod -1");
             assert_eq!(result_mod, 0);
+        });
+    }
+
+    #[test]
+    fn eval_add_sub_mul_overflow_returns_expr_overflow() {
+        // i64::MAX + 1 / i64::MIN - 1 / i64::MAX * i64::MAX → ExprOverflow。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            for (a, b, op) in [
+                (i64::MAX, 1i64, ExprOp::Add),
+                (i64::MIN, 1i64, ExprOp::Sub),
+                (i64::MAX, i64::MAX, ExprOp::Mul),
+            ] {
+                let prog = ExprProgram::new(vec![ExprOp::Const(a), ExprOp::Const(b), op]);
+                let err = eval_expr_int(&prog, &ctx, py).expect_err("should overflow");
+                assert!(
+                    matches!(err, ConstructError::ExprOverflow { .. }),
+                    "op {:?} should overflow, got {:?}",
+                    op,
+                    err
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn eval_neg_i64_min_overflows() {
+        // -(i64::MIN) 数学结果 +2^63 超界 → ExprOverflow。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            let prog = ExprProgram::new(vec![ExprOp::Const(i64::MIN), ExprOp::Neg]);
+            let err = eval_expr_int(&prog, &ctx, py).expect_err("neg min overflows");
+            assert!(matches!(err, ConstructError::ExprOverflow { .. }));
+        });
+    }
+
+    #[test]
+    fn eval_shift_amount_and_value_overflow_return_expr_overflow() {
+        // 1 << 63（值超界）/ 1 << 64（移位量越界）/ -1 >> 64（移位量越界）
+        // → ExprOverflow；-1 << 63（数学结果恰为 i64::MIN）合法。
+        with_python(|py| {
+            let ctx = Context::placeholder(py);
+            for (a, b, op) in [
+                (1i64, 63i64, ExprOp::Shl),
+                (1i64, 64i64, ExprOp::Shl),
+                (-1i64, 64i64, ExprOp::Shr),
+                (2i64, 63i64, ExprOp::Shl),
+            ] {
+                let prog = ExprProgram::new(vec![ExprOp::Const(a), ExprOp::Const(b), op]);
+                let err = eval_expr_int(&prog, &ctx, py).expect_err("should overflow");
+                assert!(
+                    matches!(err, ConstructError::ExprOverflow { .. }),
+                    "{} {:?} {} should overflow, got {:?}",
+                    a,
+                    op,
+                    b,
+                    err
+                );
+            }
+            // -1 << 63 == i64::MIN（合法边界，不报错）。
+            let prog_ok = ExprProgram::new(vec![ExprOp::Const(-1), ExprOp::Const(63), ExprOp::Shl]);
+            let v = eval_expr_int(&prog_ok, &ctx, py).expect("legal boundary shift");
+            assert_eq!(v, i64::MIN);
         });
     }
 

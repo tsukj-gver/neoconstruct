@@ -4,7 +4,8 @@
 - callable 终止条件在描述符创建时被拒绝（编译期 ``CompilationError``）
 - 终止表达式路径 parse/build 对称：Element 引用 / 跨字段哨兵 / 负数哨兵
 - 首元素即满足哨兵 → 立即停止（单元素 list）
-- 全流无哨兵到 EOF → ``StreamError``（元素级 path）
+- 全流无哨兵到 EOF → ``StreamError``（元素级 path；哨兵是组帧契约，
+  EOF 无哨兵即报错——[文档] RepeatUntil docstring 契约）
 - build 无元素满足终止条件 → ``RepeatError``
 - Prefixed 子流内 RepeatUntil（子流边界与哨兵交互）
 
@@ -166,9 +167,12 @@ def test_first_element_satisfies_terminator_stops_immediately():
 
 
 def test_eof_without_sentinel_raises_stream_error_with_element_path():
-    """全流无哨兵至 EOF → StreamError，path 定位到首个失败元素索引。[基线]
+    """全流无哨兵至 EOF → StreamError，path 定位到首个失败元素索引。[文档]
 
-    双重断言：异常类型 StreamError；path == root.items[3]（元素级定位）。
+    EOF 行为契约：RepeatUntil 的哨兵是组帧契约（build 侧同样强制"某元素
+    必须满足"），整流读尽仍未出现满足元素即报错——"读到 EOF 停"是
+    GreedyRange 的语义，两者不可混。双重断言：类型 StreamError；
+    path == root.items[3]（元素级定位）。
     """
 
     @dataclass

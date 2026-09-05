@@ -350,9 +350,12 @@ impl super::Construct for RepeatUntilNode {
     }
 
     fn sizeof(&self, _ctx: &Context<'_>) -> Result<usize, ConstructError> {
-        // 对齐 Python `RepeatUntil._sizeof` L2703-2704：永远 SizeofError。
-        Err(ConstructError::Generic {
-            message: "RepeatUntil size is undefined".to_string(),
+        // 元素数量由终止表达式运行时决定，无静态尺寸 → SizeofError
+        // （错误分类学与 Python 侧 SizeofError 类接线一致）。
+        Err(ConstructError::Sizeof {
+            message: "RepeatUntil size is undefined (element count is determined \
+                      by the terminator expression at runtime)"
+                .to_string(),
             path: String::new(),
         })
     }
@@ -776,16 +779,16 @@ mod tests {
 
     #[test]
     fn sizeof_always_returns_error() {
-        // sizeof 永远 Err
+        // sizeof 永远 Sizeof 变体（元素数量运行时未知，映射 Python SizeofError）
         with_py(|py| {
             let ctx = Context::new_root(py).expect("ctx");
             let node = make_ru_gt(byte_node(), 5, 0);
             let err = node.sizeof(&ctx).expect_err("should fail");
             match err {
-                ConstructError::Generic { message, .. } => {
+                ConstructError::Sizeof { message, .. } => {
                     assert!(message.contains("RepeatUntil"), "got: {}", message);
                 }
-                other => panic!("expected Generic, got {:?}", other),
+                other => panic!("expected Sizeof, got {:?}", other),
             }
         });
     }
