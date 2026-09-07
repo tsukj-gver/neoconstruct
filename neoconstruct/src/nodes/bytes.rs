@@ -10,7 +10,8 @@
 //!
 //! ## 已知约束
 //!
-//! build 时**仅接受 `bytes` 输入**。int/bytearray 转换暂不支持。
+//! build 时接受 bytes-like 输入（`bytes` / `bytearray` / `memoryview`，
+//! 语义等同 `bytes`）；int / str 等其他类型拒绝。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -161,20 +162,16 @@ impl super::Construct for BytesNode {
         ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 已知约束：仅接受 bytes（int/bytearray 转换暂不支持）
-        let py_bytes = obj
-            .downcast::<PyBytes>()
-            .map_err(|_| ConstructError::Generic {
+        // 接受 bytes / bytearray / memoryview（语义等同 bytes）。
+        let data = super::common::extract_bytes_like(py, obj).map_err(|type_name| {
+            ConstructError::Generic {
                 message: format!(
                     "expected bytes object for Bytes field, received non-bytes value of type {}",
-                    obj.get_type()
-                        .name()
-                        .map(|n| n.to_string())
-                        .unwrap_or_else(|_| "<unknown>".to_string()),
+                    type_name,
                 ),
                 path: path.to_string(),
-            })?;
-        let data = py_bytes.as_bytes();
+            }
+        })?;
 
         // 校验长度（对齐 Python construct 的 stream_write 行为）。
         let expected = match &self.length {
@@ -206,7 +203,7 @@ impl super::Construct for BytesNode {
                 path: path.to_string(),
             });
         }
-        stream.write(data);
+        stream.write(&data);
         Ok(())
     }
 
@@ -633,8 +630,8 @@ mod tests {
     }
 
     #[test]
-    fn build_rejects_bytearray_input() {
-        // 已知约束：bytearray 转换暂不支持
+    fn build_accepts_bytearray_input() {
+        // bytearray 与 bytes 同语义（bytes-like 接受链）
         with_py(|py| {
             let node = BytesNode::new_const(5);
             let obj = py
@@ -643,10 +640,48 @@ mod tests {
             let mut stream = BuildStream::new();
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), b"hello");
+        });
+    }
+
+    #[test]
+    fn build_accepts_memoryview_input() {
+        // memoryview 与 bytes 同语义（bytes-like 接受链）
+        with_py(|py| {
+            let node = BytesNode::new_const(5);
+            let obj = py
+                .eval_bound("memoryview(b'world')", None, None)
+                .expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), b"world");
+        });
+    }
+
+    #[test]
+    fn build_bytearray_length_mismatch_returns_field_length_error() {
+        // bytes-like 输入同样参与长度校验
+        with_py(|py| {
+            let node = BytesNode::new_const(4);
+            let obj = py.eval_bound("bytearray(b'ab')", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
             let err = node
                 .build(py, &obj, &mut stream, &mut ctx, &mut path)
                 .expect_err("should fail");
-            assert!(matches!(err, ConstructError::Generic { .. }));
+            match err {
+                ConstructError::FieldLength { message, .. } => {
+                    assert!(message.contains("expected 4"), "got: {}", message);
+                    assert!(message.contains("got 2"), "got: {}", message);
+                }
+                other => panic!("expected FieldLength, got {:?}", other),
+            }
         });
     }
 

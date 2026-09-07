@@ -154,6 +154,28 @@ def test_format_field_error_path_includes_field_name():
     assert "x" in err.path
 
 
+def test_format_field_error_message_readable_no_internal_format_string():
+    """build 越界错误消息用可读格式描述，不泄漏内部格式串。
+
+    消息应包含用户可读描述（如"大端无符号 16 位整数"），
+    不含 Python struct 内部格式串（struct '>H' 等）。
+    """
+
+    @dataclass
+    class M(StructMixin):
+        v: int = field(Int16ub)
+
+    instance = M(v=70000)  # 超出 u16 范围
+    with pytest.raises(FormatFieldError) as exc_info:
+        instance.build()
+
+    msg = str(exc_info.value)
+    assert "16 位整数" in msg
+    assert "struct" not in msg
+    assert "'>" not in msg and "'<" not in msg
+    assert "70000" in msg
+
+
 # ---------------------------------------------------------------------------
 # FieldLengthError：Bytes(n) — build 校验长度（对齐 Python construct stream_write）
 #

@@ -27,15 +27,18 @@ pub use expr::{eval_expr_any, eval_expr_bool, eval_expr_int, ExprOp, ExprProgram
 
 /// 返回 neoconstruct Rust 内核的版本号字符串。
 ///
+/// 取自 Cargo.toml 的 `[package] version`（编译期常量），与 maturin
+/// 安装时的包版本同源，避免双处硬编码漂移。
+///
 /// 用于验证 Python↔Rust FFI 链路是否可用：
 ///
 /// ```python
 /// from neoconstruct._neoconstruct_core import version
-/// print(version())  # "0.1.0"
+/// print(version())  # 与 Cargo.toml 版本一致
 /// ```
 #[pyfunction]
 fn version() -> &'static str {
-    "0.1.0"
+    env!("CARGO_PKG_VERSION")
 }
 
 /// 注册 Python 扩展模块 `neoconstruct._neoconstruct_core`。
@@ -183,7 +186,7 @@ mod tests {
 
     #[test]
     fn version_returns_expected_string() {
-        assert_eq!(version(), "0.1.0");
+        assert_eq!(version(), env!("CARGO_PKG_VERSION"));
     }
 
     #[test]

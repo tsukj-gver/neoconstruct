@@ -132,7 +132,14 @@ impl super::Construct for PrefixedArrayNode {
 
         // 4. 内联 Array 逻辑（避免构造临时 ArrayNode 实例）。
         // PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList。
-        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(count);
+        // count 来自流中数据（典型不可信输入），预分配容量按流剩余长度
+        // 封顶，防止巨额分配 abort；超出部分由逐元素 parse 自然报 Stream 错误。
+        let capacity = super::common::capped_result_capacity(
+            count,
+            self.inner.sizeof(ctx).ok(),
+            stream.remaining(),
+        );
+        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(capacity);
 
         // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
@@ -453,6 +460,25 @@ mod tests {
                 }
                 other => panic!("expected Range, got {:?}", other),
             }
+        });
+    }
+
+    #[test]
+    fn parse_huge_stream_count_returns_stream_error_not_abort() {
+        // 流内 count=0xFFFFFFFF（典型恶意/损坏长度字段）：预分配按流剩余长度
+        // 封顶，解析在流耗尽处返回可 catch 的 Stream 错误（而非分配失败 abort）。
+        with_py(|py| {
+            let countfield = crate::nodes::Node::FormatField(FormatFieldNode::new(
+                PythonFormat::UnsignedInt32Big,
+            ));
+            let node = PrefixedArrayNode::new(countfield, byte_node());
+            let mut stream = ParseStream::new(&[0xFF, 0xFF, 0xFF, 0xFF, 0x01, 0x02]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Stream { .. }));
         });
     }
 

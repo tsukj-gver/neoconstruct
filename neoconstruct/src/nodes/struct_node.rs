@@ -166,6 +166,7 @@ pub enum FieldMode {
 /// | `Tell` | `stream.tell()`；build no-op |
 /// | `Void` | 哑值 None（Padding/Pass：节点自身写 pattern 字节/空） |
 /// | `Control` | 透传显式实例值/parse 产出值；缺省（None 或属性不存在）产哑值 None——实例值不参与字节编码，Peek no-op / Seek 移针 / Checksum 重算 / Probe 打印由节点自理 |
+/// | `Conditional` | 条件根（IfThenElse/Switch/Select）：实例值（含 None 与属性不存在）一律透传给节点 build——分支自治（Pass 分支不写字节；实值分支收到 None 由分支节点自然报错） |
 /// | `Index` | `ctx.index()`（build 期循环状态，无实例值语义） |
 #[derive(Debug)]
 pub enum ValueKind {
@@ -193,6 +194,12 @@ pub enum ValueKind {
     /// resolve 产透传值（显式实例值/parse 产出值透传，缺省产哑值 None——
     /// 属性不存在等同缺省），build 值语义由节点自理（实例值不参与字节编码）。
     Control,
+    /// 条件根（IfThenElse/Switch/Select）：resolve 对 None（含属性不存在）不报错，
+    /// 透传给节点 build——分支自治（Pass 分支不写字节；实值分支而值为 None 由
+    /// 分支节点自然报错，防"改了条件没给值"的不一致静默）。None ≡ 缺席，
+    /// 来源无关（parse 产出/显式传 None/属性不存在同语义）；ctx 写该透传值
+    /// （与 parse 对称）。
+    Conditional,
     /// Index：resolve 产 ctx.index()。
     Index,
 }
@@ -204,7 +211,9 @@ impl ValueKind {
     /// ConstNode→`Const`、DefaultNode→`Default`、RebuildNode→`Rebuild`、
     /// ComputedNode→`Computed`、TellNode→`Tell`、Padding/BitPadding/Pass→`Void`、
     /// StopIf/Check/Terminated/Element/Peek/Seek/Checksum/Probe→`Control`、
-    /// IndexNode→`Index`、其余（含一切包装器根）→`Instance{expr_derived}`。
+    /// IfThenElse/Switch/Select→`Conditional`（条件根：None 透传，分支自治）、
+    /// IndexNode→`Index`、其余（含一切包装器根，如 Prefixed 内嵌 If）→
+    /// `Instance{expr_derived}`。
     ///
     /// # 参数
     ///
@@ -227,6 +236,7 @@ impl ValueKind {
             | Node::Seek(_)
             | Node::Checksum(_)
             | Node::Probe(_) => ValueKind::Control,
+            Node::IfThenElse(_) | Node::Switch(_) | Node::Select(_) => ValueKind::Conditional,
             Node::Index(_) => ValueKind::Index,
             _ => ValueKind::Instance { expr_derived },
         }
@@ -239,7 +249,8 @@ impl ValueKind {
     ///   可变对象 → `Optional`（防 dataclass 共享可变默认值）。
     /// - `Default`/`Rebuild`/`Computed` 且程序可常量折叠（ops == [Const(c)]）
     ///   → `Value(c)`；其余 → `Optional`。
-    /// - `Tell`/`Void`/`Control`/`Index` → `Optional`（实例化可省哑值）。
+    /// - `Tell`/`Void`/`Control`/`Conditional`/`Index` → `Optional`
+    ///   （实例化可省——条件根 None 透传分支自治，值可由分支语义决定）。
     /// - `Instance{expr_derived: false}` → `Required`（必填 positional）。
     /// - `Instance{expr_derived: true}` → `Optional`（缺值错误后移到 build）。
     pub fn init_default(&self, py: Python<'_>) -> InitDefault {
@@ -258,9 +269,11 @@ impl ValueKind {
                     InitDefault::Optional
                 }
             }
-            ValueKind::Tell | ValueKind::Void | ValueKind::Control | ValueKind::Index => {
-                InitDefault::Optional
-            }
+            ValueKind::Tell
+            | ValueKind::Void
+            | ValueKind::Control
+            | ValueKind::Conditional
+            | ValueKind::Index => InitDefault::Optional,
             ValueKind::Instance { expr_derived } => {
                 if *expr_derived {
                     InitDefault::Optional
@@ -712,13 +725,17 @@ impl Construct for StructNode {
                 }
                 ValueKind::Tell => stream.tell().into_py(py).into_bound(py),
                 ValueKind::Void => py.None().into_bound(py),
-                ValueKind::Control => {
-                    // 透传显式实例值/parse 产出值；缺省（None 或 AttributeError，
-                    // RO 面 init=False 实例可能无属性——属性缺失 ≡ 哑值 None）
-                    // 产哑值 None；其余 getattr 错误包装为 Generic（与
-                    // Const/Default/Instance 同判据，错误判据单源收敛）。
-                    // 节点编码忽略实例值（Peek no-op / Seek 移针 / Checksum 重算），
-                    // ctx 写透传值使后继表达式读到有效值。
+                ValueKind::Control | ValueKind::Conditional => {
+                    // 透传实例值；缺省（None 或 AttributeError，RO 面 init=False
+                    // 实例可能无属性——属性缺失 ≡ 缺省）产哑值 None 透传；其余
+                    // getattr 错误包装为 Generic（与 Instance/Const/Default 同判据，
+                    // 错误判据单源收敛）。
+                    // - Control：实例值不参与字节编码（Peek no-op / Seek 移针 /
+                    //   Checksum 重算），ctx 写透传值使后继表达式读到有效值。
+                    // - Conditional（条件根 IfThenElse/Switch/Select）：None 透传
+                    //   给节点 build，分支自治——Pass 分支不写字节；实值分支收到
+                    //   None 由分支节点自然报错（防"改了条件没给值"的静默不一致）。
+                    //   ctx 写透传值（含 None），与 parse 对称。
                     match obj.getattr(field.name.py_name().bind(py)) {
                         Ok(v) => v,
                         Err(e) if e.is_instance_of::<pyo3::exceptions::PyAttributeError>(py) => {
@@ -1836,6 +1853,218 @@ mod tests {
             let c: i64 = inst.getattr("c").unwrap().extract().unwrap();
             assert_eq!(a, 0x10);
             assert_eq!(c, 0x20);
+        });
+    }
+
+    // ======================================================================
+    // Conditional 分类（条件根 IfThenElse/Switch/Select：None 透传）
+    // ======================================================================
+
+    /// 构造 `x > 0` 条件表达式程序（引用 field 0）。
+    fn gt_zero_expr() -> crate::expr::ExprProgram {
+        use crate::expr::{ExprOp, ExprProgram};
+        ExprProgram::new(vec![ExprOp::GetInt(0), ExprOp::Const(0), ExprOp::Gt])
+    }
+
+    /// 构造 If(x>0, Byte) 根节点（else=Pass）。
+    fn if_gt_zero_node() -> Node {
+        use crate::nodes::if_then_else::IfThenElseNode;
+        use crate::nodes::pass::PassNode;
+        use crate::nodes::stop_if::StopIfCondition;
+        Node::IfThenElse(IfThenElseNode::new(
+            StopIfCondition::Expr(gt_zero_expr()),
+            u8_node(),
+            Node::Pass(PassNode::new()),
+        ))
+    }
+
+    #[test]
+    fn classify_conditional_roots() {
+        // 条件根单点判定：IfThenElse/Switch/Select 根 → Conditional
+        // （expr_derived 参数不影响该分支——分类在 Conditional 臂提前收敛）。
+        with_py(|py| {
+            use crate::nodes::if_then_else::IfThenElseNode;
+            use crate::nodes::pass::PassNode;
+            use crate::nodes::select::SelectNode;
+            use crate::nodes::stop_if::StopIfCondition;
+            use crate::nodes::switch::{SwitchKey, SwitchNode};
+
+            let ite = Node::IfThenElse(IfThenElseNode::new(
+                StopIfCondition::Always,
+                u8_node(),
+                Node::Pass(PassNode::new()),
+            ));
+            assert!(matches!(
+                ValueKind::classify(py, &ite, true),
+                ValueKind::Conditional
+            ));
+
+            let sw = Node::Switch(SwitchNode::new(
+                SwitchKey::ConstInt(99),
+                Vec::new(),
+                Node::Pass(PassNode::new()),
+            ));
+            assert!(matches!(
+                ValueKind::classify(py, &sw, false),
+                ValueKind::Conditional
+            ));
+
+            let sel = Node::Select(SelectNode::new(vec![u8_node()]));
+            assert!(matches!(
+                ValueKind::classify(py, &sel, false),
+                ValueKind::Conditional
+            ));
+        });
+    }
+
+    #[test]
+    fn classify_prefixed_conditional_inner_is_instance() {
+        // 根单点判定规则不变：Prefixed 包装的条件内层 → Instance
+        // （非条件根，None 仍按缺值报 BuildValueMissing）。
+        with_py(|py| {
+            use crate::nodes::prefixed::PrefixedNode;
+            let prefixed = Node::Prefixed(PrefixedNode::new(u8_node(), if_gt_zero_node(), false));
+            assert!(matches!(
+                ValueKind::classify(py, &prefixed, true),
+                ValueKind::Instance { expr_derived: true }
+            ));
+        });
+    }
+
+    #[test]
+    fn conditional_init_default_is_optional() {
+        // 条件根 init_default → Optional（实例化可省，R4）。
+        with_py(|py| {
+            let kind = ValueKind::classify(py, &if_gt_zero_node(), true);
+            assert!(matches!(kind.init_default(py), InitDefault::Optional));
+        });
+    }
+
+    #[test]
+    fn conditional_field_build_none_pass_branch_writes_nothing() {
+        // If(x>0, Byte) 根 → Conditional：obj 无 c 属性（≡ None 透传）、x=0
+        // → cond 假 → Pass 分支不写字节（无 BuildValueMissing）。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "x", u8_node()),
+                rw_field(py, "c", if_gt_zero_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'x': 0})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed (Pass branch)");
+            assert_eq!(stream.as_bytes(), &[0x00]);
+        });
+    }
+
+    #[test]
+    fn conditional_field_build_explicit_none_pass_branch_writes_nothing() {
+        // 显式 c=None 与属性不存在同语义（R3）：cond 假 → Pass → 不写字节。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "x", u8_node()),
+                rw_field(py, "c", if_gt_zero_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'x': 0, 'c': None})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed (Pass branch)");
+            assert_eq!(stream.as_bytes(), &[0x00]);
+        });
+    }
+
+    #[test]
+    fn conditional_field_build_none_real_branch_natural_error() {
+        // x=1 → then (Byte) 分支收到 None → 分支节点自然报错
+        //（FormatFieldError，非 BuildValueMissing——R1 分支自治）。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "x", u8_node()),
+                rw_field(py, "c", if_gt_zero_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'x': 1})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("real branch with None should fail");
+            assert!(
+                matches!(err, ConstructError::FormatField { .. }),
+                "expected FormatFieldError from branch node, got {:?}",
+                err
+            );
+        });
+    }
+
+    #[test]
+    fn conditional_field_build_explicit_value_passes_through() {
+        // 显式值透传：x=1, c=0x7F → b"\x01\x7f"。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "x", u8_node()),
+                rw_field(py, "c", if_gt_zero_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+            let obj = py
+                .eval_bound("type('O', (), {'x': 1, 'c': 0x7F})()", None, None)
+                .expect("obj");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), &[0x01, 0x7F]);
+        });
+    }
+
+    #[test]
+    fn conditional_field_round_trip_preserves_values() {
+        // parse → build 回环：cond 真分支值与 Pass 分支 None 均可回 build。
+        with_py(|py| {
+            let fields = vec![
+                rw_field(py, "x", u8_node()),
+                rw_field(py, "c", if_gt_zero_node()),
+            ];
+            let node = StructNode::new(py, fields, mock_cls(py), false, true);
+
+            // cond 真：c=0x7F
+            let mut stream = ParseStream::new(&[0x01, 0x7F]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let inst = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let mut bstream = BuildStream::new();
+            node.build(py, inst.bind(py), &mut bstream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(bstream.as_bytes(), &[0x01, 0x7F]);
+
+            // cond 假：c=None（Pass parse 产 None）→ 回 build 不报错
+            let mut stream2 = ParseStream::new(&[0x00]);
+            let mut ctx2 = Context::new_root(py).expect("ctx");
+            let inst2 = node
+                .parse(py, &mut stream2, &mut ctx2, &mut path)
+                .expect("parse");
+            let c_val = inst2.bind(py).getattr("c").unwrap();
+            assert!(c_val.is_none(), "Pass branch parse should store None");
+            let mut bstream2 = BuildStream::new();
+            node.build(py, inst2.bind(py), &mut bstream2, &mut ctx2, &mut path)
+                .expect("build from parse product");
+            assert_eq!(bstream2.as_bytes(), &[0x00]);
         });
     }
 

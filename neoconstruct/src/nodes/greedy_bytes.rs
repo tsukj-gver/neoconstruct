@@ -10,7 +10,8 @@
 //!
 //! ## build 输入约束
 //!
-//! 与 `BytesNode` 一致，build 时仅接受 `bytes` 输入。
+//! 与 `BytesNode` 一致，build 时接受 bytes-like 输入（`bytes` / `bytearray` /
+//! `memoryview`，语义等同 `bytes`）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -34,7 +35,8 @@ use pyo3::types::PyBytes;
 ///
 /// # build 行为
 ///
-/// 从 `bytes` 对象提取数据，直接写入流。不校验长度（对应 Python construct
+/// 从 bytes-like 对象（`bytes` / `bytearray` / `memoryview`）提取数据，
+/// 直接写入流。不校验长度（对应 Python construct
 /// `GreedyBytes._build` 的 `stream_write(stream, data, len(data), path)`，长度始终匹配）。
 ///
 /// # sizeof
@@ -68,22 +70,23 @@ impl super::Construct for GreedyBytesNode {
 
     fn build(
         &self,
-        _py: Python<'_>,
+        py: Python<'_>,
         obj: &Bound<'_, PyAny>,
         stream: &mut BuildStream,
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        // 仅接受 bytes 输入（对齐 BytesNode 约束）
-        let py_bytes = obj
-            .downcast::<PyBytes>()
-            .map_err(|_| ConstructError::Generic {
-                message: "expected bytes object for GreedyBytes field, received non-bytes value"
-                    .to_string(),
+        // 接受 bytes / bytearray / memoryview（语义等同 bytes）
+        let data = super::common::extract_bytes_like(py, obj).map_err(|type_name| {
+            ConstructError::Generic {
+                message: format!(
+                    "expected bytes object for GreedyBytes field, received non-bytes value of type {}",
+                    type_name
+                ),
                 path: path.to_string(),
-            })?;
-        let data = py_bytes.as_bytes();
-        stream.write(data);
+            }
+        })?;
+        stream.write(&data);
         Ok(())
     }
 
@@ -201,6 +204,38 @@ mod tests {
         with_py(|py| {
             let node = GreedyBytesNode::new();
             let obj = py.eval_bound("b'hello'", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), b"hello");
+        });
+    }
+
+    #[test]
+    fn build_accepts_bytearray_input() {
+        with_py(|py| {
+            let node = GreedyBytesNode::new();
+            let obj = py
+                .eval_bound("bytearray(b'hello')", None, None)
+                .expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build");
+            assert_eq!(stream.as_bytes(), b"hello");
+        });
+    }
+
+    #[test]
+    fn build_accepts_memoryview_input() {
+        with_py(|py| {
+            let node = GreedyBytesNode::new();
+            let obj = py
+                .eval_bound("memoryview(b'hello')", None, None)
+                .expect("eval");
             let mut stream = BuildStream::new();
             let mut ctx = Context::new_root(py).expect("ctx");
             let mut path = Path::new();

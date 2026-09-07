@@ -6,12 +6,18 @@
         crs_python_dir, *, extra_imports="")``：运行单个 parity case
     - ``assert_parity(rs_result, py_result, case_id, *, desc="", ...)``
     - ``assert_fidelity(result, case_id, *, desc="")``
+    - ``assert_loopback(result, case_id, *, desc="")``：rs 侧回环断言
+      （parse 产物直接 build == 原始数据）
     - ``make_parity_results_fixture(all_cases, case_definitions, *, scope="module")``
 
 case 定义约定：``case_definitions`` 字符串必须定义两个函数：
     - ``_make_case_rs(case_id)`` → ``(cls, parse_data, build_factory, extract)``
     - ``_make_case_py(case_id)`` → ``(fmt, parse_data, build_input)``
 子进程模板执行段写死 ``_make_case_rs(CASE)`` / ``_make_case_py(CASE)``（参数化）。
+
+rs 侧子进程额外计算回环（parse 产物直接 build，best-effort 捕获异常为
+``'ERROR:<类型名>'`` 标记），结果 JSON 含 ``data_hex`` / ``loopback`` 两键
+（py 侧为 None）——由 ``assert_loopback`` 按需消费。
 """
 
 from __future__ import annotations
@@ -64,6 +70,8 @@ for k in list(sys.modules):
 parsed = None
 built = None
 roundtrip_parsed = None
+data_hex = None
+loopback = None
 
 if IMPL == 'rs':
     cls, parse_data, build_factory, extract = _make_case_rs(CASE)
@@ -72,6 +80,14 @@ if IMPL == 'rs':
     built = build_factory().build()
     reparsed = cls.parse(built)
     roundtrip_parsed = extract(reparsed)
+    # 回环方向：parse 产物直接 build（此前 harness 只 build 工厂实例，
+    # 从不 build 解析产物）。best-effort：失败记录错误标记不中断，
+    # 由 assert_loopback 在需要处断言。
+    data_hex = parse_data.hex()
+    try:
+        loopback = parsed_obj.build().hex()
+    except Exception as e:
+        loopback = 'ERROR:' + type(e).__name__
 else:
     fmt, parse_data, build_input = _make_case_py(CASE)
     parsed_obj = fmt.parse(parse_data)
@@ -86,6 +102,8 @@ print(json.dumps({{
     'parsed': normalize(parsed),
     'built': built.hex(),
     'roundtrip_parsed': normalize(roundtrip_parsed),
+    'data_hex': data_hex,
+    'loopback': loopback,
 }}))
 """
 
@@ -123,7 +141,10 @@ def run_parity_case(
                 "case": str,            # case_id
                 "parsed": Any,          # normalize 后的 parse 结果
                 "built": str,           # hex 字符串
-                "roundtrip_parsed": Any # normalize 后的 roundtrip parse 结果
+                "roundtrip_parsed": Any, # normalize 后的 roundtrip parse 结果
+                "data_hex": str | None, # 原始 parse 输入 hex（仅 rs 侧）
+                "loopback": str | None, # parse 产物直接 build 的 hex
+                                        # （仅 rs 侧；失败为 "ERROR:<类型名>"）
             }
 
     异常：
@@ -255,6 +276,37 @@ def assert_fidelity(
         f"{label} impl={impl} 往返保真失败\n"
         f"  first parse:     {first}\n"
         f"  roundtrip parse: {roundtrip}"
+    )
+
+
+def assert_loopback(
+    result,
+    case_id,
+    *,
+    desc="",
+):
+    """断言 rs 侧回环：parse 产物直接 build 还原原始数据。
+
+    参数：
+        result: run_parity_case("rs", ...) 返回的 dict
+        case_id / desc: 失败消息定位
+
+    断言：result["loopback"] == result["data_hex"]，即
+    ``cls.parse(data).build() == data``（README「互为逆运算」在 parse→build
+    方向的实例级验证）。
+
+    说明：此前 parity harness 只 build 工厂构造的实例，从不 build 解析产物
+    ——本断言补上该方向。仅对 rs 结果断言（py 侧是 benchmark 基线，
+    loopback 不计算）；loopback 为 "ERROR:<类型名>" 标记时断言失败并展示
+    该错误类型。
+    """
+    label = f"case {case_id}" + (f" ({desc})" if desc else "")
+    loopback = result.get("loopback")
+    data_hex = result.get("data_hex")
+    assert loopback == data_hex, (
+        f"{label} impl=rs 回环失败（parse 产物 build != 原始数据）\n"
+        f"  data_hex: {data_hex}\n"
+        f"  loopback: {loopback}"
     )
 
 

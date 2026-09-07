@@ -153,8 +153,15 @@ impl super::Construct for ArrayNode {
 
         // PyList Vec 中转：用 Vec 收集元素后一次性创建 PyList，
         // 避免 PyList::append 慢路径（CPython list 的 capacity 检查 + 可能 realloc）。
-        // Vec::with_capacity 一次性分配，push 是纯 Rust 操作（~1-2ns/elem）。
-        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(count);
+        // 预分配容量按流剩余长度封顶（count 可能来自不可信输入，按 count
+        // 直接预分配会在分配失败时 abort 进程、Python 层无法 catch）；
+        // count 超出实际可解析数量时由逐元素 parse 的 Stream 错误拒绝。
+        let capacity = super::common::capped_result_capacity(
+            count,
+            self.inner.sizeof(ctx).ok(),
+            stream.remaining(),
+        );
+        let mut elems: Vec<Py<PyAny>> = Vec::with_capacity(capacity);
 
         // 保存外层 _index（嵌套数组支持）。
         let old_index = ctx.index();
@@ -726,6 +733,38 @@ mod tests {
                 .expect("parse");
             let list = result.bind(py).downcast::<PyList>().expect("is list");
             assert_eq!(list.len(), 0);
+        });
+    }
+
+    #[test]
+    fn parse_huge_const_count_returns_stream_error_not_abort() {
+        // 不可信 count 巨大字面常量 + 静态尺寸元素：预分配按流剩余长度封顶，
+        // 解析在流耗尽处返回可 catch 的 Stream 错误（而非分配失败 abort）。
+        with_py(|py| {
+            let node = ArrayNode::new(byte_node(), CountSource::Const(0xFFFF_FFFF), false);
+            let mut stream = ParseStream::new(&[0x01, 0x02]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Stream { .. }));
+        });
+    }
+
+    #[test]
+    fn parse_huge_expr_count_returns_stream_error_not_abort() {
+        // count 字段从流中解析为 0xFFFFFFFF（典型恶意长度字段场景）。
+        with_py(|py| {
+            let prog = ExprProgram::new(vec![ExprOp::Const(0xFFFF_FFFF)]);
+            let node = ArrayNode::new(byte_node(), CountSource::Expr(prog), false);
+            let mut stream = ParseStream::new(&[0x01, 0x02, 0x03, 0x04]);
+            let mut ctx = setup_ctx_for_expr(py, &[]);
+            let mut path = Path::new();
+            let err = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            assert!(matches!(err, ConstructError::Stream { .. }));
         });
     }
 

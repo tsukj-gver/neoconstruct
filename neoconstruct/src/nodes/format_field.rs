@@ -160,7 +160,8 @@ impl PythonFormat {
 
     /// 返回 Python struct 模块等价格式字符串（如 `">B"`、`"<q"`）。
     ///
-    /// 用于错误消息，与 Python construct `FormatField` 的错误信息格式对齐。
+    /// 仅用于测试与语义对照；用户面错误消息使用 [`Self::describe`] 的
+    /// 可读描述（内部格式串不外泄）。
     pub fn fmtstr(&self) -> &'static str {
         match self {
             Self::UnsignedInt8Big => ">B",
@@ -186,6 +187,37 @@ impl PythonFormat {
             Self::Float32Little => "<f",
             Self::Float64Big => ">d",
             Self::Float64Little => "<d",
+        }
+    }
+
+    /// 返回用户可读的格式描述（用于错误消息）。
+    ///
+    /// 替代 Python struct 格式串（`">H"` 等）——后者是内部实现细节，
+    /// 不应出现在用户面错误消息中。
+    pub fn describe(&self) -> &'static str {
+        match self {
+            Self::UnsignedInt8Big => "大端无符号 8 位整数",
+            Self::UnsignedInt8Little => "小端无符号 8 位整数",
+            Self::SignedInt8Big => "大端有符号 8 位整数",
+            Self::SignedInt8Little => "小端有符号 8 位整数",
+            Self::UnsignedInt16Big => "大端无符号 16 位整数",
+            Self::UnsignedInt16Little => "小端无符号 16 位整数",
+            Self::SignedInt16Big => "大端有符号 16 位整数",
+            Self::SignedInt16Little => "小端有符号 16 位整数",
+            Self::UnsignedInt32Big => "大端无符号 32 位整数",
+            Self::UnsignedInt32Little => "小端无符号 32 位整数",
+            Self::SignedInt32Big => "大端有符号 32 位整数",
+            Self::SignedInt32Little => "小端有符号 32 位整数",
+            Self::UnsignedInt64Big => "大端无符号 64 位整数",
+            Self::UnsignedInt64Little => "小端无符号 64 位整数",
+            Self::SignedInt64Big => "大端有符号 64 位整数",
+            Self::SignedInt64Little => "小端有符号 64 位整数",
+            Self::Float16Big => "大端 IEEE 754 半精度浮点数",
+            Self::Float16Little => "小端 IEEE 754 半精度浮点数",
+            Self::Float32Big => "大端 IEEE 754 单精度浮点数",
+            Self::Float32Little => "小端 IEEE 754 单精度浮点数",
+            Self::Float64Big => "大端 IEEE 754 双精度浮点数",
+            Self::Float64Little => "小端 IEEE 754 双精度浮点数",
         }
     }
 
@@ -383,80 +415,80 @@ impl super::Construct for FormatFieldNode {
         _ctx: &mut Context<'_>,
         path: &mut Path,
     ) -> Result<(), ConstructError> {
-        let fmtstr = self.format.fmtstr();
+        let desc = self.format.describe();
         match self.format {
             // 8/16/32-bit: 先 extract 为 i64，再 try_into 显式收窄
             PythonFormat::UnsignedInt8Big => {
-                let val: u8 = build_small_int::<u8>(obj, fmtstr, path)?;
+                let val: u8 = build_small_int::<u8>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::UnsignedInt8Little => {
-                let val: u8 = build_small_int::<u8>(obj, fmtstr, path)?;
+                let val: u8 = build_small_int::<u8>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::SignedInt8Big => {
-                let val: i8 = build_small_int::<i8>(obj, fmtstr, path)?;
+                let val: i8 = build_small_int::<i8>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::SignedInt8Little => {
-                let val: i8 = build_small_int::<i8>(obj, fmtstr, path)?;
+                let val: i8 = build_small_int::<i8>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::UnsignedInt16Big => {
-                let val: u16 = build_small_int::<u16>(obj, fmtstr, path)?;
+                let val: u16 = build_small_int::<u16>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::UnsignedInt16Little => {
-                let val: u16 = build_small_int::<u16>(obj, fmtstr, path)?;
+                let val: u16 = build_small_int::<u16>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::SignedInt16Big => {
-                let val: i16 = build_small_int::<i16>(obj, fmtstr, path)?;
+                let val: i16 = build_small_int::<i16>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::SignedInt16Little => {
-                let val: i16 = build_small_int::<i16>(obj, fmtstr, path)?;
+                let val: i16 = build_small_int::<i16>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::UnsignedInt32Big => {
-                let val: u32 = build_small_int::<u32>(obj, fmtstr, path)?;
+                let val: u32 = build_small_int::<u32>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::UnsignedInt32Little => {
-                let val: u32 = build_small_int::<u32>(obj, fmtstr, path)?;
+                let val: u32 = build_small_int::<u32>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::SignedInt32Big => {
-                let val: i32 = build_small_int::<i32>(obj, fmtstr, path)?;
+                let val: i32 = build_small_int::<i32>(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::SignedInt32Little => {
-                let val: i32 = build_small_int::<i32>(obj, fmtstr, path)?;
+                let val: i32 = build_small_int::<i32>(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             // 64-bit: 直接 extract 为目标类型（pyo3 自带范围检查）
             PythonFormat::UnsignedInt64Big => {
                 let val: u64 = obj
                     .extract::<u64>()
-                    .map_err(|_| make_build_error(fmtstr, obj, path))?;
+                    .map_err(|_| make_build_error(desc, obj, path))?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::UnsignedInt64Little => {
                 let val: u64 = obj
                     .extract::<u64>()
-                    .map_err(|_| make_build_error(fmtstr, obj, path))?;
+                    .map_err(|_| make_build_error(desc, obj, path))?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::SignedInt64Big => {
                 let val: i64 = obj
                     .extract::<i64>()
-                    .map_err(|_| make_build_error(fmtstr, obj, path))?;
+                    .map_err(|_| make_build_error(desc, obj, path))?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::SignedInt64Little => {
                 let val: i64 = obj
                     .extract::<i64>()
-                    .map_err(|_| make_build_error(fmtstr, obj, path))?;
+                    .map_err(|_| make_build_error(desc, obj, path))?;
                 stream.write(&val.to_le_bytes());
             }
             // ---- Float 系列 build 分支 ----
@@ -472,37 +504,37 @@ impl super::Construct for FormatFieldNode {
             //   int 输入走 i64/u64 fallback（i64/u64::MAX < f32::MAX，as f32 不溢出）。
             // - Float64 无范围检查：f64 精度足以容纳所有 i64/u64。
             PythonFormat::Float16Big => {
-                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let val: f64 = extract_float_with_int_fallback(obj, desc, path)?;
                 let f16_val = if val.is_finite() && val.abs() > F16_MAX_ABS {
-                    return Err(make_build_error(fmtstr, obj, path));
+                    return Err(make_build_error(desc, obj, path));
                 } else {
                     half::f16::from_f64(val)
                 };
                 stream.write(&f16_val.to_be_bytes());
             }
             PythonFormat::Float16Little => {
-                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let val: f64 = extract_float_with_int_fallback(obj, desc, path)?;
                 let f16_val = if val.is_finite() && val.abs() > F16_MAX_ABS {
-                    return Err(make_build_error(fmtstr, obj, path));
+                    return Err(make_build_error(desc, obj, path));
                 } else {
                     half::f16::from_f64(val)
                 };
                 stream.write(&f16_val.to_le_bytes());
             }
             PythonFormat::Float32Big => {
-                let val: f32 = extract_f32_with_int_fallback(obj, fmtstr, path)?;
+                let val: f32 = extract_f32_with_int_fallback(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::Float32Little => {
-                let val: f32 = extract_f32_with_int_fallback(obj, fmtstr, path)?;
+                let val: f32 = extract_f32_with_int_fallback(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
             PythonFormat::Float64Big => {
-                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let val: f64 = extract_float_with_int_fallback(obj, desc, path)?;
                 stream.write(&val.to_be_bytes());
             }
             PythonFormat::Float64Little => {
-                let val: f64 = extract_float_with_int_fallback(obj, fmtstr, path)?;
+                let val: f64 = extract_float_with_int_fallback(obj, desc, path)?;
                 stream.write(&val.to_le_bytes());
             }
         }
@@ -539,19 +571,17 @@ fn read_array<const N: usize>(
 
 /// 构造 build 错误：值类型不匹配或范围超出。
 ///
-/// 错误消息格式与 Python construct `FormatField._build` 对齐：
-/// `"struct '>B' error during building, given value 300"`
-fn make_build_error(fmtstr: &str, obj: &Bound<'_, PyAny>, path: &Path) -> ConstructError {
+/// 错误消息使用 [`PythonFormat::describe`] 的用户可读格式描述（不泄漏
+/// Python struct 内部格式串），如：
+/// `"大端无符号 8 位整数 error during building, given value 300"`
+fn make_build_error(desc: &str, obj: &Bound<'_, PyAny>, path: &Path) -> ConstructError {
     let repr = obj
         .repr()
         .ok()
         .and_then(|r| r.to_str().ok().map(String::from))
         .unwrap_or_else(|| "<unknown>".to_string());
     ConstructError::FormatField {
-        message: format!(
-            "struct '{}' error during building, given value {}",
-            fmtstr, repr
-        ),
+        message: format!("{} error during building, given value {}", desc, repr),
         path: path.to_string(),
     }
 }
@@ -560,19 +590,15 @@ fn make_build_error(fmtstr: &str, obj: &Bound<'_, PyAny>, path: &Path) -> Constr
 ///
 /// 禁止 `as u8` 截断：`try_into` 在值超出范围时返回 `Err`，
 /// 转为 `FormatFieldError`。
-fn build_small_int<T>(
-    obj: &Bound<'_, PyAny>,
-    fmtstr: &str,
-    path: &Path,
-) -> Result<T, ConstructError>
+fn build_small_int<T>(obj: &Bound<'_, PyAny>, desc: &str, path: &Path) -> Result<T, ConstructError>
 where
     T: TryFrom<i64>,
 {
     let val: i64 = obj
         .extract::<i64>()
-        .map_err(|_| make_build_error(fmtstr, obj, path))?;
+        .map_err(|_| make_build_error(desc, obj, path))?;
     val.try_into()
-        .map_err(|_| make_build_error(fmtstr, obj, path))
+        .map_err(|_| make_build_error(desc, obj, path))
 }
 
 // ---- Float build 辅助函数 ----
@@ -594,13 +620,13 @@ const F16_MAX_ABS: f64 = 65504.0;
 /// 全部失败 → FormatFieldError（对齐 Python struct.error）。
 fn extract_float_with_int_fallback(
     obj: &Bound<'_, PyAny>,
-    fmtstr: &str,
+    desc: &str,
     path: &Path,
 ) -> Result<f64, ConstructError> {
     obj.extract::<f64>()
         .or_else(|_| obj.extract::<i64>().map(|i| i as f64))
         .or_else(|_| obj.extract::<u64>().map(|u| u as f64))
-        .map_err(|_| make_build_error(fmtstr, obj, path))
+        .map_err(|_| make_build_error(desc, obj, path))
 }
 
 /// 从 Python 对象提取 f32，带 int fallback（Float32 build 用）。
@@ -610,13 +636,13 @@ fn extract_float_with_int_fallback(
 /// OverflowError → FormatFieldError（对齐 `struct.pack('>f', 1e40)` OverflowError）。
 fn extract_f32_with_int_fallback(
     obj: &Bound<'_, PyAny>,
-    fmtstr: &str,
+    desc: &str,
     path: &Path,
 ) -> Result<f32, ConstructError> {
     obj.extract::<f32>()
         .or_else(|_| obj.extract::<i64>().map(|i| i as f32))
         .or_else(|_| obj.extract::<u64>().map(|u| u as f32))
-        .map_err(|_| make_build_error(fmtstr, obj, path))
+        .map_err(|_| make_build_error(desc, obj, path))
 }
 
 // ---------------------------------------------------------------------------
@@ -716,6 +742,46 @@ mod tests {
         assert!(PythonFormat::SignedInt64Big.is_big_endian());
         assert!(!PythonFormat::UnsignedInt8Little.is_big_endian());
         assert!(!PythonFormat::SignedInt64Little.is_big_endian());
+    }
+
+    #[test]
+    fn format_describe_is_readable_chinese_text() {
+        // 用户可读格式描述（错误消息用，不含 Python struct 内部格式串）。
+        assert_eq!(
+            PythonFormat::UnsignedInt16Big.describe(),
+            "大端无符号 16 位整数"
+        );
+        assert_eq!(
+            PythonFormat::SignedInt8Little.describe(),
+            "小端有符号 8 位整数"
+        );
+        assert_eq!(
+            PythonFormat::Float64Little.describe(),
+            "小端 IEEE 754 双精度浮点数"
+        );
+    }
+
+    #[test]
+    fn build_out_of_range_message_uses_readable_description() {
+        // 错误消息不得泄漏内部格式串（struct '>H' 等），改为可读描述。
+        with_py(|py| {
+            let node = FormatFieldNode::new(PythonFormat::UnsignedInt16Big);
+            let obj = py.eval_bound("70000", None, None).expect("eval");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("should fail");
+            match err {
+                ConstructError::FormatField { message, .. } => {
+                    assert!(message.contains("16 位整数"), "got: {}", message);
+                    assert!(!message.contains("struct"), "got: {}", message);
+                    assert!(!message.contains("'>"), "got: {}", message);
+                }
+                other => panic!("expected FormatField, got {:?}", other),
+            }
+        });
     }
 
     #[test]
@@ -1078,7 +1144,8 @@ mod tests {
                 .expect_err("should fail");
             match err {
                 ConstructError::FormatField { message, path } => {
-                    assert!(message.contains("'>B'"), "got: {}", message);
+                    // 错误消息用可读描述（不泄漏 struct 内部格式串）
+                    assert!(message.contains("8 位整数"), "got: {}", message);
                     assert!(message.contains("300"), "got: {}", message);
                     assert_eq!(path, "root");
                 }

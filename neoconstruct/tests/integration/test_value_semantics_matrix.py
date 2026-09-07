@@ -22,8 +22,8 @@ build 缺省/build 显式等值/build 显式不等值/build 显式 None）× 嵌
 - 从零 build 缺值（Instance 字段实例值为 None）报 FieldValueMissingError，
   错误时机在 build（值使用点）而非实例化。
 - Control 缺省哑值 None 流入后继表达式消费者时报错（显式失败优于静默错值）。
-- 包装器根（If/Switch 等）按根节点分类为 Instance：缺省 build 报
-  FieldValueMissingError（显式传值仍成功）。
+- 条件根（If/Switch/Select）按根节点分类为 Conditional：None（含缺省）透传
+  分支自治——Pass 分支不写字节；实值分支收到 None 由分支节点自然报错。
 - context= 注入参数在编译期拒绝（fail fast，消除静默忽略）。
 - 数据-schema 不匹配（长度声明 vs 实际）parse 显式报 StreamError。
 
@@ -48,6 +48,7 @@ from neoconstruct import (
     ConstructError,
     Default,
     FieldValueMissingError,
+    FormatFieldError,
     GreedyBytes,
     If,
     Int8ub,
@@ -910,7 +911,7 @@ class TestExprConsumers:
         assert MA(x=1, items=[1, 2]).build() == b"\x01\x01\x02"
 
     def test_if_cond_expr(self):
-        """If(x>0, Byte)：cond 表达式（真分支可用 + 假分支缺值报错）。"""
+        """If(x>0, Byte)：cond 表达式（真分支需值 + 假分支 None 透传）。"""
 
         @dataclass
         class MI(StructMixin):
@@ -923,10 +924,10 @@ class TestExprConsumers:
         # cond=0 → Pass：parse 0 数据字节（c=None）
         parsed0 = MI.parse(b"\x00")
         assert parsed0.c is None
-        # 显式 None ≡ 缺值：包装器根按 Instance 分类 → FieldValueMissing
-        # （缺省/None 报错语义锁定——包装器全哑值分支可省属后续演进项）
-        with pytest.raises(FieldValueMissingError):
-            MI(x=0, c=None).build()
+        # 条件根 None 透传（分支自治）：cond=0 → Pass 分支不写字节；
+        # parse 产物回 build（互为逆运算）
+        assert MI(x=0, c=None).build() == b"\x00"
+        assert parsed0.build() == b"\x00"
 
     def test_computed_expr_consumer(self):
         """Computed(x+1)：消费者 no-op + parse 求值。"""
@@ -1482,50 +1483,61 @@ class TestDataNegatives:
 
 
 # ---------------------------------------------------------------------------
-# 包装器根分类：If 包装字段缺省 build 报 FieldValueMissingError
+# 包装器根分类：条件根（If/Switch/Select）None 透传分支自治
 # ---------------------------------------------------------------------------
 
 
 class TestWrapperRootClassification:
-    """field(If(cond, ...)) 缺省 build → FieldValueMissingError。
+    """field(If(cond, ...)) 条件根：None（含缺省）透传，分支自治。
 
-    语义：包装器根按根节点分类为 Instance（值类内层必须来自实例；全哑值
-    分支的罕见组合同样要求显式传值——缺省方向的错误形态是显式框架异常，
-    优于静默猜测）；显式传值仍成功。
+    语义：条件根按根节点分类为 Conditional——resolve 对 None（含属性不存在）
+    不报错，透传给节点 build。选中 Pass 分支 → 不写字节；选中哑值语义分支
+    （Padding）→ 分支自身忽略值写 pattern；选中实值分支（Byte）而值为 None
+    → 由分支节点自然报错（防"改了条件没给值"的不一致静默）；显式传值仍成功。
     """
 
-    def test_if_padding_defaulted_build_raises(self):
-        """field(If(flag>0, Padding(2))) 缺省 build → FieldValueMissingError。"""
+    def test_if_padding_defaulted_build_writes_pattern(self):
+        """field(If(flag>0, Padding(2))) 缺省 build → Padding 分支忽略值写 pattern。"""
 
         @dataclass
         class W1C(StructMixin):
             flag: int = field(Byte)
             p: Any = field(If(flag > 0, Padding(2)))
 
-        with pytest.raises(FieldValueMissingError):
-            W1C(flag=1).build()
+        assert W1C(flag=1).build() == b"\x01\x00\x00"
 
-    def test_if_padding_explicit_none_build_raises(self):
-        """显式 None ≡ 缺省 → FieldValueMissingError（None=缺值统一语义）。"""
+    def test_if_padding_explicit_none_build_writes_pattern(self):
+        """显式 None ≡ 缺省（None ≡ 缺席，来源无关）→ 同样写 pattern。"""
 
         @dataclass
         class W1C(StructMixin):
             flag: int = field(Byte)
             p: Any = field(If(flag > 0, Padding(2)))
 
-        with pytest.raises(FieldValueMissingError):
-            W1C(flag=1, p=None).build()
+        assert W1C(flag=1, p=None).build() == b"\x01\x00\x00"
 
-    def test_if_byte_defaulted_build_raises(self):
-        """field(If(flag>0, Byte)) 缺省 build → FieldValueMissingError。"""
+    def test_if_byte_defaulted_build_raises_branch_error(self):
+        """field(If(flag>0, Byte)) 缺省 build → 实值分支收到 None 自然报错。"""
 
         @dataclass
         class W2C(StructMixin):
             flag: int = field(Byte)
             b: Any = field(If(flag > 0, Byte))
 
-        with pytest.raises(FieldValueMissingError):
+        # 分支节点（Byte）自然报错，非字段层 FieldValueMissingError
+        with pytest.raises(FormatFieldError):
             W2C(flag=1).build()
+
+    def test_if_byte_false_branch_defaulted_build_writes_nothing(self):
+        """cond 假 → Pass 分支不写字节（缺省/None 均可 build）。"""
+
+        @dataclass
+        class W2C(StructMixin):
+            flag: int = field(Byte)
+            b: Any = field(If(flag > 0, Byte))
+
+        assert W2C(flag=0).build() == b"\x00"
+        assert W2C(flag=0, b=None).build() == b"\x00"
 
     def test_if_byte_explicit_value_builds(self):
         """field(If(flag>0, Byte)) 显式传值仍成功。"""

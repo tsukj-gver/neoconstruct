@@ -69,6 +69,10 @@ pub struct CompiledSchema {
     /// 每字段的实例化默认值三态（编译期由 [`crate::nodes::struct_node::ValueKind`]
     /// 推导，冷路径一次计算）。
     ///
+    /// 条件根（IfThenElse/Switch/Select → `Conditional`）推导为 `Optional`
+    /// （实例化可省——build 时 None 透传分支自治，见
+    /// [`crate::nodes::struct_node::ValueKind::Conditional`]）。
+    ///
     /// Python 侧 `_apply_dataclass_field_config` 通过 `_init_defaults` 方法
     /// 消费（I 点单一事实源＝Rust 分类）。
     init_defaults: Vec<InitDefault>,

@@ -190,19 +190,41 @@ def test_bytes_build_rejects_wrong_length():
 
 
 def test_bytes_build_accepts_bytearray():
-    """Bytes 接受 bytearray（bytes-like）输入。
-
-    注：Bytes build 基线约定仅接受 bytes；bytearray 若支持应通过，
-    若不支持应给出明确错误。此处验证实际行为。
-    """
+    """Bytes 接受 bytearray（bytes-like）输入——语义与 bytes 一致。"""
 
     @dataclass
     class B2(StructMixin):
         x: bytes = field(Bytes(2))
 
-    # bytes 必然支持
-    b = B2(x=b"\xab\xcd")
+    # 真正传入 bytearray（socket.recv / readinto 等真实数据源形态）
+    b = B2(x=bytearray(b"\xab\xcd"))
     assert b.build() == b"\xab\xcd"
+
+
+def test_bytes_build_accepts_memoryview():
+    """Bytes 接受 memoryview（bytes-like）输入——语义与 bytes 一致。"""
+
+    @dataclass
+    class B2(StructMixin):
+        x: bytes = field(Bytes(2))
+
+    b = B2(x=memoryview(b"\xab\xcd"))
+    assert b.build() == b"\xab\xcd"
+
+
+def test_bytes_build_bytearray_length_mismatch_raises():
+    """bytes-like 输入同样参与 Bytes 长度校验。"""
+
+    from neoconstruct import FieldLengthError
+
+    @dataclass
+    class B4(StructMixin):
+        x: bytes = field(Bytes(4))
+
+    with pytest.raises(FieldLengthError):
+        B4(x=bytearray(b"\x00\x01\x02")).build()
+    with pytest.raises(FieldLengthError):
+        B4(x=memoryview(b"\x00\x01\x02\x03\x04")).build()
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +276,13 @@ def test_greedy_bytes_followed_by_nothing():
     klass = _make_greedy_class()
     parsed = klass.parse(b"")
     assert parsed.x == b""
+
+
+def test_greedy_bytes_build_accepts_bytes_like():
+    """GreedyBytes build 接受 bytearray / memoryview（语义与 bytes 一致）。"""
+    klass = _make_greedy_class()
+    assert klass(x=bytearray(b"\x01\x02\x03")).build() == b"\x01\x02\x03"
+    assert klass(x=memoryview(b"\x04\x05")).build() == b"\x04\x05"
 
 
 # ---------------------------------------------------------------------------

@@ -1263,10 +1263,13 @@ class StructMixin:
         """子类创建时自动编译 schema。
 
         此方法在 ``@dataclass`` 装饰器之前执行（Python 类创建顺序）。
-        编译流程：收集字段 → 调用 Rust compile_schema → 注入 dataclass 配置 →
+        编译流程：编译期防御检查（继承拒绝 / dataclasses.field 遮蔽检测）→
+        收集字段 → 调用 Rust compile_schema → 注入 dataclass 配置 →
         存储产物。
         """
         super().__init_subclass__(**kwargs)
+        _reject_struct_subclassing(cls)
+        _reject_dataclasses_field_shadowing(cls)
         _compile_schema_for_class(cls)
 
     @classmethod
@@ -1307,6 +1310,112 @@ class StructMixin:
         return schema._build_raw(self)
 
 
+# ---------------------------------------------------------------------------
+# 编译期防御检查：继承拒绝 / dataclasses.field 遮蔽检测
+#
+# 注意：这两个检查函数必须定义在 ``BitStructMixin`` 之前——模块加载创建
+# ``BitStructMixin`` 时即触发 ``StructMixin.__init_subclass__`` 并调用它们。
+# ``_FRAMEWORK_STRUCT_BASES`` 在 ``BitStructMixin`` 定义后填充（函数体内
+# 延迟解析，用户子类创建发生在模块加载完成后，届时已可用）。
+# ---------------------------------------------------------------------------
+
+
+def _reject_struct_subclassing(cls):
+    """编译期拒绝继承已编译的 StructMixin 子类。
+
+    Schema 编译只收集子类**自身类体**的 field() 声明（不含继承属性），
+    继承会静默丢基类字段——build 产出缺字段的错误字节、parse 抛裸
+    AttributeError，均无编译期信号。字节排布具有空间位置语义，继承体系
+    无法表达基类字段的空间占位，因此显式拒绝并引导使用组合（字段嵌套）。
+
+    :param cls: 刚创建的 StructMixin 子类。
+    :raises CompilationError: 任一直接基类是用户结构类（StructMixin 后代
+                              且非框架入口基类）。
+    """
+    for base in cls.__bases__:
+        if base is StructMixin or base in _FRAMEWORK_STRUCT_BASES:
+            continue
+        if isinstance(base, type) and issubclass(base, StructMixin):
+            raise CompilationError(
+                "不支持继承：'{sub}' 继承了结构类 '{base}'。"
+                "字节排布具有空间位置语义，继承体系无法表达基类字段的占位，"
+                "继承会导致基类字段静默丢失。"
+                "请用组合替代：在字段中嵌套该结构类"
+                "（如 inner: Inner = field(Inner)）。".format(
+                    sub=cls.__name__, base=base.__name__
+                )
+            )
+
+
+def _is_protocol_descriptor(value):
+    """判断值是否是本库的协议描述符（subcon 语义对象）。
+
+    覆盖三类：
+
+    - StructMixin 子类（嵌套 Struct 引用，类对象本身即描述符）；
+    - Rust pyclass 描述符单例/实例（``__module__`` 历史上设为
+      ``"construct"``，repr 兼容用）；
+    - Python 侧描述符类实例（``neoconstruct.*`` 模块）。
+    """
+    if isinstance(value, type) and issubclass(value, StructMixin):
+        return True
+    module = type(value).__module__ or ""
+    return module == "construct" or module.startswith("neoconstruct")
+
+
+def _reject_dataclasses_field_shadowing(cls):
+    """编译期检测 ``dataclasses.field`` 遮蔽误用。
+
+    用户误写 ``magic: int = dataclasses.field(default=...)``（import 了
+    dataclasses 的 field 而非本库的 field）时，该字段被当作非二进制的
+    普通属性静默跳过——parse 不消费任何字节、返回默认值，无任何报错。
+
+    可判定的两种误用形态（编译期即报 ``CompilationError``）：
+
+    1. ``dataclasses.field(default=<协议描述符>)``：把 subcon 传给了
+       dataclasses.field 的 default（描述符被误当实例默认值）；
+    2. 类体只有 ``dataclasses.field`` 字段、没有任何本库 field() 声明：
+       整类遮蔽（import 错了 field），parse 将零消费。
+
+    与二进制字段并存的普通 ``dataclasses.field(default=标量)`` 是受支持的
+    混合字段模式（非二进制辅助属性），不在此拒绝。
+
+    :param cls: 刚创建的 StructMixin 子类。
+    :raises CompilationError: 命中上述任一误用形态。
+    """
+    annotations = getattr(cls, "__annotations__", None) or {}
+    dc_fields = []
+    has_binary_field = False
+    for name in annotations:
+        default = cls.__dict__.get(name)
+        if isinstance(default, _FieldDescriptor):
+            has_binary_field = True
+        elif isinstance(default, dataclasses.Field):
+            dc_fields.append((name, default))
+
+    if not dc_fields:
+        return
+
+    for name, dc_f in dc_fields:
+        value = dc_f.default
+        if value is not dataclasses.MISSING and _is_protocol_descriptor(value):
+            raise CompilationError(
+                "字段 '{name}' 误用了 dataclasses.field 包装协议描述符。"
+                "协议字段请使用本库的 field：from neoconstruct import field。"
+                .format(name=name)
+            )
+
+    if not has_binary_field:
+        raise CompilationError(
+            "类 '{cls}' 的所有字段都来自 dataclasses.field，没有任何本库 "
+            "field() 声明——这通常是 import 了错误的 field"
+            "（from dataclasses import field）所致，parse 将不消费任何字节。"
+            "协议字段请使用：from neoconstruct import field。".format(
+                cls=cls.__name__
+            )
+        )
+
+
 class BitStructMixin(StructMixin):
     """BitStruct 基类。子类用 ``@dataclass`` 装饰，字段使用 bit 级描述符
     （``Nibble``、``BitsInteger``、``Bit`` 等）。
@@ -1345,6 +1454,18 @@ class BitStructMixin(StructMixin):
         """子类创建时先标记 bitwise，再委托 ``StructMixin`` 完成编译。"""
         cls._construct_bitwise = True
         super().__init_subclass__(**kwargs)
+
+
+# ---------------------------------------------------------------------------
+# 框架入口基类注册（继承拒绝白名单）
+# ---------------------------------------------------------------------------
+
+# 框架自身的入口基类：``StructMixin`` 与 ``BitStructMixin``。
+# 这些基类的子类化是受支持的类创建路径；任何其他 StructMixin 后代
+# （用户已编译的结构类）被继承时触发编译期拒绝。
+# ``StructMixin`` 自身在 ``_reject_struct_subclassing`` 中单独判等
+# （模块加载期创建 ``BitStructMixin`` 时本元组尚未填充）。
+_FRAMEWORK_STRUCT_BASES: tuple = (BitStructMixin,)
 
 
 __all__ = ["StructMixin", "BitStructMixin", "field", "rfield", "wfield", "Tell", "Computed"]

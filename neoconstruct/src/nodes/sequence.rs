@@ -8,8 +8,9 @@
 //! - parse：context nesting；空 PyList；遍历 fields：field.parse → append；
 //!   命名字段写入 child_ctx；StopField 哨兵捕获 break；返回 PyList
 //! - build：context nesting；obj 是 list；遍历 fields 按 [`ValueKind`] resolve——
-//!   Instance 从 list 位置取值（`iter.next()`，None 视为缺值），其余分类
-//!   产各自的有效值（Const 补常量/Default 求值/Tell 流位置/Control 哑值 None
+//!   Instance 从 list 位置取值（`iter.next()`，None 视为缺值），Conditional
+//!   消费 list 元素但 None 透传（分支自治），其余分类产各自的有效值
+//!   （Const 补常量/Default 求值/Tell 流位置/Control 哑值 None
 //!   等，不消费 list 元素）；命名字段写 child_ctx；StopField 哨兵捕获 break
 //! - sizeof：sum 字段 sizeof（context nesting 仅影响字段引用，sizeof 用父 ctx）
 //!
@@ -17,8 +18,10 @@
 //!
 //! 值来源分类（[`ValueKind`]）与 StructNode 完全一致，仅 Instance 分支的
 //! 取值入口不同：StructNode 从实例 getattr，SequenceNode 从 list 位置访问。
-//! 值提供型分类（Const/Default/Tell/Control 等）的字段不要求 list 提供
-//! 元素——list 仅需覆盖 Instance 字段（宽松方向：多余元素忽略）。
+//! Conditional 分支同样消费 list 位置（parse 侧无条件 append 全部字段值，
+//! build 侧按位置对称取回；None 透传，元素缺位 ≡ None）。值提供型分类
+//! （Const/Default/Tell/Control 等）的字段不要求 list 提供元素——list 仅需
+//! 覆盖 Instance 与 Conditional 字段（宽松方向：多余元素忽略）。
 
 use crate::context::Context;
 use crate::error::ConstructError;
@@ -218,6 +221,14 @@ impl Construct for SequenceNode {
                     n.into_py(py).into_bound(py)
                 }
                 ValueKind::Tell => stream.tell().into_py(py).into_bound(py),
+                ValueKind::Conditional => match iter.next() {
+                    // 条件根（IfThenElse/Switch/Select）：list 元素透传（含 None——
+                    // parse 侧 Pass 分支产 None 元素，round-trip 位置对称）；
+                    // 元素缺位 ≡ None（None ≡ 缺席，来源无关）。分支自治：
+                    // Pass 分支不写字节；实值分支收到 None 由分支节点自然报错。
+                    Some(item) => item,
+                    None => py.None().into_bound(py),
+                },
                 ValueKind::Void | ValueKind::Control => py.None().into_bound(py),
                 ValueKind::Index => child_ctx.index().into_py(py).into_bound(py),
             };
@@ -411,6 +422,163 @@ mod tests {
             let node = make_simple_sequence(py);
             let s = format!("{:?}", node);
             assert!(s.contains("SequenceNode"), "got: {}", s);
+        });
+    }
+
+    // ======================================================================
+    // Conditional 元素（条件根：list 元素 None 透传，缺位 ≡ None）
+    // ======================================================================
+
+    /// 构造 Switch(99, {} 无命中, default=Pass) 根节点（条件根 → Conditional）。
+    fn switch_pass_node() -> Node {
+        use crate::nodes::pass::PassNode;
+        use crate::nodes::switch::{SwitchKey, SwitchNode};
+        Node::Switch(SwitchNode::new(
+            SwitchKey::ConstInt(99),
+            Vec::new(),
+            Node::Pass(PassNode::new()),
+        ))
+    }
+
+    /// 构造 If(x>0, Byte) 根节点（命名 x 为 field 0，else=Pass）。
+    fn if_gt_zero_node() -> Node {
+        use crate::expr::{ExprOp, ExprProgram};
+        use crate::nodes::if_then_else::IfThenElseNode;
+        use crate::nodes::pass::PassNode;
+        use crate::nodes::stop_if::StopIfCondition;
+        Node::IfThenElse(IfThenElseNode::new(
+            StopIfCondition::Expr(ExprProgram::new(vec![
+                ExprOp::GetInt(0),
+                ExprOp::Const(0),
+                ExprOp::Gt,
+            ])),
+            fmt_node(PythonFormat::UnsignedInt8Big),
+            Node::Pass(PassNode::new()),
+        ))
+    }
+
+    #[test]
+    fn conditional_element_none_passthrough_pass_branch() {
+        // Sequence(x/Byte, Switch→Pass).build([0, None])：None 元素透传，
+        // Pass 分支不写字节 → b'\x00'。
+        with_py(|py| {
+            let fields = vec![
+                SequenceField::new_named(
+                    py,
+                    FieldName::new(py, "x"),
+                    fmt_node(PythonFormat::UnsignedInt8Big),
+                ),
+                SequenceField::new_anonymous(py, switch_pass_node()),
+            ];
+            let node = SequenceNode::new(fields, false);
+            let obj = py.eval_bound("[0, None]", None, None).expect("list");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed (None passthrough)");
+            assert_eq!(stream.as_bytes(), &[0x00]);
+        });
+    }
+
+    #[test]
+    fn conditional_element_missing_treated_as_none() {
+        // list 短缺（元素缺位 ≡ None，来源无关）：[0] 同 [0, None] 语义。
+        with_py(|py| {
+            let fields = vec![
+                SequenceField::new_named(
+                    py,
+                    FieldName::new(py, "x"),
+                    fmt_node(PythonFormat::UnsignedInt8Big),
+                ),
+                SequenceField::new_anonymous(py, switch_pass_node()),
+            ];
+            let node = SequenceNode::new(fields, false);
+            let obj = py.eval_bound("[0]", None, None).expect("list");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::placeholder(py);
+            let mut path = Path::new();
+            node.build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect("build should succeed (missing element ≡ None)");
+            assert_eq!(stream.as_bytes(), &[0x00]);
+        });
+    }
+
+    #[test]
+    fn conditional_element_none_real_branch_natural_error() {
+        // If(x>0, Byte)：x=0 → Pass；list [0, None] → Pass 不消费值 → OK；
+        // 对照：x=1（cond 真）且元素 None → Byte 分支自然报错。
+        with_py(|py| {
+            let fields = vec![
+                SequenceField::new_named(
+                    py,
+                    FieldName::new(py, "x"),
+                    fmt_node(PythonFormat::UnsignedInt8Big),
+                ),
+                SequenceField::new_anonymous(py, if_gt_zero_node()),
+            ];
+            let node = SequenceNode::new(fields, true);
+
+            // cond 真 + None → 分支节点自然报错
+            let obj = py.eval_bound("[1, None]", None, None).expect("list");
+            let mut stream = BuildStream::new();
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let err = node
+                .build(py, &obj, &mut stream, &mut ctx, &mut path)
+                .expect_err("real branch with None should fail");
+            assert!(
+                matches!(err, ConstructError::FormatField { .. }),
+                "expected FormatFieldError from branch node, got {:?}",
+                err
+            );
+
+            // cond 假 + None → Pass 不写字节
+            let obj2 = py.eval_bound("[0, None]", None, None).expect("list");
+            let mut stream2 = BuildStream::new();
+            let mut ctx2 = Context::new_root(py).expect("ctx");
+            node.build(py, &obj2, &mut stream2, &mut ctx2, &mut path)
+                .expect("Pass branch with None should succeed");
+            assert_eq!(stream2.as_bytes(), &[0x00]);
+        });
+    }
+
+    #[test]
+    fn conditional_element_round_trip() {
+        // parse 产 [x, c]（Pass 分支产 None 元素）→ build 回环对称。
+        with_py(|py| {
+            let fields = vec![
+                SequenceField::new_named(
+                    py,
+                    FieldName::new(py, "x"),
+                    fmt_node(PythonFormat::UnsignedInt8Big),
+                ),
+                SequenceField::new_anonymous(py, if_gt_zero_node()),
+            ];
+            let node = SequenceNode::new(fields, true);
+
+            // cond 假：parse(b'\x00') → [0, None] → build 回 b'\x00'
+            let mut stream = ParseStream::new(&[0x00]);
+            let mut ctx = Context::new_root(py).expect("ctx");
+            let mut path = Path::new();
+            let parsed = node
+                .parse(py, &mut stream, &mut ctx, &mut path)
+                .expect("parse");
+            let mut bstream = BuildStream::new();
+            node.build(py, parsed.bind(py), &mut bstream, &mut ctx, &mut path)
+                .expect("build from parse product");
+            assert_eq!(bstream.as_bytes(), &[0x00]);
+
+            // cond 真：parse(b'\x01\x7f') → [1, 0x7f] → build 回原字节
+            let mut stream2 = ParseStream::new(&[0x01, 0x7F]);
+            let mut ctx2 = Context::new_root(py).expect("ctx");
+            let parsed2 = node
+                .parse(py, &mut stream2, &mut ctx2, &mut path)
+                .expect("parse");
+            let mut bstream2 = BuildStream::new();
+            node.build(py, parsed2.bind(py), &mut bstream2, &mut ctx2, &mut path)
+                .expect("build from parse product");
+            assert_eq!(bstream2.as_bytes(), &[0x01, 0x7F]);
         });
     }
 }

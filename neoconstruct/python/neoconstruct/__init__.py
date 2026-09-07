@@ -272,7 +272,13 @@ try:
 except ImportError:  # pragma: no cover
     pass
 
-__version__ = "0.1.0"
+# 版本号与 Rust 内核（Cargo.toml [package] version，经
+# env!("CARGO_PKG_VERSION") 编译进扩展）同源，避免双处硬编码漂移。
+# 扩展未构建时（纯 Python 侧开发）回退为占位版本号。
+if _native is not None:
+    __version__ = _native.__version__
+else:  # pragma: no cover - 仅在扩展未构建时触发
+    __version__ = "0.0.0"
 
 __all__ = [
     # 核心 API

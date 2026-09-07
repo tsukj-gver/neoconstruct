@@ -34,6 +34,7 @@ import pytest
 
 from _helpers.parity import (
     assert_fidelity,
+    assert_loopback,
     assert_parity,
     make_parity_results_fixture,
     run_parity_case,
@@ -114,13 +115,13 @@ def _make_case_rs(case_id):
 
     if C == 'S2':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Pass
-        # rs 侧 build 显式传值（包装器根按 Instance 分类：None ≡ 缺值；
-        # Pass 分支编码忽略值，两端 build 字节一致）
+        # 条件根分类为 Conditional：值可省（None 透传分支自治——Pass
+        # 分支编码忽略值，两端 build 字节一致）
         @dataclass
         class P(StructMixin):
             v: int = field(Switch(99, {1: Int8ub, 2: Int16ub}, default=Pass))
         data = bytes([])
-        return P, data, lambda: P(v=0), lambda o: o.v
+        return P, data, lambda: P(), lambda o: o.v
 
     if C == 'S3':
         # Switch 默认值（keyfunc=99 未命中 cases）→ default=Int8ub
@@ -270,6 +271,37 @@ def test_fidelity_rs(parity_results, case_id, desc):
 def test_fidelity_py(parity_results, case_id, desc):
     """py impl 自身往返保真：parse → build → parse 一致。"""
     assert_fidelity(parity_results[case_id]["py"], case_id, desc=desc)
+
+
+# Select 的选择子在两方向不对称：parse 取第一个**可解析**者，build 取第一个
+# **可构建**者。SL2（Int16ub 在前）：数据 1 字节 → parse 赢家 Int8ub，但
+# build(0x42) 时 Int16ub 可构建任意 int → 赢家 Int16ub → 回环 b'\x00\x42'
+# 非恒等（Select 语义固有，非缺陷）。该 case 锁定回环 == build 赢家字节，
+# 其余 case 断言回环恒等原始数据。
+_SELECT_AMBIGUOUS_LOOPBACK = {
+    "SL2": "0042",
+}
+
+
+@pytest.mark.parametrize("case_id,desc", ALL_CASES)
+def test_loopback_rs(parity_results, case_id, desc):
+    """rs 侧回环：parse 产物直接 build（互为逆运算的 parse→build 方向）。
+
+    条件字段（IfThenElse/Switch/Select/FocusedSeq 根）的 parse 产物
+    （含 Pass 分支产出的 None 值）build 不报错且字节还原——条件根
+    None 透传分支自治的回环属性锁定。Select 候选序歧义 case 例外
+    （见 _SELECT_AMBIGUOUS_LOOPBACK 注释）。
+    """
+    rs = parity_results[case_id]["rs"]
+    expected = _SELECT_AMBIGUOUS_LOOPBACK.get(case_id)
+    if expected is None:
+        assert_loopback(rs, case_id, desc=desc)
+    else:
+        assert rs["loopback"] == expected, (
+            f"case {case_id} ({desc}) Select 歧义回环不符合 build 赢家字节\n"
+            f"  loopback: {rs['loopback']}\n"
+            f"  expected: {expected}"
+        )
 
 
 # ---------------------------------------------------------------------------
