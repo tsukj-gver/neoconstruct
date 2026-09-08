@@ -79,7 +79,7 @@ pub enum ConstructError {
     /// - `RepeatUntilNode::sizeof`：元素数量由终止表达式运行时决定，无静态尺寸
     /// - `AlignedNode::sizeof`：modulus 非编译期常量，无法静态计算
     ///
-    /// 用户面 sizeof API 尚未提供（follow-up）；当前该变体由内核 sizeof
+    /// 用户面 sizeof API 尚未提供；当前该变体由内核 sizeof
     /// 失败路径产生，保证错误分类学与 Python 侧 `SizeofError` 类接线一致。
     #[error("sizeof error: {message} at {path}")]
     Sizeof {

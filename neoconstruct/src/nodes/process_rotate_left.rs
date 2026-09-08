@@ -316,7 +316,7 @@ mod tests {
 
     #[test]
     fn build_group_zero_raises() {
-        // PR-5 对称：ProcessRotateLeft(4, 0, ...) build → RotationError（非 panic）
+        // ProcessRotateLeft(4, 0, ...) build → RotationError（非 panic，与 parse 侧同形态）
         with_py(|py| {
             let node = make_rotate_node(4, 0);
             let obj = py.eval_bound("1", None, None).expect("int");

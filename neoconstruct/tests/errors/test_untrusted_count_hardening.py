@@ -1,8 +1,8 @@
 """不可信 count 字段加固：子进程崩溃隔离矩阵。
 
-背景：``Array(count)`` / ``PrefixedArray`` 曾按 count 预分配结果 Vec——
-不可信输入（恶意/损坏的 32-bit 长度字段置为 0xFFFFFFFF）触发 34GB 级
-分配失败，进程直接 abort（rc=0xC0000409 族），Python 层无法 catch。
+背景：按 count 预分配结果 Vec 的朴素实现面对不可信输入（恶意/损坏的
+32-bit 长度字段置为 0xFFFFFFFF）会触发 34GB 级分配失败，进程直接
+abort（rc=0xC0000409 族），Python 层无法 catch。
 
 加固后预分配按流剩余长度封顶，count 超出实际可解析数量时由逐元素
 parse 返回可 catch 的 ConstructError 族（StreamError / RangeError）。
@@ -28,14 +28,14 @@ from neoconstruct import (
     field,
 )
 
-# 子进程脚本模板：注入 CRS python 目录到 sys.path 最前部，
+# 子进程脚本模板：注入 neoconstruct python 目录到 sys.path 最前部，
 # 执行敌意用例体；可 catch 的 ConstructError → 输出 CATCHABLE 正常退出。
 _CHILD_TEMPLATE = """\
 import sys
 
-CRS_PYTHON_DIR = {crs_python_dir!r}
-sys.path[:] = [p for p in sys.path if p != CRS_PYTHON_DIR]
-sys.path.insert(0, CRS_PYTHON_DIR)
+NEOCONSTRUCT_PYTHON_DIR = {neoconstruct_python_dir!r}
+sys.path[:] = [p for p in sys.path if p != NEOCONSTRUCT_PYTHON_DIR]
+sys.path.insert(0, NEOCONSTRUCT_PYTHON_DIR)
 
 from dataclasses import dataclass
 from neoconstruct import (
@@ -47,9 +47,11 @@ from neoconstruct import (
 """
 
 
-def _run_isolated(rs_python, crs_python_dir, body):
+def _run_isolated(rs_python, neoconstruct_python_dir, body):
     """在隔离子进程中执行敌意用例体，返回 CompletedProcess。"""
-    script = _CHILD_TEMPLATE.format(crs_python_dir=crs_python_dir, body=body)
+    script = _CHILD_TEMPLATE.format(
+        neoconstruct_python_dir=neoconstruct_python_dir, body=body
+    )
     return subprocess.run(
         [rs_python, "-c", script],
         capture_output=True,

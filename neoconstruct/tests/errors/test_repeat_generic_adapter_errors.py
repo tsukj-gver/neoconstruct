@@ -245,7 +245,7 @@ def test_index_outside_array_raises_index_field_error():
 # 保留类：当前无用户面正触发路径（层次断言锁定可达性占位）
 # ---------------------------------------------------------------------------
 #
-# 可达性说明（[文档] _errors.py docstring + 实测探针）：
+# 可达性说明（依据 _errors.py docstring 与实测行为）：
 # - StopFieldError：内部哨兵（被 Struct/GreedyRange 捕获视为正常终止），
 #   实测 Array/Struct 内均不逃逸——真特性（有意暴露的内部信号）。
 # - SizeofError：错误分类学已接线（内核 sizeof 失败变体）；用户面 sizeof

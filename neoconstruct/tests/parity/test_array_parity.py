@@ -533,12 +533,7 @@ ALL_CASES = [
 # ---------------------------------------------------------------------------
 # 自动生成 parity_results fixture（预跑全部 case × impl 缓存）
 # ---------------------------------------------------------------------------
-# **历史处理记录**：R1-R3 曾因 rs 侧 case 定义使用 Python lambda（PyCallable
-# 路径已删除，RepeatUntil 终止条件必须是字段表达式）导致子进程崩溃，被容错
-# fixture 以 skip 静默放行。现已修复：R1/R3 改为 Element 表达式路径，R2 重定义
-# 为"哨兵来自前序字段"（两 impl 均可表达的跨字段引用语义；依赖 list 内容的
-# 终止判定超出表达式 VM 能力，需用户面 Adapter）。容错 fixture 保留——真正的
-# 子进程基础设施故障仍以 skip 呈现而非让整个 module 崩溃。
+# 容错语义：case 子进程基础设施故障以 skip 呈现，而非让整个 module 崩溃。
 @pytest.fixture(scope="module")
 def parity_results(venv_pair):
     """预跑全部 case × impl，失败 case 记录 error（不崩溃）。"""

@@ -11,14 +11,14 @@ build 值语义——resolve 对 None（含属性不存在）不报错，透传�
   （防"改了条件没给值"的不一致静默）。
 - ctx 写透传值（含 None），与 parse 对称；实例化默认值为 Optional。
 
-七族用例（每用例 docstring 标注所属族与维度组合）：
-- A 回环属性：parse(x).build() == x 对条件字段成立（互为逆运算）。
-- B 不一致防护：cond 指向实值分支而值为 None → 分支自然报错。
-- C None 三来源等价：parse 产出 / 显式传 None / 属性不存在同语义。
-- D ctx 可见性：透传值（含 None）写入 ctx，后继消费者读到。
-- E 分支内值提供器：Const/Default/Padding 分支使 None 也能 build。
-- F init 面：条件根 init_default → Optional；显式 default= 优先。
-- G 边界：嵌套条件 / Sequence 元素 / frozen / Select 负例。
+用例按语义分组覆盖以下维度：
+- 回环属性：parse(x).build() == x 对条件字段成立（互为逆运算）。
+- 不一致防护：cond 指向实值分支而值为 None → 分支自然报错。
+- None 三来源等价：parse 产出 / 显式传 None / 属性不存在同语义。
+- ctx 可见性：透传值（含 None）写入 ctx，后继消费者读到。
+- 分支内值提供器：Const/Default/Padding 分支使 None 也能 build。
+- init 面：条件根 init_default → Optional；显式 default= 优先。
+- 边界：嵌套条件 / Sequence 元素 / frozen / Select 负例。
 
 dataclass 一律定义在测试函数体内（与回归测试惯例一致）。
 """
@@ -52,19 +52,19 @@ from neoconstruct import (
 
 
 # ---------------------------------------------------------------------------
-# 族 A：回环属性（parse(x).build() == x）
+# 回环属性（parse(x).build() == x）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyARoundtrip:
-    """A 族：条件字段 parse 产物直接 build 还原原始数据。
+    """回环属性：条件字段 parse 产物直接 build 还原原始数据。
 
     语义：互为逆运算在 parse→build 方向对条件字段成立——真分支值透传
     重写，Pass 分支 None 透传不写字节。
     """
 
     def test_if_true_branch_roundtrip(self):
-        """A1 If(x>0, Byte) 真分支：parse 产物 build 还原字节与值。"""
+        """If(x>0, Byte) 真分支：parse 产物 build 还原字节与值。"""
 
         @dataclass
         class MI(StructMixin):
@@ -76,7 +76,7 @@ class TestFamilyARoundtrip:
         assert parsed.build() == b"\x01\x7f"
 
     def test_if_false_branch_none_roundtrip(self):
-        """A2 If(x>0, Byte) 假分支：parse 产 c=None，build 还原。"""
+        """If(x>0, Byte) 假分支：parse 产 c=None，build 还原。"""
 
         @dataclass
         class MI(StructMixin):
@@ -88,7 +88,7 @@ class TestFamilyARoundtrip:
         assert parsed.build() == b"\x00"
 
     def test_switch_case_branch_roundtrip(self):
-        """A3 Switch(x, {1: Byte, 2: Bytes(2)})：case 分派 roundtrip。"""
+        """Switch(x, {1: Byte, 2: Bytes(2)})：case 分派 roundtrip。"""
 
         @dataclass
         class MS(StructMixin):
@@ -104,7 +104,7 @@ class TestFamilyARoundtrip:
         assert parsed2.build() == b"\x02ab"
 
     def test_switch_default_pass_roundtrip(self):
-        """A4 Switch 未命中 → default=Pass：parse 产 None，build 还原。"""
+        """Switch 未命中 → default=Pass：parse 产 None，build 还原。"""
 
         @dataclass
         class MS(StructMixin):
@@ -116,7 +116,7 @@ class TestFamilyARoundtrip:
         assert parsed.build() == b"\x09"
 
     def test_select_roundtrip(self):
-        """A5 Select(Byte,)：parse 产物 build 还原。"""
+        """Select(Byte,)：parse 产物 build 还原。"""
 
         @dataclass
         class SL(StructMixin):
@@ -127,7 +127,7 @@ class TestFamilyARoundtrip:
         assert parsed.build() == b"\x42"
 
     def test_if_then_else_both_branches_roundtrip(self):
-        """A6 IfThenElse(x>0, Byte, Bytes(2))：两分支各 roundtrip。"""
+        """IfThenElse(x>0, Byte, Bytes(2))：两分支各 roundtrip。"""
 
         @dataclass
         class IT(StructMixin):
@@ -144,12 +144,12 @@ class TestFamilyARoundtrip:
 
 
 # ---------------------------------------------------------------------------
-# 族 B：不一致防护（cond 指向实值分支而值为 None → 分支自然报错）
+# 不一致防护（cond 指向实值分支而值为 None → 分支自然报错）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyBInconsistencyGuard:
-    """B 族：条件选择实值分支而值为 None → 分支节点自然报错。
+    """不一致防护：条件选择实值分支而值为 None → 分支节点自然报错。
 
     语义：错误形态是分支自身的编码错误（如 FormatFieldError），非字段层
     FieldValueMissingError——"改了条件没给值"显式失败而非静默。
@@ -204,19 +204,19 @@ class TestFamilyBInconsistencyGuard:
 
 
 # ---------------------------------------------------------------------------
-# 族 C：None 三来源等价（parse 产出 / 显式传 None / 属性不存在）
+# None 三来源等价（parse 产出 / 显式传 None / 属性不存在）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyCNoneSourceEquivalence:
-    """C 族：None ≡ 缺席，来源无关——三来源 build 字节一致。
+    """None 三来源等价：None ≡ 缺席，来源无关——三来源 build 字节一致。
 
     语义：parse 产出的 None（Pass 分支）、显式传 None、属性不存在
     （未初始化实例）在 resolve 处同语义（透传），build 输出一致。
     """
 
     def test_parse_produced_none_builds(self):
-        """C1 parse 产出 None（Pass 分支）→ build == b'\\x00'。"""
+        """parse 产出 None（Pass 分支）→ build == b'\\x00'。"""
 
         @dataclass
         class MI(StructMixin):
@@ -226,7 +226,7 @@ class TestFamilyCNoneSourceEquivalence:
         assert MI.parse(b"\x00").build() == b"\x00"
 
     def test_explicit_none_builds(self):
-        """C2 显式传 c=None → build == b'\\x00'（与 C1 同字节）。"""
+        """显式传 c=None → build == b'\\x00'（与 parse 产出 None 同字节）。"""
 
         @dataclass
         class MI(StructMixin):
@@ -236,7 +236,7 @@ class TestFamilyCNoneSourceEquivalence:
         assert MI(x=0, c=None).build() == b"\x00"
 
     def test_absent_attribute_builds(self):
-        """C3 属性不存在（删类级默认使 getattr 抛 AttributeError）→ 同 b'\\x00'。"""
+        """属性不存在（删类级默认使 getattr 抛 AttributeError）→ 同 b'\\x00'。"""
 
         @dataclass
         class MI(StructMixin):
@@ -253,19 +253,19 @@ class TestFamilyCNoneSourceEquivalence:
 
 
 # ---------------------------------------------------------------------------
-# 族 D：ctx 可见性（透传值写入 ctx，后继消费者读到）
+# ctx 可见性（透传值写入 ctx，后继消费者读到）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyDContextVisibility:
-    """D 族：条件字段的透传值（有效值/None）写入 ctx，与 parse 对称。
+    """ctx 可见性：条件字段的透传值（有效值/None）写入 ctx，与 parse 对称。
 
     语义：后继表达式消费者经 ctx 读条件字段值——有效值分派一致，
     None 流入时显式报错（显式失败优于静默错值）。
     """
 
     def test_effective_value_flows_to_consumer(self):
-        """D1 If 真值 + 后继 Bytes(c) 读 ctx → roundtrip。"""
+        """If 真值 + 后继 Bytes(c) 读 ctx → roundtrip。"""
 
         @dataclass
         class DC(StructMixin):
@@ -279,7 +279,7 @@ class TestFamilyDContextVisibility:
         assert DC(x=1, c=2, n=b"ab").build() == b"\x01\x02ab"
 
     def test_none_flows_to_consumer_raises(self):
-        """D2 x=0 → c=None 写入 ctx → Bytes(c) 消费 None → 显式报错。"""
+        """x=0 → c=None 写入 ctx → Bytes(c) 消费 None → 显式报错。"""
 
         @dataclass
         class DC(StructMixin):
@@ -291,7 +291,7 @@ class TestFamilyDContextVisibility:
             DC(x=0).build()
 
     def test_conditional_produced_key_drives_switch(self):
-        """D3 条件产出值作 Switch 分派键：parse/build 分派一致。"""
+        """条件产出值作 Switch 分派键：parse/build 分派一致。"""
 
         @dataclass
         class DS(StructMixin):
@@ -306,19 +306,19 @@ class TestFamilyDContextVisibility:
 
 
 # ---------------------------------------------------------------------------
-# 族 E：分支内值提供器（Const/Default/Padding 分支容忍 None）
+# 分支内值提供器（Const/Default/Padding 分支容忍 None）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyEBranchValueProviders:
-    """E 族：条件分支内是值提供器时，None 也能 build 成功。
+    """分支内值提供器：条件分支内是值提供器时，None 也能 build 成功。
 
     语义：分支节点的 None 容忍（Const 补值/Default 补默认/Padding 写
     pattern）在条件根透传路径下保持——build 值由分支语义决定。
     """
 
     def test_const_branch_none_builds(self):
-        """E1 If(x>0, Const(5, Byte))：c=None → Const 分支写 5；roundtrip。"""
+        """If(x>0, Const(5, Byte))：c=None → Const 分支写 5；roundtrip。"""
 
         @dataclass
         class EC(StructMixin):
@@ -332,7 +332,7 @@ class TestFamilyEBranchValueProviders:
         assert EC(x=1, c=None).build() == b"\x01\x05"
 
     def test_default_branch_none_builds(self):
-        """E2 Switch → Default(Byte, 0) 分支：None → 写默认 0。"""
+        """Switch → Default(Byte, 0) 分支：None → 写默认 0。"""
 
         @dataclass
         class ED(StructMixin):
@@ -344,7 +344,7 @@ class TestFamilyEBranchValueProviders:
         assert ED.parse(b"\x01\x09").c == 9
 
     def test_padding_branch_none_builds(self):
-        """E3 If(x>0, Padding(2))：None → 写 pattern；roundtrip。"""
+        """If(x>0, Padding(2))：None → 写 pattern；roundtrip。"""
 
         @dataclass
         class EP(StructMixin):
@@ -357,7 +357,7 @@ class TestFamilyEBranchValueProviders:
         assert EP(x=1).build() == b"\x01\x00\x00"
 
     def test_both_padding_branches_none_builds(self):
-        """E4 IfThenElse(x>0, Padding(1), Padding(2))：两哑值分支均容忍 None。"""
+        """IfThenElse(x>0, Padding(1), Padding(2))：两哑值分支均容忍 None。"""
 
         @dataclass
         class EB(StructMixin):
@@ -371,19 +371,19 @@ class TestFamilyEBranchValueProviders:
 
 
 # ---------------------------------------------------------------------------
-# 族 F：init 面（条件根 init_default → Optional；显式 default= 优先）
+# init 面（条件根 init_default → Optional；显式 default= 优先）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyFInitDefaults:
-    """F 族：default=None 只管 __init__；条件根实例化可省。
+    """init 面：default=None 只管 __init__；条件根实例化可省。
 
-    语义：条件根 init_default → Optional（R4）；用户显式 default=
+    语义：条件根 init_default → Optional；用户显式 default=
     永远优先；RO/WO 条件根的取值路径（AttributeError ≡ None）。
     """
 
     def test_conditional_field_omittable_at_init(self):
-        """F1 field(If(...)) 实例化可省：MI(x=0) → c is None。"""
+        """field(If(...)) 实例化可省：MI(x=0) → c is None。"""
 
         @dataclass
         class MI(StructMixin):
@@ -394,7 +394,7 @@ class TestFamilyFInitDefaults:
         assert inst.c is None
 
     def test_explicit_default_wins(self):
-        """F2 显式 default=0x7F 优先于框架 Optional：实例化携带该值。"""
+        """显式 default=0x7F 优先于框架 Optional：实例化携带该值。"""
 
         @dataclass
         class MD(StructMixin):
@@ -406,7 +406,7 @@ class TestFamilyFInitDefaults:
         assert MD(x=0).build() == b"\x00"
 
     def test_rfield_conditional_builds_without_attribute(self):
-        """F3 rfield(Switch→Pass)：init=False 从零 build 无属性 → None 透传。"""
+        """rfield(Switch→Pass)：init=False 从零 build 无属性 → None 透传。"""
 
         @dataclass
         class FR(StructMixin):
@@ -419,7 +419,7 @@ class TestFamilyFInitDefaults:
         assert parsed.build() == b"\x05"
 
     def test_wfield_conditional_false_branch_roundtrip(self):
-        """F4 wfield(If(x>0, Byte))：假分支 parse→build 回环；真分支 WO 丢弃值不可回。"""
+        """wfield(If(x>0, Byte))：假分支 parse→build 回环；真分支 WO 丢弃值不可回。"""
 
         @dataclass
         class FW(StructMixin):
@@ -439,12 +439,12 @@ class TestFamilyFInitDefaults:
 
 
 # ---------------------------------------------------------------------------
-# 族 G：边界（嵌套条件 / Sequence 元素 / frozen / Select 负例）
+# 边界（嵌套条件 / Sequence 元素 / frozen / Select 负例）
 # ---------------------------------------------------------------------------
 
 
 class TestFamilyGBoundaries:
-    """G 族：条件根语义的边界形态。
+    """边界：条件根语义的边界形态。
 
     语义：嵌套条件（外层根分类透传到内层分支自治）、Sequence 位置元素
     （None 透传 + 元素缺位 ≡ None）、frozen 实例（resolve 只 getattr）、
@@ -452,7 +452,7 @@ class TestFamilyGBoundaries:
     """
 
     def test_nested_conditional_none_passthrough(self):
-        """G1 嵌套条件：None 经外层透传到内层分支自治。
+        """嵌套条件：None 经外层透传到内层分支自治。
 
         注：内外两层均用表达式 cond 会触发同名 'cond' 扁平键冲突的
         编译期拒绝（既有诚实限制），故内层用常量 cond。
@@ -484,7 +484,7 @@ class TestFamilyGBoundaries:
         assert GN2(x=0).build() == b"\x00"
 
     def test_sequence_conditional_element(self):
-        """G2 Sequence 内条件元素：None 透传 / 元素缺位 ≡ None / 实值分支。"""
+        """Sequence 内条件元素：None 透传 / 元素缺位 ≡ None / 实值分支。"""
 
         @dataclass
         class GS(StructMixin):
@@ -509,7 +509,7 @@ class TestFamilyGBoundaries:
             GS2(items=[1, None]).build()
 
     def test_frozen_dataclass_conditional_roundtrip(self):
-        """G3 frozen 实例：resolve 只 getattr 不 setattr → 回环成立。"""
+        """frozen 实例：resolve 只 getattr 不 setattr → 回环成立。"""
 
         @dataclass(frozen=True)
         class GF(StructMixin):
@@ -523,7 +523,7 @@ class TestFamilyGBoundaries:
         assert parsed0.build() == b"\x00"
 
     def test_select_all_candidates_fail(self):
-        """G4 Select 全候选 parse 失败 → SelectError（显式负例）。"""
+        """Select 全候选 parse 失败 → SelectError（显式负例）。"""
 
         @dataclass
         class SP(StructMixin):
@@ -533,7 +533,7 @@ class TestFamilyGBoundaries:
             SP.parse(b"\x42")
 
     def test_switch_expr_key_conditional_root_roundtrip(self):
-        """G5 Switch(x+1, ...) 表达式键 + 条件根字段：roundtrip。"""
+        """Switch(x+1, ...) 表达式键 + 条件根字段：roundtrip。"""
 
         @dataclass
         class SK(StructMixin):

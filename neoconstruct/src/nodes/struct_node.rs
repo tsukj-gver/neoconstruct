@@ -1074,8 +1074,8 @@ mod tests {
                 py,
                 vec![("a".to_string(), u8_node()), ("b".to_string(), u8_node())],
             );
-            // 对象只有 a，缺 b（AttributeError ≡ 缺值，设计 v2.3 回填 §5.2
-            // ——错误判据单源收敛，报 BuildValueMissing 含字段+path）
+            // 对象只有 a，缺 b（AttributeError ≡ 缺值——错误判据单源收敛，
+            // 报 BuildValueMissing 含字段+path）
             let obj = py
                 .eval_bound("type('O', (), {'a': 1})()", None, None)
                 .expect("obj");
@@ -1701,8 +1701,8 @@ mod tests {
 
     #[test]
     fn ro_instance_field_without_attribute_reports_missing() {
-        // RO + Instance 分类且从零实例无该属性 → 缺值（错误判据单源收敛，
-        // 设计 v2.3 §5.2 补：AttributeError ≡ 缺值 → BuildValueMissing）。
+        // RO + Instance 分类且从零实例无该属性 → 缺值（错误判据单源收敛：
+        // AttributeError ≡ 缺值 → BuildValueMissing）。
         with_py(|py| {
             let fields = vec![rw_field(py, "a", u8_node()), ro_field(py, "v", u8_node())];
             let node = StructNode::new(py, fields, mock_cls(py), false, false);
@@ -1933,7 +1933,7 @@ mod tests {
 
     #[test]
     fn conditional_init_default_is_optional() {
-        // 条件根 init_default → Optional（实例化可省，R4）。
+        // 条件根 init_default → Optional（实例化可省）。
         with_py(|py| {
             let kind = ValueKind::classify(py, &if_gt_zero_node(), true);
             assert!(matches!(kind.init_default(py), InitDefault::Optional));
@@ -1964,7 +1964,7 @@ mod tests {
 
     #[test]
     fn conditional_field_build_explicit_none_pass_branch_writes_nothing() {
-        // 显式 c=None 与属性不存在同语义（R3）：cond 假 → Pass → 不写字节。
+        // 显式 c=None 与属性不存在同语义：cond 假 → Pass → 不写字节。
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "x", u8_node()),
@@ -1986,7 +1986,7 @@ mod tests {
     #[test]
     fn conditional_field_build_none_real_branch_natural_error() {
         // x=1 → then (Byte) 分支收到 None → 分支节点自然报错
-        //（FormatFieldError，非 BuildValueMissing——R1 分支自治）。
+        //（FormatFieldError，非 BuildValueMissing——分支自治）。
         with_py(|py| {
             let fields = vec![
                 rw_field(py, "x", u8_node()),

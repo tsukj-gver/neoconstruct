@@ -1,10 +1,10 @@
 """编译期拒绝语义：StructMixin 继承拒绝与 dataclasses.field 遮蔽检测。
 
-覆盖两类用户误用（此前均为静默错误输出/静默错误解析）：
+覆盖两类用户误用：
 
 1. 继承已编译的结构类——编译器只收集子类自身类体的 field() 声明，
-   继承会静默丢基类字段（build 产出缺字段的错误字节）。按用户裁决
-   （继承无空间信息、字节排布有位置语义）在 ``__init_subclass__``
+   继承会静默丢基类字段（build 产出缺字段的错误字节）。字节排布有
+   位置语义，继承无法表达基类字段占位，故在 ``__init_subclass__``
    编译期显式拒绝，引导用组合（字段嵌套子 Struct）替代。
 2. ``dataclasses.field`` 遮蔽误用——import 了 dataclasses 的 field 而非
    本库的 field，parse 静默忽略字节返回默认值。编译期检测两种可判定
@@ -186,10 +186,7 @@ def test_dc_field_wrapping_descriptor_rejected():
 
 
 def test_all_dc_fields_class_rejected():
-    """整类字段都来自 dataclasses.field（无任何 field() 声明）→ 编译期拒绝。
-
-    此前该形态 parse 零字节消费、静默返回默认值。
-    """
+    """整类字段都来自 dataclasses.field（无任何 field() 声明）→ 编译期拒绝。"""
 
     with pytest.raises(CompilationError) as exc_info:
 

@@ -36,8 +36,7 @@ use pyo3::types::PyBytes;
 /// # build 行为
 ///
 /// 从 bytes-like 对象（`bytes` / `bytearray` / `memoryview`）提取数据，
-/// 直接写入流。不校验长度（对应 Python construct
-/// `GreedyBytes._build` 的 `stream_write(stream, data, len(data), path)`，长度始终匹配）。
+/// 直接写入流。不校验长度（长度始终匹配）。
 ///
 /// # sizeof
 ///

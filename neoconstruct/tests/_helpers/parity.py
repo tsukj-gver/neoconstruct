@@ -80,9 +80,9 @@ if IMPL == 'rs':
     built = build_factory().build()
     reparsed = cls.parse(built)
     roundtrip_parsed = extract(reparsed)
-    # 回环方向：parse 产物直接 build（此前 harness 只 build 工厂实例，
-    # 从不 build 解析产物）。best-effort：失败记录错误标记不中断，
-    # 由 assert_loopback 在需要处断言。
+    # 回环方向：parse 产物直接 build。harness 对 build 验证两个方向：
+    # 工厂构造实例（验证 build 面）与解析产物（验证回环可逆）。
+    # best-effort：失败记录错误标记不中断，由 assert_loopback 在需要处断言。
     data_hex = parse_data.hex()
     try:
         loopback = parsed_obj.build().hex()
@@ -295,8 +295,8 @@ def assert_loopback(
     ``cls.parse(data).build() == data``（README「互为逆运算」在 parse→build
     方向的实例级验证）。
 
-    说明：此前 parity harness 只 build 工厂构造的实例，从不 build 解析产物
-    ——本断言补上该方向。仅对 rs 结果断言（py 侧是 benchmark 基线，
+    说明：harness 对 build 验证两个方向——工厂构造实例（built 维度）
+    与解析产物（本断言）。仅对 rs 结果断言（py 侧是 benchmark 基线，
     loopback 不计算）；loopback 为 "ERROR:<类型名>" 标记时断言失败并展示
     该错误类型。
     """
