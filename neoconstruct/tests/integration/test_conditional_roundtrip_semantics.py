@@ -156,7 +156,7 @@ class TestFamilyBInconsistencyGuard:
     """
 
     def test_if_byte_branch_none_raises_branch_error(self):
-        """B1 If(x>0, Byte) 真分支 + c=None → FormatFieldError。"""
+        """If(x>0, Byte) 真分支 + c=None → 分支节点自然报 FormatFieldError。"""
 
         @dataclass
         class MI(StructMixin):
@@ -167,7 +167,7 @@ class TestFamilyBInconsistencyGuard:
             MI(x=1, c=None).build()
 
     def test_switch_bytes_branch_none_raises_branch_error(self):
-        """B2 Switch case → Bytes(2) 分支 + s=None → ConstructError（非缺值错）。"""
+        """Switch case → Bytes(2) 分支 + s=None → 分支节点自然报错（非缺值错）。"""
 
         @dataclass
         class MS(StructMixin):
@@ -179,7 +179,7 @@ class TestFamilyBInconsistencyGuard:
         assert not isinstance(exc_info.value, FieldValueMissingError)
 
     def test_if_then_else_else_branch_none_raises(self):
-        """B3 IfThenElse 假分支（Byte）+ None → 报错；对照：Pass 分支不报。"""
+        """IfThenElse 实值分支（Byte）+ None → 报错；对照：Pass 分支不报。"""
 
         @dataclass
         class IT(StructMixin):
@@ -192,7 +192,7 @@ class TestFamilyBInconsistencyGuard:
         assert IT(x=1, c=None).build() == b"\x01"
 
     def test_if_byte_branch_omitted_raises_branch_error(self):
-        """B4 省略 c（属性不存在 ≡ None）同样分支自然报错。"""
+        """省略 c（属性不存在 ≡ None）同样分支自然报错。"""
 
         @dataclass
         class MI(StructMixin):
